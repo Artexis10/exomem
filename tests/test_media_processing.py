@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from exomem import commands as commands_module
-from exomem import media_jobs
+from exomem import media_jobs, media_worker
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 
@@ -2611,3 +2611,25 @@ def test_repeated_conflicting_re_renders_do_not_nest(vault: Path) -> None:
 
     assert depths == [1, 1, 1, 1], f"nesting grew: {depths}"
     assert "Original transcript." in sidecar.read_text(encoding="utf-8")
+
+
+def test_switched_off_engine_waits_with_a_pending_sidecar_and_no_job(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr")  # documents off
+    binary = _drop_media(vault, name="minutes.pdf", data=b"%PDF-1.4 fake")
+
+    result = media_processing.reconcile_media(vault, binary, explicit=False)
+
+    frontmatter, _ = _frontmatter_and_body(binary.with_name(binary.name + ".md"))
+    assert (result.state, result.job_id) == ("pending", None)
+    assert frontmatter["extracted_by"] == "pending"
+    assert _job_count(vault) == 0  # nothing queued that is bound to block or fail
+    assert media_processing.reconcile_all_media(vault, limit=10) == 0
+    assert media_worker.MediaWorker(vault, execution_mode="process").scan_pending() == 0
+
+    # Switching the engine on restarts the cell; its startup scan queues the backlog.
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr,documents")
+    assert media_worker.MediaWorker(vault, execution_mode="process").scan_pending() == 1
+    assert media_jobs.status(vault)["counts"]["pending"] == 1

@@ -412,6 +412,18 @@ def test_explicit_binary_provenance_is_narrow_and_auditable(tmp_path: Path) -> N
     assert findings == ()
 
 
+def test_media_sample_provenance_admits_no_file_added_beside_or_below_the_samples() -> None:
+    sample = REPO_ROOT / "tests/fixtures/media-samples/ocr-eng.png"
+    assert scan_artifact(sample, label="tests/fixtures/media-samples/ocr-eng.png") == ()
+    for label in (
+        "tests/fixtures/media-samples/unreviewed.png",
+        "tests/fixtures/media-samples/nested/ocr-eng.png",
+    ):
+        assert [finding.rule for finding in scan_artifact(sample, label=label)] == [
+            "format_provenance_missing"
+        ]
+
+
 def test_cloud_icon_png_provenance_does_not_allow_unrelated_images(tmp_path: Path) -> None:
     icon = REPO_ROOT / "plugins/cloud/assets/icon.png"
     assert scan_artifact(icon, label="plugins/cloud/assets/icon.png") == ()

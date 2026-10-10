@@ -247,6 +247,10 @@ cellctl:
   enabled: false
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
+  # Media engine -> the cells it is switched on in (cloud-multimodal-processing
+  # D7), e.g. {"documents": ["<cell id>"], "ocr": ["<cell id>"]}. Every engine
+  # is off in a cell no entry names. A change restarts only the cells it names.
+  mediaEngineCellIds: {}
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"

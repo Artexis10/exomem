@@ -491,12 +491,32 @@ class Basis:
             )
         return ("public", registry.load(SPEC, None).effective_digest)
 
+    def loaded_dependency(self) -> tuple[str, str]:
+        """`dependency` after this basis has read the overlay.
+
+        `dependency` stays "public" while nothing needed the overlay. A cache that
+        keeps this basis object, not only results computed from it, records this
+        instead, because a later read through the kept basis loads the overlay.
+        """
+        if not self._attempted:
+            self._load()
+        return self.dependency
+
     def matches(self, dependency: tuple[str, str]) -> bool:
-        """Re-admit before comparing a cached result's private dependency."""
+        """Re-admit before comparing a cached result's private dependency.
+
+        A withheld or invalid overlay never matches, as for lifecycle statuses: an
+        admitted caller must refuse an invalid overlay itself, never inherit a
+        result computed without it.
+        """
         if dependency[0] == "public":
             return dependency == ("public", registry.load(SPEC, None).effective_digest)
         self._load()
-        return self._snapshot is not None and dependency == self.dependency
+        return (
+            self._snapshot is not None
+            and not self._snapshot.findings
+            and dependency == self.dependency
+        )
 
 
 def _admitted(root: Path) -> bool:

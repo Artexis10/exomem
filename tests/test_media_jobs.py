@@ -1670,3 +1670,138 @@ def test_blocked_compute_presentations_still_reach_needs_worker(
         media_jobs, "_blocked_presentation_is_current", lambda _content, _error: True
     )
     assert store.needs_worker() is False
+
+
+def test_consecutive_hard_limit_failures_mark_the_file_over_budget(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+
+    verdicts = []
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None
+        verdicts.append(
+            store.record_memory_stop(claimed, kind="hard_limit", stop_limit=3, context="limit-a")
+        )
+
+    assert verdicts == [media_jobs.PENDING, media_jobs.PENDING, media_jobs.OVER_BUDGET]
+    [row] = media_jobs.status(vault)["jobs"]
+    assert row["state"] == media_jobs.BLOCKED
+    assert row["attempts"] == 0  # a memory stop never consumes an artifact attempt
+    assert row["next_action"] == media_jobs.OVER_BUDGET_ACTION
+    assert row["retryable"] is False
+    assert store.retry() == 0
+    assert store.recover_memory_verdicts(
+        lifted=lambda _type, recorded: recorded != "limit-a", include_memory_blocked=True
+    ) == 0
+    # A changed cell limit or engine budget is what lets the file try again.
+    assert store.recover_memory_verdicts(
+        lifted=lambda _type, recorded: recorded != "limit-b", include_memory_blocked=False
+    ) == 1
+    assert store.claim_next() is not None
+
+
+def test_only_a_longer_job_timeout_returns_a_file_that_outran_the_watchdog(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_brakes
+
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    monkeypatch.setenv(media_brakes.JOB_TIMEOUT_ENV, "900")
+    exceeded = media_brakes.timeout_context(media_brakes.settings())
+
+    verdicts = []
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None
+        verdicts.append(store.record_timeout_stop(claimed, stop_limit=3, context=exceeded))
+
+    assert verdicts == [media_jobs.PENDING, media_jobs.PENDING, media_jobs.OVER_BUDGET]
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["state"], row["attempts"]) == (media_jobs.BLOCKED, 0)
+    assert (row["next_action"], row["retryable"]) == (media_jobs.OVER_BUDGET_ACTION, False)
+
+    def lifted_with_timeout(seconds: str):
+        monkeypatch.setenv(media_brakes.JOB_TIMEOUT_ENV, seconds)
+        config = media_brakes.settings()
+        # The cell's memory context differs from the recorded one, and must not matter.
+        return lambda _type, recorded: media_brakes.verdict_lifted(recorded, current="limit-a", config=config)
+
+    # An equal or shorter timeout would only stop the file again.
+    assert store.recover_memory_verdicts(lifted=lifted_with_timeout("900"), include_memory_blocked=True) == 0
+    assert store.recover_memory_verdicts(lifted=lifted_with_timeout("600"), include_memory_blocked=True) == 0
+    assert store.recover_memory_verdicts(lifted=lifted_with_timeout("1800"), include_memory_blocked=False) == 1
+    assert store.claim_next() is not None
+
+
+def test_a_memory_blocked_return_keeps_the_files_watchdog_count(vault: Path) -> None:
+    # The watchdog bounds a file at the stop limit times the timeout. A file that also
+    # meets memory pressure must not get a fresh count each time it returns from it.
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    exceeded = '{"job_timeout_seconds": 900.0}'
+
+    for _ in range(2):
+        claimed = store.claim_next()
+        assert claimed is not None
+        assert store.record_timeout_stop(claimed, stop_limit=3, context=exceeded) == media_jobs.PENDING
+    pressure = []
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None
+        pressure.append(store.record_memory_stop(claimed, kind="pressure", stop_limit=3, context="limit-a"))
+    assert pressure[-1] == media_jobs.MEMORY_BLOCKED
+    assert store.recover_memory_verdicts(lifted=lambda _type, _recorded: False, include_memory_blocked=True) == 1
+
+    conn = store._connect()
+    try:
+        [timeout_stops] = conn.execute("SELECT timeout_stops FROM jobs").fetchone()
+    finally:
+        conn.close()
+    assert timeout_stops == 2
+    claimed = store.claim_next()
+    assert claimed is not None
+    assert store.record_timeout_stop(claimed, stop_limit=3, context=exceeded) == media_jobs.OVER_BUDGET
+
+
+def test_a_pressure_stop_never_marks_a_file_over_budget(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+
+    verdicts = []
+    for kind in ("hard_limit", "pressure", "hard_limit"):
+        claimed = store.claim_next()
+        assert claimed is not None
+        verdicts.append(store.record_memory_stop(claimed, kind=kind, stop_limit=3, context="limit-a"))
+
+    assert verdicts == [media_jobs.PENDING, media_jobs.PENDING, media_jobs.MEMORY_BLOCKED]
+    status = media_jobs.status(vault)
+    [row] = status["jobs"]
+    # The tenant sees the job only as waiting; the memory reason is the operator's.
+    assert (row["state"], row["error"], row["retryable"]) == (media_jobs.PENDING, None, False)
+    assert status["memory_blocked_count"] == 1
+    # Counted as its row shows it, so no operator sees a blocked job the row hides.
+    assert (status["counts"][media_jobs.PENDING], status["counts"][media_jobs.BLOCKED]) == (1, 0)
+    assert store.recover_memory_verdicts(
+        lifted=lambda _type, recorded: recorded != "limit-a", include_memory_blocked=False
+    ) == 0
+    assert store.recover_memory_verdicts(
+        lifted=lambda _type, recorded: recorded != "limit-a", include_memory_blocked=True
+    ) == 1
+    assert store.claim_next() is not None
+
+
+def test_cloud_job_blocked_on_an_engine_names_no_install(vault: Path, monkeypatch) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    [row] = media_jobs.status(vault)["jobs"]
+
+    assert row["state"] == media_jobs.BLOCKED
+    assert "install" not in row["next_action"]
+    assert "unavailable on this deployment" in row["next_action"]

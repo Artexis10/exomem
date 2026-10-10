@@ -2862,7 +2862,9 @@ def build_corpus_context_with_census(
             if cached is not None and cached[1] is context:
                 _ENRICHED_CONTEXT_MEMO[memo_key] = (
                     context,
-                    (basis.dependency, type_basis.dependency),
+                    # The reused states keep this basis object, so record the
+                    # dependency it will have once a later read loads it.
+                    (basis.dependency, type_basis.loaded_dependency()),
                     enriched,
                     states,
                 )

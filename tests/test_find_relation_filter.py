@@ -230,3 +230,49 @@ def test_relation_match_annotation_is_additive(tmp_path: Path) -> None:
     # Hits without a relation filter carry no annotation.
     plain = find_module.find(vault, query="", limit=15)
     assert all(h.relation_match is None for h in plain)
+
+
+CLAIM = "Knowledge Base/Notes/quince-claim.md"
+
+
+@pytest.mark.parametrize(
+    ("target", "visible_target", "relation_filter"),
+    [
+        # Over the whole vault the hidden namesake makes the link ambiguous.
+        ("Shared Name", True, {"relations": ["supports"]}),
+        # Over the whole vault the link resolves to the hidden page alone.
+        ("Secret Name", False, {"relations": ["supports"]}),
+        # An anchor without relation keys reads every typed edge touching it.
+        ("Shared Name", True, {"relation_of": CLAIM}),
+    ],
+    ids=["ambiguous-namesake", "only-hidden-target", "anchor-alone"],
+)
+def test_a_hidden_page_never_changes_a_restricted_callers_relation_filter(
+    tmp_path: Path, target: str, visible_target: bool, relation_filter: dict
+) -> None:
+    """A restricted caller's relation filter reads the edges that a vault
+    without the hidden page holds. Over the whole vault the hidden page either
+    removes the visible target or becomes the edge's other end, and either one
+    tells the caller that the hidden page exists."""
+    present, absent = tmp_path / "present", tmp_path / "absent"
+    for root in (present, absent):
+        _write(
+            root,
+            CLAIM,
+            f"---\ntype: insight\n---\n# Quince claim\n\n## Relations\n\n- supports [[{target}]]\n",
+        )
+        if visible_target:
+            _write(root, f"Knowledge Base/Notes/{target}.md", "---\ntype: insight\n---\n# Catalogue\n")
+    _write(present, f"Knowledge Base/Private/{target}.md", "---\ntype: insight\n---\n# Ledger\n")
+    for root in (present, absent):
+        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+
+    def admit(path: str) -> bool:
+        return not path.startswith("Knowledge Base/Private/")
+
+    def recall(root: Path, admit_path) -> list[dict]:
+        hits = find_module.find(root, query="", limit=15, admit_path=admit_path, **relation_filter)
+        return [hit.as_dict() for hit in hits]
+
+    assert recall(present, None) != recall(absent, admit)
+    assert recall(present, admit) == recall(absent, admit)

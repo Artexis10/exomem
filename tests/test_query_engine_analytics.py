@@ -104,13 +104,25 @@ def owner():
         yield
 
 
+@pytest.mark.query_deadline
+def test_profiles_keep_their_shipped_bounds_and_refuse_wider_ones():
+    """A profile whose shipped bounds drift, or a profile constructed with bounds wider than it
+    admits. Opens no reader, so the shipped 200 ms deadline cannot trip here."""
+    assert runtime.QueryLimits().bounds() == INTERACTIVE
+    assert runtime.QueryLimits(profile="analytics").bounds() == ANALYTICS
+    for wider in ({"timeout_ms": 2000}, {"max_row_visits": 100_001}, {"profile": "analytics", "timeout_ms": 2001},
+                  {"profile": "analytics", "max_temp_bytes": 257 * MIB}):
+        with pytest.raises(ValueError):
+            runtime.QueryLimits(**wider)
+
+
 def test_execution_profile_defaults_to_interactive_and_sessions_never_mix_bounds(store):
     """A request without a profile run under analytics bounds, or an interactive request
     silently widened inside an analytics session."""
     create(store)
     load(store, [exercise(record) for record in iter_exercises(24)])
     default = reduce(store, request())
-    assert default["execution_profile"] == "interactive" and default["bounds"] == INTERACTIVE
+    assert default["execution_profile"] == "interactive" and default["bounds"] == runtime.PROFILES["interactive"]
     wide = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
     assert wide["execution_profile"] == "analytics" and wide["bounds"] == ANALYTICS
     assert wide["groups"] == default["groups"]
@@ -203,16 +215,11 @@ def test_group_temp_and_retained_state_caps_refuse_without_partial_results(store
 
 
 def test_tighter_compiler_bounds_refuse_analytics_widening(store):
-    """A compiler-bounded caller whose request widens it to analytics, or a profile constructed
-    with bounds wider than the profile admits."""
+    """A compiler-bounded caller whose request widens it to analytics."""
     create(store)
     seed(store, [exercise(record) for record in iter_exercises(2000)])
-    compiler = runtime.QueryLimits(timeout_ms=50, max_row_visits=1000)
+    compiler = runtime.QueryLimits(max_row_visits=1000)
     with pytest.raises(runtime.QueryError, match="QUERY_PROFILE_UNAVAILABLE"):
         reduce(store, analytics(request()), limits=compiler)
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, request(), limits=compiler)
-    for wider in ({"timeout_ms": 2000}, {"max_row_visits": 100_001}, {"profile": "analytics", "timeout_ms": 2001},
-                  {"profile": "analytics", "max_temp_bytes": 257 * MIB}):
-        with pytest.raises(ValueError):
-            runtime.QueryLimits(**wider)

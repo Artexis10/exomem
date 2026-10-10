@@ -30,3 +30,13 @@ infra/provisioner/alembic/**/*.pyc
 infra/helm/*
 !infra/helm/cell/
 !infra/helm/cell/**
+# The Cloud image's media build gate (stage `cloud`) bind-mounts these two.
+!tests/
+tests/*
+!tests/fixtures/
+tests/fixtures/*
+!tests/fixtures/media-samples/
+!tests/fixtures/media-samples/**
+!scripts/
+scripts/*
+!scripts/check-media-samples.py

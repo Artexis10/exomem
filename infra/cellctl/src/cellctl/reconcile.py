@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import traceback
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
@@ -386,6 +387,9 @@ class ClusterConfig:
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
     dedicated_cell_ids: tuple[str, ...] = ()
+    # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
+    # A selection, not a chart-wide value, so an engine can canary in one cell.
+    media_engine_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -413,6 +417,17 @@ class ClusterConfig:
             or (cell_ids and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
+        for engine, cell_ids in self.media_engine_cell_ids.items():
+            if (
+                not isinstance(engine, str)
+                # Engine names are a value of the comma-separated cell variable.
+                or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", engine)
+                or not isinstance(cell_ids, tuple)
+                or len(cell_ids) > 1024
+                or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
+                or len(set(cell_ids)) != len(cell_ids)
+            ):
+                raise ValueError("a media engine selection maps lower-case engine names to unique base32 cell IDs")
 
     def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
         if cell_id in self.dedicated_cell_ids:
@@ -429,6 +444,10 @@ class ClusterConfig:
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
         return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
+
+    def media_engines_for_cell(self, cell_id: str) -> str:
+        """The value of the cell's media engine switch; "" when no engine selects it."""
+        return ",".join(sorted(engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids))
 
 
 class ClusterGateway:
@@ -823,6 +842,10 @@ def _compute_render_digest(
     endpoint = cluster_config.artifact_broker_for_cell(row.cell_id)
     if endpoint:
         material["artifact_broker_url"] = endpoint
+    engines = cluster_config.media_engines_for_cell(row.cell_id)
+    if engines:
+        # Only a selected cell's digest moves, so a canary restarts one cell.
+        material["media_engines"] = engines
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
         # a Hetzner volume keeps the digest it had before local storage.
@@ -1627,6 +1650,7 @@ async def _reconcile_row(
             row_generation=row.generation,
             job_egress_except=cluster_config.job_egress_except,
             artifact_broker_url=cluster_config.artifact_broker_for_cell(row.cell_id),
+            media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,

@@ -7092,7 +7092,13 @@ class EpistemicGraphIndex:
             _bump_generation(conn)
         return cur.rowcount if cur.rowcount is not None else 0
 
-    def neighbors_for(self, seeds: list[str]) -> list[GraphNeighbor]:
+    def neighbors_for(
+        self,
+        seeds: list[str],
+        *,
+        keep: Callable[[str], bool] | None = None,
+        resolver: vault_module.WikilinkResolver | None = None,
+    ) -> list[GraphNeighbor]:
         """Typed edges touching `seeds` in both directions, batched over SQL.
 
         Semantic-block-authored relations store src/dst as the BLOCK node key,
@@ -7105,12 +7111,20 @@ class EpistemicGraphIndex:
         kind='file', so a relation touching another page's block still
         resolves to that page) — an INNER JOIN, so unresolved-placeholder
         targets (no node row at all) are excluded. Results are ordered by seed
-        position then `rowid` (stable insertion/source order — edge_key is a
-        content hash and is NOT a valid ordering signal), matching design D3's
-        "seed order then edge insertion order" contract; family-precedence
+        position, then by the path of the page that authors the edge, then by
+        the edge's place among that page's edges (authoring order). Every page
+        writes its edges in one transaction, so `rowid` orders a page's own
+        rows, but across pages it records which page was written last, and
+        edge_key is a content hash: neither orders neighbours. Family-precedence
         tiering and target dedup are the caller's job (find_candidates.py).
         Self-edges (a block's own `derived_from` edge to its owning file) drop
         out via the same-path check below.
+
+        `keep` is a reader's view (`None` for the owner). The sidecar resolved
+        every link over the whole vault, so for such a reader a withheld page
+        sharing a stem or title could drop or redirect a visible page's edge;
+        those links re-resolve in the reader's view (`_neighbor_rows`).
+        `resolver` is the request's recall resolver for that re-resolution.
         """
         if not seeds:
             return []
@@ -7145,25 +7159,46 @@ class EpistemicGraphIndex:
                 return []
             keys = list(seed_rel_by_key)
             key_placeholders = ",".join("?" for _ in keys)
-            outbound = conn.execute(
-                "SELECT e.rowid, e.src_key, e.relation_type, n.path "
-                "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.dst_key "
-                f"WHERE e.src_key IN ({key_placeholders}) "
-                "ORDER BY e.rowid",
-                keys,
-            ).fetchall()
-            inbound = conn.execute(
-                "SELECT e.rowid, e.dst_key, e.relation_type, n.path "
-                "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
-                f"WHERE e.dst_key IN ({key_placeholders}) "
-                "ORDER BY e.rowid",
-                keys,
-            ).fetchall()
+            batches = {
+                "outbound": conn.execute(
+                    "SELECT e.source_path, e.rowid, e.src_key, e.relation_type, n.path "
+                    "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.dst_key "
+                    f"WHERE e.src_key IN ({key_placeholders})",
+                    keys,
+                ).fetchall(),
+                "inbound": conn.execute(
+                    "SELECT e.source_path, e.rowid, e.dst_key, e.relation_type, n.path "
+                    "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
+                    f"WHERE e.dst_key IN ({key_placeholders})",
+                    keys,
+                ).fetchall(),
+            }
+            positioned = _neighbor_rows(
+                None
+                if keep is None
+                # `reads_placeholders=False` is safe only because every caller
+                # drops a neighbour outside the reader's view before using it:
+                # `find_candidates` drops each row whose other end is outside
+                # `recall_paths` before its tally, and the referent stage reads
+                # only edges seeded by released hits and withholds the rest at
+                # egress. The links it leaves alone point at withheld pages,
+                # not placeholders.
+                else _VisibleLinkView(
+                    self.vault_root,
+                    conn,
+                    keep,
+                    self.registry,
+                    resolver=resolver,
+                    reads_placeholders=False,
+                ),
+                seed_rel_by_key,
+                batches,
+            )
         finally:
             conn.close()
-        rows: list[tuple[int, int, GraphNeighbor]] = []
-        for direction, batch in (("outbound", outbound), ("inbound", inbound)):
-            for rowid, seed_key, relation_type, other_path in batch:
+        rows: list[tuple[int, tuple[str, int], GraphNeighbor]] = []
+        for direction, batch in positioned.items():
+            for position, seed_key, relation_type, other_path in batch:
                 seed_rel = seed_rel_by_key.get(seed_key)
                 if (
                     seed_rel is None
@@ -7176,7 +7211,7 @@ class EpistemicGraphIndex:
                 rows.append(
                     (
                         seed_order[seed_rel],
-                        rowid,
+                        position,
                         GraphNeighbor(
                             seed_rel=seed_rel,
                             other_rel=other_path,
@@ -7187,7 +7222,7 @@ class EpistemicGraphIndex:
                     )
                 )
         rows.sort(key=lambda item: (item[0], item[1]))
-        return [neighbor for _order, _rowid, neighbor in rows]
+        return [neighbor for _order, _position, neighbor in rows]
 
     def indexed_paths(self, paths: list[str]) -> set[str]:
         """Subset of `paths` (vault-relative, .md-suffixed) with a FILE node in
@@ -7218,6 +7253,8 @@ class EpistemicGraphIndex:
         *,
         anchor: str | None = None,
         direction: str = "any",
+        keep: Callable[[str], bool] | None = None,
+        resolver: vault_module.WikilinkResolver | None = None,
     ) -> RelationFilterResult:
         """Pages participating in a typed edge whose canonical `relation_type` or
         `parent_relation` is in `keys` (extension parent roll-up).
@@ -7235,6 +7272,17 @@ class EpistemicGraphIndex:
         authoritative (an empty set means no such edges); "warming" means the
         sidecar is missing or stale; "temporarily_unavailable" means the graph
         index is disabled. It never scans the corpus and never false-empties.
+
+        Rows are read in match-precedence order, then by the path of the page
+        that authors the edge, then by the edge's place in that page, so a page's
+        `provenance` never depends on which page the sidecar wrote last.
+
+        `keep` is a reader's view (`None` for the owner) and `resolver` the
+        recall resolver to re-resolve with (read once when `None`). For such a
+        reader every page with a link that a withheld page resolves differently
+        is re-derived in the reader's view, and an edge whose page or
+        counterpart the reader may not see drops out, as in a vault without the
+        withheld pages.
         """
         requested_keys = [str(k) for k in keys if k]
         plan = traversal_profiles.relation_query_plan(self.registry, requested_keys)
@@ -7262,24 +7310,28 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot()
         if conn is None:
             return RelationFilterResult(status="warming")
-        select_columns = "SELECT s.path, d.path, e.relation_type, e.rowid"
+        select_columns = "SELECT s.path, d.path, e.relation_type, e.source_path, e.rowid"
         select_from = (
             "FROM graph_edges e "
             "JOIN graph_nodes s ON s.node_key = e.src_key "
             "JOIN graph_nodes d ON d.node_key = e.dst_key "
         )
         select = f"{select_columns} {select_from}"
+        # Match precedence: exact relation type, replacement, then parent family.
+        match_branches = [
+            branch
+            for branch in (
+                (plan.exact_keys, 0, "relation_type", "relation_type"),
+                (plan.replacement_keys, 1, "replacement", "relation_type"),
+                (plan.parent_keys, 2, "parent_relation", "parent_relation"),
+            )
+            if branch[0]
+        ]
         try:
             if key_set:
                 branches: list[str] = []
                 params: list[str] = []
-                for match_keys, priority, matched_via, column in (
-                    (plan.exact_keys, 0, "relation_type", "relation_type"),
-                    (plan.replacement_keys, 1, "replacement", "relation_type"),
-                    (plan.parent_keys, 2, "parent_relation", "parent_relation"),
-                ):
-                    if not match_keys:
-                        continue
+                for match_keys, priority, matched_via, column in match_branches:
                     placeholders = ",".join("?" for _ in match_keys)
                     branches.append(
                         f"{select_columns}, {priority} AS match_priority, "
@@ -7289,7 +7341,7 @@ class EpistemicGraphIndex:
                     )
                     params.extend(sorted(match_keys))
                 rows = conn.execute(
-                    " UNION ALL ".join(branches) + " ORDER BY 5, 4",
+                    " UNION ALL ".join(branches) + " ORDER BY 6, 4, 5",
                     params,
                 ).fetchall()
             else:
@@ -7308,9 +7360,46 @@ class EpistemicGraphIndex:
                 rows = conn.execute(
                     f"{select} WHERE e.relation_type IS NOT NULL AND e.src_key IN ({kp}) "
                     f"UNION {select} WHERE e.relation_type IS NOT NULL AND e.dst_key IN ({kp}) "
-                    "ORDER BY 4",
+                    "ORDER BY 4, 5",
                     anchor_node_keys + anchor_node_keys,
                 ).fetchall()
+            if keep is not None:
+                view = _VisibleLinkView(
+                    self.vault_root,
+                    conn,
+                    keep,
+                    self.registry,
+                    resolver=resolver,
+                    # A link whose candidates are all withheld still reaches a
+                    # withheld page, and `_add` drops that edge.
+                    reads_placeholders=False,
+                )
+                rederived = view.changed_sources()
+                # Without a re-derived page, the stored rows already are the
+                # reader's view, in the order the query above returned them.
+                if rederived:
+                    rows = [row for row in rows if row[3] not in rederived]
+                    for page in sorted(rederived):
+                        for index, edge in enumerate(view.authored_edges(page) or ()):
+                            src_path = view.node_path(str(edge["src_key"]))
+                            dst_path = view.node_path(str(edge["dst_key"]))
+                            if src_path is None or dst_path is None:
+                                continue
+                            row = (src_path, dst_path, edge["relation_type"], page, index)
+                            if key_set:
+                                rows.extend(
+                                    (*row, priority, matched_via, edge[column])
+                                    for match_keys, priority, matched_via, column in match_branches
+                                    if edge[column] in match_keys
+                                )
+                            elif edge["relation_type"] is not None and anchor_rel in (
+                                src_path,
+                                dst_path,
+                            ):
+                                rows.append(row)
+                    rows.sort(
+                        key=lambda row: (row[5], row[3], row[4]) if key_set else row[3:5]
+                    )
         except sqlite3.Error:
             return RelationFilterResult(status="warming")
         finally:
@@ -7348,6 +7437,7 @@ class EpistemicGraphIndex:
                 (anchor_rel is not None and page == anchor_rel)
                 or not _path_allowed(str(page))
                 or not _path_allowed(str(counterpart))
+                or (keep is not None and not (keep(str(page)) and keep(str(counterpart))))
             ):
                 return
             paths.add(page)
@@ -7367,9 +7457,9 @@ class EpistemicGraphIndex:
             )
 
         for row in rows:
-            src_path, dst_path, relation_type, _rowid = row[:4]
-            matched_via = str(row[5]) if len(row) > 5 else "relation_type"
-            matched_key = str(row[6]) if len(row) > 6 else relation_type
+            src_path, dst_path, relation_type = row[:3]
+            matched_via = str(row[6]) if len(row) > 6 else "relation_type"
+            matched_key = str(row[7]) if len(row) > 7 else relation_type
             if src_path == dst_path:
                 continue
             edge_def = self.registry.definition(str(relation_type or ""))
@@ -11441,37 +11531,59 @@ class _VisibleLinkView:
         conn: sqlite3.Connection,
         keep: Callable[[str], bool],
         registry: relation_registry.RelationRegistry,
+        *,
+        resolver: vault_module.WikilinkResolver | None = None,
+        reads_placeholders: bool = True,
     ) -> None:
         self.vault_root = Path(vault_root)
         self.conn = conn
         self.keep = keep
         self.registry = registry
-        self._resolver: vault_module.WikilinkResolver | None = None
+        self.reads_placeholders = reads_placeholders
+        self._resolver = resolver
         self._changes: dict[str, bool] = {}
-        self._edges: dict[str, list[dict[str, Any]] | None] = {}
+        self._authored: dict[str, list[dict[str, Any]] | None] = {}
         self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
+        self._node_paths: dict[str, str | None] = {}
 
     def _shared_resolver(self) -> vault_module.WikilinkResolver:
-        """The recall resolver the graph itself is built with, read once per view."""
+        """The recall resolver the graph itself is built with, read once per view.
+
+        A caller that already holds its request's recall resolver passes it in.
+        """
         if self._resolver is None:
             self._resolver = find_module.recall_resolver_snapshot(self.vault_root)
         return self._resolver
 
     def target_changes(self, raw_target: str) -> bool:
-        """True when a page this link could resolve to is one the reader may not see."""
+        """True when a page this link could resolve to is one the reader may not see.
+
+        A caller that never reads placeholder targets skips a link whose
+        candidates the reader sees none of: over the whole vault it resolves to
+        a withheld page or to a placeholder, here to a placeholder, and that
+        caller reads nothing from any of them.
+        """
         changed = self._changes.get(raw_target)
         if changed is None:
-            changed = any(
-                not self.keep(candidate)
-                for candidate in sorted(_link_candidates(self._shared_resolver(), raw_target))
-            )
+            candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
+            if self.reads_placeholders:
+                changed = any(not self.keep(candidate) for candidate in candidates)
+            else:
+                seen = [candidate for candidate in candidates if self.keep(candidate)]
+                changed = 0 < len(seen) < len(candidates)
             self._changes[raw_target] = changed
         return changed
 
-    def page_edges(self, rel_path: str) -> list[dict[str, Any]] | None:
-        """`rel_path`'s link edges in the reader's view, or `None` when unchanged."""
-        if rel_path in self._edges:
-            return self._edges[rel_path]
+    def authored_edges(self, rel_path: str) -> list[dict[str, Any]] | None:
+        """Every edge `rel_path` authors in the reader's view, in authoring order.
+
+        `None` when the page's links resolve as over the whole vault. The
+        sidecar writes a page's edges in this order, so an edge's index here is
+        its place among the page's stored rows in a vault without the withheld
+        pages.
+        """
+        if rel_path in self._authored:
+            return self._authored[rel_path]
         targets = [
             str(row[0])
             for row in self.conn.execute(
@@ -11485,8 +11597,15 @@ class _VisibleLinkView:
             if any(self.target_changes(target) for target in targets)
             else None
         )
-        self._edges[rel_path] = edges
+        self._authored[rel_path] = edges
         return edges
+
+    def page_edges(self, rel_path: str) -> list[dict[str, Any]] | None:
+        """`rel_path`'s link edges in the reader's view, or `None` when unchanged."""
+        edges = self.authored_edges(rel_path)
+        if edges is None:
+            return None
+        return [edge for edge in edges if edge["origin"] in _RESOLVED_LINK_ORIGINS]
 
     def _derive(self, rel_path: str) -> list[dict[str, Any]]:
         path = self.vault_root / rel_path
@@ -11515,14 +11634,44 @@ class _VisibleLinkView:
             resolver=self._shared_resolver(),
             visible=self.keep,
         )
-        resolved = [edge for edge in edges if edge.origin in _RESOLVED_LINK_ORIGINS]
         self._evidence[rel_path] = {
             edge.edge_key: json.loads(
                 json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True)
             )
-            for edge in resolved
+            for edge in edges
+            if edge.origin in _RESOLVED_LINK_ORIGINS
         }
-        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in resolved]
+        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in edges]
+
+    def node_path(self, key: str) -> str | None:
+        """The page `key` belongs to, or `None` for a key with no node row.
+
+        Like the stored rows' inner joins, an unresolved placeholder names no page.
+        """
+        if key not in self._node_paths:
+            row = self.conn.execute(
+                "SELECT path FROM graph_nodes WHERE node_key = ?", (key,)
+            ).fetchone()
+            self._node_paths[key] = str(row[0]) if row is not None else None
+        return self._node_paths[key]
+
+    def changed_sources(self) -> set[str]:
+        """Every page the reader sees with a link that resolves differently here.
+
+        Such a link has a withheld candidate, so the pages that name a withheld
+        page's path, stem or title hold every one of them.
+        """
+        resolver = self._shared_resolver()
+        withheld = {
+            f"{path}.md" for path in resolver.full_paths if not self.keep(f"{path}.md")
+        }
+        return {
+            source
+            for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
+                self.conn, _dependency_changed_keys(withheld, resolver)
+            )
+            if self.keep(source) and self.target_changes(raw_target)
+        }
 
     def inbound_sources(self, rel_path: str) -> set[str]:
         """Visible pages whose links to `rel_path`'s names resolve differently here."""
@@ -11571,6 +11720,51 @@ class _VisibleLinkView:
 
 #: Rows a reader's view reads before re-applying the caller's inspection cap.
 _VIEW_ROW_LIMIT = 100_000
+
+
+def _neighbor_rows(
+    view: _VisibleLinkView | None,
+    seed_rel_by_key: dict[str, str],
+    batches: dict[str, list[tuple[Any, ...]]],
+) -> dict[str, list[tuple[Any, ...]]]:
+    """`neighbors_for`'s rows, each keyed by its page's path and its place there.
+
+    For a reader (`view`), a page whose links a withheld page could resolve
+    differently (a seed, or a visible page whose link to a seed's name changes)
+    is re-derived in the reader's view: its re-derived edges that touch a seed
+    replace its stored rows, each at its index within the page. A stored row
+    keeps its `rowid`, which orders the page's rows the same way.
+    """
+    affected: set[str] = set()
+    if view is not None:
+        seed_pages = set(seed_rel_by_key.values())
+        affected = {page for page in seed_pages if view.authored_edges(page) is not None}
+        for page in sorted(seed_pages):
+            affected.update(view.inbound_sources(page))
+    positioned: dict[str, list[tuple[Any, ...]]] = {
+        direction: [
+            ((source_path, rowid), seed_key, relation_type, other_path)
+            for source_path, rowid, seed_key, relation_type, other_path in batch
+            if source_path not in affected
+        ]
+        for direction, batch in batches.items()
+    }
+    if view is None:
+        return positioned
+    for page in sorted(affected):
+        for index, edge in enumerate(view.authored_edges(page) or ()):
+            for direction, seed_key, other_key in (
+                ("outbound", edge["src_key"], edge["dst_key"]),
+                ("inbound", edge["dst_key"], edge["src_key"]),
+            ):
+                if seed_key not in seed_rel_by_key:
+                    continue
+                other_path = view.node_path(str(other_key))
+                if other_path is not None:
+                    positioned[direction].append(
+                        ((page, index), seed_key, edge["relation_type"], other_path)
+                    )
+    return positioned
 
 
 def _edge_inspection_budget(*, max_nodes: int, max_edges: int) -> int:

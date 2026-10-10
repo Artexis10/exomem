@@ -1242,3 +1242,92 @@ def test_a_warm_owner_view_follows_a_status_save_and_a_page_edit(vault: Path) ->
         page.write_text(_page(title="One"), encoding="utf-8")
         edited = semantic_contract.build_corpus_context_with_census(vault)[0]
         assert _PAGE_REL in edited.eligible_governed_paths
+
+
+_MEETING_REL = "Knowledge Base/Notes/Meetings/m1.md"
+
+
+def _meeting_vault(
+    vault: Path, *, page_type: str, overlay: dict | None = None, raw: str = ""
+) -> None:
+    """A vault whose note-type overlay the owner admits and an unbound call does not.
+
+    `overlay` is saved through the registry; `raw` is written as is (an invalid one).
+    """
+    from exomem import commands, note_types
+    from exomem.governance.principal import library_scope
+    from test_note_type_registry import _withhold_note_types
+
+    page = vault / _MEETING_REL
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        _page(title="Meeting").replace("type: insight", f"type: {page_type}"), encoding="utf-8"
+    )
+    if overlay is not None:
+        with library_scope():
+            inspected = commands.op_schema_memory(vault, subject="note-types", operation="inspect")
+            commands.op_schema_memory(
+                vault,
+                subject="note-types",
+                operation="save",
+                proposal={"upsert": overlay},
+                expected_hash=inspected["content_hash"],
+                why="a vault meeting type",
+            )
+    else:
+        path = note_types.registry_path(vault)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw, encoding="utf-8")
+    _withhold_note_types(vault)
+
+
+def _compiled_finding(vault: Path) -> str | None:
+    finding = semantic_contract.compiled_structure_finding(
+        semantic_contract.build_corpus_context(vault).pages[_MEETING_REL]
+    )
+    return finding.code if finding is not None else None
+
+
+def test_a_warm_unbound_view_never_inherits_the_owners_note_types(vault: Path) -> None:
+    """An unbound call after the owner sees its own note types, not the owner's
+    overlay carried on reused page states."""
+    from exomem.governance.principal import library_scope
+
+    _meeting_vault(
+        vault,
+        page_type="insight",
+        overlay={
+            "meeting-note": {
+                "label": "Meeting note",
+                "description": "A meeting record.",
+                "attributes": {"role": "compiled", "folder": "Notes/Meetings"},
+            }
+        },
+    )
+    semantic_contract.reset_corpus_context_cache()
+    unbound_alone = _compiled_finding(vault)
+    semantic_contract.reset_corpus_context_cache()
+    with library_scope():
+        owner_alone = _compiled_finding(vault)
+    assert owner_alone != unbound_alone
+
+    semantic_contract.reset_corpus_context_cache()
+    with library_scope():
+        _compiled_finding(vault)
+    assert _compiled_finding(vault) == unbound_alone
+
+
+def test_an_owner_with_an_invalid_overlay_refuses_after_an_unbound_call(vault: Path) -> None:
+    """The owner's invalid overlay refuses even when an unbound call warmed the
+    corpus without it."""
+    from exomem.governance.principal import library_scope
+    from exomem.cli_ops import OpError
+
+    _meeting_vault(
+        vault, page_type="meeting-note", raw="schema_version: 1\nentries: [meeting-note]\n"
+    )
+    semantic_contract.build_corpus_context(vault)
+    with library_scope(), pytest.raises(OpError, match="NOTE_TYPE_DEFINITION_UNAVAILABLE"):
+        semantic_contract.canonical_compiled_destination(
+            semantic_contract.build_corpus_context(vault).pages[_MEETING_REL]
+        )

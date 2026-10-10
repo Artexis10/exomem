@@ -3504,3 +3504,18 @@ def test_cloud_cell_default_resources_agree_with_cellctls_own_defaults() -> None
         "memoryLimit": defaults["memory_limit"],
     }
     assert chart["memoryLimit"] == "3Gi"
+
+
+def test_cellctl_renders_the_media_engine_switch_under_the_name_the_runtime_reads() -> None:
+    """cellctl names the per-cell engine switch itself; renaming it on one side only
+    would leave every engine off in every selected cell, with no error anywhere."""
+    from exomem import media_engines
+
+    manifests = ast.parse((ROOT / "infra/cellctl/src/cellctl/manifests.py").read_text(encoding="utf-8"))
+    [rendered] = [
+        ast.literal_eval(node.value)
+        for node in manifests.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "MEDIA_ENGINES_ENV" for target in node.targets)
+    ]
+    assert rendered == media_engines.ENGINES_ENV

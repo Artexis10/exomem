@@ -5643,9 +5643,9 @@ async def run_exomem_direct_probes(
     if profile == "full":
         media_requirements = {
             "media-pdf": ("fitz",),
-            "media-image": ("PIL", "pytesseract"),
+            "media-image": ("PIL",),
             "media-audio": ("faster_whisper", "av"),
-            "media-video": ("PIL", "pytesseract", "faster_whisper", "av"),
+            "media-video": ("PIL", "faster_whisper", "av"),
         }
         for probe_id in ("media-pdf", "media-image", "media-audio", "media-video"):
             probe = probes[probe_id]
@@ -7232,7 +7232,7 @@ async def _run_exomem_mcp(
     media_modules = (
         python_module_inventory(
             python,
-            ("PIL", "pytesseract", "fitz", "faster_whisper", "av"),
+            ("PIL", "fitz", "faster_whisper", "av"),
             cwd=REPO_ROOT,
             env=env,
         )
@@ -7435,7 +7435,7 @@ async def _run_exomem_mcp(
                         },
                         "image_ocr": {
                             "model": "system-tesseract",
-                            "backend": "pytesseract",
+                            "backend": "tesseract-cli",
                             "device": "cpu",
                             "dtype": "not_applicable",
                             "quantization": "not_applicable",

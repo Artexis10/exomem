@@ -55,6 +55,8 @@ A pressure stop, and an allocation failure under the hard limit, SHALL each be a
 - **Exceeds this deployment's processing budget**, only when each of those stops was an allocation failure under the child's own VmData hard limit. A child that hits its hard limit SHALL exit, so each counted failure starts in a fresh child that carries no growth from earlier jobs. That failure is the only evidence about the file itself: anonymous demand above the engine's budget also raises VmData, so the hard limit catches an oversized file. The tenant SHALL see that the file exceeds this deployment's processing budget, with no install wording and no wording that calls the file corrupt. The job SHALL return to pending only when the cell's memory limit or that engine's budget changes.
 - **Memory-blocked**, in every other case, including every case with a pressure stop. Pressure can come from the whole cell, such as backfill encoding in the serving process, a sensor child or an import checkpoint, so a pressure stop SHALL never lead to the over-budget state. The job SHALL return to pending without a human retry: when a supervisor starts, when the cell's limit or the engine's budget changes, and periodically with a bounded backoff while memory pressure is low. A tenant SHALL see it only as waiting, with no action to take, and its memory reason SHALL appear only on operator surfaces, such as doctor.
 
+A job that runs longer than the configured job timeout SHALL be stopped by the supervisor. That stop SHALL count separately from memory stops. After the same bounded number of timeout stops, each in a fresh child, the job SHALL take the state "exceeds this deployment's processing budget", with the timeout it exceeded recorded for operators. It SHALL return to pending only when the configured job timeout becomes larger. A file that never finishes within the timeout therefore holds the queue for at most that bound, then lets later jobs run.
+
 #### Scenario: No room means no claim
 
 - **WHEN** the cell's anonymous memory plus the next engine's anonymous-memory budget reaches the lower of `memory.high` and the profile's admission fraction
@@ -100,6 +102,13 @@ A pressure stop, and an allocation failure under the hard limit, SHALL each be a
 - **WHEN** a job's consecutive stops include pressure stops, such as stops while an import checkpoint runs
 - **THEN** the job becomes memory-blocked and recovers without a human
 - **AND** it never takes the state "exceeds this deployment's processing budget"
+
+#### Scenario: A job that always outruns the timeout stops holding the queue
+
+- **WHEN** a scanned book always runs longer than the configured job timeout, and a quick job is queued behind it
+- **THEN** after the bounded number of timeout stops the book takes the state "exceeds this deployment's processing budget"
+- **AND** the quick job then runs and completes
+- **AND** the book returns to pending only after the configured job timeout is raised
 
 #### Scenario: A memory-blocked job recovers without a human
 

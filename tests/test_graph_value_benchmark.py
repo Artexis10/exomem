@@ -1451,7 +1451,7 @@ def test_full_media_probes_execute_public_process_search_and_read_paths() -> Non
     }
     modules = {
         name: {"available": True, "version": "fixture"}
-        for name in ("fitz", "PIL", "pytesseract", "faster_whisper", "av")
+        for name in ("fitz", "PIL", "faster_whisper", "av")
     }
     recorder = Recorder()
 
