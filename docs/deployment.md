@@ -470,6 +470,17 @@ scratch to hash, hold, or replace — the failure class that has caused
 whole-vault rebuild chains and warm-up stalls when live state synced between
 machines.
 
+The structured collection store checks this before it writes its live
+database. Store custody stays unverified while the vault or the state directory
+is inside a file-sync root. Custody recognizes a root from the evidence in the
+`sync-providers` vocabulary registry: client metadata files, cloud document
+paths, platform variables, Windows sync folder names and vault sync plugins.
+If your sync client is not in the shipped pack, add it with
+`schema_memory(subject="sync-providers", operation="save")` or in
+`_Schema/sync-providers.yaml`. You can also list sync roots as absolute paths
+in `EXOMEM_COLLECTION_STORE_SYNC_ROOTS`. A vault entry can only add evidence;
+it cannot change or remove a shipped entry.
+
 Ordinary service and stateful CLI startup is read-only at this boundary. It
 never creates the state root, copies or removes a legacy file, resumes an
 interrupted transition, or upgrades a manifest. Until an explicit offline
@@ -1122,6 +1133,12 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   with `--lane source`, `capture_source`). A held handle is redeemable once,
   within an hour, and only by a request using the same local token, so point
   the client's MCP connection at the local listener with that token.
+  `--raw-protection` keeps a directly preserved original owner-only until you
+  release the whole artifact; a held file takes that choice when its command
+  redeems it. A direct preserve on the local listener never crosses the proxy
+  edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
+  public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
+  file stays within the 100 MB that `preserve_artifacts` can fetch.
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as

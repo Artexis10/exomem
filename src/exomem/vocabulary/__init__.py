@@ -43,6 +43,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
         relation_registry,
         semantic_language_registry,
         source_taxonomy,
+        sync_providers,
     )
 
     return {
@@ -56,6 +57,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             lifecycle_statuses.SPEC,
             planning_values.SPEC,
             note_types.SPEC,
+            sync_providers.SPEC,
         )
     }
 
