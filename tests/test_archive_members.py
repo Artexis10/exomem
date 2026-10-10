@@ -143,7 +143,7 @@ def _zip64_end(entries: int, directory_bytes: int) -> bytes:
 
 
 def _forged_end_record(directory_bytes: int) -> bytes:
-    """An end record whose two entry counts spell a second signature: `PK` and `\\x05\\x06`.
+    """An end record whose two entry counts spell a second end-record signature: `PK`, then bytes 5 and 6.
 
     A search from the end finds that inner signature first, while `zipfile` reads the file's
     last 22 bytes as the record."""
