@@ -8,9 +8,9 @@ members, SHALL prove each member's hash in a streamed pass before taking its row
 and row. A `json-document` source SHALL take rows from a declared row path that may cross
 nested arrays, with field paths relative to the row, ancestor paths from the document root
 or an enclosing element, the row's index, and literals. The reader SHALL stream, so memory
-does not grow with a member's size. A job SHALL skip a member already imported into the
-same collection with the same mapping unless the caller asks to re-import it. A field MAY
-declare a numeric scale.
+does not grow with a member's size. A job SHALL skip a member that an earlier job imported
+into the same collection with the same mapping unless the caller asks to re-import it. A
+field MAY declare a numeric scale.
 
 #### Scenario: Rows from a nested array
 - **WHEN** a member holds a list of devices, each with a list of samples, and the mapping declares a row path through both lists
