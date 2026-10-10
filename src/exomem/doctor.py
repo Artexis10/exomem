@@ -968,6 +968,26 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
     return _check("fast_ack_custody", "pass", message, details=details)
 
 
+def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
+    """State the collection store's unsupported writer setup for a vault that has a store.
+
+    A vault without the store's routing marker has only file collections, so it gets no line.
+    """
+    if vault_root is None:
+        return None
+    from . import held_fs
+    from .collection_store import authority, connection
+
+    try:
+        marker = authority.read_marker(vault_root)
+    except (OSError, held_fs.HeldFsError):
+        return _check("collection_store", "warn", "The collection store's routing marker could not be read.",
+                      f"Check that this user can read {authority.marker_path(vault_root)}.")
+    if marker is None:
+        return None
+    return _check("collection_store", "pass", f"This vault has store collections. {connection.UNSUPPORTED_WRITERS}")
+
+
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     """graph_sync epoch health: whether the derived graph is servable.
 
@@ -3711,6 +3731,9 @@ def doctor(
         check_graph_recovery_age(vault_root),
         _check_relation_census(vault_root),
     ]
+    collection_store = _check_collection_store(vault_root)
+    if collection_store is not None:
+        checks.append(collection_store)
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
         checks.append(runtime_processes)
