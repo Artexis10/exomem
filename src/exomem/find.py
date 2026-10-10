@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field
 from datetime import date
 from functools import wraps
 from pathlib import Path
@@ -2201,57 +2202,97 @@ def _origin_view(vault_root: Path) -> bool:
     return egress.projects_origin_for_caller(vault_root)
 
 
+#: What `_read_unit_parent` returns for a parent that is missing or cannot be
+#: parsed: every row read off it is stale.
+_PARENT_UNREADABLE = object()
+
+
+@dataclass
+class UnitParentReads:
+    """What one request read off unit parents, so each is read once.
+
+    Activation's role lanes select overlapping units off the same pages. Each
+    lane still runs its own query and checks its own rows; only the reads of
+    a parent's Markdown are shared. `parents` is `_read_unit_parent` by path,
+    `validated` is `lexstore.search_semantic_units_result`'s currency check
+    by row stamp.
+    """
+
+    parents: dict[str, Any] = field(default_factory=dict)
+    validated: dict[tuple[str, str, str, int], bool] = field(default_factory=dict)
+
+
+def _read_unit_parent(vault_root: Path, parent_path: str) -> Any:
+    """One parent as unit hydration reads it, before any row is checked.
+
+    `None` when recall does not admit the page or a page filter rejects it,
+    `_PARENT_UNREADABLE` when it is missing or cannot be parsed, otherwise
+    `[page, state, None]`; the caller fills the last slot with the page's
+    prose units the first time a row's generation matches.
+    """
+    from . import semantic_index
+
+    if not recall_policy.is_recall_candidate(vault_root, vault_root / parent_path):
+        return None
+    page = _CACHE.get(vault_root / parent_path, vault_root)
+    if page is None:
+        return _PARENT_UNREADABLE
+    if not _passes_filters(
+        page,
+        vault_root=vault_root,
+        types=None,
+        projects=None,
+        tags=None,
+        speakers=None,
+        file_types=None,
+        exclude_file_types=None,
+    ):
+        return None
+    try:
+        state = semantic_index.current_parent_index_state(vault_root, parent_path)
+    except (OSError, UnicodeError, ValueError) as error:
+        log.warning("semantic-unit candidate hydration failed for %s: %s", parent_path, error)
+        return _PARENT_UNREADABLE
+    return [page, state, None]
+
+
 def _hydrate_indexed_unit_records(
     vault_root: Path,
     indexed: list[Any],
     *,
     plan: structured_filters.FilterPlan,
     stale_out: list[str] | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
-    """Hydrate only sidecar-selected parents, rejecting any generation race."""
-    from . import semantic_index
+    """Hydrate only sidecar-selected parents, rejecting any generation race.
 
+    With `parent_reads`, a parent another call of the same request already
+    read is not read again; each call still checks it against its own rows'
+    generation.
+    """
     parents: dict[str, tuple[ParsedPage, Any, tuple[Any, ...]] | None] = {}
     records: dict[str, tuple[ParsedPage, Any, int]] = {}
+    reads = {} if parent_reads is None else parent_reads.parents
     for hit in indexed:
         parent = parents.get(hit.parent_path)
         if hit.parent_path not in parents:
-            if not recall_policy.is_recall_candidate(vault_root, vault_root / hit.parent_path):
-                parents[hit.parent_path] = None
-                continue
-            page = _CACHE.get(vault_root / hit.parent_path, vault_root)
-            if page is None or not _passes_filters(
-                page,
-                vault_root=vault_root,
-                types=None,
-                projects=None,
-                tags=None,
-                speakers=None,
-                file_types=None,
-                exclude_file_types=None,
-            ):
-                if page is None and stale_out is not None:
+            if hit.parent_path not in reads:
+                reads[hit.parent_path] = _read_unit_parent(vault_root, hit.parent_path)
+            read = reads[hit.parent_path]
+            if read is None or read is _PARENT_UNREADABLE:
+                if read is _PARENT_UNREADABLE and stale_out is not None:
                     stale_out.append(hit.unit_ref)
                 parents[hit.parent_path] = None
                 continue
-            try:
-                state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
-            except (OSError, UnicodeError, ValueError) as error:
-                log.warning(
-                    "semantic-unit candidate hydration failed for %s: %s",
-                    hit.parent_path,
-                    error,
-                )
-                if stale_out is not None:
-                    stale_out.append(hit.unit_ref)
-                parents[hit.parent_path] = None
-                continue
+            page, state, prose = read
             if state.parent_generation != hit.parent_generation:
                 if stale_out is not None:
                     stale_out.append(hit.unit_ref)
                 parents[hit.parent_path] = None
                 continue
-            parent = (page, state, find_results.prose_units(vault_root, page, state.document.units))
+            if prose is None:
+                prose = read[2] = find_results.prose_units(vault_root, page, state.document.units)
+            parent = (page, state, prose)
             parents[hit.parent_path] = parent
         if parent is None:
             continue
@@ -2503,6 +2544,7 @@ def _find_semantic_units(
     max_catalog_candidates: int | None = None,
     truncated_out: list[bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -2577,12 +2619,15 @@ def _find_semantic_units(
                             _repair_stale=True,
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
+                            validated=parent_reads.validated if parent_reads else None,
                         )
                         _set_catalog_timing_profile(timings, catalog_result.readiness)
                         if not catalog_result.readiness.complete:
                             _raise_catalog_outcome(catalog_result.readiness)
                         indexed = list(catalog_result.value or [])
-                        records = _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                        records = _hydrate_indexed_unit_records(
+                            vault_root, indexed, plan=plan, parent_reads=parent_reads
+                        )
                         if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
                         if (
@@ -2617,6 +2662,7 @@ def _find_semantic_units(
                         _repair_stale=True,
                         repair=exact_repair,
                         allow_delta=exact_allow_delta,
+                        validated=parent_reads.validated if parent_reads else None,
                     )
                     _set_catalog_timing_profile(timings, catalog_result.readiness)
                     if not catalog_result.readiness.complete:
@@ -2625,7 +2671,9 @@ def _find_semantic_units(
                     records = (
                         {}
                         if mode == "vector"
-                        else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                        else _hydrate_indexed_unit_records(
+                            vault_root, indexed, plan=plan, parent_reads=parent_reads
+                        )
                     )
         else:
             indexed = lexstore.search_semantic_units(
@@ -2670,7 +2718,9 @@ def _find_semantic_units(
             records = (
                 {}
                 if mode == "vector"
-                else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                else _hydrate_indexed_unit_records(
+                    vault_root, indexed, plan=plan, parent_reads=parent_reads
+                )
             )
     else:
         records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
@@ -2802,7 +2852,11 @@ def _find_semantic_units(
     # produce a trustworthy ranking. This avoids reparsing the same candidate
     # parents twice while preserving the deterministic lexical fallback.
     if mode == "vector" and not vector_hits and indexed:
-        records.update(_hydrate_indexed_unit_records(vault_root, indexed, plan=plan))
+        records.update(
+            _hydrate_indexed_unit_records(
+                vault_root, indexed, plan=plan, parent_reads=parent_reads
+            )
+        )
 
     if not records:
         if candidate_window_exhausted and failed_out is not None:

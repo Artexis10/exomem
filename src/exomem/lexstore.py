@@ -2635,8 +2635,13 @@ def search_semantic_units_result(
     repair: bool = True,
     recall_checkpoint: Any | None = None,
     allow_delta: bool = True,
+    validated: dict[tuple[str, str, str, int], bool] | None = None,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
-    """Typed exact-category unit query preserving every catalog outcome."""
+    """Typed exact-category unit query preserving every catalog outcome.
+
+    `validated` keeps each row stamp's currency check for the caller's request,
+    so several queries over the same parents read each one once.
+    """
     from .semantic_units import canonicalize_category
 
     if not _catalog_usable():
@@ -2678,7 +2683,7 @@ def search_semantic_units_result(
     hits = list(result.value or [])
     current: list[SemanticUnitLexicalHit] = []
     stale_paths: set[str] = set()
-    freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+    freshness_by_stamp = {} if validated is None else validated
     for hit in hits:
         stamp = (
             hit.parent_path,
@@ -7314,6 +7319,17 @@ class LexicalStore:
         allowed_clause += excluded_clause
         params.extend(excluded_params)
         if admitted is not None:
+            if groups and min_matched_terms <= 1:
+                # A row the all-of test keeps holds every stem of some group,
+                # so the index can name those rows first. Without this the
+                # test ran once per row the whole query matched: on a long
+                # turn that is nearly every page, times every group. This
+                # branch scores in Python, so the MATCH only selects rows and
+                # the test itself still decides; the rows are unchanged.
+                params[0] = f"({match}) AND (" + " OR ".join(
+                    "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
+                    for group in groups
+                ) + ")"
             candidates = {
                 path: stemmed.split() for path, stemmed in conn.execute(
                     f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
@@ -8118,10 +8134,13 @@ class LexicalStore:
             clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
             params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
         if excluded_categories_by_parent is not None:
+            # One uncorrelated key set, built once per query. A correlated
+            # NOT EXISTS re-read the whole map for every matched row, which
+            # grew with the square of the neighbourhood.
             clauses.append(
-                "NOT EXISTS (SELECT 1 FROM json_each(?) AS parent "
-                "JOIN json_each(parent.value) AS category "
-                "WHERE parent.key = u.parent_path AND category.value = u.category)"
+                "json_array(u.parent_path, u.category) NOT IN ("
+                "SELECT json_array(parent.key, category.value) "
+                "FROM json_each(?) AS parent, json_each(parent.value) AS category)"
             )
             params.append(json.dumps(excluded_categories_by_parent, ensure_ascii=False))
         columns = (
