@@ -15,6 +15,7 @@ the name. A suffixed name that stands on a real file SHALL carry no block. The b
 advisory and MAY diverge from the `entity_recurrence` family in either direction; the
 family remains authoritative. A write by a page that already linked
 the name, or for a name already linked from two or more eligible pages, SHALL carry no
+block. A name that the agent dismissed in an `undeclared_referents` block SHALL carry no
 block. Pages committed within one mutation batch SHALL count once. The block SHALL be
 withheld when the `structural_suggestions` authority class is `off` and whenever the
 graph index does not answer the lookup as available. Detection SHALL never create an

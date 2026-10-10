@@ -8,9 +8,9 @@ The product SHALL define a closed v1 set of envelope action classes —
 hard ceiling: `hygiene_writes` silent; `proactive_capture` silent-capable;
 `link_acceptance` confirm; `structural_suggestions` advisory (surface only);
 `restructure_execution` — covering restructure application, supersession
-commit, entity merge, deletion, and edge removal, which is a `remove-relation`
-call or the removal of an edge from a page that the current write does not
-author — confirm-required; `disclosure` governed
+commit, entity merge, deletion, and edge removal, which is an `edit_memory`
+`remove_relation` operation or the removal of an edge from a page that the
+current write does not author — confirm-required; `disclosure` governed
 exclusively by the governance plane. On a personal vault, additive entity
 creation (a new identity through the entity writer's resolve-before-create
 path, which refuses or prepares a decision on an existing exact name) belongs
@@ -23,12 +23,15 @@ semantic-category registry save, a relation-extension save and a typed edge that
 the agent authors also belong to `proactive_capture`. `link_acceptance` covers
 acceptance of a relation that the server's relation queue suggested. Replacing a
 generic edge in place with a specific predicate is a typed edge the agent
-authors, not an edge removal, and an `edit_memory` call that drops a
-`## Relations` bullet from the page it writes is part of that write, not an
+authors, not an edge removal, and any other `edit_memory` operation that drops
+a `## Relations` bullet from the page it writes is part of that write, not an
 edge removal. A promotion revert is `restructure_execution` whose confirmation
 is the user's request; it seals and applies its own curation plan in one call,
-the promotion's item context is its preview, and the promotion's dependants
-block it until the user names them. A resolved
+the promotion's item context is its preview, and it requires the promotion's
+current fingerprint, which covers the dependants and the content it changes and
+serves as the plan-fingerprint approval that curation apply requires. Edge
+removal and promotion revert SHALL run only on tools that are already marked
+destructive. A resolved
 non-owner's registry save remains a pending item for the owner. An
 additive-authority grant that governs the caller, including the Hosted v2
 grants, applies unchanged and is neither widened nor replaced by this class. No
@@ -111,15 +114,16 @@ time, never refused — reading the envelope never breaks bootstrap.
 
 #### Scenario: An edge removal is confirmed by the user's request
 
-- **WHEN** the agent runs `remove-relation`, or a write removes an edge from a
-  page that the write does not author
+- **WHEN** the agent runs an `edit_memory` `remove_relation` operation, or a
+  write removes an edge from a page that the write does not author
 - **THEN** the action is `restructure_execution`, and a user's explicit revert
   request is its confirmation
 
 #### Scenario: An edit to the page it writes is not an edge removal
 
-- **WHEN** the agent's `edit_memory` call drops a `## Relations` bullet from the
-  page that the call writes
+- **WHEN** the agent's `edit_memory` call with an operation other than
+  `remove_relation` drops a `## Relations` bullet from the page that the call
+  writes
 - **THEN** the edit follows the class of that write and asks no edge-removal
   confirmation
 

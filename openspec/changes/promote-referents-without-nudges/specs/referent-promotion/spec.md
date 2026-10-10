@@ -4,9 +4,10 @@
 
 `connect_memory` SHALL offer `add-relation` with `path`, `requested_relation`, `target`, `expected_hash` and `why`.
 It SHALL append one bullet under the subject page's `## Relations` through the edit writer, write a log entry, return `exists` for an edge that is already present, refuse a stale `expected_hash`, and refuse an unregistered or deprecated predicate with the propose route.
-`connect_memory` SHALL offer `remove-relation` with `path`, `requested_relation`, `target` and `why`, keyed by that triple and taking no hash.
+`edit_memory` SHALL offer a `remove_relation` operation kind with `relation` and `target` on the subject page's `path`, keyed by that triple and taking no hash.
 It SHALL remove exactly the bullets of that triple and return `absent` when there are none.
-Both SHALL refuse a withheld subject or target exactly as a missing one, and both SHALL be curation step kinds that compensate each other.
+Removal SHALL NOT be offered on `connect_memory`, which stays additive, so that every tool's destructive hint stays truthful.
+Both leaves SHALL refuse a withheld subject or target exactly as a missing one, and both SHALL be curation step kinds that compensate each other.
 `create-entity` `connections` SHALL accept `{target, relation}` items beside strings, and a string SHALL keep the registry's generic relation.
 
 #### Scenario: Repeating an edge writes nothing
@@ -16,7 +17,7 @@ Both SHALL refuse a withheld subject or target exactly as a missing one, and bot
 
 #### Scenario: Removal touches only its triple
 
-- **WHEN** `remove-relation` removes an `owns` edge while another session has edited a different section of the same page
+- **WHEN** a `remove_relation` operation removes an `owns` edge while another session has edited a different section of the same page
 - **THEN** only the `owns` bullet for that target is gone, the other edit survives, and a repeat returns `absent`
 
 #### Scenario: A withheld target cannot be detected
@@ -77,15 +78,18 @@ Family dispositions SHALL apply, and a withheld promotion SHALL contribute nothi
 
 ### Requirement: Each promotion reverts in one call
 
-Every `recent_promotions` entry SHALL revert through one call keyed by its ref, `triage_memory(ref=<entry ref>, action="revert")`, and its item context SHALL name that call.
-For a typed edge, the call SHALL run the `remove-relation` step for that triple.
-For an entity creation, the call SHALL seal and apply, in that one call, a curation plan whose steps remove the promotion's own edges and then trash the entity.
-The entry's item context SHALL list every other inbound link to the entity as a dependant, and the entry's fingerprint SHALL cover that list.
+Every `recent_promotions` entry SHALL revert through one call keyed by its ref on a tool that is already destructive, and its item context SHALL name that call.
+Every revert SHALL require the entry's current fingerprint, which SHALL cover the entry's dependant list and the content hash of each page or registry entry that the revert changes; a stale fingerprint SHALL refuse the call and change nothing.
+A typed edge or an entity creation SHALL revert through `maintain_memory(mode="curation", curation_action="revert", review_ref=<entry ref>, expected_plan_fingerprint=<entry fingerprint>, why)`.
+That call SHALL seal the revert plan from the entry and apply it in the same call, and the sealed plan's fingerprint SHALL be the entry's fingerprint, so that curation apply's plan-fingerprint approval stays required.
+For a typed edge, the plan SHALL hold one `remove_relation` step; for an entity creation, its steps SHALL remove the promotion's own edges and then trash the entity.
+The entry's item context SHALL list every other inbound link to the entity as a dependant.
 A link from the promotion's originating write SHALL NOT be a dependant, because after the revert it is an unresolved wikilink again, as it was before the promotion.
-When dependants exist, the call SHALL refuse and return them unless it carries the entry's current fingerprint, which the agent passes only after the user names them.
-For a registry addition, the call SHALL remove the key through a `remove` delta verb when the key is vault-added and nothing uses it.
+A registry addition SHALL revert through one `schema_memory` save of that key, carrying `expected_hash`, `why`, `vocabulary_ref=<entry ref>` and `vocabulary_fingerprint=<entry fingerprint>`.
+The save SHALL remove the key through a `remove` delta verb when the key is vault-added and nothing uses it.
 The `remove` verb SHALL be allowed only in a registry whose adapter declares a usage check, which today means entity types, relations and semantic categories, and every other registry SHALL refuse it.
-Otherwise the call SHALL deprecate the key, to its parent for a relation, and SHALL list the dependants.
+Otherwise the save SHALL deprecate the key, to its parent for a relation, and SHALL list the dependants.
+No revert SHALL land on `triage_memory` or `connect_memory`.
 A revert SHALL NOT restore an older registry version or drop a later save.
 A revert SHALL run only on the user's request, which is its confirmation, and history and logs SHALL keep both the promotion and its revert.
 
@@ -99,16 +103,16 @@ A revert SHALL run only on the user's request, which is its confirmation, and hi
 - **WHEN** the user asks to undo a promoted entity that only the promotion's own edges and its originating note link to
 - **THEN** one call removes those edges and moves the entity page to the trash, with no separate preview or apply call
 
-#### Scenario: Dependants block an entity revert until the user names them
+#### Scenario: A revert needs the entry's current fingerprint
 
-- **WHEN** a later note links the promoted entity and the agent runs the revert call without a fingerprint
-- **THEN** the call refuses, changes nothing, and lists the later note as a dependant
-- **AND** after the user names that dependant, the same call with the entry's current fingerprint reverts the entity
+- **WHEN** the agent runs an entity revert without a fingerprint, or with a fingerprint read before a later note linked the entity
+- **THEN** the call refuses, changes nothing, and the entry's item context lists the later note as a dependant
+- **AND** after the user has seen and named that dependant, the same call with the entry's current fingerprint reverts the entity
 
 #### Scenario: A used type is deprecated, not removed
 
 - **WHEN** the user asks to undo a promoted entity type that two entities use
-- **THEN** the route deprecates the type, lists the two entities as dependants, and leaves every later registry save in place
+- **THEN** the one `schema_memory` save deprecates the type, lists the two entities as dependants, and leaves every later registry save in place
 
 #### Scenario: An unused type is removed
 
