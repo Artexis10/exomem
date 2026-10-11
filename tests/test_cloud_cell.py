@@ -264,7 +264,7 @@ def test_cloud_principal_from_verifier_claims_is_non_owner_and_resolved(
 
 
 def test_cloud_non_owner_principal_fails_owner_only_governance_check(
-    monkeypatch: pytest.MonkeyPatch,
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from exomem.server_auth import CloudCellTokenVerifier
 
@@ -279,7 +279,7 @@ def test_cloud_non_owner_principal_fails_owner_only_governance_check(
     cloud_principal = principal_module.resolve_mcp_principal()
 
     with pytest.raises(GovernanceError, match="GOVERNANCE_OWNER_REQUIRED"):
-        _require_owner(cloud_principal)
+        _require_owner(cloud_principal, vault_root=vault)
 
 
 def test_cloud_governed_write_commits_then_owner_only_op_refuses(

@@ -145,7 +145,9 @@ def _release_snapshot(
         basis = status_basis or lifecycle_statuses.Basis(vault_root)
         if not disclosure:
             try:
-                if basis.classify(page.frontmatter.get("status")).require() == "superseded":
+                if basis.classify(
+                    page.frontmatter.get("status"), path=page.path, frontmatter=page.frontmatter
+                ).require() == "superseded":
                     raise _unavailable()
             except lifecycle_statuses.ClassificationUnavailable as error:
                 raise _unavailable() from error

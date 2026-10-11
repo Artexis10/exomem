@@ -490,7 +490,7 @@ def build_packet(
             item.relevance_order,
             0 if item.level == "unit" else 1,
             # Within a role, current material ranks before history.
-            _lifecycle_rank(item.lifecycle, status_basis=status_basis),
+            _lifecycle_rank(item.lifecycle, path=item.path or None, status_basis=status_basis),
             -_date_rank(item.updated),
             # Most units author no time of their own; their page's time orders
             # them rather than their ref's spelling.
@@ -532,7 +532,7 @@ def build_packet(
         if conversation_inferred
         else limit
     )
-    listed_anchors = [dict(anchor) for anchor in anchors]
+    listed_anchors = _listed_anchors(anchors)
     listed_ambiguity = [dict(entry) for entry in ambiguity[:working_set_resolve.MAX_AMBIGUITY_CHOICES]]
     role_ids = frozenset(str(role["id"]) for role in roles) if conversation_inferred else frozenset()
     if conversation_inferred:
@@ -669,7 +669,7 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
-            ordering = status_basis.ordering(item.lifecycle)
+            ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
             if ordering is not None and ordering.historical:
                 unit["history"] = True
             if promoted and promoted_used + cost > promoted_share:
@@ -714,6 +714,38 @@ def build_packet(
     return working_set_conversation.InferredPacket(packet) if conversation_inferred else packet
 
 
+#: What must have reached a `partial` anchor for a packet to list it: the
+#: turn's own words, an earlier turn or packet of this conversation
+#: (`continuity`, `conversation`), this conversation's own thread (`recency`,
+#: the evidence of a follow-up carried from it) or a carried page's link
+#: (`carried_link`, one closed token of `EVIDENCE_KINDS`). A candidate that
+#: only a ranking engine reached (`retrieval`, `vector_band`, with whatever
+#: qualifiers) is one fact no rule could promote; listed, it named pages the
+#: user never mentioned, which the hook already declines to render.
+_LISTED_PARTIAL_KINDS: frozenset[str] = (
+    working_set_resolve.WORDED_CONTACT_KINDS
+    | working_set_resolve.NAMED_BEFORE_KINDS
+    | working_set_resolve.PRIOR_CONTACT_KINDS
+    | frozenset({"carried_link"})
+)
+
+
+def _listed_anchors(anchors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The anchor entries a packet lists, in order: all of them except a
+    `partial` one that nothing in `_LISTED_PARTIAL_KINDS` reached.
+
+    Decided where the packet is assembled, after resolution: what resolved,
+    what is ambiguous and what was admitted are unchanged; only the menu
+    stops naming what recall alone surfaced.
+    """
+    return [
+        dict(anchor)
+        for anchor in anchors
+        if anchor.get("status") != "partial"
+        or _LISTED_PARTIAL_KINDS.intersection(str(kind) for kind in anchor.get("evidence") or ())
+    ]
+
+
 def abstained_packet(
     *,
     reason: str,
@@ -755,7 +787,7 @@ def abstained_packet(
     recent_entries, used = _budgeted_recent(recent_context, limit)
     return {
         "recent_context": recent_entries,
-        "anchors": [dict(anchor) for anchor in anchors],
+        "anchors": _listed_anchors(anchors),
         "roles": [],
         "units": [],
         "pointers": [],
@@ -913,8 +945,10 @@ def _redundant_superseded(item: LaneItem, present_paths: frozenset[str] | set[st
     return any(target in present_paths for target in _superseded_targets(item))
 
 
-def _lifecycle_rank(lifecycle: str, *, status_basis: lifecycle_statuses.Basis) -> int:
-    ordering = status_basis.ordering(lifecycle)
+def _lifecycle_rank(
+    lifecycle: str, *, path: str | None = None, status_basis: lifecycle_statuses.Basis
+) -> int:
+    ordering = status_basis.ordering(lifecycle, path=path)
     return 0 if ordering is not None and ordering.live else 1
 
 
@@ -1998,7 +2032,9 @@ def _is_current_page(
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
-    return status_basis.classify(frontmatter.get("status")).carryable
+    return status_basis.classify(
+        frontmatter.get("status"), path=text, frontmatter=frontmatter
+    ).carryable
 
 
 def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
@@ -2249,6 +2285,33 @@ def _carry_by_retrieval(
     return _visible_hits(hits, visible)[: working_set_resolve.MAX_ANCHORS]
 
 
+def _lexical_hits_without(
+    vault_root: Path,
+    turn: str,
+    pages: frozenset[str],
+    words: frozenset[str],
+    *,
+    freshness_snapshot: Any = None,
+) -> frozenset[str]:
+    """`working_set_resolve.candidates_for`'s dependence check, read on the
+    snapshot the request's first lexical pass read. Empty when that snapshot
+    is unreadable: the anchors then stay leads."""
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot readmits nothing
+            log.debug("activation dependence check freshness unavailable", exc_info=True)
+            return frozenset()
+    from . import working_set_runtime
+
+    return working_set_runtime.lexical_hits_without(
+        vault_root, turn, pages, words, freshness=freshness, recall_checkpoint=recall_checkpoint
+    )
+
+
 def _visible_hits(
     hits: Sequence[tuple[str, float]], visible: Callable[[str], bool] | None
 ) -> tuple[tuple[str, float], ...]:
@@ -2266,6 +2329,7 @@ def _carry_groups_by_retrieval(
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
@@ -2299,6 +2363,7 @@ def _carry_groups_by_retrieval(
             contacts=contacts,
             status_basis=status_basis,
             visible=visible,
+            query_context=query_context,
         )
     if state != "available":
         return ()
@@ -2418,6 +2483,90 @@ def _named_anchors(
         }
         for path, _score in named
     )
+
+
+def _title_named_anchors(
+    vault_root: Path,
+    *,
+    turn: str,
+    timings: Any = None,
+    freshness_snapshot: Any = None,
+    lexical_seconds: float = 0.0,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    index: working_set_index.WorkingSetIndex | None = None,
+    exclude: frozenset[str] = frozenset(),
+    query_context=None,
+) -> tuple[dict[str, Any], ...]:
+    """The pages an unresolved turn names by their title in ordinary words,
+    as `retrieval_named` anchor entries, for an abstention the carry named
+    nothing in (`working_set_runtime.title_named_pages`).
+
+    Listed, never served: the packet stays `unresolved` with no unit, pointer
+    or current state for them, and the token names none of them. Evidence is
+    `lexical_overlap` (two words of the page's own title) and `retrieval`
+    (the carry's ranked query reached it). Each entry carries the project
+    keys the page's own frontmatter declares, so the agent can tell which
+    part of the vault it belongs to before picking it with `anchor`. The
+    budget rule, readiness refusals and timing span are the carry's own; a
+    page the caller may not see, or one the packet already lists (`exclude`),
+    is dropped before the `RETRIEVAL_CARRY_MAX_DOMAINS` cap, so it never
+    takes a slot.
+    """
+    if budget_exhausted(
+        "working_set.carry", reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
+    ):
+        return ()
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot lists nothing
+            log.debug("activation title listing freshness unavailable", exc_info=True)
+            return ()
+    with _span(timings, "working_set.carry"):
+        from . import working_set_runtime
+
+        hits, state = working_set_runtime.title_named_pages(
+            vault_root,
+            turn,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+            visible=visible,
+            status_basis=status_basis or lifecycle_statuses.Basis(vault_root),
+            query_context=query_context,
+        )
+    if state != "available":
+        return ()
+    named = tuple(hit for hit in _visible_hits(hits, visible) if hit[0] not in exclude)[
+        :RETRIEVAL_CARRY_MAX_DOMAINS
+    ]
+    return tuple(
+        {
+            **entry,
+            "evidence": ["lexical_overlap", "retrieval"],
+            "projects": _page_projects(vault_root, str(entry["path"])),
+        }
+        for entry in _named_anchors(vault_root, named, index=index)
+    )
+
+
+def _page_projects(vault_root: Path, rel_path: str) -> list[str]:
+    """The project keys a page's own frontmatter declares, sorted; `[]` when
+    it declares none or cannot be read. Read off `find_corpus.CACHE`, which
+    the lifecycle check has already warmed for this page."""
+    try:
+        from . import find_corpus
+
+        root = Path(vault_root)
+        page = find_corpus.CACHE.get(root / rel_path, root)
+    except Exception:  # noqa: BLE001 - a project label is a courtesy, never a promise
+        log.debug("activation named-page projects read failed for %s", rel_path, exc_info=True)
+        return []
+    frontmatter = getattr(page, "frontmatter", None)
+    return sorted(find_corpus.all_projects(frontmatter)) if isinstance(frontmatter, dict) else []
 
 
 def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -> str:
@@ -2590,6 +2739,7 @@ def _carried_packet(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     unresolved_anchors: Sequence[Mapping[str, Any]] = (),
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """One packet compiled from a single dominant page, marked as carried.
@@ -2664,6 +2814,7 @@ def _carried_packet(
         evidence=evidence,
         visible=visible,
         contacts=contacts,
+        retrieval_eligible=retrieval_eligible,
         status_basis=status_basis,
     )
     if carried_anchors:
@@ -2820,6 +2971,7 @@ def _carried_material(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
@@ -2838,6 +2990,9 @@ def _carried_material(
     `_carried_packet` documents.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    if evidence == ("retrieval",) and retrieval_eligible is not None:
+        eligible = retrieval_eligible(frozenset(paths))
+        paths = tuple(path for path in paths if path in eligible)
     anchors: list[working_set_resolve.ResolvedAnchor] = []
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -3400,6 +3555,28 @@ def _compile_packet(
     index_token = index.token()
     conventions_registry = activation_conventions.load_conventions(root)
     conventions = conventions_registry.conventions
+    checked_without: dict[frozenset[str], dict[str, bool]] = {}
+    partial_pages: dict[frozenset[str], set[str]] = {}
+
+    def retrieval_without(pages: frozenset[str], words: frozenset[str]) -> frozenset[str]:
+        checked = checked_without.setdefault(words, {})
+        unchecked = pages - checked.keys()
+        if unchecked:
+            independent = _lexical_hits_without(
+                root, turn, frozenset(unchecked), words, freshness_snapshot=freshness_snapshot
+            )
+            checked.update((path, path in independent) for path in unchecked)
+        return frozenset(path for path in pages if checked[path])
+
+    def retrieval_eligible(pages: frozenset[str]) -> frozenset[str]:
+        eligible = set(pages)
+        # Shared pages must prove each owner's exclusion separately, never their union.
+        for words, owners in partial_pages.items():
+            affected = pages & owners
+            if affected:
+                eligible.difference_update(affected - retrieval_without(affected, words))
+        return frozenset(eligible)
+
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
         "index_generation": index_token[1],
@@ -3562,9 +3739,15 @@ def _compile_packet(
                         analysis, registry.roles.values()
                     ),
                     row_lexicons=row_lexicons,
+                    retrieval_without=retrieval_without if retrieval_paths else None,
                 )
 
             candidates = _candidates(rows)
+            for candidate in candidates:
+                if candidate.path and candidate.partial_name_terms:
+                    partial_pages.setdefault(candidate.partial_name_terms, set()).add(
+                        candidate.path
+                    )
 
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
@@ -3827,6 +4010,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                retrieval_eligible=retrieval_eligible,
                 status_basis=status_basis,
             )
             if not packet["abstained"] and any(
@@ -3912,7 +4096,19 @@ def _compile_packet(
                 status_basis=status_basis,
             )
 
+    # Set when the carry below named no page at all, which is the one turn the
+    # final abstention lists title-named pages for (`_title_named_anchors`).
+    carry_named_nothing = False
+    query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
+        from . import lexstore
+        from .governance import egress
+
+        admitted = visible if visible is not None else egress.release_walk_filter(root)
+        query_context = lexstore.RequestQueryContext(
+            root, admitted if admitted is not None else lambda _path: True, status_basis,
+            restricted=visible is not None,
+        )
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,
@@ -3923,7 +4119,9 @@ def _compile_packet(
             contacts=contacts,
             visible=visible,
             status_basis=status_basis,
+            query_context=query_context,
         )
+        carry_named_nothing = not groups
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
         for group in groups:
@@ -3969,6 +4167,7 @@ def _compile_packet(
                 visible=visible,
                 contacts=contacts,
                 unresolved_anchors=tuple(item.as_dict() for item in resolution.anchors),
+                retrieval_eligible=retrieval_eligible,
                 status_basis=status_basis,
             )
             if packet is not None:
@@ -4078,11 +4277,34 @@ def _compile_packet(
                 return packet
 
     if resolution.status != "resolved":
+        # Last, so every carry above that could serve material has declined.
+        # A page whose title the turn says in ordinary words is listed for the
+        # agent to pick; nothing is served from it and the turn stays
+        # `unresolved`.
+        listed = tuple(anchor.as_dict() for anchor in resolution.anchors)
+        titled = (
+            _title_named_anchors(
+                root,
+                turn=turn,
+                timings=timings,
+                freshness_snapshot=freshness_snapshot,
+                lexical_seconds=lexical_seconds,
+                visible=visible,
+                status_basis=status_basis,
+                index=index,
+                exclude=frozenset(
+                    str(entry["path"]) for entry in _listed_anchors(listed) if entry.get("path")
+                ),
+                query_context=query_context,
+            )
+            if carry_named_nothing
+            else ()
+        )
         return abstained_packet(
             reason=resolution.status,
             max_chars=limit,
             generation=generation,
-            anchors=tuple(anchor.as_dict() for anchor in resolution.anchors),
+            anchors=(*listed, *titled),
             ambiguity=resolution.ambiguity,
             missing=({"role": "anchors", "reason": "lane_truncated"},)
             if resolution.truncated
@@ -4189,6 +4411,7 @@ def _compile_packet(
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
             visible=visible,
+            retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
         )
         if beside_anchors:
@@ -4236,6 +4459,7 @@ def _named_beside(
     freshness_snapshot: Any,
     lexical_seconds: float,
     visible: Callable[[str], bool] | None = None,
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     tuple[dict[str, Any], ...],
@@ -4297,6 +4521,7 @@ def _named_beside(
             freshness_snapshot=freshness_snapshot,
             visible=visible,
             contacts=contacts,
+            retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
         )
     except BudgetExhausted:
@@ -4485,7 +4710,7 @@ def _referent_filters(
     retired = {
         path
         for path, row in by_path.items()
-        if not status_basis.classify(getattr(row, "lifecycle", None)).carryable
+        if not status_basis.classify(getattr(row, "lifecycle", None), path=path).carryable
     }
 
     def admissible(path: str) -> bool:
@@ -5094,7 +5319,7 @@ def _recent_frontmatter_statement(
         if not isinstance(value, (str, int, float)) or not str(value).strip():
             continue
         if name == "status":
-            classification = status_basis.classify(value)
+            classification = status_basis.classify(value, path=rel, frontmatter=frontmatter)
             classification.require()
             if not classification.unregistered:
                 continue

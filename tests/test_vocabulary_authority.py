@@ -7,7 +7,11 @@ from threading import Event, Thread
 import pytest
 
 from exomem import vocabulary_authority
-from exomem.governance import authorization_session_lifecycle, store
+from exomem.governance import (
+    authorization_session_authority,
+    authorization_session_lifecycle,
+    store,
+)
 from exomem.governance.authorization_session_lifecycle import AuthorizationSessionContext
 from exomem.governance.principal import RequestPrincipal
 from exomem.vocabulary_effects import Effect
@@ -32,6 +36,11 @@ def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
         store,
         "open_authorization_session_connection",
         lambda _root: type("_Connection", (), {"close": lambda self: None})(),
+    )
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_purpose",
+        lambda _connection, *, context, audience, now: None,
     )
 
 

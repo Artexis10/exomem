@@ -965,28 +965,21 @@ def lexical_evidence(
     they match. `selection`, when given, receives how many units were kept
     and dropped — counts only, never the turn's words.
     """
-    from . import find_types, lexstore
+    from . import find_types
 
     by_path = {row.path: row for row in rows if row.path}
     if not by_path:
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        # A full-page match on the same single name word is not a second fact.
-        # Require two distinct content units (words or unspaced runs); exact
-        # aliases still resolve alone.
-        result = lexstore.search_bm25_result(
+        result = _lexical_query(
             vault_root,
-            content_words(turn),
-            min(limit, len(by_path)),
-            scope="kb",
+            turn,
+            set(by_path),
+            limit=limit,
             freshness=freshness,
-            allowed_paths=set(by_path),
-            allow_delta=False,
-            min_matched_terms=2,
             recall_checkpoint=recall_checkpoint,
-            term_budget=lexical_term_budget(),
-            term_selection=selection,
+            selection=selection,
         )
         if not result.readiness.complete:
             return [], result.readiness.status
@@ -1007,6 +1000,86 @@ def lexical_evidence(
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical evidence unavailable", exc_info=True)
         return [], "unavailable"
+
+
+def _lexical_query(
+    vault_root: Path,
+    words: str,
+    paths: set[str],
+    *,
+    limit: int,
+    freshness=None,
+    recall_checkpoint=None,
+    selection: dict | None = None,
+    excluded_corroboration_stems: frozenset[str] | None = None,
+):
+    """The activation lexical query: `paths` ranked by the content words of
+    `words`, each hit matching at least two distinct content units.
+    Units containing `excluded_corroboration_stems` cannot corroborate."""
+    from . import lexstore
+
+    # A full-page match on the same single name word is not a second fact.
+    # Require two distinct content units (words or unspaced runs); exact
+    # aliases still resolve alone.
+    return lexstore.search_bm25_result(
+        vault_root,
+        content_words(words),
+        min(limit, len(paths)),
+        scope="kb",
+        freshness=freshness,
+        allowed_paths=paths,
+        allow_delta=False,
+        min_matched_terms=2,
+        recall_checkpoint=recall_checkpoint,
+        term_budget=lexical_term_budget(),
+        term_selection=selection,
+        excluded_corroboration_stems=excluded_corroboration_stems,
+    )
+
+
+def lexical_hits_without(
+    vault_root: Path,
+    turn: str,
+    pages: frozenset[str],
+    left_out: frozenset[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> frozenset[str]:
+    """Which of `pages` the activation lexical query still reaches for `turn`
+    when the stems of the `left_out` words are not counted
+    (`working_set_resolve.candidates_for`'s dependence check).
+
+    Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
+    bring "hedge" back unless its stem is what is left out. The query keeps
+    the first pass's budget and unit grouping: a word or unspaced run counts
+    once, and a run needs a strict majority of its content stems. A unit
+    containing a left-out stem cannot corroborate.
+    Empty when the catalogue cannot answer: the anchors then stay leads, as
+    they do when nothing is asked.
+    """
+    from . import bm25 as bm25_module
+
+    turn = working_set_index.subject_text(turn)
+    dropped = frozenset(bm25_module.tokenize(" ".join(left_out), query=True))
+    if not pages:
+        return frozenset()
+    try:
+        result = _lexical_query(
+            vault_root,
+            turn,
+            set(pages),
+            limit=len(pages),
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+            excluded_corroboration_stems=dropped,
+        )
+    except Exception:  # noqa: BLE001 - one optional evidence lane
+        log.debug("activation lexical dependence check unavailable", exc_info=True)
+        return frozenset()
+    if not result.readiness.complete:
+        return frozenset()
+    return frozenset(path for path, _score in result.value or ()) & pages
 
 
 #: The floor on how many scored hits the carry recall asks for. The real
@@ -1123,12 +1196,8 @@ _SENTENCE_BREAK = re.compile(
 _TOKEN_JOINERS = re.compile(r"['\-]+")
 
 
-def _positioned_words(turn: str) -> tuple[tuple[tuple[int, tuple[str, ...]], ...], ...]:
-    """Word units at their raw token positions, kept apart by sentence.
-
-    Runs keep their place but contribute no pairable stems. A word's index
-    in its sentence is its distinct unit id, including compound parts.
-    """
+def _positioned_units(turn: str):
+    """Full token units at raw token positions, kept apart by sentence."""
     from . import bm25 as bm25_module
 
     sentences = []
@@ -1139,9 +1208,17 @@ def _positioned_words(turn: str) -> tuple[tuple[tuple[int, tuple[str, ...]], ...
         ):
             for part in _TOKEN_JOINERS.split(token):
                 for unit in bm25_module.token_units(part, query=True):
-                    words.append((index, () if unit.run else tuple(dict.fromkeys(unit.stems))))
+                    words.append((index, unit))
         sentences.append(tuple(words))
     return tuple(sentences)
+
+
+def _positioned_words(turn: str) -> tuple[tuple[tuple[int, tuple[str, ...]], ...], ...]:
+    """Carry units keep raw positions but mask unspaced runs from pairing."""
+    return tuple(
+        tuple((index, () if unit.run else tuple(dict.fromkeys(unit.stems))) for index, unit in words)
+        for words in _positioned_units(turn)
+    )
 
 
 def _pair_occurrences(
@@ -1246,6 +1323,7 @@ def rare_turn_terms(
     visible: Callable[[str], bool] | None = None,
     admitted_paths: set[str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[tuple[str, ...], int, str]:
     """Distinctive stems and corpus size over this request's admitted pages."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -1254,7 +1332,10 @@ def rare_turn_terms(
 
     # An omitted predicate is not proof of complete admission. Ask the existing
     # walk owner; its None result proves the unrestricted empty-policy case.
-    admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
+    admitted = (
+        query_context.visible if query_context is not None
+        else visible if visible is not None else egress.release_walk_filter(vault_root)
+    )
     result = lexstore.carry_term_statistics(
         vault_root,
         stems,
@@ -1265,6 +1346,7 @@ def rare_turn_terms(
         ),
         freshness=freshness,
         recall_checkpoint=recall_checkpoint,
+        query_context=query_context,
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
@@ -1358,6 +1440,7 @@ def carry_named_groups(
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[tuple[tuple[tuple[str, float], ...], ...], str]:
     """The pages this turn NAMED, one group per phrase that named them.
     Returns `(groups, readiness status)`.
@@ -1399,6 +1482,7 @@ def carry_named_groups(
             status_basis=status_basis,
             visible=visible,
             admitted_paths=admitted_paths,
+            query_context=query_context,
         )
         if state != "available":
             return (), state
@@ -1434,6 +1518,7 @@ def carry_named_groups(
                 exclude_navigation=True,
                 exclude_raw_material=True,
                 admitted_paths=admitted_paths,
+                query_context=query_context,
             )
             if not result.readiness.complete:
                 return (), result.readiness.status
@@ -1469,6 +1554,7 @@ def carry_named_groups(
                 contacts=contacts,
                 status_basis=status_basis,
                 admitted_paths=admitted_paths,
+                query_context=query_context,
             )
         return tuple(groups), "available"
     except lifecycle_statuses.ClassificationUnavailable as error:
@@ -1494,6 +1580,7 @@ def _carry_title_groups(
     admitted_paths: set[str],
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> list[tuple[tuple[str, float], ...]]:
     """Pages a turn names by TITLE when no two distinctive words name them.
 
@@ -1536,6 +1623,7 @@ def _carry_title_groups(
         exclude_navigation=True,
         exclude_raw_material=True,
         admitted_paths=admitted_paths,
+        query_context=query_context,
     )
     if not result.readiness.complete or len(result.value or ()) >= fetch:
         # A bounded prefix cannot prove that a namesake was not cut off.
@@ -1726,6 +1814,149 @@ def carry_candidates(
         for path, score in group:
             merged[path] = max(score, merged.get(path, score))
     return tuple(sorted(merged.items(), key=lambda item: (-item[1], item[0]))), state
+
+
+def title_named_pages(
+    vault_root: Path,
+    turn: str,
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
+) -> tuple[tuple[tuple[str, float], ...], str]:
+    """Current pages whose TITLE the turn names in ordinary words, in rank
+    order. Returns `(hits, readiness status)`.
+
+    For a turn the carry named nothing in: "the smooth chain cleaning" names
+    the page titled "Smooth chain cleaning", although none of those words is
+    distinctive and the carry rightly refuses to serve it. A page qualifies
+    when two distinct normalized title units contact distinct turn units within
+    `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other in one sentence of the
+    turn, and it is among the ranked rows of the bounded full-subject query.
+    No rarity is asked for, because these pages are only listed for the
+    agent to pick (`RETRIEVAL_NAMED_STATUS`) and never served: the bar is
+    that the turn names the page, not that its words single it out. A
+    one-unit title is never named.
+
+    The query uses the maintained catalogue only, no foreground
+    delta, raw material and navigation excluded before the row limit,
+    `carry_fetch_size` rows. `visible` is the caller's reader view, `None`
+    for the owner. A restricted reader's rows are scored over the pages it
+    may see, so a withheld page neither takes a row nor moves another page's
+    rank. The corpus-size floor does not apply: it exists because rarity
+    cannot be measured in a small vault, and nothing here measures rarity.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    from . import lexstore
+    from .governance import egress
+
+    # The resolver's reading of the turn, as the carry reads it.
+    turn = working_set_index.subject_text(turn)
+    try:
+        from . import bm25 as bm25_module
+
+        sentences = _positioned_units(turn)
+        units = bm25_module.token_units(turn, query=True)
+        if len({unit for unit in units}) < 2:
+            return (), "available"
+        # Reuse request admission only after this snapshot proves its generation.
+        admitted = (
+            query_context.visible if query_context is not None
+            else visible if visible is not None else egress.release_walk_filter(vault_root)
+        )
+        corpus = lexstore.carry_term_statistics(
+            vault_root,
+            [],
+            visible=admitted if admitted is not None else lambda _path: True,
+            status_basis=status_basis,
+            path_limit=lambda pages: 0,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+            query_context=query_context,
+        )
+        if not corpus.readiness.complete:
+            return (), corpus.readiness.status
+        _frequencies, corpus_pages, _paths, admitted_paths = corpus.value
+        # The owner keeps catalogue ranking; restricted readers use admitted
+        # statistics so hidden pages cannot move a visible page's rank.
+        restricted = visible is not None
+        result = lexstore.search_bm25_result(
+            vault_root,
+            turn,
+            working_set.carry_fetch_size(corpus_pages),
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            # Not a tuning value: the catalogue indexes a page's title with its
+            # body, so title contact needs two distinct query units. The filter
+            # uses the maintained strict-majority rule for each unspaced run.
+            min_matched_terms=2,
+            recall_checkpoint=recall_checkpoint,
+            term_budget=lexical_term_budget(),
+            exclude_navigation=True,
+            exclude_raw_material=True,
+            admitted_paths=admitted_paths if restricted else None,
+            query_context=query_context,
+        )
+        if not result.readiness.complete:
+            return (), result.readiness.status
+        return (
+            tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _is_raw_material(str(path))
+                and not _is_navigation_page(str(path))
+                # Naming first: each test reads the page, and most rows are
+                # not named, so the lifecycle read is paid only by those that are.
+                and _names_title(sentences, working_set._page_title(vault_root, str(path)))
+                and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
+            ),
+            "available",
+        )
+    except lifecycle_statuses.ClassificationUnavailable as error:
+        raise egress.ReaderViewUnavailable("status classification is unavailable") from error
+    except Exception:  # noqa: BLE001 - a listing is additive; it lists nothing, never raises
+        log.debug("activation title listing unavailable", exc_info=True)
+        return (), "unavailable"
+
+
+def _names_title(
+    sentences,
+    title: str,
+) -> bool:
+    """Two distinct title units contact distinct turn units in one window."""
+    from . import bm25 as bm25_module
+    from . import lexstore
+
+    title_units = tuple(dict.fromkeys(bm25_module.token_units(title, query=True)))
+    if len(title_units) < 2:
+        return False
+    # The catalogue's unit compiler owns strict-majority run matching.
+    title_terms = [lexstore._term_units([unit]) for unit in title_units]
+    title_stems = [frozenset(row[0] for row in terms) for terms in title_terms]
+    for words in sentences:
+        placed = []
+        for index, unit in words:
+            terms = lexstore._term_units([unit])
+            if not terms:
+                continue
+            stems = frozenset(row[0] for row in terms)
+            matches = {
+                title_id for title_id, own in enumerate(title_stems)
+                if title_terms[title_id] and len(stems & own) >= title_terms[title_id][0][2]
+                and len(stems & own) >= terms[0][2]
+            }
+            if matches:
+                placed.append((index, unit, matches))
+        for position, (left_at, left, left_matches) in enumerate(placed):
+            for right_at, right, right_matches in placed[position + 1:]:
+                if right_at - left_at > working_set.RETRIEVAL_CARRY_RARE_WINDOW:
+                    break
+                if left != right and any(a != b for a in left_matches for b in right_matches):
+                    return True
+    return False
 
 
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:

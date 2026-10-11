@@ -82,10 +82,12 @@ def _seed_sidecars(
 
 
 def test_hierarchy_parser_and_sidecar_versions_are_incremented() -> None:
-    assert semantic_index.PARSER_VERSION == 4
-    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION == 3
-    assert lexstore.SCHEMA_VERSION == 12
-    assert epistemic_graph.SCHEMA_VERSION == 12
+    # Lower bounds: the hierarchy parser shipped at these versions, and later
+    # format changes move them further without undoing it.
+    assert semantic_index.PARSER_VERSION >= 4
+    assert embedding_index.SEMANTIC_UNIT_SCHEMA_VERSION >= 3
+    assert lexstore.SCHEMA_VERSION >= 12
+    assert epistemic_graph.SCHEMA_VERSION >= 12
 
 
 def test_explicit_upgrade_reconcile_reprojects_unchanged_rich_units_everywhere(
@@ -151,7 +153,7 @@ Keep retry windows bounded.
         ).fetchall()
         for node_key, raw_metadata in rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
+            if not metadata.get("occurrence_key"):
                 continue
             metadata.update(
                 tags=[],
@@ -196,14 +198,10 @@ Keep retry windows bounded.
     assert [(row.tags, row.context) for row in rows] == [
         (("reliability", "runtime/retry"), "Edge path")
     ]
-    graph_rows = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path)).execute(
-        "SELECT metadata FROM graph_nodes WHERE path = ?",
-        (_REL,),
-    ).fetchall()
     graph_units = [
-        json.loads(raw_metadata)
-        for (raw_metadata,) in graph_rows
-        if json.loads(raw_metadata).get("record_type") == "semantic_unit"
+        node["metadata"]
+        for node in epistemic_graph.graph_context(tmp_path, path=_REL, depth=1)["nodes"]
+        if node["metadata"].get("record_type") == "semantic_unit"
     ]
     assert [(row["tags"], row["context"]) for row in graph_units] == [
         (["reliability", "runtime/retry"], "Edge path")
@@ -257,7 +255,8 @@ Parent conclusion.
     try:
         conn.execute(
             "UPDATE semantic_units SET parser_version = ?, "
-            "parent_generation = 'pre-hierarchy', unit_ref = 'old-overlap-ref' "
+            "parent_generation = 'pre-hierarchy', "
+            "unit_ref = 'old-overlap-ref-' || source_order "
             "WHERE parent_path = ?",
             (semantic_index.PARSER_VERSION - 1, _REL),
         )
@@ -272,11 +271,11 @@ Parent conclusion.
         ).fetchall()
         for node_key, raw_metadata in rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
+            if not metadata.get("occurrence_key"):
                 continue
             metadata.update(
                 {
-                    "unit_ref": "old-overlap-ref",
+                    "occurrence_key": "old-overlap-occurrence",
                     "parent_generation": "pre-hierarchy",
                     "parser_version": semantic_index.PARSER_VERSION - 1,
                 }
@@ -287,14 +286,12 @@ Parent conclusion.
             )
         edge_rows = conn.execute(
             "SELECT edge_key, metadata FROM graph_edges "
-            "WHERE source_path = ? AND relation_type = 'derived_from'",
+            "WHERE source_path = ? AND origin IN ('semantic_unit', 'semantic_block')",
             (_REL,),
         ).fetchall()
         for edge_key, raw_metadata in edge_rows:
             metadata = json.loads(raw_metadata)
-            if metadata.get("record_type") != "semantic_unit":
-                continue
-            metadata["unit_ref"] = "old-overlap-ref"
+            metadata["occurrence_key"] = "old-overlap-occurrence"
             conn.execute(
                 "UPDATE graph_edges SET metadata = ? WHERE edge_key = ?",
                 (json.dumps(metadata, sort_keys=True), edge_key),
@@ -364,12 +361,11 @@ def test_sidecar_parity_classifies_missing_mixed_moved_and_graph_edge_drift(
     try:
         edge = conn.execute(
             "SELECT edge_key, metadata FROM graph_edges "
-            "WHERE source_path = ? AND relation_type = 'derived_from' LIMIT 1",
+            "WHERE source_path = ? AND origin IN ('semantic_unit', 'semantic_block') LIMIT 1",
             (_REL,),
         ).fetchone()
         assert edge is not None
-        metadata = json.loads(edge[1])
-        assert metadata["record_type"] == "semantic_unit"
+        assert json.loads(edge[1])["occurrence_key"]
         conn.execute("DELETE FROM graph_edges WHERE edge_key = ?", (edge[0],))
         conn.commit()
     finally:
@@ -515,3 +511,131 @@ def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
         include_vectors=True,
         include_graph=True,
     ) == ()
+
+
+def test_an_old_generation_reads_incomplete_until_reconcile_restores_coverage_and_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """After a parser-generation upgrade, older sidecar rows are never complete coverage.
+
+    Lexical, vector and graph readers report the old rows as incomplete until the
+    explicit reconcile republishes them. Then coverage is complete again, and the
+    relation queue judges each page by its current lifecycle class, including a
+    label that only the status overlay defines. This catches a reader that serves
+    old rows as a proved answer, and a rebuild that leaves coverage or classes stale.
+    """
+    from exomem import relation_queue
+    from exomem.governance.principal import library_scope
+
+    pages = {}
+    for name, status in (("live", "active"), ("parked", "parked")):
+        rel = f"Knowledge Base/Notes/Insights/{name}.md"
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\ntitle: {name.title()}\nstatus: {status}\n---\n"
+            f"# {name.title()}\n\n## Decision\n\nKeep retry windows bounded for {name} work.\n",
+            encoding="utf-8",
+        )
+        pages[rel] = path
+    find_module.clear_cache()
+    with library_scope():
+        inspected = commands.op_schema_memory(tmp_path, subject="statuses", operation="inspect")
+        commands.op_schema_memory(
+            tmp_path, subject="statuses", operation="save",
+            proposal={"upsert": {"parked": {"attributes": {"class": "retired"}}}},
+            expected_hash=inspected["content_hash"], why="parked work is retired",
+        )
+
+    assert lexstore.search_semantic_units(tmp_path, "retry windows", k=10, scope="kb")
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    for path in pages.values():
+        state = semantic_index.build_parent_index_state(tmp_path, path)
+        index.upsert_semantic_units(
+            state,
+            np.zeros((len(state.occurrences), embedding_index.VECTOR_DIM), dtype=np.float32),
+            path.stat().st_mtime,
+        )
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+
+    # An older binary wrote every derived row.
+    older = semantic_index.PARSER_VERSION - 1
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_units SET parser_version = ?, parent_generation = 'older'", (older,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    conn = sqlite3.connect(embedding_index.index_paths.sidecar_path(tmp_path))
+    try:
+        conn.execute(
+            "UPDATE semantic_unit_vectors SET parser_version = ?, parent_generation = 'older'",
+            (older,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(tmp_path))
+    try:
+        for node_key, raw_metadata in conn.execute(
+            "SELECT node_key, metadata FROM graph_nodes WHERE path IN (?, ?)", tuple(pages)
+        ).fetchall():
+            metadata = json.loads(raw_metadata or "{}")
+            # Occurrence nodes and each file's structural summary carry the generation.
+            aged = [part for part in (metadata, metadata.get(epistemic_graph.STRUCTURAL_METADATA))
+                    if isinstance(part, dict) and "parser_version" in part]
+            for part in aged:
+                part["parser_version"] = older
+            if aged:
+                conn.execute(
+                    "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                    (json.dumps(metadata, sort_keys=True), node_key),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    find_module.clear_cache()
+
+    def observe():
+        incomplete: list[str] = []
+        vector_hits = embedding_index.EmbeddingIndex(tmp_path).search_semantic_units(
+            np.zeros(embedding_index.VECTOR_DIM, dtype=np.float32), 10,
+            allowed_parent_paths=set(pages), validate=False, incomplete_out=incomplete,
+        )
+        # Exact kind recall needs a complete candidate set, so stale rows read as incomplete.
+        lexical = lexstore.search_semantic_units(
+            tmp_path, "retry windows", k=10, scope="kb", kinds=["decision"]
+        )
+        with library_scope():
+            queue = relation_queue.build_queue(tmp_path)
+        return {
+            "vector": sorted(hit.parent_path for hit in vector_hits),
+            "incomplete": incomplete,
+            "lexical": None if lexical is None else sorted(row.parent_path for row in lexical),
+            "queue": queue,
+        }
+
+    before = observe()
+    assert before["vector"] == [] and before["incomplete"]
+    assert before["lexical"] is None
+    assert before["queue"]["status"] != "available"
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    monkeypatch.setattr(readiness, "should_defer", lambda *_args: False)
+    def zeros(texts, **_kwargs):  # noqa: ANN001, ANN003
+        return np.zeros((len(texts), embedding_index.VECTOR_DIM), dtype=np.float32)
+
+    monkeypatch.setattr(embeddings, "_embed_live_chunks", zeros)
+    monkeypatch.setattr(embeddings, "embed_texts", zeros)
+    commands.op_maintain_memory(tmp_path, mode="reconcile")
+
+    after = observe()
+    assert after["vector"] == sorted(pages) and after["incomplete"] == []
+    assert after["lexical"] == sorted(pages)
+    assert after["queue"]["status"] == "available"
+    assert after["queue"]["coverage"]["eligible_pages"] == 1
+    assert after["queue"]["coverage"]["definitions_unavailable_pages"] == 0

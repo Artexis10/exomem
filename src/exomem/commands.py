@@ -163,6 +163,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
+from .governance import connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -684,9 +685,10 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary import instances
+    from .vocabulary.contract import selected_admission_refusal
 
-    refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
+    refusal = selected_admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
     if refusal is not None:
         return refusal
     taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
@@ -713,8 +715,8 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
             "this metadata, not the model itself. A captured source keeps its path so "
             "provenance references stay valid; classification applies to new captures."
         )
-        projection["registry"] = (
-            source_taxonomy_module.registry_path(vault_root).relative_to(vault_root).as_posix()
+        projection["registry"] = instances.selected_overlay(
+            vault_root, source_taxonomy_module.KIND_SPEC
         )
         projection["source_kinds"] = [
             taxonomy.kinds[key].as_dict() for key in sorted(taxonomy.kinds)
@@ -1018,9 +1020,9 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary.contract import selected_admission_refusal
 
-    entity_registry_refusal = admission_refusal(vault_root, entity_types_module.SPEC)
+    entity_registry_refusal = selected_admission_refusal(vault_root, entity_types_module.SPEC)
     entity_type_registry = entity_types_module.load_entity_types(
         None if entity_registry_refusal else vault_root
     )
@@ -1107,7 +1109,7 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_registry_refusal = admission_refusal(vault_root, relation_registry_module.SPEC)
+    relation_registry_refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
     relation_registry = relation_registry_module.load_registry(
         None if relation_registry_refusal else vault_root
     )
@@ -2916,14 +2918,8 @@ def op_find(
         )
         hits = release.hits
     else:
-        from .governance import raw_protection
-
-        who = principal_module.effective_principal()
-        admit_path = (
-            (lambda path: raw_protection.permits(vault_root, path, who))
-            if not raw_protection.has_unrestricted_access(vault_root, who) else None
-        )
-        # RAW admission precedes candidate selection; ordinary policy still
+        admit_path = find_module.caller_admission(vault_root)
+        # Content admission precedes candidate selection; ordinary policy still
         # uses its existing annotation pool and final authorization below.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
         retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
@@ -3593,6 +3589,7 @@ def op_graph_context(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     purpose: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -3634,19 +3631,11 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-    # A unit seed is a fact about its parent page: resolved against a withheld
-    # parent it answers as a unit of an absent page does (see
-    # `egress.unit_parent_withheld`).
-    graph_unit_ref = unit_ref
-    if unit_ref is not None and egress_module.unit_parent_withheld(
-        vault_root, unit_ref, purpose=purpose
-    ):
-        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=graph_unit_ref,
+        unit_ref=unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -3655,7 +3644,9 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        registry_scope=registry_scope,
         keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
+        seed_keep=egress_module.unit_seed_parent_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
@@ -4990,6 +4981,7 @@ def op_link(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     aliases: list[str] | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -5033,6 +5025,7 @@ def op_link(
             in another script (a Japanese name for an English-titled page) so
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5070,6 +5063,7 @@ def op_link(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -7194,7 +7188,21 @@ def _op_activate_context_body(
             attribution=attribution,
             ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
         )
-    if attribution is not None and attribution.session:
+    recording = attribution
+    if served and caller_thread is None and not (attribution is not None and attribution.session):
+        # A keyless caller's first served packet is recorded under the thread
+        # its token now names, exactly as each later packet of that thread is,
+        # so a follow-up that echoes the token can be carried on what this one
+        # served. Ranking above used no thread: this packet had none yet.
+        recording = working_set_heat_module.attribution_for(
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            salt=salt or None,
+            thread=thread,
+        )
+    if recording is not None and recording.session:
         # The session's last served thread (ruling S5-1): what its token names,
         # after the guard, so a compacted or resumed conversation that lost its
         # token still continues its own work. Never an event in the ring:
@@ -7202,9 +7210,9 @@ def _op_activate_context_body(
         working_set_heat_module.note_session(
             vault_root,
             working_set_heat_module.SessionMark(
-                session=attribution.session,
-                workspace=attribution.workspace,
-                client=attribution.client,
+                session=recording.session,
+                workspace=recording.workspace,
+                client=recording.client,
                 paths=tuple(
                     str(item.get("path") or "")
                     for item in (packet.get("anchors") or ())
@@ -9628,6 +9636,7 @@ def op_connect_memory(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     entity_family: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities; propose or accept connections.
 
@@ -9650,12 +9659,20 @@ def op_connect_memory(
         facets: create-entity only. Registry-declared facet values.
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
+        registry_scope: create-entity instance selector; public or a canonical private Scope ID.
     """
+    if registry_scope is not None and operation != "create-entity":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation in {"create-entity", "accept-relation"},
     )
     if operation == "resolve-relation":
+        from .vocabulary.contract import selected_admission_refusal
+
+        refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
+        if refusal is not None:
+            return {"available": False, "reason": refusal["reason"]}
         supplied = locals()
         unrelated_defaults = {
             "unit_ref": None,
@@ -9859,6 +9876,7 @@ def op_connect_memory(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10564,6 +10582,7 @@ def op_schema_memory(
     vocabulary_fingerprint: str | None = None,
     detail: Literal["counts", "keys"] | None = None,
     version: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -10605,12 +10624,23 @@ def op_schema_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         detail: Census detail; keys adds predicate keys.
         version: Kept version from `history`, for `restore`.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
     from .vocabulary import contract as vocabulary_contract
     from .vocabulary import registry_spec
 
+    if registry_scope is not None and not (
+        operation in _REGISTRY_OPERATIONS and subject in _registry_subjects()
+    ):
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires a registry operation")
+
+    if operation == "save-entity-types" and not connector_boundary.unrestricted(
+        vault_root, principal_module.effective_principal()
+    ):
+        # Entity saves validate global usage, including hidden rows.
+        return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
     if subject == "query-engine":
         # The typed query grammar's bounded discovery chapters; no vault read or write.
         from .query_engine import route as query_route
@@ -10655,7 +10685,7 @@ def op_schema_memory(
             queued = vocabulary_contract.queues_for_owner(vault_root)
             if queued is not None and spec.family is None:
                 return {"subject": registry_subject, "available": False, "reason": queued}
-        refusal = vocabulary_contract.admission_refusal(vault_root, spec)
+        refusal = vocabulary_contract.selected_admission_refusal(vault_root, spec)
         if refusal is not None:
             return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
@@ -10669,6 +10699,7 @@ def op_schema_memory(
             version=version,
             limit=limit,
             continuation=continuation,
+            registry_scope=registry_scope,
             unexpected={
                 "name": name,
                 "project": project,
@@ -11241,6 +11272,12 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "traversal-profiles":
+        profile_path = traversal_profiles_module.profile_path(vault_root)
+        if not egress_module.content_permits(
+            vault_root, profile_path.relative_to(vault_root).as_posix(),
+            principal_module.effective_principal(),
+        ):
+            return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
         if operation == "infer":
             result = memory_schema_module.infer_traversal_profiles(vault_root)
             if save:
@@ -11372,6 +11409,7 @@ def _registry_schema_operation(
     limit: int,
     continuation: str | None,
     unexpected: Mapping[str, Any],
+    registry_scope: str | None = None,
 ) -> dict[str, Any]:
     """One registry contract for every vocabulary subject."""
     from .vocabulary import contract, registry_spec
@@ -11402,7 +11440,12 @@ def _registry_schema_operation(
             + "; also got "
             + ", ".join(extra)
         )
-    spec = registry_spec(subject)
+    from .vocabulary import instances
+
+    try:
+        spec = instances.select(vault_root, registry_spec(subject), registry_scope, authoring=True)
+    except instances.RegistryError as error:
+        return contract.selection_refusal(subject, error)
     if operation == "inspect":
         return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
     if operation == "history":

@@ -23,6 +23,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from typing import Any, NamedTuple
 
 from . import activation_result, working_set_anaphora
@@ -139,8 +140,9 @@ DECIDING_ALONE_KINDS: frozenset[str] = frozenset({"exact_alias", "agent_choice"}
 #: needing to know this feature exists.
 RETRIEVAL_CARRIED_STATUS = "retrieval_carried"
 
-#: The status of a page a turn NAMED but that carries nothing, because the
-#: turn named another one too. Deliberately not `retrieval_carried`, which
+#: The status of a page a turn NAMED but that carries nothing: the turn named
+#: another one too, or said the page's title in ordinary words, which lists a
+#: page and never serves one. Deliberately not `retrieval_carried`, which
 #: says "this page carries the packet", and deliberately not reported as
 #: `ambiguous`, which says two anchors RESOLVED and the agent must choose
 #: between senses. This is neither: nothing resolved, nothing was carried,
@@ -223,9 +225,10 @@ def shipped_vocabulary() -> ReferentialVocabulary:
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
 #: `usage_prior`) is independent evidence that the turn is about the anchor —
-#: words and a ranking engine agreeing is two facts. `rare_term` is the weak
-#: member: a single shared term rare enough to be a lead, never a decision by
-#: itself (see the three-clause rule in `_status_for`).
+#: words and a ranking engine agreeing is two facts, unless the engine agreed
+#: on the same one word (`candidates_for`'s `retrieval` grant). `rare_term` is
+#: the weak member: a single shared term rare enough to be a lead, never a
+#: decision by itself (see the three-clause rule in `_status_for`).
 WORDED_CONTACT_KINDS: frozenset[str] = frozenset(
     {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
 )
@@ -496,6 +499,12 @@ class CandidateFacts:
     #: Did a turn whose casing says something write the shared name word
     #: without a capital anywhere (`TurnAnalysis.capitalised_anywhere`)?
     name_lower_case: bool = False
+    #: Initial own-page retrieval reach keeps a lead in a competing menu.
+    #: Private provenance, never independent resolving evidence.
+    retrieval_reached: bool = False
+    #: Own authored partial-name terms, retained before any retrieval hit.
+    #: Private dependence facts for the shared retrieval-carry boundary.
+    partial_name_terms: frozenset[str] = frozenset()
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -1225,11 +1234,20 @@ class RowLexicon(NamedTuple):
     names: frozenset[str]
     name_terms: frozenset[str]
     terms: frozenset[str]
+    #: The name terms that are a whole registered name on their own: a title,
+    #: an alias or the page's file name that is one word. A turn sharing one
+    #: of these said a name of the anchor; any other shared name term is only
+    #: part of a longer name.
+    whole_name_terms: frozenset[str]
 
 
 def row_lexicon(row: AnchorFacts) -> RowLexicon:
     """`row`'s normalised names, the folded terms of its title and aliases,
-    and the folded terms of its whole vocabulary."""
+    the folded terms of its whole vocabulary, and its one-word names.
+
+    The file name counts as a registered name because the vault resolves a
+    link by it (`[[Name]]` reaches `Name.md` whatever its title says)."""
+    file_name = PurePosixPath(row.path).stem if row.path else ""
     return RowLexicon(
         names=frozenset({normalize(row.title), *row.aliases} - {""}),
         name_terms=frozenset(
@@ -1239,6 +1257,12 @@ def row_lexicon(row: AnchorFacts) -> RowLexicon:
         ),
         terms=frozenset(
             folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+        ),
+        whole_name_terms=frozenset(
+            folded
+            for name in (row.title, *row.aliases, file_name)
+            if len(words := tokens_of(name)) == 1
+            and (folded := _fold_lexical_term(words[0])) is not None
         ),
     )
 
@@ -1366,8 +1390,17 @@ def candidates_for(
     rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
     eligible_categories: frozenset[str] = frozenset(),
     row_lexicons: Mapping[str, RowLexicon] | None = None,
+    retrieval_without: Callable[[frozenset[str], frozenset[str]], frozenset[str]] | None = None,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
+
+    `retrieval_without(pages, words)` answers which of `pages` are still
+    lexical hits for the turn when `words` (folded lexical terms) and every
+    form that stems like them are not counted. It is asked only when an
+    anchor's recall hit may rest on a singleton partial-name contact,
+    once for each distinct excluded-term set, and those
+    anchors keep `retrieval` only for the pages it returns. Without it they
+    lose it.
 
     `row_lexicons` (anchor id -> `row_lexicon(row)`) lets a caller matching
     several turns against the same rows derive each row's names once
@@ -1449,7 +1482,11 @@ def candidates_for(
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
     consumed_words = _consumed_embedded_words(analysis, rows)
+    # A word that is a whole name of ANY anchor is a name for every anchor it
+    # reaches: two people share a first name, and only one is stored under it.
+    whole_names: set[str] = set()
     for row in rows:
+        whole_names.update(lexicon_of(row).whole_name_terms)
         matched = _exact_alias_phrases(lexicon_of(row), phrases, consumed_words)
         row_exact_phrases[row.anchor_id] = matched
         positions: set[int] = set()
@@ -1482,6 +1519,9 @@ def candidates_for(
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
     out: list[CandidateFacts] = []
+    # Anchors whose recall hit may rest on the word they share: anchor id ->
+    # (page, that word). The dependence check after the loop reads them.
+    dependent: dict[str, tuple[str, frozenset[str]]] = {}
     for row in rows:
         evidence: set[str] = set()
         matched_phrases = row_exact_phrases[row.anchor_id]
@@ -1531,6 +1571,9 @@ def candidates_for(
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
+        # Does `rare_term` rest on a singleton partial-name contact?
+        # The `retrieval` grant below checks whether the hit needs it.
+        partial_name_contact = False
         if _lexical_overlap(shared_broad, shared_name, min_terms):
             evidence.add("lexical_overlap")
             name_contact = shared_name
@@ -1565,6 +1608,10 @@ def candidates_for(
                 if not consumed:
                     evidence.add("rare_term")
                     name_contact = shared_name
+                    partial_name_contact = (
+                        not matched_phrases
+                        and not shared_name & whole_names
+                    )
         # An unspaced script writes a name inside a run of words, never as a
         # token of its own: containment is its `rare_term` (design §6.3),
         # never `exact_alias`, and like any `rare_term` it needs a second,
@@ -1584,8 +1631,17 @@ def candidates_for(
         # pages, so a neighbour hit is not the turn reaching the anchor —
         # it is corroborated instead, and only from a WORDED partner (see
         # `add_graph_corroboration`).
+        #
+        # A recall hit that needs the singleton partial-name term is the
+        # same contact as `rare_term`: the page carries its own title, so
+        # that term and any other matched unit complete the lexical hit.
+        # Require two remaining content units without that term's stems;
+        # casing cannot establish independence or decide the caller's intent.
         if row.path and row.path in retrieval_paths:
-            evidence.add("retrieval")
+            if partial_name_contact:
+                dependent[row.anchor_id] = (row.path, shared_name)
+            else:
+                evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
         # anchor with no contact kind is not a candidate at all — unless the
         # turn is referential and this anchor is at the top of the hot
@@ -1630,14 +1686,37 @@ def candidates_for(
                 name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
+                # Capitals anywhere, sentence starts included: the existing
+                # band-yield and bare-name rules keep this stricter reading.
                 name_lower_case=bool(
                     name_contact
                     and analysis.cased_turn
                     and all(_is_cased(term) for term in name_contact)
                     and not name_contact & analysis.capitalised_anywhere
                 ),
+                retrieval_reached=bool(row.path and row.path in retrieval_paths),
+                partial_name_terms=shared_name if partial_name_contact else frozenset(),
             )
         )
+    if dependent and retrieval_without is not None:
+        # The dependence check, one query for each distinct excluded-term set, so
+        # one anchor's word never takes a match away from another's page. A
+        # page that is still a hit without its own word matched the turn
+        # apart from it, so its `retrieval` is a second fact after all.
+        pages_by_word: dict[frozenset[str], set[str]] = {}
+        for path, word in dependent.values():
+            pages_by_word.setdefault(word, set()).add(path)
+        independent = {
+            (path, word)
+            for word, pages in pages_by_word.items()
+            for path in retrieval_without(frozenset(pages), word)
+        }
+        out = [
+            replace(item, evidence=item.evidence | {"retrieval"})
+            if dependent.get(item.anchor_id) in independent
+            else item
+            for item in out
+        ]
     out.sort(key=_candidate_order)
     # The maintained index bounds this set. Competing senses must see it whole.
     return tuple(out)
@@ -2599,10 +2678,13 @@ def resolve(
     )
     ordered = sorted(candidates, key=_candidate_order)
     anchors: list[ResolvedAnchor] = []
+    retrieved_partial_ids: set[str] = set()
     for candidate in ordered:
         status = _status_for(candidate, recency_resolves=recency_resolves)
         if status == activation_result.UNRESOLVED:
             continue
+        if status == "partial" and candidate.retrieval_reached:
+            retrieved_partial_ids.add(candidate.anchor_id)
         anchors.append(
             ResolvedAnchor(
                 anchor_id=candidate.anchor_id,
@@ -2645,6 +2727,34 @@ def resolve(
     # anywhere, behaviour is unchanged (the agent may still be asked to
     # choose between two weak senses, exactly as today).
     has_named_anchor = any(DECIDING_ALONE_KINDS & set(anchor.evidence) for anchor in resolved)
+    if not has_named_anchor:
+        leads: list[ResolvedAnchor] = []
+        for anchor in anchors:
+            if (
+                anchor.status != "partial"
+                or anchor.anchor_id not in retrieved_partial_ids
+                or set(anchor.evidence) & CONTACT_KINDS != {"rare_term"}
+                or len(anchor.name_contact) != 1
+                or anchor.name_span_segment != "turn"
+                or anchor.name_span is None
+                or anchor.name_span[0] >= anchor.name_span[1]
+            ):
+                continue
+            if any(
+                peer.kind == anchor.kind
+                and peer.name_contact == anchor.name_contact
+                and peer.name_span_segment == anchor.name_span_segment
+                and peer.name_span == anchor.name_span
+                for peer in resolved
+            ):
+                leads.append(anchor)
+        original = dict(groups)
+        expanded = dict(_competing_groups((*resolved, *leads)))
+        # A partial bridge cannot erase competition between resolved components.
+        groups = tuple(
+            (kind, expanded[kind] if kind in expanded else original[kind])
+            for kind in sorted(original.keys() | expanded.keys())
+        )
     ambiguity: list[dict[str, Any]] = []
     demoted_refs: set[str] = set()
     disambiguated_by = ""

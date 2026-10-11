@@ -100,10 +100,12 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
     ),
     # Stays red by ruling (R3): the grill resolves only partially, and a
     # shared tag is not corroboration on a real vault. Semantic corroboration
-    # is future sensed-model work.
+    # is future sensed-model work. Recall alone reaches the grill, so since
+    # close-memory-loop 6.24 it is not listed as a partial either, and gold
+    # recall reads 0.00 where the listed partial used to count 0.50.
     "C2": (
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
+        "gold recall 0.00 below the 0.9 floor",
     ),
     # The plan anchor now reports its item (close-memory-loop 6.12), and the
     # turn's words reach the other workstream's item, never this one's. Stays
@@ -135,7 +137,7 @@ RED_TODAY: dict[str, tuple[str, ...]] = {
     # As C2, on the padded tree (R3).
     "C9": (
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
+        "gold recall 0.00 below the 0.9 floor",
     ),
 }
 
@@ -541,7 +543,8 @@ def test_current_runtime_the_audit_is_red_and_padding_robustness_fails(run: Run)
     padding = audit.score_padding_robustness(run.score("C9"), run.score("C2"))
     assert padding.passed is False
     assert padding.reasons == ("padded-tree precision below the 0.8 floor",)
-    assert (padding.recall_padded, padding.recall_base) == (0.5, 0.5)
+    # Neither tree lists the grill partial recall alone reached (C2, C9).
+    assert (padding.recall_padded, padding.recall_base) == (0.0, 0.0)
 
 
 def test_current_runtime_packets_stay_within_the_size_bounds(run: Run) -> None:

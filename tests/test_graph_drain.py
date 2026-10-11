@@ -550,6 +550,39 @@ def test_a_barrier_with_an_external_mark_converges_through_the_full_marker(
     assert EpistemicGraphIndex(vault).available()
 
 
+def test_a_stopped_first_rebuild_leaves_whole_vault_debt_the_drain_converges(
+    tmp_path: Path,
+) -> None:
+    """A fresh vault whose first rebuild stops gets its graph with no later write.
+
+    With no sidecar, the drain has no barrier or availability to repair and defers
+    incremental repair. The stop must leave it a whole-vault marker; without one the
+    graph stayed unbuilt until an unrelated write restarted the rebuild.
+    """
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base/Notes/Insights"
+    notes.mkdir(parents=True)
+    (notes / "a.md").write_text(_page("A", "A links to [[b]]."), encoding="utf-8")
+    (notes / "b.md").write_text(_page("B", "B is present."), encoding="utf-8")
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1, mutation_id="1" * 24,
+        paths=(("Knowledge Base/Notes/Insights/a.md", "d" * 64),),
+        created_paths=("Knowledge Base/Notes/Insights/a.md",),
+    )
+
+    def stop(_checkpoint: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        raise RuntimeError("the vault moved while the pass sampled it")
+
+    waiter = graph_sync.GraphRebuildCoordinator(vault).start_or_join(checkpoint, stop)
+    with pytest.raises(graph_sync.GraphRebuildStopped):
+        waiter.wait(5.0)
+    assert not epistemic_graph.sidecar_path(vault).exists()
+
+    assert graph_drain._work_once(vault) == 1
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert EpistemicGraphIndex(vault).available()
+
+
 def test_cold_recovery_rebuilds_unqueued_recall_content_before_advertising_current(
     tmp_path: Path,
     real_barrier: None,

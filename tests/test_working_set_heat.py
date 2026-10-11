@@ -1168,6 +1168,40 @@ def test_the_profile_reports_seeded_then_current(vault) -> None:
     assert heat.members(heat.leading(second)).paths == (PATTERN,)
 
 
+def test_a_withheld_burst_never_cuts_a_visible_edit_from_the_cold_seed(vault, tmp_path) -> None:
+    """A reader's cold seed applies the burst rule over the pages it may see.
+
+    Withheld pages written as one burst after the visible edit used to cut
+    that edit from every reader's seed, so a reader's recent page depended on
+    pages it may not see. The second vault has no withheld pages at all.
+    """
+    import os
+    import shutil
+    import time
+
+    withheld = [f"{KB}/Notes/Withheld/batch-{index}.md" for index in range(3)]
+    _age(vault, newest=PATTERN)
+    twin = tmp_path / "twin"
+    shutil.copytree(vault, twin)
+    now = time.time()
+    for index, rel in enumerate(withheld):
+        page = vault / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("---\ntype: note\n---\n# Batch\n", encoding="utf-8")
+        os.utime(page, (now + 1 + index, now + 1 + index))
+    views = []
+    for root in (vault, twin):
+        heat.reset_for_tests()
+        _live(root)
+        view = heat.released_view(heat.profile(root), lambda path: path not in withheld)
+        views.append(
+            (heat.members(heat.leading(view)).paths, [item.path for item in view.vault_contacts])
+        )
+
+    assert views[0] == views[1]
+    assert views[1][0] == (PATTERN,)
+
+
 def test_an_external_single_edit_is_work(vault) -> None:
     import time
 

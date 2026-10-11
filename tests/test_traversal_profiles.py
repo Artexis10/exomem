@@ -174,7 +174,7 @@ The result reproduced.
     assert epistemic_graph.EpistemicGraphIndex(vault).edges() == before_edges
 
 
-def test_registry_hash_drift_requires_rebuild_and_re_resolves_alias(tmp_path: Path) -> None:
+def test_registry_alias_change_re_resolves_without_a_graph_rebuild(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     proposal = {
         "schema_version": 1,
@@ -201,10 +201,10 @@ def test_registry_hash_drift_requires_rebuild_and_re_resolves_alias(tmp_path: Pa
     )
     proposal["extensions"]["science.replicates"]["aliases"] = ["reproduces"]
     _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", yaml.safe_dump(proposal))
-    assert epistemic_graph.EpistemicGraphIndex(vault).available() is False
-    assert "registry hash drift" in epistemic_graph.graph_drift(vault)[0]["reason"]
-    rebuilt = epistemic_graph.EpistemicGraphIndex(vault)
-    rebuilt.rebuild_all()
-    changed = next(edge for edge in rebuilt.edges() if edge["raw_relation"] == "mirrors")
+    # Shared rows keep the raw observation; each read resolves it with the
+    # current definitions, so an alias change needs no rebuild.
+    current = epistemic_graph.EpistemicGraphIndex(vault)
+    assert current.available() is True
+    changed = next(edge for edge in current.edges() if edge["raw_relation"] == "mirrors")
     assert changed["relation_type"] is None
     assert changed["registry_status"] == "unregistered"

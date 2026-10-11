@@ -105,6 +105,21 @@ The policy applies.
     )
 
 
+def _owe_full_rebuild(root: Path) -> tuple[graph_sync.GraphSyncCheckpoint, int]:
+    """A committed Markdown batch whose whole-vault rebuild is owed."""
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(root / f"{KB}/case.md", "---\ntype: insight\n---\n# Case\n\nRevised.\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert checkpoint is not None
+    deferred_index.mark_graph_full_rebuild(root, generation=checkpoint.generation)
+    marker = deferred_index.graph_full_rebuild_pending(root)
+    assert marker is not None
+    return checkpoint, marker
+
+
 def _stable_nodes(index: epistemic_graph.EpistemicGraphIndex) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for source in index.nodes():
@@ -129,297 +144,54 @@ def _stable_edges(index: epistemic_graph.EpistemicGraphIndex) -> list[dict[str, 
     return sorted(rows, key=lambda row: str(row["edge_key"]))
 
 
-def test_epoch_writes_injects_full_epoch_only_for_exact_registry_target(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "vault"
-    registry_write = vault.PlannedWrite(
-        relation_registry.extension_registry_path(root), _registry_yaml(alias=True)
-    )
-
-    generated = graph_sync.epoch_writes(root, [registry_write])
-
-    assert generated is not None
-    floor_write, checkpoint_write = generated
-    checkpoint = graph_sync.GraphSyncCheckpoint.parse(str(checkpoint_write.content))
-    assert floor_write.path == graph_sync.floor_path(root)
-    assert checkpoint_write.path == graph_sync.checkpoint_path(root)
-    assert checkpoint is not None
-    assert checkpoint.scope == "full"
-    assert checkpoint.paths == ()
-    assert checkpoint.created_paths == ()
-
-    lookalike = vault.PlannedWrite(
-        root / "Other" / "relation-registry.yaml", _registry_yaml(alias=True)
-    )
-    assert graph_sync.epoch_writes(root, [lookalike]) is None
-
-
-def test_registry_batch_commits_durable_full_recovery_demand_without_caller_epoch(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "vault"
-    registry_path = relation_registry.extension_registry_path(root)
-
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-
-    checkpoint = graph_sync.read_checkpoint(root)
-    assert checkpoint is not None and checkpoint.scope == "full"
-    assert deferred_index.graph_full_rebuild_pending(root) == checkpoint.generation
-    assert registry_path.read_text(encoding="utf-8") == _registry_yaml(alias=True)
-
-
-def test_live_registry_fanout_uses_the_shared_full_marker_dispatcher(
+def test_a_registry_save_leaves_the_graph_current_and_resolves_at_read_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-    checkpoint = graph_sync.read_checkpoint(root)
-    assert checkpoint is not None
-    calls: list[Path] = []
-
-    def converge(candidate: Path) -> epistemic_graph.GraphDispatchResult:
-        calls.append(candidate)
-        return epistemic_graph.GraphDispatchResult(
-            "completed", "registry_rebind_completed", checkpoint
-        )
-
-    monkeypatch.setattr(epistemic_graph, "converge_full_graph_marker", converge)
-
-    report = index_sync.upsert_after_write(root, [registry_path])
-
-    assert calls == [root]
-    assert report.eligible_paths == ()
-    assert [component.as_dict() for component in report.components] == [
-        {
-            "component": "epistemic_graph",
-            "outcome": "completed",
-            "code": "registry_rebind_completed",
-        }
-    ]
-
-
-def test_caught_registry_batch_failure_rolls_back_epoch_but_retains_harmless_debt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "vault"
-    registry_path = relation_registry.extension_registry_path(root)
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    before = _registry_yaml(alias=False)
-    registry_path.write_text(before, encoding="utf-8")
-    original = vault._after_batch_destination_published
-
-    def fail_after_registry(path: Path) -> None:
-        original(path)
-        if path == registry_path:
-            raise RuntimeError("synthetic caught cut")
-
-    monkeypatch.setattr(vault, "_after_batch_destination_published", fail_after_registry)
-
-    with pytest.raises(RuntimeError, match="synthetic caught cut"):
-        vault.batch_atomic_write(
-            [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-            vault_root=root,
-            post_commit_fanout=False,
-        )
-
-    assert registry_path.read_text(encoding="utf-8") == before
-    assert graph_sync.checkpoint_state(root)[0] == "absent"
-    assert graph_sync.floor_state(root)[0] == "absent"
-    assert deferred_index.graph_full_rebuild_pending(root) is not None
-
-
-def test_abrupt_registry_cut_after_floor_and_registry_is_recoverable_not_current(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class AbruptCut(BaseException):
-        pass
-
-    root = tmp_path / "vault"
-    registry_path = relation_registry.extension_registry_path(root)
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(_registry_yaml(alias=False), encoding="utf-8")
-    original = vault._after_batch_destination_published
-
-    def stop_after_registry(path: Path) -> None:
-        original(path)
-        if path == registry_path:
-            raise AbruptCut()
-
-    monkeypatch.setattr(vault, "_after_batch_destination_published", stop_after_registry)
-
-    with pytest.raises(AbruptCut):
-        vault.batch_atomic_write(
-            [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-            vault_root=root,
-            post_commit_fanout=False,
-        )
-
-    assert registry_path.read_text(encoding="utf-8") == _registry_yaml(alias=True)
-    assert graph_sync.classify_epoch(root).kind == "recoverable"
-    assert graph_sync.status(root)["state"] != "current"
-    assert deferred_index.graph_full_rebuild_pending(root) is not None
-
-
-def test_recoverable_registry_cut_converges_without_a_second_registry_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class AbruptCut(BaseException):
-        pass
-
     root = tmp_path / "vault"
     _seed_rebind_vault(root)
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    before = epistemic_graph.EpistemicGraphIndex(root).edges()
+    assert not any(row["relation_type"] == "vault.applies_to" for row in before)
     registry_path = relation_registry.extension_registry_path(root)
-    original = vault._after_batch_destination_published
 
-    def stop_after_registry(path: Path) -> None:
-        original(path)
-        if path == registry_path:
-            raise AbruptCut()
-
-    with monkeypatch.context() as cut:
-        cut.setattr(vault, "_after_batch_destination_published", stop_after_registry)
-        with pytest.raises(AbruptCut):
-            vault.batch_atomic_write(
-                [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-                vault_root=root,
-                post_commit_fanout=False,
-            )
-
-    committed_registry = registry_path.read_bytes()
-    assert graph_sync.classify_epoch(root).kind == "recoverable"
-
-    result = epistemic_graph.converge_full_graph_marker(root)
-
-    assert result == epistemic_graph.GraphDispatchResult(
-        "completed", "registry_rebind_completed", graph_sync.read_checkpoint(root)
-    )
-    assert graph_sync.status(root)["state"] == "current"
-    assert deferred_index.graph_full_rebuild_pending(root) is None
-    assert registry_path.read_bytes() == committed_registry
-
-
-def test_registry_rebind_matches_clean_rebuild_and_never_parses_markdown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "vault"
-    _seed_rebind_vault(root)
-    index = epistemic_graph.EpistemicGraphIndex(root)
-    index.rebuild_all()
-    before_edges = _stable_edges(index)
-    before_identity = {
-        row["edge_key"]: (
-            row["src_key"],
-            row["dst_key"],
-            row["raw_relation"],
-            row["source_path"],
-            row["source_anchor"],
-            row["metadata"].get("source_hash"),
-        )
-        for row in before_edges
-    }
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-
+    # Stored rows keep raw observations, so the save owes the graph no work.
     with monkeypatch.context() as guarded:
         guarded.setattr(
-            epistemic_graph.find_module,
+            find_module,
             "_parse_page",
-            lambda *_args, **_kwargs: pytest.fail("registry rebind parsed Markdown"),
+            lambda *_args, **_kwargs: pytest.fail("a registry save parsed Markdown"),
         )
-        result = epistemic_graph.converge_full_graph_marker(root)
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
+            vault_root=root,
+            post_commit_fanout=False,
+        )
+        report = index_sync.upsert_after_write(root, [registry_path])
+        current = epistemic_graph.EpistemicGraphIndex(root)
+        assert current.available()
+        edges = _stable_edges(current)
 
-    assert result.outcome == "completed"
-    assert result.code == "registry_rebind_completed"
+    assert report.components == ()
     assert deferred_index.graph_full_rebuild_pending(root) is None
-    rebound = epistemic_graph.EpistemicGraphIndex(root)
-    rebound_edges = _stable_edges(rebound)
-    assert {
-        row["edge_key"]: (
-            row["src_key"],
-            row["dst_key"],
-            row["raw_relation"],
-            row["source_path"],
-            row["source_anchor"],
-            row["metadata"].get("source_hash"),
-        )
-        for row in rebound_edges
-    } == before_identity
-    applies = [row for row in rebound_edges if row["raw_relation"] == "applies_to"]
-    assert applies
+    assert graph_sync.status(root)["state"] == "current"
+    applies = [row for row in edges if row["raw_relation"] == "applies_to"]
     assert {row["relation_type"] for row in applies} == {"vault.applies_to"}
     assert {row["registry_status"] for row in applies} == {"alias"}
-    assert any(row["src_key"].startswith("block:") for row in applies)
-    assert any(row["metadata"].get("target_resolution") == "unresolved" for row in applies)
-    assert not any(
-        row["relation_type"] == "vault.applied_from"
-        and row["src_key"] == applies[0]["dst_key"]
-        and row["dst_key"] == applies[0]["src_key"]
-        for row in rebound_edges
-    )
 
     clean = tmp_path / "clean"
     shutil.copytree(root / "Knowledge Base", clean / "Knowledge Base")
     clean_index = epistemic_graph.EpistemicGraphIndex(clean)
     clean_index.rebuild_all()
-    assert _stable_nodes(rebound) == _stable_nodes(clean_index)
-    assert rebound_edges == _stable_edges(clean_index)
+    assert edges == _stable_edges(clean_index)
 
 
-def test_registry_rebind_declines_an_unproven_source_sidecar(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    _seed_rebind_vault(root)
-    index = epistemic_graph.EpistemicGraphIndex(root)
-    index.rebuild_all()
-    with sqlite3.connect(index.path) as conn:
-        conn.execute(
-            "UPDATE graph_meta SET value = 'unproven' "
-            "WHERE key = 'recall_resolver_topology'"
-        )
-
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-
-    result = epistemic_graph.converge_full_graph_marker(root)
-
-    assert result.outcome == "completed"
-    assert result.code == "graph_rebuild_completed"
-    assert deferred_index.graph_full_rebuild_pending(root) is None
-
-
-def test_interrupted_registry_rebind_keeps_checkpoint_and_marker(
+def test_interrupted_full_marker_convergence_keeps_checkpoint_and_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "vault"
     _seed_rebind_vault(root)
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-    checkpoint = graph_sync.read_checkpoint(root)
-    marker = deferred_index.graph_full_rebuild_pending(root)
-    assert checkpoint is not None and marker is not None
+    checkpoint, marker = _owe_full_rebuild(root)
     monkeypatch.setattr(
         graph_sync,
         "replace_sidecar",
@@ -439,15 +211,8 @@ def test_dispatcher_leaves_marker_untouched_when_canonical_boundary_is_busy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "vault"
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-    checkpoint = graph_sync.read_checkpoint(root)
-    marker = deferred_index.graph_full_rebuild_pending(root)
-    assert checkpoint is not None and marker is not None
+    _seed_rebind_vault(root)
+    _checkpoint, marker = _owe_full_rebuild(root)
 
     class BusyCoordinator:
         def hold(self, **_kwargs):
@@ -470,34 +235,6 @@ def test_dispatcher_leaves_marker_untouched_when_canonical_boundary_is_busy(
     assert result == epistemic_graph.GraphDispatchResult("failed", "graph_boundary_busy")
     monkeypatch.setattr(writer_lease, "active_manager", active_manager)
     assert deferred_index.graph_full_rebuild_pending(root) == marker
-
-
-def test_successful_rebind_cas_clear_preserves_newer_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "vault"
-    _seed_rebind_vault(root)
-    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
-    registry_path = relation_registry.extension_registry_path(root)
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(registry_path, _registry_yaml(alias=True))],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
-    observed = deferred_index.graph_full_rebuild_pending(root)
-    assert observed is not None
-    original = graph_sync.replace_sidecar
-
-    def publish_then_enqueue(*args, **kwargs) -> None:
-        original(*args, **kwargs)
-        deferred_index.mark_graph_full_rebuild(root, generation=observed + 1)
-
-    monkeypatch.setattr(graph_sync, "replace_sidecar", publish_then_enqueue)
-
-    result = epistemic_graph.converge_full_graph_marker(root)
-
-    assert result.outcome == "completed"
-    assert deferred_index.graph_full_rebuild_pending(root) == observed + 1
 
 
 def test_relation_query_plan_is_alias_family_and_survivor_directed() -> None:
@@ -677,7 +414,13 @@ def test_graph_schema_persists_resolution_context_and_review_inputs(tmp_path: Pa
         "review_eligible",
         "activation_signal_version",
     } <= node_columns
-    assert context == ("Project Alpha", "insight", "claim", "file", "semantic_relation")
+    # The unit's kind is a selected meaning: shared rows leave it to each reader.
+    assert context == ("Project Alpha", "insight", None, "file", "semantic_relation")
+    served = next(
+        edge for edge in index.edges() if edge["raw_relation"] == "applies_to"
+        and edge["origin"] == "semantic_relation"
+    )
+    assert served["resolver_source_kind"] == "claim"
     assert file_row[:-1] == (
         "insight",
         "active",

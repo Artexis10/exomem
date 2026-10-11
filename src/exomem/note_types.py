@@ -49,6 +49,16 @@ def registry_path(root: Path) -> Path:
     return kb_root(root) / "_Schema" / "note-types.yaml"
 
 
+def overlay_path(root: Path) -> Path:
+    """The overlay the selected public instance reads; the default path when none is selected."""
+    from .vocabulary import instances
+
+    try:
+        return instances.select(Path(root), SPEC).overlay(Path(root))
+    except registry.RegistryError:
+        return registry_path(root)
+
+
 @dataclass(frozen=True, slots=True)
 class NoteType:
     """One registered type's closed note-type role and attributes."""
@@ -338,10 +348,18 @@ def shipped(predicate: Predicate | None = None) -> tuple[NoteType, ...]:
 
 
 class NoteTypeUnavailable(OpError):
-    """A write needs a note-type definition, and the admitted overlay is invalid."""
+    """A write needs a note-type definition that the vault's registry cannot supply."""
 
 
-def unavailable_error() -> NoteTypeUnavailable:
+def unavailable_error(*, unassigned: bool = False) -> NoteTypeUnavailable:
+    if unassigned:
+        return NoteTypeUnavailable(
+            "NOTE_TYPE_DEFINITION_UNAVAILABLE",
+            "The note-type registry needs assignment through connector-boundary arming, "
+            "so the definition this write needs is unavailable.",
+            "Assign the registry's namespace through stopped connector-boundary arming, "
+            "or use a shipped note type.",
+        )
     return NoteTypeUnavailable(
         "NOTE_TYPE_DEFINITION_UNAVAILABLE",
         "The note-type overlay is invalid, so the definition this write needs is unavailable.",
@@ -357,11 +375,12 @@ class Resolution:
     note_type: NoteType | None = None
     available: bool = True
     unregistered: bool = False
+    unassigned: bool = False
 
     def require(self) -> NoteType | None:
         """The definition, None when unregistered, untyped or withheld; raises when unavailable."""
         if not self.available:
-            raise unavailable_error()
+            raise unavailable_error(unassigned=self.unassigned)
         return self.note_type
 
     def selects(self, predicate: Predicate) -> bool:
@@ -371,6 +390,7 @@ class Resolution:
 
 _UNTYPED = Resolution()
 _UNAVAILABLE = Resolution(available=False)
+_UNASSIGNED = Resolution(available=False, unassigned=True)
 _UNREGISTERED = Resolution(unregistered=True)
 
 
@@ -395,6 +415,10 @@ class Basis:
     `refuses` is False for a page the operation only reads or rewrites links in
     (see `reading`): an invalid overlay then leaves the value without a
     definition, as on the read side, instead of refusing.
+
+    The overlay is the one the selected public instance reads, the same one
+    `registry.load` reads. A selection or binding error makes the vault's types
+    unavailable, as an invalid overlay does.
     """
 
     root: Path | None
@@ -402,26 +426,35 @@ class Basis:
     refuses: bool = True
     _snapshot: registry.Snapshot | None = field(default=None, init=False, repr=False)
     _attempted: bool = field(default=False, init=False, repr=False)
-
-    def _admitted(self) -> bool:
-        if self.root is None:
-            return False
-        if not self.owner_local:
-            return _admitted(self.root)
-        from .governance.principal import owner_local_producer
-
-        with owner_local_producer(self.root, "note_type_definitions"):
-            return _admitted(self.root)
+    _selection_error: registry.RegistryError | None = field(default=None, init=False, repr=False)
 
     def _load(self) -> None:
         self._attempted = True
-        if self.root is not None and not self.root.is_dir():
+        self._snapshot, self._selection_error = None, None
+        if self.root is None:
+            return
+        if not self.root.is_dir():
             # A vault that does not exist has no overlay to admit or read.
             self._snapshot = registry.load(SPEC, None)
-        elif self._admitted():
-            self._snapshot = registry.load(SPEC, self.root)
+        elif not self.owner_local:
+            self._load_selected(self.root)
         else:
-            self._snapshot = None
+            from .governance.principal import owner_local_producer
+
+            with owner_local_producer(self.root, "note_type_definitions"):
+                self._load_selected(self.root)
+
+    def _load_selected(self, root: Path) -> None:
+        from .vocabulary import instances
+        from .vocabulary.contract import admission_refusal
+
+        # Admit the instance the read selects, then read it under the same admission.
+        try:
+            spec = instances.select(root, SPEC)
+            if admission_refusal(root, spec) is None:
+                self._snapshot = registry.load(spec, root)
+        except registry.RegistryError as error:
+            self._selection_error = error
 
     def _extension(self) -> NoteTypeRegistry | None:
         if not self._attempted:
@@ -437,11 +470,15 @@ class Basis:
 
     def _withheld(self) -> Resolution:
         from .governance.principal import current_principal
+        from .vocabulary import instances
 
         # Without admission the value has no definition, as before the registry.
         # A library call that no surface bound has no audience to refuse for.
-        if self._snapshot is None or not self.refuses or current_principal() is None:
+        withheld = self._snapshot is None and self._selection_error is None
+        if withheld or not self.refuses or current_principal() is None:
             return _UNTYPED
+        if isinstance(self._selection_error, instances.AssignmentRequired):
+            return _UNASSIGNED
         return _UNAVAILABLE
 
     def resolve(self, value: object) -> Resolution:
@@ -497,6 +534,7 @@ class Basis:
         `dependency` stays "public" while nothing needed the overlay. A cache that
         keeps this basis object, not only results computed from it, records this
         instead, because a later read through the kept basis loads the overlay.
+        State that every audience shares records it for the same reason.
         """
         if not self._attempted:
             self._load()
@@ -517,9 +555,3 @@ class Basis:
             and not self._snapshot.findings
             and dependency == self.dependency
         )
-
-
-def _admitted(root: Path) -> bool:
-    from .vocabulary.contract import admission_refusal
-
-    return admission_refusal(root, SPEC) is None

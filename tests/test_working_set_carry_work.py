@@ -8,9 +8,9 @@ phrase test on each of them once per phrase. A live turn spent seconds there.
 The index is now asked for the pages that hold a phrase's words, and the test
 runs on those alone; the pages returned and their scores are unchanged.
 
-Work is the number of phrase tests the carry's ranking queries run: no clock in
-it, and no filler page holds a phrase, so four times the filler must not
-multiply it. Invented, generic vocabulary throughout.
+Work is the number of candidate documents the carry ranks: no clock in it,
+and no filler page holds a phrase, so four times the filler must not multiply
+it. Invented, generic vocabulary throughout.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import lexstore, working_set_runtime
+from exomem import bm25, lexstore, working_set_runtime
 
 #: Everyday words: every filler page holds all of them, so none is distinctive.
 EVERYDAY = tuple(
@@ -63,30 +63,22 @@ def _grow_filler(vault: Path, total: int) -> None:
     working_set_runtime.reset_caches_for_tests()
 
 
-def _phrase_tests(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, tuple]:
-    """How many times one warm carry tests a page for a phrase, and its groups.
+def _ranked_pages(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, tuple]:
+    """How many candidate documents one warm carry ranks, and its groups.
 
-    The test is SQLite's `instr` over a page's stems, so the count is the
-    calls to it while the carry's ranking queries run: pages examined, times
-    the phrases each is tested for. The first call fills the per-snapshot
-    corpus statistics the ranking reads; the second is the steady state of a
-    served turn.
+    Eligibility and scoring share the document counter in the admitted-corpus
+    scorer. Count documents entering that scorer during carry searches.
+    The first call fills the per-snapshot corpus statistics; the second is
+    the steady state of a served turn.
     """
-    tests = [0]
+    ranked = [0]
     counting = [False]
-    connect = lexstore.LexicalStore._connect
+    score = bm25.CorpusStatistics.score
 
-    def instr(text, needle):
+    def counted_score(self, candidates, *args, **kwargs):
         if counting[0]:
-            tests[0] += 1
-        if text is None or needle is None:
-            return None
-        return str(text).find(str(needle)) + 1
-
-    def counted_connect(self, *args, **kwargs):
-        conn = connect(self, *args, **kwargs)
-        conn.create_function("instr", 2, instr, deterministic=True)
-        return conn
+            ranked[0] += len(candidates)
+        return score(self, candidates, *args, **kwargs)
 
     search = lexstore.search_bm25_result
 
@@ -98,13 +90,13 @@ def _phrase_tests(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[int, tu
             counting[0] = False
 
     with monkeypatch.context() as patch:
-        patch.setattr(lexstore.LexicalStore, "_connect", counted_connect)
+        patch.setattr(bm25.CorpusStatistics, "score", counted_score)
         patch.setattr(lexstore, "search_bm25_result", counted_search)
         working_set_runtime.carry_named_groups(vault, TURN)
-        tests[0] = 0
+        ranked[0] = 0
         groups, state = working_set_runtime.carry_named_groups(vault, TURN)
     assert state == "available"
-    return tests[0], tuple(tuple(path for path, _score in group) for group in groups)
+    return ranked[0], tuple(tuple(path for path, _score in group) for group in groups)
 
 
 @pytest.mark.timeout(300)
@@ -117,14 +109,14 @@ def test_the_carry_phrase_query_does_not_grow_with_the_pages_its_words_match(
         "The kelvane harbor review raised the ceiling. " + " ".join(EVERYDAY) + "\n",
     )
     _grow_filler(vault, SMALL_CORPUS)
-    small_tests, small_groups = _phrase_tests(vault, monkeypatch)
+    small_tests, small_groups = _ranked_pages(vault, monkeypatch)
     _grow_filler(vault, LARGE_CORPUS)
-    large_tests, large_groups = _phrase_tests(vault, monkeypatch)
+    large_tests, large_groups = _ranked_pages(vault, monkeypatch)
 
     assert small_groups == large_groups == ((NAMED_PAGE,),)
-    assert small_tests > 0, "the carry no longer tests pages for a phrase; re-target this guard"
+    assert small_tests > 0, "the carry no longer ranks candidate pages; re-target this guard"
     assert large_tests <= 1.5 * small_tests, (
-        f"the carry ran {small_tests} phrase tests over {SMALL_CORPUS} filler pages and "
+        f"the carry ranked {small_tests} candidate pages over {SMALL_CORPUS} filler pages and "
         f"{large_tests} over {LARGE_CORPUS}: it examines the pages the turn's words "
         "match, not only the pages that hold a phrase"
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -49,19 +50,16 @@ def assemble_context(
     if unit_controls:
         if path:
             path = _canonical_path(vault_root, path, keep)
-        # A unit seed is a fact about its parent page: against a withheld
-        # parent it resolves, and validates, as a unit of an absent page does.
-        # The caller's own reference is still what the envelope echoes.
-        graph_unit_ref = unit_ref
-        if unit_ref is not None and egress.unit_parent_withheld(vault_root, unit_ref):
-            graph_unit_ref = egress.UNRESOLVABLE_UNIT_REF
-        if graph_unit_ref is not None and path:
-            _validate_unit_parent_path(vault_root, unit_ref=graph_unit_ref, path=path)
+        seed_keep = egress.unit_seed_parent_filter(vault_root)
+        if unit_ref is not None and path:
+            _validate_unit_parent_path(
+                vault_root, unit_ref=unit_ref, path=path, keep=keep, seed_keep=seed_keep
+            )
         graph = epistemic_graph.graph_context(
             vault_root,
             path=path,
             query=query,
-            unit_ref=graph_unit_ref,
+            unit_ref=unit_ref,
             categories=categories,
             kinds=kinds,
             depth=depth,
@@ -72,6 +70,7 @@ def assemble_context(
             max_edges=max_edges,
             traversal_profile=traversal_profile,
             keep=keep,
+            seed_keep=seed_keep,
         )
         if keep is not None:
             graph = egress.guard_graph_context(vault_root, graph)
@@ -254,9 +253,16 @@ def _hits_for_graph_seeds(
     return hits
 
 
-def _validate_unit_parent_path(vault_root: Path, *, unit_ref: str, path: str) -> None:
+def _validate_unit_parent_path(
+    vault_root: Path,
+    *,
+    unit_ref: str,
+    path: str,
+    keep: Callable[[str], bool] | None = None,
+    seed_keep: Callable[[str], bool] | None = None,
+) -> None:
     parent_paths, work_exhausted = epistemic_graph.indexed_unit_parent_path_resolution(
-        vault_root, unit_ref
+        vault_root, unit_ref, keep=keep, seed_keep=seed_keep
     )
     if work_exhausted:
         raise ValueError(

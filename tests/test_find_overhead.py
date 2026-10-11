@@ -12,6 +12,7 @@ import pytest
 
 from exomem import bm25, lifecycle_statuses, warmup
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 
 
 def _count_walks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -38,6 +39,7 @@ def _count_walks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     return counts
 
 
+@library_scope()
 def test_steady_state_walk_budget(vault: Path, monkeypatch) -> None:
     """A warmed repeat hybrid query stat-walks each scope at most once
     (freshness snapshot) plus the keyword lane's single parse walk."""

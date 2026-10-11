@@ -132,6 +132,27 @@ DAILY = {
     ("positions", "2026-03-29"): (23, 253),
 }
 
+MIXED_FIELDS = (
+    "  natural_key: [day, position]\n  fields:\n"
+    "    day: {type: date, required: true, sortable: true}\n"
+    "    position: {type: integer, required: true, sortable: true}\n"
+    "    local_date: {type: date, filterable: true}\n"
+    "    numeric: {type: number, filterable: true}\n    text: {type: string, filterable: true}\n"
+)
+MIXED_MAPPING = {
+    "rows": "days[].values[]",
+    "fields": {
+        "day": "$.days[].day", "position": "$index",
+        "numeric": {"from": "$value", "source_type": "number"},
+        "text": {"from": "$value", "source_type": "string"},
+    },
+    "time": {"from": [{"date": "$.days[].day"}], "local_date": "local_date"},
+}
+MIXED_DOCUMENT = {"days": [
+    {"day": "2026-11-01", "values": [7, 3.25, "7", "ää😀", 7]},
+    {"day": "2026-11-02", "values": [-0.0, "3.25", 3]},
+]}
+
 
 def preserve_export(store, name, members):
     """Zip the invented member documents and preserve the zip through archive expansion."""
@@ -206,6 +227,180 @@ def sha256(document):
 
 def file_sha256(store, path):
     return hashlib.sha256((store.root / path).read_bytes()).hexdigest()
+
+
+def test_guarded_scalar_aliases_keep_exact_values_ordinals_and_numeric_counts_after_restart(store, monkeypatch):
+    """A mixed scalar array that loses strings, coerces them, or includes them in a numeric average."""
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 2)
+    setup(store, b"", title="Mixed", fields=MIXED_FIELDS)
+    manifest, _ = preserve_export(store, "mixed", {"days/first.json": MIXED_DOCUMENT})
+    request = {"source_ref": manifest, "format": "json-document", "members": "days/*", "mapping": MIXED_MAPPING}
+    preview = agent(store, mode="preview", **request)
+    assert preview["mapping"]["findings"] == []
+    assert preview["rows"] == {"sampled": 8, "valid": 8, "invalid": 0, "complete": True}
+    job = agent(store, mode="start", **request)
+    run_jobs(store, max_batches=1)
+    assert agent(store, mode="status", continuation=job["continuation"])["next_position"]["member_row"] == 2
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        done = finish(store, job, handle)
+        assert (done["state"], done["rows"]["imported"], done["rows"]["rejected"]) == ("complete", 8, 0)
+        with request_scope(OWNER), preview_store(store.root, handle):
+            rows = commands.op_record_memory(store.root, action="query", collection=CID,
+                query={"version": 1, "select": ["day", "position", "numeric", "text"],
+                       "order_by": [{"field": "day"}, {"field": "position"}]})["rows"]
+            daily = commands.op_record_memory(store.root, action="query", collection=CID, query={
+                "version": 1, "group_by": [{"field": "local_date", "bucket": "day"}],
+                "aggregates": {"rows": {"op": "count"}, "numbers": {"op": "count", "field": "numeric"},
+                    "strings": {"op": "count", "field": "text"}, "total": {"op": "sum", "field": "numeric"},
+                    "mean": {"op": "avg", "field": "numeric"}},
+            })["groups"]
+        expected = [{"day": day["day"], "position": position,
+                     "text" if type(value) is str else "numeric": value}
+                    for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
+        assert rows == expected
+        assert [type(row.get("numeric", row.get("text"))) for row in rows] == [
+            type(row.get("numeric", row.get("text"))) for row in expected]
+        assert json.dumps(rows[5]["numeric"]) == "-0.0"
+        assert [(group["rows"], group["numbers"], group["strings"], group["total"], group["mean"])
+                for group in daily] == [(5, 3, 2, 17.25, 5.75), (3, 2, 1, 3, 1.5)]
+        before = logged(handle.connection)
+        replay = agent(store, handle, mode="start", **request)
+        assert replay["continuation"] == job["continuation"] and replay["state"] == "complete"
+        again, _ = preserve_export(store, "mixed-again", {
+            "days/first.json": MIXED_DOCUMENT, "metadata/info.json": {"version": 1},
+        })
+        skipped = finish(store, agent(store, handle, mode="start", **{**request, "source_ref": again}), handle)
+        assert skipped["members"] == {"selected": 1, "read": 0, "skipped": 1}
+        assert skipped["rows"]["imported"] == 0 and logged(handle.connection) == before
+
+
+@pytest.mark.parametrize("invalid", [True, None, {"unmapped": 1}, [1]])
+@pytest.mark.parametrize("policy", ["stop", "skip"])
+def test_present_unmapped_kinds_after_preview_are_visible_rejections(store, monkeypatch, invalid, policy):
+    """A late scalar kind silently becomes a row with neither alias, or a boolean becomes a number."""
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 50)
+    setup(store, b"", title="Mixed", fields=MIXED_FIELDS)
+    document = {"days": [{"day": "2026-11-01", "values": [1] * 100 + [invalid, 2.5]}]}
+    manifest, _ = preserve_export(store, "late-kind", {"days/first.json": document})
+    request = {"source_ref": manifest, "format": "json-document", "members": "days/*",
+               "mapping": {**MIXED_MAPPING, "on_invalid": policy}}
+    preview = agent(store, mode="preview", **request)
+    assert preview["rows"] == {"sampled": 100, "valid": 100, "invalid": 0, "complete": False}
+    done = finish(store, agent(store, mode="start", **request))
+    assert (done["state"], done["rows"]["imported"], done["rows"]["rejected"]) == (
+        "failed" if policy == "stop" else "complete", 100 if policy == "stop" else 101,
+        0 if policy == "stop" else 1)
+    assert [(row["row"], row["code"]) for row in done["rejections"]] == (
+        [] if policy == "stop" else [(100, "IMPORT_SOURCE_TYPE_UNMAPPED")])
+    rows = list(typed_storage.collection_values(store.connection, CID))
+    assert len(rows) == done["rows"]["imported"] and all("numeric" in values for _, values in rows)
+    if policy == "stop":
+        assert done["error"]["code"] == "IMPORT_SOURCE_TYPE_UNMAPPED" and done["next_position"]["row"] == 100
+        assert done["error"]["row"] == 100 and done["error"]["at"] == "mapping.fields.numeric.source_type"
+
+
+def test_ancestor_source_guard_groups_preserve_matching_aliases_and_missing_paths(store):
+    """Guards grouped by target or row-relative spelling reject a matching enclosing value."""
+    setup(store, b"", title="Mixed", fields=MIXED_FIELDS)
+    document = {"days": [
+        {"day": "2026-11-01", "sample": "7", "values": [0, 0]},
+        {"day": "2026-11-02", "values": [0]},
+    ]}
+    mapping = {**MIXED_MAPPING, "fields": {**MIXED_MAPPING["fields"],
+        "numeric": {"from": "$.days[].sample", "source_type": "number"},
+        "text": {"from": "$.days[].sample", "source_type": "string"}}}
+    manifest, _ = preserve_export(store, "ancestor", {"days/first.json": document})
+    job = agent(store, mode="start", source_ref=manifest, format="json-document", members="days/*", mapping=mapping)
+    assert finish(store, job)["rows"]["imported"] == 3
+    rows = [values for _, values in typed_storage.collection_values(store.connection, CID)]
+    assert sorted((row["day"], row["position"], row.get("text")) for row in rows) == [
+        ("2026-11-01", 0, "7"), ("2026-11-01", 1, "7"), ("2026-11-02", 0, None)]
+    assert all("numeric" not in row for row in rows) and "text" not in rows[2]
+
+
+def test_unmapped_source_kind_preview_reports_bounded_errors_without_writing_rows(store):
+    """Preview hides why guarded rows are invalid, leaks their content, or produces unbounded findings."""
+    setup(store, b"", title="Mixed", fields=MIXED_FIELDS)
+    document = {"days": [{"day": "2026-11-01", "values": [{"unmapped": "invented-private"}] * 25}]}
+    manifest, _ = preserve_export(store, "invalid-preview", {"days/first.json": document})
+    result = agent(store, mode="preview", source_ref=manifest, format="json-document", members="days/*",
+                   mapping=MIXED_MAPPING)
+    assert result["rows"] == {"sampled": 25, "valid": 0, "invalid": 25, "complete": True}
+    assert len(result["errors"]) == 20 and {error["code"] for error in result["errors"]} == {"IMPORT_SOURCE_TYPE_UNMAPPED"}
+    assert "invented-private" not in json.dumps(result["errors"])
+    assert count(store.connection) == 0 and store.connection.execute("SELECT COUNT(*) FROM import_jobs").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("fmt", ["ndjson", "json-array"])
+def test_source_guards_distinguish_missing_null_and_all_json_kinds_before_scale(store, fmt):
+    """A guard that converts JSON, scales a string, or treats present null as an absent path."""
+    fields = (
+        "  natural_key: [id]\n  fields:\n    id: {type: string, required: true}\n"
+        "    numeric: {type: number}\n    text: {type: string}\n    flag: {type: boolean}\n"
+        "    nothing: {type: string}\n    object: {type: object}\n"
+        "    array: {type: array, items: {type: string}}\n"
+    )
+    source = [{"id": str(index), "value": value}
+              for index, value in enumerate([10, "10", True, None, {"nested": "ää"}, ["one", "two"]])]
+    source.append({"id": "missing"})
+    mapping = {"fields": {"id": "id", **{
+        name: {"from": "value", "source_type": kind, **({"scale": 0.1} if kind == "number" else {})}
+        for name, kind in (("numeric", "number"), ("text", "string"), ("flag", "boolean"),
+                           ("nothing", "null"), ("object", "object"), ("array", "array"))
+    }}}
+    data = json.dumps(source).encode() if fmt == "json-array" else b"".join(
+        json.dumps(row).encode() + b"\n" for row in source)
+    setup(store, data, fields=fields)
+    from test_collection_store_importer import SOURCE
+
+    job = agent(store, mode="start", source_ref=SOURCE, format=fmt, mapping=mapping)
+    done = finish(store, job)
+    assert (done["state"], done["rows"]["imported"], done["rows"]["rejected"]) == ("complete", 7, 0), done
+    rows = {values["id"]: values for _, values in typed_storage.collection_values(store.connection, CID)}
+    assert rows == {
+        "0": {"id": "0", "numeric": 1.0}, "1": {"id": "1", "text": "10"},
+        "2": {"id": "2", "flag": True}, "3": {"id": "3", "nothing": None},
+        "4": {"id": "4", "object": {"nested": "ää"}}, "5": {"id": "5", "array": ["one", "two"]},
+        "missing": {"id": "missing"},
+    }
+
+
+@pytest.mark.parametrize(("spec", "fmt", "at"), [
+    ({"from": "v", "source_type": "integer"}, "json-document", "source_type"),
+    ({"from": "v", "source_type": None}, "json-document", "source_type"),
+    ({"from": "v", "source_type": ["number"]}, "json-document", "source_type"),
+    ({"from": "v", "source_type": "number", "other": True}, "json-document", "other"),
+    ({"from": "v", "source_type": "number"}, "csv", "source_type"),
+    ({"const": 1, "source_type": "number"}, "json-document", ""),
+])
+def test_source_guards_refuse_unknown_kinds_keys_csv_and_guarded_literals(tmp_path, spec, fmt, at):
+    """An untrusted guard widens the closed mapping grammar or changes CSV conversion."""
+    mapping = {**SAMPLES, "fields": {**SAMPLES["fields"], "value": spec}}
+    if fmt == "csv":
+        mapping.pop("rows")
+    with pytest.raises(collections.CollectionError) as error:
+        importer.compile_mapping(mapping, manifest(tmp_path), fmt)
+    assert error.value.code == "IMPORT_MAPPING_INVALID"
+    assert error.value.details["at"] == "mapping.fields.value" + (f".{at}" if at else "")
+    assert len(json.dumps(error.value.details)) < 1024
+
+
+def test_source_guards_keep_old_mapping_identities_and_change_only_declared_guard_identity(tmp_path):
+    """An optional guard rewrites old replay/member identities, or guarded and unguarded imports collide."""
+    parsed = manifest(tmp_path)
+    old = importer.compile_mapping(SAMPLES, parsed, "json-document")
+    assert hashlib.sha256(importer._json(old.canonical).encode()).hexdigest() == (
+        "e1106ad1cfdfbc5dfeafa59d36676670bfd934befe21451fb2d4a6e0bcd53dc9")
+    positions = importer.compile_mapping(POSITIONS, parsed, "json-document")
+    assert hashlib.sha256(importer._json(positions.canonical).encode()).hexdigest() == (
+        "92b985141677d8c9f0f05d8fc4a51b299a01c717b083a0482517e30ccd85a888")
+    guarded = importer.compile_mapping({**SAMPLES, "fields": {**SAMPLES["fields"],
+        "value": {**SAMPLES["fields"]["value"], "source_type": "number"}}}, parsed, "json-document")
+    assert guarded.canonical["fields"]["value"] == {**old.canonical["fields"]["value"], "source_type": "number"}
+    assert hashlib.sha256(importer._json(guarded.canonical).encode()).digest() != (
+        hashlib.sha256(importer._json(old.canonical).encode()).digest())
 
 
 def test_an_export_imports_across_the_fold_and_gap_resumes_and_skips_imported_members(store, monkeypatch):
@@ -439,7 +634,7 @@ def test_numbers_beyond_int64_or_a_float_cost_only_their_own_rows(tmp_path):
     document = {"device_id": 2**64 - 1, "date": "2026-01-10", "values": [1, 2, 10**310]}
     mapping = {
         "rows": "values[]",
-        "fields": {"series": {"const": "positions"}, "value": {"from": "$value", "scale": 0.5}},
+        "fields": {"series": {"const": "positions"}, "value": {"from": "$value", "scale": 0.5, "source_type": "number"}},
         "time": {"from": [{"date": "$.date", "zone": ZONE, "fold": "earlier", "index": "$index",
                            "every": {"s": 10**309}, "clock": "elapsed"}], **TIMES},
         "on_invalid": "skip",

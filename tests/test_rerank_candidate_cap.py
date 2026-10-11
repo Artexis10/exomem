@@ -13,6 +13,7 @@ import pytest
 from exomem import commands, embeddings, readiness, server, writer_lease
 from exomem import find as find_module
 from exomem.__main__ import main
+from exomem.governance.principal import library_scope
 
 
 @pytest.fixture(autouse=True)
@@ -349,6 +350,7 @@ def test_cap_diagnostics_report_successful_prefix_and_tail_counts(
     assert all(hit["ranking_explanation"]["reranker"]["input_rank"] <= 5 for hit in result["hits"])
 
 
+@library_scope()
 def test_different_caps_are_isolated_in_the_hot_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

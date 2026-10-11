@@ -59,6 +59,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -66,7 +67,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -477,7 +478,14 @@ def _axis_test_sql(
     return "(" + " AND ".join(parts) + ")", params
 
 
-def _eligibility_sql(expr: Any, *, unit_missing: bool) -> tuple[str, list[object]]:
+#: `(axis, values) -> SQL` proposing occurrences whose raw label could carry
+#: one of `values` on that axis under some admitted instance.
+SelectedAxisLabels = Callable[[str, tuple[str, ...]], tuple[str, list[str]]]
+
+
+def _eligibility_sql(
+    expr: Any, *, unit_missing: bool, labels: SelectedAxisLabels | None = None
+) -> tuple[str, list[object]]:
     """Render one eligibility expression over `pages p` (and `semantic_units u`).
 
     ``unit_missing`` renders the arm `page_matches` evaluates with no unit at
@@ -486,20 +494,26 @@ def _eligibility_sql(expr: Any, *, unit_missing: bool) -> tuple[str, list[object
     one `EXISTS` over the unit rows, which is exactly the existential grouping
     `page_matches` performs — and it puts the EXISTS at the top, so two unit
     predicates in one conjunction are required of the SAME unit.
+
+    A test on a selected-meaning axis renders NULL where the stored row
+    cannot decide it: a positive membership test is NULL for a row whose raw
+    label `labels` proposes and false otherwise; every other test is NULL.
+    The unit arm keeps rows that are not proven false, so the result is the
+    superset the canonical evaluator then decides over served units.
     """
     from . import structured_filters as sf
 
     if isinstance(expr, sf.EligibilityConst):
         return ("1" if expr.value else "0"), []
     if isinstance(expr, sf.EligibilityNot):
-        sql, params = _eligibility_sql(expr.child, unit_missing=unit_missing)
+        sql, params = _eligibility_sql(expr.child, unit_missing=unit_missing, labels=labels)
         return f"NOT ({sql})", params
     if isinstance(expr, (sf.EligibilityAll, sf.EligibilityAny)):
         joiner = " AND " if isinstance(expr, sf.EligibilityAll) else " OR "
         parts: list[str] = []
         params: list[object] = []
         for child in expr.children:
-            sql, bound = _eligibility_sql(child, unit_missing=unit_missing)
+            sql, bound = _eligibility_sql(child, unit_missing=unit_missing, labels=labels)
             parts.append(sql)
             params.extend(bound)
         return "(" + joiner.join(parts) + ")", params
@@ -508,28 +522,65 @@ def _eligibility_sql(expr: Any, *, unit_missing: bool) -> tuple[str, list[object
         if unit_missing:
             # MISSING: `$exists false` is the only test a vanished unit passes.
             return ("1" if expr.op == "exists" and not expr.present else "0"), []
+        if axis in sf.ENTRY_AXES and expr.op != "exists":
+            if expr.op in {"in", "eq"} and labels is not None:
+                sql, bound = labels(axis, tuple(str(value) for value in expr.values))
+                return f"(CASE WHEN {sql} THEN NULL ELSE 0 END)", list(bound)
+            return "NULL", []
         return _axis_test_sql(expr, _UNIT_AXIS_COLUMNS[axis], "u")
     return _axis_test_sql(expr, _PAGE_AXIS_COLUMNS[axis], "p")
 
 
-def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, list[object]]:
+def _eligibility_predicate(
+    eligibility: Any, scope_column: str, labels: SelectedAxisLabels | None = None
+) -> tuple[str, list[object]]:
     """The whole page predicate for one `EligibilityPlan`, over `pages p`.
 
     `page_matches` is `evaluate(plan, page, unit=None) OR any(evaluate(plan,
     page, unit))`. That is rendered literally: the first arm with every unit
     axis MISSING, the second as one `EXISTS` over the parent's in-scope units.
     A plan with no unit predicate has only the first arm, exactly as the
-    evaluator short-circuits to `evaluate_filter(plan, page=page)`.
+    evaluator short-circuits to `evaluate_filter(plan, page=page)`. A unit
+    row counts unless its test is proven false (`IS NOT 0`).
     """
     sql, params = _eligibility_sql(eligibility.expr, unit_missing=True)
     if not eligibility.has_unit_axis:
         return sql, params
-    unit_sql, unit_params = _eligibility_sql(eligibility.expr, unit_missing=False)
+    unit_sql, unit_params = _eligibility_sql(eligibility.expr, unit_missing=False, labels=labels)
     return (
         f"({sql}) OR EXISTS(SELECT 1 FROM semantic_units u "
-        f"WHERE u.parent_path = p.path AND u.{scope_column} = 1 AND ({unit_sql}))",
+        f"WHERE u.parent_path = p.path AND u.{scope_column} = 1 AND ({unit_sql}) IS NOT 0)",
         params + unit_params,
     )
+
+
+def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
+    """Raw labels any admitted instance could interpret to a requested value.
+
+    Unit filters compare served values by spelling, so every admitted
+    instance's own vocabulary proposes candidates, not only shared core.
+    """
+    from . import semantic_index, semantic_language_registry
+
+    adapters = [semantic_language_registry.core_registry()] + [
+        snapshots["categories"].typed
+        for _instance, snapshots in semantic_index.Interpretations(vault_root).admitted_instances()
+    ]
+
+    def labels(axis: str, values: tuple[str, ...]) -> tuple[str, list[str]]:
+        parts = [
+            semantic_language_registry.unit_query_plan(
+                adapter,
+                categories=list(values) if axis == "unit.category" else None,
+                kinds=list(values) if axis == "unit.kind" else None,
+            ).predicate("u.category", "u.kind")
+            for adapter in adapters
+        ]
+        return "(" + " OR ".join(sql for sql, _ in parts) + ")", [
+            label for _sql, bound in parts for label in bound
+        ]
+
+    return labels
 
 
 #: 11: tokenizer v2 (`bm25.TOKENIZER_VERSION` 2) and the unicode61 declaration
@@ -537,7 +588,9 @@ def _eligibility_predicate(eligibility: Any, scope_column: str) -> tuple[str, li
 #: rebuilt by the existing background rebuild.
 #: 12: transactional frequency revisions and page/FTS-content mutation triggers.
 #: A v11 catalogue is rebuilt before revision-bound counts can be cached.
-SCHEMA_VERSION = 12
+#: 13: `semantic_units` holds selection-free structural occurrences and
+#: `pages.structure_json` their summary; readers interpret both per operation.
+SCHEMA_VERSION = 13
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -718,6 +771,192 @@ class SemanticUnitLexicalHit:
     lexical_score: float | None
 
 
+#: Stored occurrence columns a served unit hit reads, in `_unit_hit` order.
+_OCCURRENCE_COLUMNS = (
+    "u.unit_ref, u.parent_path, u.parent_ref, u.parent_generation, u.parent_source_hash, "
+    "u.parser_version, u.form, u.category_raw, u.category_key, u.content, u.tags_json, "
+    "u.context, u.unit_source_hash, u.anchor, u.line, u.end_line, u.source_order"
+)
+#: Occurrence rows interpreted per batch. Batches are transport: a row the
+#: selected interpretation rejects never counts toward a result or a cap.
+_OCCURRENCE_TRANSPORT_BATCH = 256
+
+
+def _unit_hit(row: tuple, unit: Any, score: float | None) -> SemanticUnitLexicalHit:
+    """One stored occurrence as the unit its page's selected interpretation emits."""
+    return SemanticUnitLexicalHit(
+        record_type="semantic_unit",
+        unit_ref=str(unit.unit_ref),
+        parent_path=str(row[1]),
+        parent_ref=str(row[2]) if row[2] is not None else None,
+        parent_generation=str(row[3]),
+        parent_source_hash=str(row[4]),
+        parser_version=int(row[5]),
+        form=str(row[6]),
+        category_raw=str(row[7]),
+        category_key=str(row[8]),
+        category=str(unit.category),
+        kind=str(unit.kind),
+        content=str(row[9]),
+        tags=tuple(str(tag) for tag in json.loads(row[10])),
+        context=str(row[11]) if row[11] is not None else None,
+        source_hash=str(row[12]),
+        anchor=str(row[13]) if row[13] is not None else None,
+        line=int(row[14]),
+        end_line=int(row[15]),
+        fingerprint=unit.fingerprint,
+        source_order=int(row[16]),
+        lexical_score=float(score) if score is not None else None,
+    )
+
+
+class _SelectedUnits:
+    """One lexical operation's admitted reading of the stored structural occurrences.
+
+    Rows hold neutral occurrences with raw labels. This view interprets each
+    touched parent once, from its page row's stored summary, with the page's
+    selected instance; a page the caller may not see is never interpreted.
+    An admitted page whose selected coverage is incomplete makes the dependent
+    answer unavailable (`require_complete`), never exact-empty.
+    """
+
+    def __init__(
+        self, vault_root: Path, conn: sqlite3.Connection, *, admitted: set[str] | None = None
+    ) -> None:
+        from . import semantic_index
+        from .governance import egress
+
+        # Decided on the first parent touched: a query that proposes no row
+        # pays no release decision.
+        keep: list[Any] = []
+
+        def allowed(path: str) -> bool:
+            if admitted is not None and path not in admitted:
+                return False
+            if not keep:
+                keep.append(egress.page_release_filter(vault_root))
+            return keep[0] is None or bool(keep[0](path))
+
+        self.conn = conn
+        self.interpretations = semantic_index.Interpretations(vault_root)
+        self.parents = semantic_index.AdmittedParents(
+            self._summaries, allowed=allowed, interpretations=self.interpretations,
+        )
+
+    def _summaries(self, paths: list[str]) -> dict[str, Any]:
+        return {
+            str(path): json.loads(raw)
+            for path, raw in self.conn.execute(
+                "SELECT path, structure_json FROM pages "
+                "WHERE path IN (SELECT value FROM json_each(?)) AND structure_json IS NOT NULL",
+                (json.dumps(paths, ensure_ascii=False),),
+            )
+        }
+
+    def unit(self, path: str, key: str) -> Any:
+        """The unit a stored occurrence is for this reader, or None."""
+        parent = self.parents.parent(path)
+        return parent.structure.unit(key) if parent is not None else None
+
+    def instance(self, path: str) -> str | None:
+        parent = self.parents.parent(path)
+        return parent.instance_id if parent is not None else None
+
+    def require_complete(self) -> None:
+        from .vocabulary.registry import RegistryError
+
+        if self.parents.unavailable:
+            raise RegistryError("REGISTRY_UNAVAILABLE: selected unit coverage is incomplete")
+
+    def plans(
+        self,
+        *,
+        categories: Iterable[str] | None,
+        kinds: Iterable[str] | None,
+        clauses: tuple | None,
+        registry_scope: str | None,
+    ) -> list[Any] | None:
+        """The query's unit plans in its selected instance; None when unconstrained.
+
+        An explicit `registry_scope` selects the query instance; omission
+        selects public. Core values match every page; extension values match
+        only pages of the query instance.
+        """
+        from . import semantic_language_registry
+        from .vocabulary.registry import PUBLIC_INSTANCE, RegistryError
+
+        if not (categories or kinds or clauses is not None):
+            return None
+        selected = self.interpretations.snapshots(registry_scope)
+        if selected is None:
+            raise RegistryError("REGISTRY_UNAVAILABLE: query instance definitions are unavailable")
+        language = selected["snapshots"]["categories"].typed
+        admitted = tuple(
+            snapshots["categories"].typed
+            for _instance, snapshots in self.interpretations.admitted_instances()
+        )
+
+        def plan(category_seeds: Iterable[str] | None, kind_seeds: Iterable[str] | None) -> Any:
+            return semantic_language_registry.unit_query_plan(
+                language,
+                categories=None if category_seeds is None else list(category_seeds),
+                kinds=None if kind_seeds is None else list(kind_seeds),
+                instance_id=registry_scope or PUBLIC_INSTANCE,
+                admitted=admitted,
+            )
+
+        if clauses is not None:
+            return [plan(clause.category_seeds, clause.kind_seeds) for clause in clauses]
+        return [plan(categories or None, kinds or None)]
+
+    def predicate(self, plans: list[Any] | None) -> tuple[str, list[str]]:
+        """Conservative candidate SQL over `semantic_units u` for any of `plans`."""
+        if plans is None:
+            return "1", []
+        parts = [plan.predicate("u.category", "u.kind") for plan in plans]
+        if not parts:
+            return "0", []
+        return "(" + " OR ".join(sql for sql, _ in parts) + ")", [
+            label for _sql, labels in parts for label in labels
+        ]
+
+    def matches(self, plans: list[Any] | None, path: str, unit: Any) -> bool:
+        return plans is None or any(
+            plan.matches(unit.category, unit.kind, self.instance(path)) for plan in plans
+        )
+
+    def served(self, rows: Iterable[tuple]) -> Iterator[tuple[tuple, Any]]:
+        """`(row, unit)` for each occurrence row that is a referable unit here, in order.
+
+        Rows are read and interpreted in transport batches, so a caller that
+        stops at its limit never interprets the parents beyond it.
+        """
+        iterator = iter(rows)
+        while batch := list(itertools.islice(iterator, _OCCURRENCE_TRANSPORT_BATCH)):
+            self.parents.prefetch(str(row[1]) for row in batch)
+            for row in batch:
+                unit = self.unit(str(row[1]), str(row[0]))
+                if unit is not None and unit.unit_ref is not None:
+                    yield row, unit
+
+    def corpus(self, column: str, parents: set[str]) -> dict[str, list[str]]:
+        """Stemmed tokens of every referable unit of `parents`, keyed by public ref.
+
+        Ranking statistics come from this selected corpus, so a candidate no
+        interpretation emits, or an overlapping occurrence, never weighs in.
+        """
+        rows = self.conn.execute(
+            "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed FROM semantic_units u "
+            "JOIN unit_fts ON unit_fts.rowid = u.rowid "
+            f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(parents), ensure_ascii=False),),
+        )
+        corpus: dict[str, list[str]] = {}
+        for row, unit in self.served(rows):
+            corpus.setdefault(str(unit.unit_ref), str(row[2]).split())
+        return corpus
+
+
 @dataclass(frozen=True, slots=True)
 class CatalogReadiness:
     """Whether the normal-table catalog may answer an exact category/kind query.
@@ -725,8 +964,10 @@ class CatalogReadiness:
     ``status`` is one of ``available`` (this exact projection is present),
     ``stale`` (well-formed but not yet at the requested freshness, or missing),
     ``unsupported`` (the ``python`` kill switch retired the catalog),
-    ``transient_failure`` (a passing lock/interrupt), or ``fatal_failure`` (the
-    sidecar proved unusable for the process). Only ``available`` is
+    ``transient_failure`` (a passing lock/interrupt), ``definitions_unavailable``
+    (an admitted page's selected definitions are missing, so dependent unit
+    coverage is incomplete), or ``fatal_failure`` (the sidecar proved unusable
+    for the process). Only ``available`` is
     ``complete``; every other status defers to the caller's degraded path.
     ``backend`` records which lexical backend this decision was made under.
     """
@@ -1034,46 +1275,21 @@ def _remove_lexical_rebuild_artifact(
 
 
 _CATALOG_IDENTITY_SCHEMA = "exomem.semantic-catalog.row-identity.v4"
-_REGISTRY_ABSENT_MARKER = "absent"
 
 
 def catalog_semantic_identity(vault_root: Path) -> str:
-    """Return the content-addressed identity of parsed semantic-catalog rows.
+    """Identify structural catalog rows independently of selected extension definitions.
 
-    The identity is a compound of the components that make an already-built
-    catalog's parsed rows correct for a given corpus, so any of them changing
-    invalidates those rows even when no note Markdown changed:
-
-    * this slice's catalog/schema version (``SCHEMA_VERSION``);
-    * the semantic-unit ``semantic_index.PARSER_VERSION``;
-    * the canonical semantic-authoring contract id/version/content digest — the
-      current core category/authoring identity seam;
-    * the exact content hash of the extension semantic-language registry at
-      ``semantic_language_registry.registry_path`` (an explicit stable marker
-      when the registry is absent);
-    * the effective digest of the note-type registry, so a save or restore
-      that changes what a type means retires rows parsed under the old meaning.
-
-    Recall policy and access membership deliberately do not participate here:
-    ``RecallFreshnessCheckpoint`` attests that independent projection boundary.
-    Serialization is a canonical, sorted, separator-fixed JSON payload hashed
-    with SHA-256. No Markdown corpus is walked and no file is mutated. The
-    language registry is read only to hash its bytes, and the note-type
-    registry contributes only its cached effective digest, so neither personal
-    vocabulary nor raw registry bytes appear in the returned identity.
+    The rows are structural, so only the components that change how a page is
+    parsed participate: the catalog and parser versions, the semantic-authoring
+    contract, and the note-type registry's admitted dependency, so a save or
+    restore that changes what a type means retires rows parsed under the old
+    meaning. Recall policy and access membership do not participate:
+    ``RecallFreshnessCheckpoint`` attests that independent boundary.
     """
-    from . import note_types, semantic_authoring, semantic_index, semantic_language_registry
-    from .vocabulary import registry as vocabulary_registry
+    from . import note_types, semantic_authoring, semantic_index
 
     contract = semantic_authoring.get_semantic_authoring_contract()
-    registry_file = semantic_language_registry.registry_path(Path(vault_root))
-    try:
-        registry_bytes = registry_file.read_bytes()
-    except (FileNotFoundError, IsADirectoryError):
-        registry_marker = _REGISTRY_ABSENT_MARKER
-    else:
-        registry_marker = f"sha256:{hashlib.sha256(registry_bytes).hexdigest()}"
-
     payload = {
         "schema": _CATALOG_IDENTITY_SCHEMA,
         "catalog_schema_version": SCHEMA_VERSION,
@@ -1081,11 +1297,10 @@ def catalog_semantic_identity(vault_root: Path) -> str:
         "authoring_contract_id": contract.contract_id,
         "authoring_contract_version": contract.version,
         "authoring_contract_digest": contract.content_digest,
-        "extension_registry_hash": registry_marker,
         # The catalogue is shared by every audience, so it binds the owner's meaning.
-        "note_type_registry_digest": vocabulary_registry.load(
-            note_types.SPEC, Path(vault_root)
-        ).effective_digest,
+        "note_type_registry": list(
+            note_types.Basis(Path(vault_root), owner_local=True).loaded_dependency()
+        ),
     }
     canonical = json.dumps(
         payload,
@@ -1965,6 +2180,22 @@ _TERM_FREQUENCY_CACHE_MAX = 50_000
 _ADMITTED_STATISTICS_MAX = 4
 
 
+@dataclass
+class RequestQueryContext:
+    """Admission shared within one request, re-proved on each query snapshot.
+
+    It retains no readiness or hits. The reader and lifecycle basis belong
+    to this request; the catalogue generation decides whether paths can recur.
+    """
+
+    vault_root: Path
+    visible: Callable[[str], bool]
+    status_basis: Any
+    restricted: bool = True
+    generation: tuple | None = None
+    admitted_paths: set[str] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTermBudget:
     """How much of a long query a bounded BM25 caller lets reach the MATCH.
@@ -2144,10 +2375,12 @@ def search_bm25_result(
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
     admitted_paths: set[str] | None = None,
+    query_context: RequestQueryContext | None = None,
     allow_delta: bool = True,
     min_matched_terms: int = 1,
     corroboration_tokens: list[str] | None = None,
     corroboration_groups: list[list[str]] | None = None,
+    excluded_corroboration_stems: frozenset[str] | None = None,
     recall_checkpoint: Any | None = None,
     exclude_navigation: bool = False,
     exclude_raw_material: bool = False,
@@ -2164,6 +2397,10 @@ def search_bm25_result(
     the predicate then answers the sharper question "did several of the
     turn's DISTINCTIVE words occur here" while the ranking still sees the
     whole query. `None` keeps the existing behaviour exactly.
+
+    `excluded_corroboration_stems` removes whole counted units containing any
+    of those stems after budget selection. Ranking still uses the same units;
+    the remaining units keep their grouping and run-match thresholds.
 
     `exclude_navigation` and `exclude_raw_material` leave those rows out
     inside the query (see `_excluded_rows_clause`), so `k` counts only rows a
@@ -2197,16 +2434,18 @@ def search_bm25_result(
         freshness,
         allowed_paths,
         admitted_paths=admitted_paths,
+        query_context=query_context,
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
         corroboration_tokens=corroboration_tokens,
         corroboration_groups=[group for group in groups if group],
+        excluded_corroboration_stems=excluded_corroboration_stems,
         recall_checkpoint=recall_checkpoint,
         term_units=_term_units(units),
         exclude_navigation=exclude_navigation,
         exclude_raw_material=exclude_raw_material,
         term_budget=term_budget,
-        query_units=units if term_budget is not None else None,
+        query_units=units if term_budget is not None or excluded_corroboration_stems else None,
         term_selection=term_selection,
     )
 
@@ -2220,6 +2459,7 @@ def carry_term_statistics(
     path_limit: Callable[[int], int],
     freshness: tuple | None = None,
     recall_checkpoint: Any | None = None,
+    query_context: RequestQueryContext | None = None,
 ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
     """Admitted carry counts and bounded discount paths from one SQL snapshot."""
     if not _usable():
@@ -2231,6 +2471,7 @@ def carry_term_statistics(
         path_limit=path_limit,
         freshness=freshness,
         recall_checkpoint=recall_checkpoint,
+        query_context=query_context,
     )
 
 
@@ -2341,6 +2582,23 @@ def term_document_paths(
 #: and never changes the rows.
 _FTS_PAGES = "fts CROSS JOIN pages p ON p.rowid = fts.rowid"
 _UNIT_FTS_UNITS = "unit_fts CROSS JOIN semantic_units u ON u.rowid = unit_fts.rowid"
+
+
+def _page_carryable(
+    status_basis: Any, status: object, path: str, shipped: dict[object, bool]
+) -> bool:
+    """Whether one page's status label carries, memoizing only page-independent labels.
+
+    A shipped label has one class on every page, so `shipped` keeps it. Any other
+    label classifies through its page's own selected instance.
+    """
+    from . import lifecycle_statuses
+
+    pack = lifecycle_statuses.Basis(None).classify(status)
+    if pack.lifecycle_class is not None:
+        shipped[status] = pack.carryable
+        return pack.carryable
+    return status_basis.classify(status, path=path).carryable
 
 
 def _excluded_rows_clause(
@@ -2483,6 +2741,7 @@ def search_semantic_units(
     _validate_current: bool = True,
     repair: bool = True,
     recall_checkpoint: Any | None = None,
+    registry_scope: str | None = None,
 ) -> list[SemanticUnitLexicalHit] | None:
     """Return exact-metadata semantic-unit candidates from the lexical sidecar.
 
@@ -2524,6 +2783,7 @@ def search_semantic_units(
             _validate_current=_validate_current,
             repair=repair,
             recall_checkpoint=recall_checkpoint,
+            registry_scope=registry_scope,
         )
         return result.value if result.readiness.complete else None
     if not _catalog_usable():
@@ -2549,6 +2809,7 @@ def search_semantic_units(
         clauses=clauses,
         allowed_parent_paths=allowed_parent_paths,
         admitted_parent_paths=admitted_parent_paths,
+        registry_scope=registry_scope,
     )
     if hits is None:
         return None
@@ -2605,6 +2866,7 @@ def search_semantic_units(
             _repair_stale=False,
             repair=repair,
             recall_checkpoint=recall_checkpoint,
+            registry_scope=registry_scope,
         )
     if stale_paths:
         _schedule_repair(vault_root)
@@ -2635,6 +2897,7 @@ def search_semantic_units_result(
     repair: bool = True,
     recall_checkpoint: Any | None = None,
     allow_delta: bool = True,
+    registry_scope: str | None = None,
     validated: dict[tuple[str, str, str, int], bool] | None = None,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome.
@@ -2678,6 +2941,7 @@ def search_semantic_units_result(
         allow_delta=allow_delta,
         allowed_parent_paths=allowed_parent_paths,
         admitted_parent_paths=admitted_parent_paths,
+        registry_scope=registry_scope,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -2731,6 +2995,8 @@ def search_semantic_units_result(
                 repair=repair,
                 recall_checkpoint=recall_checkpoint,
                 allow_delta=allow_delta,
+                registry_scope=registry_scope,
+                validated=validated,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -2744,6 +3010,7 @@ def search_semantic_parent_paths(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    registry_scope: str | None = None,
 ) -> list[str] | None:
     """Distinct candidate parent identities for a planner clause disjunction.
 
@@ -2753,11 +3020,14 @@ def search_semantic_parent_paths(
     returns ``None`` (the caller's cue that the maintained index cannot yet serve
     this safe exact seed) rather than an empty candidate set. Returns only
     relative path strings: matching semantic parents plus their in-scope
-    scene-frame children.
+    scene-frame children. `registry_scope` selects the query's vocabulary
+    instance (public when omitted); it grants no authority.
     """
     if not _catalog_usable():
         return None
-    return get_store(vault_root).search_semantic_parent_paths(clauses, scope, freshness)
+    return get_store(vault_root).search_semantic_parent_paths(
+        clauses, scope, freshness, registry_scope=registry_scope
+    )
 
 
 def search_semantic_parent_paths_result(
@@ -2766,6 +3036,7 @@ def search_semantic_parent_paths_result(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    registry_scope: str | None = None,
 ) -> CatalogQueryResult[list[str]]:
     """Typed counterpart to `search_semantic_parent_paths`."""
     if not _catalog_usable():
@@ -2773,7 +3044,7 @@ def search_semantic_parent_paths_result(
             None, CatalogReadiness("unsupported", False, backend())
         )
     return get_store(vault_root).search_semantic_parent_paths_result(
-        clauses, scope, freshness
+        clauses, scope, freshness, registry_scope=registry_scope
     )
 
 
@@ -2863,15 +3134,22 @@ def eligibility_metadata_result(
         scope,
         freshness,
         lambda conn: _eligibility_metadata_query(
-            conn, paths, include_units=include_units, parents_only=parents_only
+            vault_root, conn, paths, include_units=include_units, parents_only=parents_only
         ),
         "lexical eligibility metadata query failed (%s); filter eligibility declines",
     )
 
 
 def _eligibility_metadata_query(
-    conn: sqlite3.Connection, paths: set[str], *, include_units: bool, parents_only: bool = False
+    vault_root: Path,
+    conn: sqlite3.Connection,
+    paths: set[str],
+    *,
+    include_units: bool,
+    parents_only: bool = False,
 ) -> dict[str, EligibilityMetadata]:
+    from .vocabulary.registry import RegistryError
+
     view = "NULL" if parents_only else "eligibility_view_json"
     rows = conn.execute(
         "WITH requested AS (SELECT value AS path FROM json_each(?)), "
@@ -2899,31 +3177,40 @@ def _eligibility_metadata_query(
             )
         if not include_units:
             return result
+        # Each page's units as its selected interpretation emits them; a page
+        # the caller may not see keeps no units and is never interpreted.
+        view = _SelectedUnits(vault_root, conn)
         unit_rows = conn.execute(
-            "SELECT parent_path, category, category_key, kind, tags_json, context, form, "
-            "verdict, check_by_day FROM semantic_units "
-            "WHERE parent_path IN (SELECT value FROM json_each(?))",
+            f"SELECT {_OCCURRENCE_COLUMNS}, u.verdict, u.check_by_day FROM semantic_units u "
+            "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
+            "ORDER BY u.parent_path, u.source_order",
             (json.dumps(sorted(result), ensure_ascii=False),),
-        ).fetchall()
+        )
         units: dict[str, list[dict[str, Any]]] = {}
-        for path, category, category_key, kind, tags, context, form, verdict, check_by in unit_rows:
+        for row, served in view.served(unit_rows):
+            path, verdict, check_by = row[1], row[17], row[18]
             unit = dict(
-                category=category,
-                category_key=category_key,
-                kind=kind,
-                tags=json.loads(tags),
-                context=context,
-                form=form,
+                category=served.category,
+                category_key=row[8],
+                kind=served.kind,
+                tags=json.loads(row[10]),
+                context=row[11],
+                form=row[6],
+                instance=view.instance(str(path)),
             )
             if verdict is not None:
                 unit["verdict"] = verdict
             if check_by is not None:
                 unit["check_by"] = date.fromisoformat(check_by)
             units.setdefault(str(path), []).append(unit)
+        view.require_complete()
         from dataclasses import replace
 
         for path, values in units.items():
             result[path] = replace(result[path], units=tuple(values))
+    except RegistryError:
+        # Unavailable definitions are a dependent outcome, not a corrupt snapshot.
+        raise
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise sqlite3.DatabaseError("invalid eligibility metadata snapshot") from error
     return result
@@ -4098,7 +4385,7 @@ class LexicalStore:
     # The current normal-table shape sentinels. An older `pages` table lacks
     # one or more of these, so it must be rebuilt before a new-column INSERT.
     _CURRENT_PAGES_COLUMNS = frozenset(
-        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json"}
+        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json"}
     ) | frozenset(_ELIGIBILITY_COLUMNS)
     #: The eligibility sentinels on `semantic_units`. A catalog missing any of
     #: them cannot answer a governed unit filter, so it is a legacy shape.
@@ -4181,7 +4468,7 @@ class LexicalStore:
             " updated_day TEXT,"
             " updated_json TEXT,"
             " eligibility_view_json TEXT,"
-            " content_hash TEXT)"
+            " content_hash TEXT, structure_json TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
@@ -4194,7 +4481,8 @@ class LexicalStore:
         self._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
-            " record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),"
+            " record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),"
+            # The internal occurrence key; a public unit ref is a selected meaning.
             " unit_ref TEXT NOT NULL,"
             " parent_path TEXT NOT NULL,"
             " parent_ref TEXT,"
@@ -4204,6 +4492,8 @@ class LexicalStore:
             " form TEXT NOT NULL,"
             " category_raw TEXT NOT NULL,"
             " category_key TEXT NOT NULL,"
+            # Raw category and heading labels in the registry normalization
+            # domain; they only propose candidates for selected interpretation.
             " category TEXT NOT NULL,"
             " kind TEXT NOT NULL,"
             " content TEXT NOT NULL,"
@@ -4990,16 +5280,27 @@ class LexicalStore:
         in_kb: bool,
         in_vault: bool,
     ) -> None:
+        """Store every structural occurrence some selected interpretation could emit.
+
+        Rows are shared by every caller, so they hold only selection-free facts:
+        raw category and heading labels in the registry normalization domain,
+        and the governed metadata the occurrence authors. Whether a row is a
+        unit, its category, kind and public reference belong to the reader's
+        selected interpretation of the page's stored summary.
+        """
         from . import bm25 as bm25_module
-        from .semantic_index import current_parent_index_state
+        from . import semantic_language_registry, semantic_units
+        from .semantic_index import current_parent_index_state, structural_metadata
 
         try:
             state = current_parent_index_state(self.vault_root, path)
         except (OSError, UnicodeError, ValueError):
             return
-        for source_order, unit in enumerate(state.document.units):
-            if unit.unit_ref is None:
-                continue
+        if state.candidates is None:
+            return
+        conn.execute("UPDATE pages SET structure_json = ? WHERE path = ?",
+                     (json.dumps(structural_metadata(state), sort_keys=True), state.path))
+        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
             cur = conn.execute(
                 "INSERT INTO semantic_units("
                 "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
@@ -5007,10 +5308,10 @@ class LexicalStore:
                 "category, kind, content, tags_json, context, unit_source_hash, anchor, "
                 "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
                 "verdict, check_by_day, check_by_json, tags_canonical_json) "
-                "VALUES('semantic_unit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "VALUES('structural_occurrence', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    unit.unit_ref,
+                    semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash),
                     state.path,
                     state.parent_ref,
                     state.parent_generation,
@@ -5019,8 +5320,8 @@ class LexicalStore:
                     unit.form,
                     unit.category_raw,
                     unit.category_key,
-                    unit.category,
-                    unit.kind,
+                    semantic_language_registry.normalize_label(unit.category_raw),
+                    unit.kind_key,
                     unit.content,
                     json.dumps(list(unit.tags), ensure_ascii=False, separators=(",", ":")),
                     unit.context,
@@ -5028,7 +5329,7 @@ class LexicalStore:
                     unit.anchor,
                     unit.line,
                     unit.end_line,
-                    unit.fingerprint,
+                    None,
                     source_order,
                     updated,
                     int(in_kb),
@@ -6862,10 +7163,12 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         admitted_paths: set[str] | None = None,
+        query_context: RequestQueryContext | None = None,
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
         corroboration_groups: list[list[str]] | None = None,
+        excluded_corroboration_stems: frozenset[str] | None = None,
         recall_checkpoint: Any | None = None,
         term_units: list[list[object]] | None = None,
         exclude_navigation: bool = False,
@@ -6880,10 +7183,12 @@ class LexicalStore:
             lambda conn: self._bm25_query(
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 admitted_paths=admitted_paths,
+                query_context=query_context,
                 min_matched_terms=min_matched_terms,
                 term_units=term_units,
                 corroboration_tokens=corroboration_tokens,
                 corroboration_groups=corroboration_groups,
+                excluded_corroboration_stems=excluded_corroboration_stems,
                 exclude_navigation=exclude_navigation,
                 exclude_raw_material=exclude_raw_material,
                 term_budget=term_budget,
@@ -6904,23 +7209,18 @@ class LexicalStore:
         path_limit: Callable[[int], int],
         freshness: tuple | None,
         recall_checkpoint: Any | None,
+        query_context: RequestQueryContext | None = None,
     ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
         def query(conn: sqlite3.Connection):
-            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
-            # Read paths before admission. Hidden labels never reach classification;
-            # navigation and retired pages still belong in the admitted denominator.
-            admitted = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT p.path FROM pages p WHERE p.in_kb = 1" + raw_clause, raw_params
-                )
-                if visible(str(row[0]))
-            }
+            context = query_context or RequestQueryContext(self.vault_root, visible, status_basis)
+            if context.visible is not visible or context.status_basis is not status_basis:
+                raise ValueError("query context belongs to another reader or lifecycle basis")
+            admitted = self._request_admitted_paths(conn, context)
             pages = len(admitted)
             limit = path_limit(pages)
             excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
-            # One classification per distinct label in this snapshot; a hidden
-            # row is dropped before its label is read.
+            # One classification per distinct shipped label in this snapshot; a
+            # hidden row is dropped before its label is read.
             carryable: dict[object, bool] = {}
             frequencies: dict[str, int] = {}
             paths: dict[str, tuple[str, ...]] = {}
@@ -6940,7 +7240,7 @@ class LexicalStore:
                         continue
                     allowed = carryable.get(status)
                     if allowed is None:
-                        allowed = carryable[status] = status_basis.classify(status).carryable
+                        allowed = _page_carryable(status_basis, status, path, carryable)
                     if allowed:
                         count += 1
                         if len(bounded) < limit:
@@ -7164,7 +7464,7 @@ class LexicalStore:
             col = "in_vault" if scope == "vault" else "in_kb"
             statistics = bm25_module.CorpusStatistics.of({
                 path: stemmed.split() for path, stemmed in conn.execute(
-                    "SELECT p.path, fts.stemmed FROM pages p JOIN fts ON fts.rowid = p.rowid "
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
                     f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
                     (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
                 )
@@ -7177,6 +7477,28 @@ class LexicalStore:
         finally:
             if owns_snapshot:
                 conn.rollback()
+
+    def _request_admitted_paths(
+        self, conn: sqlite3.Connection, context: RequestQueryContext, scope: str = "kb"
+    ) -> set[str]:
+        if Path(context.vault_root).absolute() != self.vault_root.absolute():
+            raise ValueError("query context belongs to another vault")
+        generation = (
+            str(self.vault_root.absolute()), scope,
+            id(context.visible), id(context.status_basis), *self._snapshot_generation(conn)
+        )
+        if context.generation != generation or context.admitted_paths is None:
+            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+            col = "in_vault" if scope == "vault" else "in_kb"
+            # Hidden labels never reach classification; navigation and retired
+            # pages still belong in the admitted denominator.
+            context.admitted_paths = {
+                str(row[0]) for row in conn.execute(
+                    f"SELECT p.path FROM pages p WHERE p.{col} = 1" + raw_clause, raw_params
+                ) if context.visible(str(row[0]))
+            }
+            context.generation = generation
+        return context.admitted_paths
 
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:
@@ -7210,21 +7532,29 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         admitted_paths: set[str] | None = None,
+        query_context: RequestQueryContext | None = None,
         min_matched_terms: int = 1,
         term_units: list[list[object]] | None = None,
         corroboration_tokens: list[str] | None = None,
         corroboration_groups: list[list[str]] | None = None,
+        excluded_corroboration_stems: frozenset[str] | None = None,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
         term_budget: QueryTermBudget | None = None,
         query_units: list | None = None,
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
+        if query_context is not None:
+            current_paths = self._request_admitted_paths(conn, query_context, scope)
+            admitted_paths = (
+                current_paths if admitted_paths is not None or query_context.restricted else None
+            )
         admitted = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
             else None
         )
+        counted = query_units
         if term_budget is not None and query_units is not None:
             from . import bm25 as bm25_module
 
@@ -7256,6 +7586,13 @@ class LexicalStore:
                 return []
             tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
             term_units = _term_units(counted)
+        if excluded_corroboration_stems and counted is not None:
+            # A unit sharing the partial name's stem is the same contact,
+            # even when other stems in that unit match the page.
+            term_units = _term_units([
+                unit for unit in counted
+                if excluded_corroboration_stems.isdisjoint(unit.stems)
+            ])
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
         # membership (any-term match).
@@ -7272,7 +7609,9 @@ class LexicalStore:
         corroboration_at = len(params)
         corroborated = ""
         groups = [group for group in (corroboration_groups or []) if group]
-        if min_matched_terms > 1 or groups:
+        if min_matched_terms > 1 and corroboration_tokens is None and term_units is None:
+            term_units = [[stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))]
+        if admitted is None and (min_matched_terms > 1 or groups):
             # Filter before LIMIT so one-unit hits cannot crowd out valid pages.
             clauses: list[str] = []
             if min_matched_terms > 1 and corroboration_tokens is None:
@@ -7342,15 +7681,27 @@ class LexicalStore:
                     "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
                     for group in groups
                 ) + ")"
+            # SQL admits before scoring or cap. The scorer then corroborates
+            # with the same Counter it needs for each document's score.
+            ranking_clause += (
+                " AND p.path IN (SELECT value FROM json_each(?))" + excluded_clause
+            )
+            ranking_params = [
+                params[0], *params[1:corroboration_at],
+                json.dumps(sorted(admitted_paths), ensure_ascii=False), *excluded_params,
+            ]
             candidates = {
                 path: stemmed.split() for path, stemmed in conn.execute(
                     f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
-                    f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
-                    params,
+                    f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause,
+                    ranking_params,
                 )
-                if path in admitted_paths
             }
-            return admitted.score(candidates, tokens, k)
+            return admitted.score(
+                candidates, tokens, k, min_matched_terms=min_matched_terms,
+                term_units=term_units, corroboration_tokens=corroboration_tokens,
+                corroboration_groups=groups,
+            )
         if term_budget is not None and corroborated:
             # Bounded: rank every row the kept units match that passes the
             # scope, path and exclusion filters, then run the corroboration
@@ -7635,48 +7986,33 @@ class LexicalStore:
     def unit_categories_of(self, paths: Iterable[str]) -> dict[str, frozenset[str]] | None:
         """The categories each page's own semantic units are filed under.
 
-        One indexed read of the maintained `semantic_units` table, bounded by
-        the caller's own path list and by nothing else: no hydration, no
-        eligibility check, no ranking. A caller uses it to choose WHICH lenses
-        to read a page through, never to serve anything from it. None when the
-        catalogue is absent or stale, so a caller keeps its unfiltered lenses.
+        Bounded by the caller's own path list: no Markdown, no eligibility
+        check, no ranking. A caller uses it to choose WHICH lenses to read a
+        page through, never to serve anything from it. None when the catalogue
+        is absent or stale, or a page's selected coverage is incomplete, so a
+        caller keeps its unfiltered lenses.
         """
-        wanted = sorted({str(path) for path in paths if str(path)})
-        if not wanted or self._failed or not self.path.exists():
+        rows = self.units_of(paths)
+        if rows is None:
             return None
-        try:
-            conn = self._connect()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
-            return None
-        try:
-            if not self._schema_is_current(conn):
-                return None
-            rows = conn.execute(
-                "SELECT DISTINCT parent_path, category FROM semantic_units "
-                "WHERE parent_path IN (SELECT value FROM json_each(?))",
-                (json.dumps(wanted, ensure_ascii=False),),
-            ).fetchall()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical unit-category probe declined (%s)")
-            return None
-        finally:
-            conn.close()
         out: dict[str, set[str]] = {}
-        for parent, category in rows:
+        for parent, _ref, category, _content in rows:
             if category:
-                out.setdefault(str(parent), set()).add(str(category))
+                out.setdefault(parent, set()).add(category)
         return {path: frozenset(found) for path, found in out.items()}
 
     def units_of(
         self, paths: Iterable[str], *, categories: Iterable[str] | None = None
     ) -> list[tuple[str, str, str, str]] | None:
         """`(parent_path, unit_ref, category, content)` for every semantic unit
-        of the given pages, or only those filed under `categories`: the rows
-        `unit_categories_of` reads, with the text a caller needs to decide each
-        unit for a reader. None when the catalogue is absent or stale."""
+        of the given pages, or only those filed under `categories`, as each
+        page's selected interpretation emits them: the text a caller needs to
+        decide each unit for a reader. None when the catalogue is absent or
+        stale, or a page's selected coverage is incomplete."""
+        from .vocabulary.registry import RegistryError
+
         wanted = sorted({str(path) for path in paths if str(path)})
-        filed = None if categories is None else sorted({str(c) for c in categories if str(c)})
+        filed = None if categories is None else {str(c) for c in categories if str(c)}
         if not wanted or self._failed or not self.path.exists():
             return None
         try:
@@ -7687,21 +8023,26 @@ class LexicalStore:
         try:
             if not self._schema_is_current(conn):
                 return None
-            query = (
-                "SELECT parent_path, unit_ref, category, content FROM semantic_units "
-                "WHERE parent_path IN (SELECT value FROM json_each(?))"
-            )
-            params = [json.dumps(wanted, ensure_ascii=False)]
-            if filed is not None:
-                query += " AND category IN (SELECT value FROM json_each(?))"
-                params.append(json.dumps(filed, ensure_ascii=False))
-            rows = conn.execute(query + " ORDER BY parent_path, source_order", params).fetchall()
+            view = _SelectedUnits(self.vault_root, conn)
+            served = [
+                (str(row[1]), str(unit.unit_ref), str(unit.category or ""), str(row[9]))
+                for row, unit in view.served(conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u "
+                    "WHERE u.parent_path IN (SELECT value FROM json_each(?)) "
+                    "ORDER BY u.parent_path, u.source_order",
+                    (json.dumps(wanted, ensure_ascii=False),),
+                ))
+                if filed is None or unit.category in filed
+            ]
+            view.require_complete()
+        except RegistryError:
+            return None
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical unit probe declined (%s)")
             return None
         finally:
             conn.close()
-        return [(str(parent), str(ref), str(category or ""), str(content)) for parent, ref, category, content in rows]
+        return served
 
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
@@ -7885,6 +8226,7 @@ class LexicalStore:
         replacement N-1. Returns `query_fn`'s result, or None to defer.
         """
         from . import freshness as freshness_module
+        from .vocabulary.registry import RegistryError
 
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
@@ -7927,6 +8269,8 @@ class LexicalStore:
                 return CatalogQueryResult(query_fn(conn), readiness)
             finally:
                 conn.close()
+        except RegistryError:
+            return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, readiness.backend))
         except sqlite3.Error as e:
             verdict = self._catalog_readiness_error(e, readiness.backend)
             if verdict.status == "transient_failure":
@@ -7984,7 +8328,10 @@ class LexicalStore:
         clauses: tuple | None = None,
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
+        registry_scope: str | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
+        from .vocabulary.registry import RegistryError
+
         if categories or kinds or clauses:
             # Exact category/kind selection (flat axes or a branch-preserving DNF
             # clause set) consults the readiness seam first and never touches
@@ -8003,6 +8350,7 @@ class LexicalStore:
                 literal_tokens,
                 clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
+                registry_scope=registry_scope,
             )
             return result.value if result.readiness.complete else None
         if self._failed:
@@ -8025,8 +8373,11 @@ class LexicalStore:
                     allowed_unit_refs,
                     literal_tokens,
                     allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
+                    registry_scope=registry_scope,
                 ),
             )
+        except RegistryError:
+            return None
         except sqlite3.Error as e:
             self._note_query_failure(
                 e,
@@ -8054,6 +8405,7 @@ class LexicalStore:
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
         retained_query_units: list | None = None,
+        registry_scope: str | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
@@ -8072,13 +8424,15 @@ class LexicalStore:
                 if admitted_parent_paths is None:
                     frequencies, pages = self._catalogue_term_frequencies(conn, measured, scope)
                 else:
-                    col = "in_vault" if scope == "vault" else "in_kb"
-                    corpus = [set(stemmed.split()) for (stemmed,) in conn.execute(
-                        "SELECT unit_fts.stemmed FROM semantic_units u "
-                        "JOIN unit_fts ON unit_fts.rowid = u.rowid "
-                        f"WHERE u.{col} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
-                        (json.dumps(sorted(admitted_parent_paths), ensure_ascii=False),),
-                    )]
+                    # Frequencies over the admitted parents' selected units only.
+                    view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+                    corpus = [
+                        set(tokens)
+                        for tokens in view.corpus(
+                            "in_vault" if scope == "vault" else "in_kb", admitted_parent_paths
+                        ).values()
+                    ]
+                    view.require_complete()
                     frequencies = {token: sum(token in doc for doc in corpus) for token in measured}
                     pages = len(corpus)
                 kept, _counted, _dropped = select_query_units(
@@ -8094,6 +8448,7 @@ class LexicalStore:
                 literal_tokens, dnf_clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
+                registry_scope=registry_scope,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -8120,160 +8475,91 @@ class LexicalStore:
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
+        registry_scope: str | None = None,
     ) -> list[SemanticUnitLexicalHit]:
-        col = "in_vault" if scope == "vault" else "in_kb"
-        clauses = [f"u.{col} = 1"]
-        params: list[object] = []
-        if dnf_clauses is not None:
-            # Branch-preserving DNF over the same semantic-unit row — identical
-            # algebra to page-level parent recall. A row that fails every branch
-            # (a category/kind cross-product) is never selected or hydrated.
-            predicate, dnf_params = self._clause_predicate(dnf_clauses)
-            clauses.append(f"({predicate})")
-            params.extend(dnf_params)
-        if categories:
-            placeholders = ",".join("?" for _ in categories)
-            clauses.append(f"u.category IN ({placeholders})")
-            params.extend(categories)
-        if kinds:
-            placeholders = ",".join("?" for _ in kinds)
-            clauses.append(f"u.kind IN ({placeholders})")
-            params.extend(kinds)
-        if allowed_unit_refs is not None:
-            clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_unit_refs), ensure_ascii=False))
-        if allowed_parent_paths is not None:
-            clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(sorted(allowed_parent_paths), ensure_ascii=False))
-        if excluded_categories_by_parent is not None:
-            # One uncorrelated key set, built once per query. A correlated
-            # NOT EXISTS re-read the whole map for every matched row, which
-            # grew with the square of the neighbourhood.
-            clauses.append(
-                "json_array(u.parent_path, u.category) NOT IN ("
-                "SELECT json_array(parent.key, category.value) "
-                "FROM json_each(?) AS parent, json_each(parent.value) AS category)"
-            )
-            params.append(json.dumps(excluded_categories_by_parent, ensure_ascii=False))
-        columns = (
-            "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
-            "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
-            "u.category_raw, u.category_key, u.category, u.kind, u.content, "
-            "u.tags_json, u.context, u.unit_source_hash, u.anchor, u.line, "
-            "u.end_line, u.fingerprint, u.source_order"
-        )
-        if literal_tokens:
-            literal_clauses = ["instr(lower(u.content), ?) > 0" for _ in literal_tokens]
-            rows = conn.execute(
-                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
-                + " AND ".join([*clauses, *literal_clauses])
-                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
-                [*params, *literal_tokens, k],
-            ).fetchall()
-        elif tokens and admitted_parent_paths is not None:
-            from . import bm25 as bm25_module
+        """Units whose own selected meaning matches, ranked, then limited to `k`.
 
-            corpus = {
-                ref: stemmed.split() for ref, stemmed in conn.execute(
-                    "SELECT u.unit_ref, unit_fts.stemmed FROM semantic_units u "
-                    "JOIN unit_fts ON unit_fts.rowid = u.rowid "
-                    f"WHERE u.{col} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(admitted_parent_paths), ensure_ascii=False),),
-                )
-            }
-            candidates = {row[1]: row for row in conn.execute(
-                f"SELECT {columns} FROM semantic_units u WHERE " + " AND ".join(clauses), params,
-            )}
-            scored = bm25_module.score_token_corpus(corpus, tokens, k, allowed_paths=set(candidates))
-            rows = [(*candidates[ref], score) for ref, score in scored]
-        elif tokens:
-            match = " OR ".join(f'"{token}"' for token in tokens)
-            rows = conn.execute(
-                f"SELECT {columns}, -bm25(unit_fts) AS lexical_score "
-                f"FROM {_UNIT_FTS_UNITS} "
-                "WHERE unit_fts MATCH ? AND "
-                + " AND ".join(clauses)
-                + " ORDER BY bm25(unit_fts), u.parent_path, u.source_order LIMIT ?",
-                [match, *params, k],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT {columns}, NULL AS lexical_score FROM semantic_units u WHERE "
-                + " AND ".join(clauses)
-                + " ORDER BY u.updated DESC, u.parent_path DESC, u.source_order LIMIT ?",
-                [*params, k],
-            ).fetchall()
-        return [self._semantic_unit_hit(row) for row in rows]
-
-    @staticmethod
-    def _semantic_unit_hit(row: tuple) -> SemanticUnitLexicalHit:
-        tags = json.loads(row[13])
-        return SemanticUnitLexicalHit(
-            record_type=str(row[0]),
-            unit_ref=str(row[1]),
-            parent_path=str(row[2]),
-            parent_ref=str(row[3]) if row[3] is not None else None,
-            parent_generation=str(row[4]),
-            parent_source_hash=str(row[5]),
-            parser_version=int(row[6]),
-            form=str(row[7]),
-            category_raw=str(row[8]),
-            category_key=str(row[9]),
-            category=str(row[10]),
-            kind=str(row[11]),
-            content=str(row[12]),
-            tags=tuple(str(tag) for tag in tags),
-            context=str(row[14]) if row[14] is not None else None,
-            source_hash=str(row[15]),
-            anchor=str(row[16]) if row[16] is not None else None,
-            line=int(row[17]),
-            end_line=int(row[18]),
-            fingerprint=str(row[19]) if row[19] is not None else None,
-            source_order=int(row[20]),
-            lexical_score=float(row[21]) if row[21] is not None else None,
-        )
-
-    @staticmethod
-    def _clause_predicate(clauses: tuple) -> tuple[str, list[object]]:
-        """Branch-preserving DNF over the semantic-unit category/kind axes.
-
-        Each ``IndexCandidateClause`` becomes a same-row conjunction of its
-        constrained axes (``u.category IN (...) AND u.kind IN (...)``); the
-        clauses are OR-joined, so a cross-product row that matches no single
-        branch is never selected. Category and kind seeds are canonicalized
-        defensively. An empty positive seed set is preserved as an always-false
-        ``0`` predicate rather than being dropped. Shared verbatim by the
-        page-level parent query and the unit-level candidate query so both lanes
-        evaluate the identical algebra.
+        SQL proposes occurrences by raw label, content and parent; each
+        proposed row takes its page's selected interpretation before it can
+        rank or spend a result slot. `dnf_clauses` is the planner's
+        branch-preserving disjunction: a unit must match one clause on its
+        own category and kind together.
         """
-        from .semantic_units import canonicalize_category
+        from . import bm25 as bm25_module
 
-        clause_sql: list[str] = []
-        params: list[object] = []
-        for clause in clauses:
-            parts: list[str] = []
-            for axis, seeds in (
-                ("category", clause.category_seeds),
-                ("kind", clause.kind_seeds),
-            ):
-                if seeds is None:
-                    continue
-                canonical = sorted({canonicalize_category(value) for value in seeds})
-                if not canonical:
-                    parts.append("0")
-                    continue
-                placeholders = ",".join("?" for _ in canonical)
-                parts.append(f"u.{axis} IN ({placeholders})")
-                params.extend(canonical)
-            clause_sql.append("(" + " AND ".join(parts) + ")" if parts else "0")
-        predicate = " OR ".join(clause_sql) if clause_sql else "0"
-        return predicate, params
+        col = "in_vault" if scope == "vault" else "in_kb"
+        view = _SelectedUnits(self.vault_root, conn, admitted=admitted_parent_paths)
+        plans = view.plans(
+            categories=categories, kinds=kinds, clauses=dnf_clauses, registry_scope=registry_scope
+        )
+        predicate, params = view.predicate(plans)
+        clauses = [f"u.{col} = 1", predicate]
+        for paths in (allowed_parent_paths, admitted_parent_paths):
+            if paths is not None:
+                clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
+                params.append(json.dumps(sorted(paths), ensure_ascii=False))
+        clauses.extend("instr(lower(u.content), ?) > 0" for _ in literal_tokens)
+        params.extend(literal_tokens)
+        where = " AND ".join(clauses)
+
+        def wanted(row: tuple, unit: Any) -> bool:
+            path = str(row[1])
+            return (
+                view.matches(plans, path, unit)
+                and (
+                    excluded_categories_by_parent is None
+                    or unit.category not in excluded_categories_by_parent.get(path, ())
+                )
+                and (allowed_unit_refs is None or unit.unit_ref in allowed_unit_refs)
+            )
+
+        hits: list[SemanticUnitLexicalHit] = []
+        # Literal selection is exact metadata: it never ranks and needs no FTS5.
+        ranked = bool(tokens) and not literal_tokens
+        if ranked and admitted_parent_paths is not None:
+            # Statistics over the admitted parents' selected units, keyed and
+            # tie-broken by public identity as the ranked hits are.
+            corpus = view.corpus(col, admitted_parent_paths)
+            candidates = {
+                str(unit.unit_ref): (row, unit)
+                for row, unit in view.served(
+                    conn.execute(f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params)
+                )
+                if wanted(row, unit) and str(unit.unit_ref) in corpus
+            }
+            scored = bm25_module.score_token_corpus(corpus, tokens, k, allowed_paths=set(candidates))
+            hits = [_unit_hit(*candidates[ref], score) for ref, score in scored]
+        else:
+            if ranked:
+                match = " OR ".join(f'"{token}"' for token in tokens)
+                rows = conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS}, -bm25(unit_fts) AS lexical_score "
+                    f"FROM {_UNIT_FTS_UNITS} "
+                    f"WHERE unit_fts MATCH ? AND {where} "
+                    "ORDER BY bm25(unit_fts), u.parent_path, u.source_order",
+                    [match, *params],
+                )
+            else:
+                rows = conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS}, NULL AS lexical_score FROM semantic_units u "
+                    f"WHERE {where} ORDER BY u.updated DESC, u.parent_path DESC, u.source_order",
+                    params,
+                )
+            for row, unit in view.served(rows):
+                if len(hits) >= k:
+                    break
+                if wanted(row, unit):
+                    hits.append(_unit_hit(row, unit, row[17]))
+        view.require_complete()
+        return hits
 
     def search_semantic_parent_paths(
         self,
         clauses: tuple,
         scope: str,
         freshness: tuple | None,
+        *,
+        registry_scope: str | None = None,
     ) -> list[str] | None:
         """Distinct candidate parent identities for a planner clause disjunction.
 
@@ -8281,11 +8567,11 @@ class LexicalStore:
         foreground path can neither rebuild, heal, nor walk the corpus; an
         incomplete projection returns ``None``. Readiness and the query are bound
         to one connection/read transaction so a concurrent publication cannot swap
-        the catalog between the proof and the query. Emits ONE parameterized
-        normal-table query and returns only strings — no unit payload columns,
-        no `SemanticUnitLexicalHit`, no tag JSON, no `_semantic_unit_hit`.
+        the catalog between the proof and the query. Returns only strings.
         """
-        result = self.search_semantic_parent_paths_result(clauses, scope, freshness)
+        result = self.search_semantic_parent_paths_result(
+            clauses, scope, freshness, registry_scope=registry_scope
+        )
         return result.value if result.readiness.complete else None
 
     def search_semantic_parent_paths_result(
@@ -8293,12 +8579,16 @@ class LexicalStore:
         clauses: tuple,
         scope: str,
         freshness: tuple | None,
+        *,
+        registry_scope: str | None = None,
     ) -> CatalogQueryResult[list[str]]:
         """Typed distinct-parent exact catalog query."""
         return self._serve_from_ready_catalog_result(
             scope,
             freshness,
-            lambda conn: self._semantic_parent_paths_query(conn, clauses, scope),
+            lambda conn: self._semantic_parent_paths_query(
+                conn, clauses, scope, registry_scope=registry_scope
+            ),
             "lexical semantic-parent sidecar failed (%s); candidate seeding degrades",
         )
 
@@ -8307,30 +8597,34 @@ class LexicalStore:
         conn: sqlite3.Connection,
         clauses: tuple,
         scope: str,
+        *,
+        registry_scope: str | None = None,
     ) -> list[str]:
-        """Sorted distinct candidate parents for the clause disjunction.
+        """Sorted distinct parents carrying a unit that matches one clause.
 
-        The candidate predicate is a branch-preserving OR of clauses, each
-        AND-ing its category and/or kind `$in` values on the same semantic-unit
-        row. A `matched` CTE names those parents once; the result is the union of
-        matching `semantic_units.parent_path` and every in-scope `pages.path`
-        whose `emitted_parent_path` is one of them (scene-frame expansion). Both
-        arms are confined to the requested scope.
+        Each clause AND-s its category and/or kind values on the same unit,
+        as the unit's own page selects them; the clauses are OR-joined. The
+        result adds every in-scope page whose `emitted_parent_path` is a
+        matched parent (scene-frame expansion). Both arms stay in scope.
         """
         col = "in_vault" if scope == "vault" else "in_kb"
-        predicate, params = self._clause_predicate(clauses)
+        view = _SelectedUnits(self.vault_root, conn)
+        plans = view.plans(categories=None, kinds=None, clauses=clauses, registry_scope=registry_scope)
+        predicate, params = view.predicate(plans)
         rows = conn.execute(
-            "WITH matched AS ("
-            " SELECT DISTINCT u.parent_path AS parent_path FROM semantic_units u "
-            f"WHERE u.{col} = 1 AND (" + predicate + ")"
-            ") "
-            "SELECT parent_path FROM matched "
-            "UNION "
-            f"SELECT p.path FROM pages p WHERE p.{col} = 1 "
-            "AND p.emitted_parent_path IN (SELECT parent_path FROM matched)",
+            f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE u.{col} = 1 AND {predicate}",
             params,
+        )
+        matched = sorted({
+            str(row[1]) for row, unit in view.served(rows) if view.matches(plans, str(row[1]), unit)
+        })
+        view.require_complete()
+        children = conn.execute(
+            f"SELECT p.path FROM pages p WHERE p.{col} = 1 "
+            "AND p.emitted_parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(matched, ensure_ascii=False),),
         ).fetchall()
-        return sorted(str(row[0]) for row in rows)
+        return sorted({*matched, *(str(row[0]) for row in children)})
 
     def search_eligible_parent_paths_result(
         self,
@@ -8375,7 +8669,9 @@ class LexicalStore:
         emitted parent, and both identities belong to one eligibility set.
         """
         col = "in_vault" if scope == "vault" else "in_kb"
-        predicate, params = _eligibility_predicate(eligibility, col)
+        predicate, params = _eligibility_predicate(
+            eligibility, col, _selected_axis_labels(self.vault_root)
+        )
         rows = conn.execute(
             "WITH matched AS ("
             f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
@@ -8431,7 +8727,9 @@ class LexicalStore:
         connection's collation to agree with `str.__lt__`.
         """
         col = "in_vault" if scope == "vault" else "in_kb"
-        predicate, params = _eligibility_predicate(eligibility, col)
+        predicate, params = _eligibility_predicate(
+            eligibility, col, _selected_axis_labels(self.vault_root)
+        )
         rows = conn.execute(
             "WITH matched AS ("
             f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
