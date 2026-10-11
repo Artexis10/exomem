@@ -182,8 +182,10 @@ def test_graph_context_reports_stale_and_missing_unit_refs_explicitly(
     assert missing["seeds"] == []
 
 
+@pytest.mark.parametrize("extra_parents", [0, epistemic_graph.UNIT_PARENT_REF_MAX_CANDIDATES])
 def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
     tmp_path: Path,
+    extra_parents: int,
 ) -> None:
     first = _write(
         tmp_path,
@@ -197,6 +199,13 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
         f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
         "# Second\n\n- [config] Second unit ^shared\n",
     )
+    for index in range(extra_parents):
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/Insights/zz-collision-{index:02d}.md",
+            f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+            "# Later collision\n\n- [config] Another unit ^shared\n",
+        )
     unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
         0
     ].unit_ref
@@ -206,6 +215,7 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
 
     assert context["unit_status"] == "ambiguous"
     assert context["seeds"] == []
+    assert not context["truncation"]
 
 
 def test_graph_context_ignores_deleted_parent_ref_collision(

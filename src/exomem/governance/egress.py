@@ -5889,89 +5889,30 @@ def release_level_for(
     return level
 
 
-#: A unit reference whose parent names no page. A seed whose parent is withheld
-#: from the caller is resolved as this instead, so the resolver, its drift
-#: accounting and every lane after it take the branch a unit of an absent page
-#: takes, rather than a branch that exists only because the page does.
-UNRESOLVABLE_UNIT_REF = "exomem://memory/unavailable#unavailable"
-
-
-def unit_parent_withheld(
+def unit_seed_parent_filter(
     vault_root: Path,
-    unit_ref: str,
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-) -> bool:
-    """True when a page a unit reference names is not released to the caller.
+) -> Callable[[str], bool]:
+    """Admit each unit parent before graph meaning, drift, or candidate caps.
 
-    Whether a unit reference resolves, and the drift reported while resolving
-    it, are facts about the pages the resolver consults, so a graph seed is
-    decided by those pages before the graph is asked. The candidates are every
-    path the graph's own rows can consult for the reference (current or not;
-    `epistemic_graph.unit_ref_indexed_paths`), every page the reference's
-    memory id names in the reference index, and the page an
-    `exomem://vault/` or `exomem://source/` parent names by path — confined to
-    the vault the same way any caller-named path is (`vault.resolve_under_vault`);
-    a name that does not resolve inside the vault is undecidable and counts as
-    withheld without ever being stat'd or read. Each candidate is decided at
-    `RELEASE_FLOOR`, the level below which the graph guard already withholds a
-    seed; a path that cannot be decided counts as withheld, and a walk with
-    more rows than the resolver examines cannot prove every page visible.
-
-    An explicit sub-floor decision withholds the owner's seed exactly as it
-    withholds anyone else's, so a rule that names the `owner` audience still
-    applies to a unit seed. What does not apply to the owner is an
-    UNDECIDABLE candidate: a walk with more rows than the resolver examines
-    (`work_exhausted`), or a stale row naming a path that is no longer
-    there, is a graph artifact rather than a policy decision, and must not
-    cost the owner the stale-status and drift report the unguarded answer
-    carries. For anyone else, an undecidable candidate counts as withheld,
-    because a walk that cannot prove every candidate visible cannot prove the
-    page released either.
+    Explicit sub-floor decisions exclude owners too. Only an owner with
+    unrestricted content authority keeps an undecidable ordinary path for
+    stale diagnostics; restricted callers treat it as absent.
     """
     vault_root = Path(vault_root)
-    policy = policy_module.load(vault_root)
-    if _file_policy_empty(vault_root, policy) and not lifecycle.tombstoned_paths(vault_root):
-        return False
     who = principal if principal is not None else effective_principal()
-    is_owner = who.resolved and who.audience_id == OWNER_AUDIENCE
-    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
-    if not separator or not parent_ref:
-        return False
-    from .. import epistemic_graph
+    diagnostic_owner = (
+        who.resolved and who.audience_id == OWNER_AUDIENCE
+        and unrestricted_content_access(vault_root, who)
+    )
 
-    indexed, work_exhausted = epistemic_graph.unit_ref_indexed_paths(vault_root, unit_ref)
-    if work_exhausted and not is_owner:
-        return True
-    candidates = set(indexed)
-    memory_id = memory_refs.parse_memory_ref(parent_ref)
-    if memory_id is not None:
-        candidates.update(
-            memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ())
-        )
-    elif parent_ref.lower().startswith(("exomem://vault/", "exomem://source/")):
-        named = memory_refs.resolve_identifier_read_only(vault_root, parent_ref)
-        try:
-            _named_abs, named = vault.resolve_under_vault(vault_root, named)
-        except vault.VaultPathError:
-            return True
-        candidates.add(named)
-    for rel_path in sorted(candidates):
+    def keep(rel_path: str) -> bool:
         level = release_level_for(vault_root, rel_path, principal=who, purpose=purpose)
-        if level is None:
-            # Undecidable — a stale or budget-truncated graph row pointing at
-            # a path that is no longer there, most often. For anyone else
-            # that is indistinguishable from a page withheld from them, so it
-            # counts as withheld. The owner is never denied a page over a
-            # graph artifact; only an explicit sub-floor decision (an
-            # owner-targeted rule) withholds the owner's seed, below.
-            if is_owner:
-                continue
-            return True
-        if level < RELEASE_FLOOR:
-            return True
-    return False
+        return diagnostic_owner if level is None else level >= RELEASE_FLOOR
+
+    return keep
 
 
 @canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)

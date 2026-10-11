@@ -8277,18 +8277,19 @@ def _query_meaning(
     if registry_scope is None and path:
         anchor = _with_md(path)
     elif registry_scope is None and unit_ref:
-        parent_ref = str(unit_ref).rpartition("#")[0]
-        anchor = next(
-            (
-                str(row[0])
-                for row in view.conn.execute(
-                    "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
-                    (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES),
-                )
-                if view.allowed(str(row[0]))
-            ),
-            None,
-        )
+        candidates, _overflow = view.unit_parent_candidates(unit_ref)
+        anchored = False
+        for candidate in candidates:
+            if not view.allowed(candidate):
+                continue
+            parent = view.parent(candidate)
+            if parent is not None and parent.definitions is not None:
+                return parent.definitions.instance_id, parent.definitions.snapshots
+            anchored |= (
+                parent is not None or _node_by_key(view.conn, _file_key(candidate)) is not None
+            )
+        if anchored:
+            return instances.PUBLIC_INSTANCE, None
     if anchor is not None and view.allowed(anchor):
         parent = view.parent(anchor)
         if parent is not None and parent.definitions is not None:
@@ -8502,6 +8503,7 @@ def graph_context(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     keep: Callable[[str], bool] | None = None,
+    seed_keep: Callable[[str], bool] | None = None,
     registry_scope: str | None = None,
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query.
@@ -8512,6 +8514,8 @@ def graph_context(
     page, so the neighbourhood and its caps are what the caller could reach.
     `registry_scope` selects the query's vocabulary instance; it grants no
     authority. Every unit and edge keeps its authoring page's own meaning.
+    `seed_keep` admits unit parents for diagnostics too; missing ordinary
+    owner paths can report drift without admitting their stored summaries.
     """
 
     def _allowed(rel_path: str) -> bool:
@@ -8543,7 +8547,7 @@ def graph_context(
             unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
         return unavailable
     try:
-        view = GraphView(vault_root, conn, keep=keep)
+        view = GraphView(vault_root, conn, keep=keep, seed_keep=seed_keep)
         query_instance, query_definitions = _query_meaning(
             view, registry_scope=registry_scope, path=path, unit_ref=unit_ref
         )
@@ -8645,7 +8649,7 @@ def graph_context(
                 canonical_seeds,
                 parent_drift_counts,
                 unit_parent_work_exhausted,
-            ) = _current_unit_status(conn, vault_root, unit_ref)
+            ) = _current_unit_status(view, unit_ref)
             current_parent_paths = [
                 p for p in current_parent_paths if not _records_suppressed_path(vault_root, p)
             ]
@@ -11024,14 +11028,13 @@ def _unit_seed_truncation(
 
 
 def _current_unit_status(
-    conn: sqlite3.Connection, vault_root: Path, unit_ref: str
+    view: GraphView, unit_ref: str
 ) -> tuple[str, list[str], list[dict[str, Any]], dict[str, int], bool]:
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
     if not separator or not parent_ref:
         return "missing", [], [], {}, False
     paths, seeds, drift_counts, work_exhausted = _current_unit_parent_paths(
-        conn,
-        vault_root,
+        view,
         parent_ref=parent_ref,
         unit_ref=unit_ref,
     )
@@ -11109,23 +11112,18 @@ def _current_page_unit(
 
 
 def _current_unit_parent_paths(
-    conn: sqlite3.Connection,
-    vault_root: Path,
+    view: GraphView,
     *,
     parent_ref: str,
     unit_ref: str,
 ) -> tuple[list[str], list[dict[str, Any]], dict[str, int], bool]:
-    rows = conn.execute(
-        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
-        (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
-    ).fetchall()
+    candidates, overflow = view.unit_parent_candidates(unit_ref)
     current_paths: list[str] = []
     current_seeds: list[dict[str, Any]] = []
     drift_counts: dict[str, int] = {}
-    for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
-        rel = str(row[0])
+    for rel in candidates:
         resolved = _current_page_unit(
-            vault_root,
+            view.vault_root,
             rel,
             lambda document: document.resolve_unit(unit_ref),
             parent_ref=parent_ref,
@@ -11141,50 +11139,26 @@ def _current_unit_parent_paths(
         current_paths,
         current_seeds,
         drift_counts,
-        len(rows) > UNIT_PARENT_REF_MAX_CANDIDATES,
+        overflow,
     )
 
 
-def indexed_unit_parent_path_resolution(vault_root: Path, unit_ref: str) -> tuple[list[str], bool]:
+def indexed_unit_parent_path_resolution(
+    vault_root: Path,
+    unit_ref: str,
+    *,
+    keep: Callable[[str], bool] | None = None,
+    seed_keep: Callable[[str], bool] | None = None,
+) -> tuple[list[str], bool]:
     idx = EpistemicGraphIndex(vault_root)
     conn = idx._open_read_snapshot()
     if conn is None:
         return [], False
     try:
         _status, paths, _seeds, _drift_counts, work_exhausted = _current_unit_status(
-            conn, vault_root, unit_ref
+            GraphView(vault_root, conn, keep=keep, seed_keep=seed_keep), unit_ref
         )
         return paths, work_exhausted
-    finally:
-        conn.close()
-
-
-def unit_ref_indexed_paths(vault_root: Path, unit_ref: str) -> tuple[list[str], bool]:
-    """Every page path the graph can consult while resolving `unit_ref`.
-
-    Resolution walks the parent-ref rows for the reference's parent, current
-    or not, and each row reports drift about its own page; the unit-seed query
-    reads the node rows carrying the reference itself. Both are bounded here
-    exactly as the resolver bounds them. The flag is True when there are more
-    parent rows than the resolver examines.
-    """
-    idx = EpistemicGraphIndex(vault_root)
-    conn = idx._open_read_snapshot()
-    if conn is None:
-        return [], False
-    try:
-        parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
-        parent_rows = (
-            conn.execute(
-                "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
-                (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
-            ).fetchall()
-            if separator and parent_ref
-            else []
-        )
-        # Stored rows carry no public unit refs; the parent rows locate them.
-        paths = {str(row[0]) for row in parent_rows[:UNIT_PARENT_REF_MAX_CANDIDATES]}
-        return sorted(paths), len(parent_rows) > UNIT_PARENT_REF_MAX_CANDIDATES
     finally:
         conn.close()
 
@@ -11278,6 +11252,7 @@ class GraphView:
         conn: sqlite3.Connection,
         *,
         keep: Callable[[str], bool] | None = None,
+        seed_keep: Callable[[str], bool] | None = None,
         interpretations: semantic_index.Interpretations | None = None,
         admitted: dict[str, bool] | None = None,
         resolver: vault_module.WikilinkResolver | None = None,
@@ -11286,6 +11261,8 @@ class GraphView:
         self.vault_root = Path(vault_root)
         self.conn = conn
         self.keep = keep
+        self.seed_keep = seed_keep if seed_keep is not None else keep
+        self._unit_parents: dict[str, tuple[list[str], bool]] = {}
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
@@ -11373,22 +11350,54 @@ class GraphView:
             },
         }
 
-    def indexed_units(self, unit_ref: str) -> list[dict[str, Any]]:
-        """Stored candidates the stored interpretation places at `unit_ref`."""
+    def unit_parent_candidates(self, unit_ref: str) -> tuple[list[str], bool]:
+        """Admit indexed parents before interpretation, diagnostics, or the cap."""
         parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
         if not separator or not parent_ref:
-            return []
+            return [], False
+        if parent_ref not in self._unit_parents:
+            candidates: list[str] = []
+            overflow = False
+            for (path,) in self.conn.execute(
+                "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path",
+                (parent_ref,),
+            ):
+                rel = str(path)
+                try:
+                    vault_module.resolve_under_vault(self.vault_root, rel)
+                except vault_module.VaultPathError:
+                    continue
+                if not _recall_path_allowed(self.vault_root, rel):
+                    # Missing ordinary owner paths retain stale diagnostics;
+                    # they never gain permission to read stored summaries.
+                    if not _placeholder_path_allowed(self.vault_root, rel) or not access.is_indexable(
+                        self.vault_root, rel
+                    ):
+                        continue
+                    try:
+                        vault_module.PathGuard.capture(self.vault_root, rel, leaf_policy="absent")
+                    except (OSError, vault_module.PathGuardError):
+                        continue
+                if self.seed_keep is not None and not self.seed_keep(rel):
+                    continue
+                if len(candidates) == UNIT_PARENT_REF_MAX_CANDIDATES:
+                    overflow = True
+                    break
+                candidates.append(rel)
+            self._unit_parents[parent_ref] = candidates, overflow
+        return self._unit_parents[parent_ref]
+
+    def indexed_units(self, unit_ref: str) -> list[dict[str, Any]]:
+        """Stored candidates the stored interpretation places at `unit_ref`."""
+        candidates, _overflow = self.unit_parent_candidates(unit_ref)
         found: list[dict[str, Any]] = []
-        for (path,) in self.conn.execute(
-            "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT ?",
-            (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES),
-        ).fetchall():
-            parent = self.parent(str(path))
+        for path in candidates:
+            parent = self.parent(path)
             for unit in parent.structure.units if parent is not None else ():
                 if unit.unit_ref != unit_ref:
                     continue
                 row = _node_by_key(
-                    self.conn, _candidate_key(str(path), unit.occurrence_key, unit.form)
+                    self.conn, _candidate_key(path, unit.occurrence_key, unit.form)
                 )
                 if row is not None:
                     found.append(_served_candidate(row, unit))

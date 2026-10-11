@@ -3630,19 +3630,11 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-    # A unit seed is a fact about its parent page: resolved against a withheld
-    # parent it answers as a unit of an absent page does (see
-    # `egress.unit_parent_withheld`).
-    graph_unit_ref = unit_ref
-    if unit_ref is not None and egress_module.unit_parent_withheld(
-        vault_root, unit_ref, purpose=purpose
-    ):
-        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=graph_unit_ref,
+        unit_ref=unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -3653,6 +3645,7 @@ def op_graph_context(
         traversal_profile=traversal_profile,
         registry_scope=registry_scope,
         keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
+        seed_keep=egress_module.unit_seed_parent_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
