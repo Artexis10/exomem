@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,172 @@ def _fresh_session() -> None:
         _due_state().reset_emission_state()
     except ImportError:
         pass
+
+
+def test_activation_surfaces_the_relevant_sixth_due_item(vault: Path) -> None:
+    """A global five-item list must not hide overdue work on the page being discussed."""
+    from exomem import lexstore, working_set_index
+
+    for index in range(5):
+        _overdue_prediction(vault, f"older-{index}", check_by="2025-01-01")
+    target = _overdue_prediction(vault, "current-backlog", check_by=_yesterday())
+    _write(vault, target, (vault / target).read_text(encoding="utf-8")
+           + "\n## Observations\n\n- [finding] The backlog remains above its operating limit. ^current\n")
+    _due_state().reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    row = next(row for row in _due_state().served_entries(vault) if row["path"] == target)
+    assert row["ref"] not in {item["ref"] for item in _due_state().served(vault)["top"]}
+
+    packet = writer_lease.invoke_command(
+        _command("activate_context"), vault, turn="Review the current backlog.", anchor=target
+    )
+
+    assert packet.get("relevant_due_refs") == [{
+        "ref": row["ref"], "fingerprint": row["fingerprint"],
+        "category": row["category"], "due_since": row["due_since"],
+        "anchor": packet["anchors"][0]["ref"],
+    }]
+    assert "due_state" not in packet
+    recall = writer_lease.invoke_command(
+        _command("ask_memory"), vault, query="autovacuum backlog", limit=1
+    )
+    assert recall["due_state"]["total"] == 6
+
+    context = writer_lease.invoke_command(
+        _command("review_item_context"), vault,
+        ref=row["ref"], expected_fingerprint=row["fingerprint"],
+    )
+    assert context["target"]["path"] == target
+    dismissed = writer_lease.invoke_command(
+        _command("triage_memory"), vault, ref=row["ref"], action="dismiss",
+        expected_fingerprint=row["fingerprint"], why="handled: reviewed during the current work",
+    )
+    assert dismissed["state"] == "dismissed"
+    after = writer_lease.invoke_command(
+        _command("activate_context"), vault, turn="Review the current backlog.", anchor=target
+    )
+    assert "relevant_due_refs" not in after
+
+
+def test_one_authored_prediction_update_clears_activation_advice(vault: Path) -> None:
+    """Resolution writes authored state once; it must not require a second triage write."""
+    from exomem import lexstore, working_set_index
+
+    target = _overdue_prediction(vault, "bounded-prediction", check_by=_yesterday())
+    source = (vault / target).read_text(encoding="utf-8")
+    source = source.replace("type: insight\n", "type: insight\nexomem_id: 00000000-0000-4000-8000-000000000091\n")
+    source = source.replace("## Prediction\n\n", "## Prediction\n\n- category: prediction\n")
+    source += "\n## Observations\n\n- [finding] The backlog remains above its operating limit. ^current\n"
+    _write(vault, target, source)
+    _due_state().reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    packet = writer_lease.invoke_command(
+        _command("activate_context"), vault, turn="Review this prediction.", anchor=target
+    )
+    (candidate,) = packet["relevant_due_refs"]
+    with pytest.raises(ValueError, match="REVIEW_ITEM_CHANGED"):
+        writer_lease.invoke_command(
+            _command("review_item_context"), vault, ref=candidate["ref"],
+            expected_fingerprint="0" * 24,
+        )
+    read = writer_lease.invoke_command(
+        _command("read_memory"), vault, path=target,
+        unit_ref="exomem://memory/00000000-0000-4000-8000-000000000091#p1",
+    )
+    assert read["status"] == "found"
+    assert read["unit"]["fingerprint"] != candidate["fingerprint"]
+
+    updated = writer_lease.invoke_command(
+        _command("observe_memory"), vault, path=target, operation="update", kind="prediction",
+        category="prediction", content=read["unit"]["content"], verdict="confirmed",
+        unit_ref=read["unit_ref"], expected_fingerprint=read["unit"]["fingerprint"],
+        expected_hash=read["parent"]["content_hash"],
+    )
+
+    assert updated["status"] == "committed"
+    assert "verdict: confirmed" in (vault / target).read_text(encoding="utf-8")
+    assert not _due_state().served_entries(vault, paths=frozenset({target}), recover=False)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    after = writer_lease.invoke_command(
+        _command("activate_context"), vault, turn="Review this prediction.", anchor=target
+    )
+    assert "relevant_due_refs" not in after
+
+
+def test_bounded_due_reads_do_not_contaminate_full_served_views(vault: Path) -> None:
+    """A partial activation view must not replace the cache used by ordinary due lists."""
+    first = _overdue_prediction(vault, "first", check_by="2025-01-01")
+    second = _overdue_prediction(vault, "second", check_by=_yesterday())
+    _due_state().reconcile(vault)
+    before = _due_state().served_entries(vault)
+    selected = _due_state().served_entries(vault, paths=frozenset({second}), recover=False)
+    assert [row["path"] for row in selected] == [second]
+    assert first in {row["path"] for row in before}
+    assert _due_state().served_entries(vault) == before
+
+
+@pytest.mark.parametrize("evidence", ["recent", "partial"])
+def test_recent_or_partial_context_does_not_raise_due_advice(vault: Path, evidence: str) -> None:
+    """A recent pointer or one partial name cannot associate an unrelated interruption."""
+    from exomem import lexstore, working_set_heat, working_set_index
+
+    target = "Knowledge Base/Products/Glacier Cargo.md"
+    _write(vault, target,
+           "---\ntype: product\nstatus: active\nupdated: 2026-01-01\n---\n\n"
+           "# Glacier Cargo\n\nA freight carrier.\n\n"
+           "- [constraint] Keep the load below its operating limit. ^limit\n\n"
+           "## Prediction\n\n- id: p1\n- check_by: " + _yesterday()
+           + "\n\nThe carrier supports the planned load.\n")
+    _due_state().reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    if evidence == "recent":
+        assert working_set_heat.append(vault, [
+            working_set_heat.HeatEvent(time.time_ns(), target, "work", origin="edit_memory")
+        ])
+    packet = writer_lease.invoke_command(
+        _command("activate_context"), vault,
+        turn="ok continue" if evidence == "recent" else "Glacier",
+    )
+
+    if evidence == "recent":
+        assert target in {item["path"] for item in packet["recent_context"]}
+    else:
+        assert any(item["path"] == target and item["status"] == "partial"
+                   for item in packet["anchors"])
+    assert not any(item["status"] == "resolved" for item in packet["anchors"])
+    assert "relevant_due_refs" not in packet
+
+
+@pytest.mark.parametrize("projection", ["missing", "unreadable"])
+def test_activation_omits_unavailable_due_projection_without_recovery(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, projection: str,
+) -> None:
+    """Advice must not turn an otherwise valid activation into a vault recovery pass."""
+    from exomem import lexstore, working_set_index
+
+    target = _scratch_page(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    if projection == "unreadable":
+        _due_state().state_path(vault).write_text("{invalid", encoding="utf-8")
+    scans: list[Path] = []
+
+    def attempted(root, **kwargs):
+        scans.append(root)
+        raise AssertionError("activation requested due recovery")
+
+    monkeypatch.setattr(_due_state(), "_schedule_reconcile", attempted)
+    packet = writer_lease.invoke_command(
+        _command("activate_context"), vault, turn="Review the connection pool.", anchor=target
+    )
+    assert packet["abstained"] is False
+    assert "relevant_due_refs" not in packet
+    assert "due_state" not in packet
+    assert scans == []
 
 
 # ==========================================================================

@@ -9,6 +9,8 @@ tool-surface digest does not depend on how a particular install is configured.
 
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from starlette.testclient import TestClient
 
 from exomem import commands, server, working_set_index, working_set_runtime
 from exomem.__main__ import main as cli_main
+from exomem.governance.principal import library_scope
 
 TURN = "I'm planning to tow the Cargo Sled north — what are its constraints?"
 
@@ -63,7 +66,7 @@ def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, 
     return code, captured.out
 
 
-def _rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def _surface_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in (
         "EXOMEM_UPLOAD_TOKEN",
@@ -72,8 +75,11 @@ def _rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     ):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
-    mcp = server.build_server(require_auth=False)
-    return TestClient(mcp.http_app())
+    return server.build_server(require_auth=False)
+
+
+def _rest_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    return TestClient(_surface_server(monkeypatch).http_app())
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +169,47 @@ def test_three_doors_return_the_same_packet(
     assert rest_packet["generation"]["index_generation"] == direct["generation"][
         "index_generation"
     ]
+
+
+def test_mcp_and_rest_return_the_same_relevant_due_identity(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remote activation must retain a complete review identity through both dispatchers."""
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import due_state, lexstore
+
+    mcp = _surface_server(monkeypatch)
+    client = TestClient(mcp.http_app())
+    _seed_structure(vault)
+    _seed_planning(vault)
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    target = vault / page
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n## Prediction\n\n- id: capacity-check\n- check_by: "
+        + (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        + "\n\nThe runners withstand the planned load.\n",
+        encoding="utf-8",
+    )
+    due_state.reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    row = next(row for row in due_state.served_entries(vault) if row["path"] == page)
+    arguments = {"turn": TURN, "anchor": page}
+
+    rest = client.post("/api/activate_context", json=arguments,
+                       headers={"Authorization": "Bearer sekret"})
+    assert rest.status_code == 200, rest.text
+    with library_scope():
+        result = asyncio.run(mcp.call_tool("activate_context", arguments, run_middleware=False))
+    packet = result.structured_content
+
+    assert rest.json()["data"]["relevant_due_refs"] == packet["relevant_due_refs"]
+    (candidate,) = packet["relevant_due_refs"]
+    assert candidate["ref"] == row["ref"] and candidate["fingerprint"] == row["fingerprint"]
+    assert "due_state" not in packet and "due_state" not in rest.json()["data"]
 
 
 def test_the_long_cli_name_reaches_the_same_leaf(

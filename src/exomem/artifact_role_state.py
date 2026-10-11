@@ -810,7 +810,9 @@ def apply_delta(root: Path, path: str, parsed: Any, *, families: set[str]) -> No
         )
 
 
-def served(root: Path, authorize: Callable[[str], bool]) -> tuple[list[Any], dict[str, str]]:
+def served(
+    root: Path, authorize: Callable[[str], bool], *, paths: frozenset[str] | None = None,
+) -> tuple[list[Any], dict[str, str]]:
     import sqlite3
 
     unknown = dict.fromkeys(sensor.FAMILIES, "unknown")
@@ -822,17 +824,19 @@ def served(root: Path, authorize: Callable[[str], bool]) -> tuple[list[Any], dic
         ) as connection:
             index = _stored_index(connection)
             index["_deadline"] = time.monotonic() + 0.2
-            paths = []
-            for position, path in enumerate(itertools.islice(index["origins"], MAX_EDGES + 1)):
+            origins = index["origins"]
+            selected = sorted(paths) if paths is not None else origins
+            origin_paths = []
+            for position, path in enumerate(itertools.islice(selected, MAX_EDGES + 1)):
                 _checkpoint(index)
                 if position == MAX_EDGES:
                     return [], dict.fromkeys(sensor.FAMILIES, "capped")
-                if not authorize(path):
+                if (paths is not None and path not in origins) or not authorize(path):
                     continue
-                paths.append(path)
-                if len(paths) > MAX_SERVED_ORIGINS:
+                origin_paths.append(path)
+                if len(origin_paths) > MAX_SERVED_ORIGINS:
                     return [], dict.fromkeys(sensor.FAMILIES, "capped")
-            index["origins"] = {path: index["origins"][path] for path in paths}
+            index["origins"] = {path: origins[path] for path in origin_paths}
             return inspect(root, index, authorize)
     except Exception:  # noqa: BLE001 - compact carriers never expose invalid advice
         log.debug("keyed artifact role projection unavailable", exc_info=True)

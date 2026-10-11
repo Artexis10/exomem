@@ -96,7 +96,12 @@ from typing import Any
 
 from . import call_spans
 from . import review_state as review_state_module
-from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer, selected_writer
+from .collection_store.preview import (
+    bound_writer,
+    canonical_read,
+    selected_projection_writer,
+    selected_writer,
+)
 from .planning_values import PlanningValues
 
 log = logging.getLogger(__name__)
@@ -2522,6 +2527,83 @@ def in_batch_scope() -> bool:
 # --------------------------------------------------------------------------
 
 
+def relevant_material(packet: Mapping[str, Any]) -> dict[str, str]:
+    """Exact released current page paths and their already served parent identities."""
+    from . import context_refs, retained_inputs
+    from .governance import egress
+
+    if packet.get("abstained"):
+        return {}
+    material = {
+        str(anchor["path"]): str(anchor["ref"])
+        for anchor in packet.get("anchors") or ()
+        if isinstance(anchor, Mapping) and anchor.get("status") == "resolved"
+        and anchor.get("path") and anchor.get("ref")
+    }
+    if not material:
+        return {}
+    for unit in packet.get("units") or ():
+        if not isinstance(unit, Mapping) or unit.get("history") is True:
+            continue
+        provenance = unit.get("provenance") or {}
+        if not isinstance(provenance, Mapping) or not provenance.get("path"):
+            continue
+        path = str(provenance["path"])
+        reference = str(unit.get("ref") or "")
+        try:
+            parent, _ = retained_inputs.parse_reference(reference)
+        except retained_inputs.RetainedInputError:
+            parsed, explicit = egress._unwrap_reference(reference)
+            if parsed != path:
+                continue
+            parent = context_refs.vault_ref(path) if explicit else reference
+        material.setdefault(path, parent)
+    for state in packet.get("current_state") or ():
+        if isinstance(state, Mapping) and state.get("path") and state.get("statement"):
+            # A current-state source releases its path, not its own canonical ref.
+            path = str(state["path"])
+            material.setdefault(path, path)
+    return material
+
+
+def for_activation(
+    vault_root: Path, packet: dict[str, Any], *, purpose: str | None = None,
+) -> None:
+    """Associate one existing due finding with current material, without recovery."""
+    material = relevant_material(packet)
+    if not material:
+        return
+    try:
+        rows = served_entries(vault_root, paths=frozenset(material), recover=False, purpose=purpose)
+    except Exception:  # noqa: BLE001 - missing advice never prevents current context
+        log.debug("relevant due advice unavailable", exc_info=True)
+        return
+    for row in rows:
+        anchor = material.get(str(row.get("path") or ""))
+        if anchor:
+            packet["relevant_due_refs"] = [{
+                "ref": row["ref"], "fingerprint": row["fingerprint"],
+                "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
+            }]
+            return
+
+
+def filter_relevant_refs(packet: dict[str, Any]) -> dict[str, Any]:
+    """Withdraw advice whose exact released material disappeared at final egress."""
+    if "relevant_due_refs" not in packet:
+        return packet
+    material = frozenset(relevant_material(packet).values())
+    kept = [
+        item for item in packet["relevant_due_refs"]
+        if isinstance(item, Mapping) and item.get("anchor") in material
+    ][:1]
+    if kept:
+        packet["relevant_due_refs"] = kept
+    else:
+        packet.pop("relevant_due_refs", None)
+    return packet
+
+
 @canonical_read
 def served_entries(
     vault_root: Path,
@@ -2530,8 +2612,14 @@ def served_entries(
     now: dt.datetime | None = None,
     principal: Any = None,
     purpose: str | None = None,
+    paths: frozenset[str] | None = None,
+    recover: bool = True,
 ) -> list[dict[str, Any]]:
     """Every open item this audience may see, most-overdue first -- memoised.
+
+    `paths` selects stored page buckets before recomposition and bypasses this
+    full-view cache. `recover=False` omits a missing or unreadable projection.
+    JSON decoding still reads the whole projection file.
 
     Rebuilding the rows on every recall was the whole cost of a read on the
     personal vault -- 25 s before PR #1279 and still 0.6 s idle to 4 s under
@@ -2563,6 +2651,12 @@ def served_entries(
         now = now.astimezone(dt.UTC)
     effective_now = now or dt.datetime.now(dt.UTC)
     today = today or effective_now.date()
+    if paths is not None or not recover:
+        # A partial audience view never populates or reuses the full served cache.
+        return _served_entries_uncached(
+            vault_root, today=today, now=effective_now, principal=principal,
+            purpose=purpose, paths=paths, recover=recover,
+        )[0]
     writer = bound_writer(vault_root)
     if writer is not None:
         return _served_entries_uncached(
@@ -2712,6 +2806,8 @@ def _served_entries_uncached(
     principal: Any = None,
     purpose: str | None = None,
     payload: dict[str, Any] | None = None,
+    paths: frozenset[str] | None = None,
+    recover: bool = True,
 ) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
     """The build behind `served_entries`, and what a memo of it must re-check.
 
@@ -2731,6 +2827,9 @@ def _served_entries_uncached(
     horizon: dt.datetime | None = None
     if payload is None:
         payload = load(vault_root)
+    if payload is None and not recover:
+        # Activation omits unavailable advice rather than starting a vault scan.
+        return [], None, {}, None
     if payload is None:
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
@@ -2738,6 +2837,16 @@ def _served_entries_uncached(
         payload = _schedule_reconcile(vault_root, today=today)
         if payload is None:
             return [], None, {}, None
+
+    if paths is not None:
+        payload = {
+            **payload,
+            "categories": {
+                category: {path: pages[path] for path in sorted(paths) if path in pages}
+                for category, pages in (payload.get("categories") or {}).items()
+                if isinstance(pages, dict)
+            },
+        }
 
     if _owes_nothing(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
@@ -2801,7 +2910,10 @@ def _served_entries_uncached(
     if isinstance(role_index, dict):
         from . import artifact_role_review, artifact_role_state
         try:
-            findings, _ = artifact_role_state.served(vault_root, keep)
+            findings, _ = (
+                artifact_role_state.served(vault_root, keep, paths=paths)
+                if paths is not None else artifact_role_state.served(vault_root, keep)
+            )
             role_token = _findings_token(findings)
             role_grouped = _entries_from_findings(vault_root, findings)
             for family in artifact_role_review.FAMILIES:

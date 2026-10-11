@@ -1909,9 +1909,20 @@ def op_bootstrap(
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
-                    if profile == "compact" and not frozen_profile
-                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                    "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
+                    "Raise at most one due item per maintained client conversation in the user's language. "
+                    "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
+                    "receipt is not a mention. Dismissed or snoozed fingerprints stay quiet until state changes. "
+                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
+                ),
+                "relevant_due_handling": (
+                    "For relevant_due_refs, read review_item_context(ref, expected_fingerprint); bounded context may need a wider audit. "
+                    "review_memory has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
+                    "One applicable writer, such as observe_memory(operation='update'), resolves with the real unit "
+                    "fingerprint and parent hash. Its delta clears the finding without extra triage; "
+                    "a due fingerprint is not a unit fingerprint. One triage_memory(ref, action='dismiss', "
+                    "expected_fingerprint, why) records presentation disposition, not authored resolution. "
+                    "Preserve existing mutation authority."
                 ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
@@ -2386,16 +2397,7 @@ def _bootstrap_latency_block() -> list[dict] | None:
         return None
 
 
-_SESSION_POST_WRITE_KEYS = (
-    "due_state",
-    "due_state_handling",
-    "due_state_authority",
-    "capture_sweep_handling",
-    "artifact_role_state_handling",
-    "review_reason",
-    "family_disposition",
-    "family_disposition_reading",
-)
+_SESSION_POST_WRITE_KEYS = bootstrap_core_module.SESSION_POST_WRITE_KEYS
 
 
 def _session_bootstrap_projection(compact: dict) -> dict:
@@ -6516,7 +6518,8 @@ def op_activate_context(
     Read-only: returns bounded recent_context, anchored units, provenance,
     pointers and governed current_state. Abstains rather than guesses.
     On ambiguous or unresolved candidates, choose a ref and retry with anchor.
-    episode_due and upkeep are advisory, never mutation authority.
+    episode_due, upkeep and relevant_due_refs are advisory, never mutation authority.
+    Judge due relevance; raise at most one due item per maintained client conversation.
     Details: bootstrap(profile="full") reference index, references/recall.md.
 
     If needed, also pass `conversation`: optional `focus`, `refs`, `recent`
@@ -6618,6 +6621,10 @@ def op_activate_context(
             upkeep_module.for_packet(vault_root, packet, session=session)
             # Also outside the cache: each resolved anchor page's sensed status.
             sensed_model.for_packet(vault_root, packet)
+            from . import due_state as due_state_module
+
+            # Guarded material supplies relevance; the agent decides whether to raise it.
+            due_state_module.for_activation(vault_root, packet, purpose=purpose)
         except Exception as error:
             query_log.log_activation_call(
                 vault_root,
