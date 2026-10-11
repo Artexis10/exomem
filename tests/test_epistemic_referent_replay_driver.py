@@ -142,10 +142,15 @@ class _Agent:
 
     ``capture`` writes into the run's own vault, found through the environment the
     driver hands the child. ``faults`` makes the first N invocations exit non-zero.
+    ``recent_only`` names the referent only in the packet's ``recent_context``.
     """
 
-    def __init__(self, case_id: str, profile: Path, *, capture: bool = False, faults: int = 0):
+    def __init__(
+        self, case_id: str, profile: Path, *, capture: bool = False, faults: int = 0,
+        recent_only: bool = False,
+    ):
         self.case_id, self.profile, self.capture, self.faults = case_id, profile, capture, faults
+        self.recent_only = recent_only
         self.calls: list[list[str]] = []
         self.exomem_id: str | None = None
 
@@ -167,6 +172,9 @@ class _Agent:
             "units": [{"ref": memory_ref(self.exomem_id), "provenance": {"path": entity}}],
             "pointers": [],
         }
+        if self.recent_only:
+            served = {"ref": memory_ref(self.exomem_id), "path": entity, "why": "edited"}
+            packet = {"recent_context": [served], "anchors": [], "units": [], "pointers": []}
         return _Proc(
             _stream(
                 init,
@@ -231,6 +239,24 @@ def test_the_fresh_session_packet_is_recorded_and_its_refs_map_to_snapshot_ids(t
         "referent_used_in_fresh_session": "pass",
     }
     assert [call["name"] for call in run["tool_calls"]] == ["mcp__exomem__activate_context"]
+
+
+def test_a_referent_named_only_in_recent_context_is_not_served(tmp_path) -> None:
+    """Fails when recent_context alone counts as serving the referent (ruling of 2026-10-11).
+
+    A capture session edits the referent's page, so recent work names it whatever
+    the question was; the answer here states the key value, and "uses" must still fail.
+    """
+
+    agent = _Agent(PET, _profile(tmp_path), capture=True, recent_only=True)
+    result = _run(tmp_path, agent, case_ids=[PET], repeats=1)
+
+    assert result["manifest"]["uses_rule"]["fixed_before_any_baseline"] is True
+    run = json.loads((tmp_path / "out" / PET / "hookless" / "attempt-01" / "run.json").read_text())
+    entity_id = f"Knowledge Base/Entities/Companions/{_key(PET)['referent']['name']}"
+    assert {(ref["item_id"], ref["serves"]) for ref in run["packet"]["refs"]} == {(entity_id, False)}
+    uses = run["assertions"]["referent_used_in_fresh_session"]
+    assert (uses["outcome"], "does not serve" in uses["evidence"]) == ("fail", True)
 
 
 def test_a_quiet_twin_is_scored_on_the_runtime_projection_rather_than_blocked(tmp_path) -> None:

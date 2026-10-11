@@ -45,6 +45,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -71,6 +72,34 @@ ACTIVATE_TOOL = "mcp__exomem__activate_context"
 #: provenance and current state. The packet schema fixes this set
 #: (`exomem.working_set.build_packet`); it is not a reading of meaning.
 PACKET_REF_KEYS = frozenset({"ref", "path", "anchor"})
+#: Ruling of 2026-10-11, fixed before any baseline run: a ref is served when it is
+#: a packet anchor, the provenance of a served unit, or a pointer. recent_context
+#: never serves, because edit time, not the question, chooses it.
+SERVING_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "anchors": frozenset({"ref", "path"}),
+        "units": frozenset({"provenance.path", "provenance.anchor"}),
+        "pointers": frozenset({"ref"}),
+    }
+)
+#: The same ruling for a hook-delivered packet, by the line labels the hook gives
+#: those sections (`exomem_retrieve_nudge._packet_lines`); `recent`, `session`,
+#: `state` and `upkeep` lines never serve.
+SERVING_HOOK_LABELS = frozenset({"referent", "unit", "carried", "history", "carried history", "pointer"})
+USES_RULE = {
+    "fixed_on": "2026-10-11",
+    "fixed_before_any_baseline": True,
+    "served": (
+        "A ref is served when it is a packet anchor, the provenance (path or anchor) of a "
+        "served unit, or a pointer. recent_context never serves: edit time, not the "
+        "question, chooses it."
+    ),
+    "no_activation": (
+        "A complete fresh stream with no activate_context call and no hook packet received "
+        "an empty packet, so 'uses' fails rather than blocks. An errored or unreadable "
+        "activation blocks."
+    ),
+}
 #: The CLI's own marker for a plugin it ships, as its `init` line writes it.
 BUILTIN_PLUGIN_PATH = "builtin"
 #: The client's documented hook event that adds context before the model answers.
@@ -308,53 +337,70 @@ def packet_captures(stdout: str) -> tuple[list[dict[str, Any]], str | None]:
     return captured, None
 
 
-def _packet_refs(value: Any) -> Iterable[str]:
+def _packet_refs(value: Any, path: tuple[str, ...] = ()) -> Iterable[tuple[str, str]]:
+    """``(field, ref)`` for every locator in one packet section, e.g. ``provenance.path``."""
+
     if isinstance(value, dict):
         for key, child in value.items():
             if key in PACKET_REF_KEYS and isinstance(child, str) and child:
-                yield child
+                yield ".".join((*path, key)), child
             else:
-                yield from _packet_refs(child)
+                yield from _packet_refs(child, (*path, key))
     elif isinstance(value, list):
         for child in value:
-            yield from _packet_refs(child)
+            yield from _packet_refs(child, path)
+
+
+def _hook_lines(text: str) -> Iterable[tuple[str, str]]:
+    """``(label, ref)`` per rendered packet line, ``- label: text [ref]``.
+
+    The hook's own line format (``exomem_retrieve_nudge._packet_line``); a line
+    without a trailing ref carries nothing to serve.
+    """
+
+    for line in text.splitlines():
+        if line.startswith("- ") and line.endswith("]") and "[" in line:
+            yield line[2:].split(":", 1)[0], line.rsplit("[", 1)[1][:-1]
 
 
 def served_refs(
     captures: Sequence[Mapping[str, Any]], snapshot: EpistemicStateSnapshot
 ) -> list[dict[str, Any]]:
-    """Each ref a packet served, with the snapshot item it names, or ``None``.
+    """Every ref a packet carried: the snapshot item it names, and whether it serves.
 
     The assertion matches item ids, locators and ``exomem_id`` exactly, so a
     memory ref is resolved to its ``exomem_id`` through the product's own
-    parser, and a path to the item whose locator or id it is. A hook carries
-    the packet rendered as text, each line ending in ``[ref]``
-    (``exomem_retrieve_nudge._packet_line``), so an item is served by a hook
-    when one of its refs appears in that form.
+    parser, and a path to the item whose locator or id it is. Every ref is
+    recorded, so a run file shows what the ruling left out as well as what it
+    counted; only ``serves`` refs reach the "uses" test.
     """
 
-    from exomem.memory_refs import memory_ref, normalize_id, parse_memory_ref
+    from exomem.memory_refs import normalize_id, parse_memory_ref
 
-    ids = {item.id: normalize_id(item.raw.get("exomem_id")) for item in snapshot.items}
-    by_id = {memory_id: item_id for item_id, memory_id in ids.items() if memory_id}
+    by_id = {
+        normalize_id(item.raw.get("exomem_id")): item.id
+        for item in snapshot.items
+        if normalize_id(item.raw.get("exomem_id"))
+    }
     by_path = {item.locator: item.id for item in snapshot.items if item.locator}
     by_path.update({item.id: item.id for item in snapshot.items})
+
+    def row(source: str, section: str, field: str, ref: str, serves: bool) -> dict[str, Any]:
+        memory_id = parse_memory_ref(ref)
+        item_id = by_id.get(memory_id) if memory_id else by_path.get(ref)
+        return {"source": source, "section": section, "field": field, "ref": ref,
+                "item_id": item_id, "serves": serves}
+
     out: list[dict[str, Any]] = []
     for capture in captures:
         if capture["source"] == "activate_context":
             for section, value in capture["packet"].items():
-                for ref in _packet_refs(value):
-                    memory_id = parse_memory_ref(ref)
-                    item_id = by_id.get(memory_id) if memory_id else by_path.get(ref)
-                    out.append(
-                        {"source": "activate_context", "section": section, "ref": ref, "item_id": item_id}
-                    )
-            continue
-        for item in snapshot.items:
-            handles = [item.id, item.locator, ids[item.id] and memory_ref(ids[item.id])]
-            for handle in filter(None, handles):
-                if f"[{handle}]" in capture["text"]:
-                    out.append({"source": "hook", "section": "hook", "ref": handle, "item_id": item.id})
+                for field, ref in _packet_refs(value):
+                    serves = field in SERVING_FIELDS.get(section, ())
+                    out.append(row("activate_context", section, field, ref, serves))
+        else:
+            for label, ref in _hook_lines(capture["text"]):
+                out.append(row("hook", label, "line", ref, label in SERVING_HOOK_LABELS))
     return out
 
 
@@ -578,7 +624,9 @@ def run_once(
         if not answer.strip():
             return blocked("fresh session: the answer was not captured")
         record["fresh_answer"] = answer
-        served = tuple(dict.fromkeys(ref["item_id"] for ref in refs if ref["item_id"]))
+        served = tuple(
+            dict.fromkeys(ref["item_id"] for ref in refs if ref["serves"] and ref["item_id"])
+        )
 
     for name in _expectations(case.case_id, shape, cases_root):
         context = AssertionContext(
@@ -758,6 +806,7 @@ def run_driver(
         "max_attempts": max_attempts,
         "cases": list(case_ids or case_set),
         "shapes": list(shapes),
+        "uses_rule": USES_RULE,
         "hookless_label": (
             "The hookless shape is a proxy for a hookless client such as ChatGPT, "
             "never a ChatGPT result."
