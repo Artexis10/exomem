@@ -316,7 +316,7 @@ async def read_import(connection: asyncpg.Connection, cell_id: str):
     # Migration 0061 fixes the open predicate; terminal history only repairs an orphan C1 hold.
     record = await connection.fetchrow(
         "SELECT * FROM (SELECT i.*, (observed_state IS NULL OR "
-        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_pending') OR "
+        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
         "(requested_state='discard_requested' AND observed_state IS DISTINCT FROM 'discarded')) AS is_open "
         "FROM exomem_cloud_imports i WHERE cell_id=$1) requests WHERE is_open OR "
         "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import') "
@@ -362,7 +362,14 @@ async def finalize_import(connection: asyncpg.Connection, cell_id: str, import_i
             "SELECT requested_state, observed_state, error_code FROM exomem_cloud_imports "
             "WHERE cell_id=$1 AND import_id=$2 FOR UPDATE", cell_id, uuid.UUID(import_id),
         )
-        if item is None or item["observed_state"] != "cleanup_stopping":
+        # C5 fixes these stopping observations as proof of a completed cleanup phase.
+        if item is None or item["observed_state"] not in ("cleanup_stopping", "cleanup_discard_stopping"):
+            return None
+        # Keep-adoption completion cannot acknowledge newer full-discard intent.
+        if item["observed_state"] == "cleanup_stopping" and item["requested_state"] in ("cancelled", "discard_requested"):
+            await write_import(connection, import_id, {"observed_state": "cleanup_running"})
+            started_at = await connection.fetchval("SELECT clock_timestamp()")
+            await write_observed(connection, cell_id, {"hold_kind": "import", "hold_started_at": started_at})
             return None
         # C5 fixes intent, expiry codes and terminal observations.
         if item["requested_state"] in ("cancelled", "discard_requested"):

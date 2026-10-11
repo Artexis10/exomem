@@ -1,4 +1,4 @@
--- Imported from Substrate 47ef7757da2a1a6089eadcf1f0cb7d6fd67583a8:migrations/0060_exomem_cloud_imports.sql
+-- Imported from Substrate 100485eeced0b94c9ab550bb65cb3bb2b60f0eb2:migrations/0060_exomem_cloud_imports.sql
 -- C5 is the content-free request/observation contract shared with cellctl.
 -- The protocol fixes these state and kind enums; neither contains tenant vocabulary.
 ALTER TABLE exomem_cloud_cells DROP CONSTRAINT exomem_cloud_cells_hold_kind_check;

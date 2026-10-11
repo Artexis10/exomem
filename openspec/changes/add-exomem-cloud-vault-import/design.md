@@ -294,13 +294,18 @@ upload URLs before local cleanup removes private keys. Cleanup can repeat after
 a restart because local removal and verified transport deletion are idempotent.
 The controller never prepares or imports from a cleanup observation.
 
-Successful local and transport cleanup becomes `cleanup_stopping` before the
-controller removes completed Jobs. That state never repeats cleanup, including
-when cancellation arrives later. Every prepare, import, cleanup and discard Job
-controller and Pod must be absent before terminal publication. The controller
-locks C1 and C5 in the API's C1-first order, reads current cancellation intent,
-and publishes the terminal outcome with C1 hold release in one transaction.
-This keeps the open slot occupied while Kubernetes removes Jobs and Pods.
+Successful keep-adoption cleanup becomes `cleanup_stopping`. Successful full
+discard and transport cleanup becomes `cleanup_discard_stopping`. The completed
+Job phase fixes this observation, not a newer requested intent. Both states
+retain the open slot until all phase Job controllers and Pods are absent.
+
+The controller locks C1 and C5 in API admission order and reads current observed
+state, intent and lifecycle. Ordinary cleanup with newer cancellation or discard
+rearms `cleanup_running` and a fresh bounded C1 hold in the same transaction.
+It preserves the original error and makes no runtime manifest or release change.
+The next pass runs full discard, including removal of adoption material.
+Full-discard completion never repeats cleanup. Terminal publication and C1 hold
+release remain atomic, and only completed full discard can publish `discarded`.
 
 Cleanup failure uses `cleanup_pending`. It retains the original work outcome
 and occupies the cell's single open import slot. A failed attempt removes every
@@ -319,3 +324,9 @@ runtime stopped. Deletion stops import Jobs, then uses ordinary verified cell
 deletion instead of recurring cleanup. Committed RAW sources and receipts survive
 import cleanup. A successful import retains its outcome across cleanup retries,
 even when the original upload deadline has passed.
+
+### Cleanup rollback boundary
+
+Deploy migration 0061 before the controller uses the new observations. Keep the
+new controller while records use `cleanup_discard_stopping`; older readers do
+not reliably understand that open state.

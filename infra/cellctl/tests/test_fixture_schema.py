@@ -180,7 +180,7 @@ async def test_c5_cleanup_and_terminal_discard_both_keep_the_open_import_slot(ce
         await owner.execute("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')", "abcdefghijklmnop", tenant)
         insert = "INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES('abcdefghijklmnop','adopt',0,0) RETURNING import_id"
         import_id = await app.fetchval(insert)
-        for state in ("cleanup_running", "cleanup_stopping", "cleanup_pending"):
+        for state in ("cleanup_running", "cleanup_stopping", "cleanup_discard_stopping", "cleanup_pending"):
             await controller.execute("UPDATE exomem_cloud_imports SET observed_state=$2 WHERE import_id=$1", import_id, state)
             assert (await db.read_import(controller, "abcdefghijklmnop")).observed_state == state
             with pytest.raises(asyncpg.UniqueViolationError):

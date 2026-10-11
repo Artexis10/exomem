@@ -1,4 +1,4 @@
--- Imported from Substrate 47ef7757da2a1a6089eadcf1f0cb7d6fd67583a8:scripts/exomem-cloud-grants.sql
+-- Imported from Substrate 100485eeced0b94c9ab550bb65cb3bb2b60f0eb2:scripts/exomem-cloud-grants.sql
 -- Idempotent least-privilege grants for the Exomem Cloud control plane
 -- (design D7). This script is the single implementation of:
 --

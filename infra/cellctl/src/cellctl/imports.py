@@ -113,7 +113,7 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
         return release() if active_hold == "import" or remaining else None
     if image is None:
         return None  # Ordinary first provisioning must produce the cell image and claim.
-    if item.observed_state == "cleanup_stopping":
+    if item.observed_state in ("cleanup_stopping", "cleanup_discard_stopping"):
         decision = held()
         decision.stop_import_jobs = remaining
         if not remaining:
@@ -169,7 +169,9 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             return decision
         if cleanup_job.succeeded:
             decision.cleanup_import_transport = True
-            decision.import_updates.update(observed_state="cleanup_stopping", recipient=None, upload_id=None)
+            # The succeeded Job phase fixes cleanup scope; finalization reads newer intent under lock.
+            decision.import_updates.update(observed_state="cleanup_discard_stopping" if cleanup_phase == "discard" else "cleanup_stopping",
+                                           recipient=None, upload_id=None)
             decision.stop_import_jobs = remaining
             return decision
         if not cleanup_job.active and not cleanup_job.exists:

@@ -1530,7 +1530,7 @@ async def _reconcile_row(
         if decision.finalize_import:
             current = await db.finalize_import(connection, row.cell_id, item.import_id)
             if current is None:
-                return False  # Lifecycle or a newer observation wins; reread next pass.
+                return False  # Rearmed discard, lifecycle or a newer observation wins; reread next pass.
             row = dataclass_replace(current, hold_kind=None, hold_started_at=None, last_error_code=None)
             decision.hold_kind = None
             decision.hold_started_at = None

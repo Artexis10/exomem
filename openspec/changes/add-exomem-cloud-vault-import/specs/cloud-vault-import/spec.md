@@ -166,22 +166,29 @@ before recording private completion and permitting ciphertext cleanup.
 
 ### Requirement: Cleanup completion preserves exclusive admission and current intent
 
-The controller SHALL record `cleanup_running`, the original work outcome and cleared upload URLs before removing private keys. It SHALL retry only idempotent local and transport cleanup from that state. It SHALL record `cleanup_stopping` after both cleanup stages succeed and before removing Jobs. `cleanup_running`, `cleanup_stopping`, and `cleanup_pending` SHALL occupy the cell's open import slot.
+The controller SHALL record `cleanup_running`, the original work outcome and cleared upload URLs before removing private keys. It SHALL retry only idempotent local and transport cleanup from that state. It SHALL record `cleanup_stopping` after keep-adoption cleanup or `cleanup_discard_stopping` after full discard and transport cleanup. The completed Job phase SHALL determine that observation before Job removal. `cleanup_running`, `cleanup_stopping`, `cleanup_discard_stopping`, and `cleanup_pending` SHALL occupy the cell's open import slot.
 
 The controller SHALL publish the terminal outcome only after every import phase Job controller and Pod is absent. It SHALL lock C1 and C5 in API admission order, read current requested intent and lifecycle state, and publish the outcome with C1 hold release atomically. A new import SHALL use its current recorded C1 hold or a fresh deadline, never a predecessor's StatefulSet deadline.
 
 #### Scenario: Completed cleanup restarts while Kubernetes removes Pods
 
-- **WHEN** the controller restarts after recording `cleanup_stopping` and a terminating or orphan import Pod remains
-- **THEN** it keeps the hold and open slot, removes remaining Jobs, and never replays prepare, import, or cleanup
+- **WHEN** the controller restarts after recording a stopping observation and a terminating or orphan import Pod remains
+- **THEN** it keeps the hold and open slot, removes remaining Jobs, and never replays prepare or import
 
 #### Scenario: Cancellation arrives after the controller reads completion
 
 - **WHEN** cancellation commits after the controller reads `cleanup_stopping` but before terminal publication
-- **THEN** the terminal transaction reads that intent and publishes `discarded` while preserving the original error
-- **AND** it releases C1 in the same transaction and preserves current lifecycle state
+- **THEN** the transaction reads current state and intent and rearms `cleanup_running` with a fresh bounded C1 hold
+- **AND** full discard removes adoption material before `cleanup_discard_stopping` can publish `discarded`
+- **AND** final publication releases C1 in the same transaction and preserves current lifecycle state
 
 #### Scenario: Publication stops before hold release
 
 - **WHEN** the terminal transaction fails before clearing C1
 - **THEN** both terminal publication and hold release roll back and the open slot remains occupied
+
+#### Scenario: Full discard restarts after identity removal
+
+- **WHEN** a full discard restarts after removing the import identity and before recording completion
+- **THEN** it idempotently removes remaining adoption material without preparing or importing again
+- **AND** `cleanup_discard_stopping` waits for all phase Jobs and Pods before releasing admission
