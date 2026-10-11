@@ -552,14 +552,23 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
         r".{0,140}proactive_capture",
         normalized,
     ), (name, "proactive_capture")
-    assert re.search(r"(?:affiliation|accepted) relation.{0,100}link_acceptance", normalized), (
+    # Owner decision O2: only a relation the queue suggested keeps link_acceptance.
+    assert re.search(r"queued relation.{0,60}link_acceptance", normalized), (
         name,
         "link_acceptance",
     )
-    # Ruling R1: a new Entity is additive capture; merge and curation stay confirmed.
+    assert not re.search(
+        r"affiliation relations?:? (?:requires? |uses? )?`?link_acceptance", normalized
+    ), (name, "an affiliation edge the agent authors is not link_acceptance")
+    # Ruling R1 and O2: a new Entity and an authored edge are additive capture;
+    # merge and curation stay confirmed.
     assert re.search(r"(?:new entity|create-entity).{0,80}proactive_capture", normalized), (
         name,
         "new entity proactive_capture",
+    )
+    assert re.search(r"own (?:affiliation )?edge.{0,60}proactive_capture", normalized), (
+        name,
+        "authored edge proactive_capture",
     )
     assert re.search(
         r"merge.{0,60}(?:substantial curation|structural change).{0,100}restructure_execution",
@@ -601,8 +610,6 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             ROOT / "docs" / "ai-assistant-guide.md",
             "## Copyable instruction block",
         ),
-        "prominence balanced": prominence.CONTRACTS["balanced"].capture,
-        "prominence maximal": prominence.CONTRACTS["maximal"].capture,
         "maximal docs": _markdown_block(ROOT / "docs" / "prominence.md", "### Maximal", "### Balanced"),
         "balanced docs": _markdown_block(ROOT / "docs" / "prominence.md", "### Balanced", "### Light"),
     }
@@ -615,6 +622,13 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             mutant = block.replace(marker, "")
             with pytest.raises(AssertionError):
                 _assert_baseline_authority_mapping(name, mutant)
+    # The served capture contract names only the facet's class; every promotion's
+    # class is served once, in the envelope beside it (`envelope.PROMOTION_CLASSES`).
+    for level in ("balanced", "maximal"):
+        capture = " ".join(prominence.CONTRACTS[level].capture.lower().split())
+        for marker in _BASELINE_MARKERS:
+            assert marker in capture, (level, marker)
+        assert "concise observation or narrow entity facet follows proactive_capture" in capture
     assert "when torn between saving and letting it pass, save" in blocks["maximal docs"]
     assert "not mid-thought exploration" in blocks["balanced docs"]
     # The generic "records" marker above is satisfied by the Planning/Records
@@ -668,11 +682,13 @@ def test_every_served_bootstrap_projection_respects_its_prominence_level(
     assert "recurr" in capture and "reusable comparison" in capture
     assert "compiled observation" in capture and "records" in capture
     assert "one-off" in capture and "incidental" in capture
-    _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", capture)
-    for marker in _DELEGATION_MARKERS:
-        mutant = capture.replace(marker, "")
-        with pytest.raises(AssertionError):
-            _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", mutant)
+    assert "narrow entity facet follows proactive_capture" in capture
+    # The rest of the baseline authority is the envelope served beside it.
+    served = payload["engagement"]["envelope"]
+    assert served["promotion_classes"]["entity_creation"] == "proactive_capture"
+    assert served["promotion_classes"]["typed_edge"] == "proactive_capture"
+    assert served["promotion_classes"]["queue_acceptance"] == "link_acceptance"
+    assert "entity merge" in served["confirm_required"]
     assert "_memory" not in capture
 
 
@@ -700,12 +716,14 @@ def test_reduced_surface_keeps_command_free_baseline_authority_mapping(
         product_commands=("bootstrap", "ask_memory"),
     )
     with active_surface(descriptor):
-        capture = commands.op_bootstrap(tmp_path, profile=profile)["engagement"][
-            "contract"
-        ]["capture"].lower()
+        engagement = commands.op_bootstrap(tmp_path, profile=profile)["engagement"]
+    capture = engagement["contract"]["capture"].lower()
 
     assert "stable preference" in capture
-    _assert_baseline_authority_mapping(f"{level}/{profile} reduced bootstrap", capture)
+    assert "narrow entity facet follows proactive_capture" in capture
+    # A reduced surface still serves every promotion's class, command-free.
+    assert engagement["envelope"]["promotion_classes"]["typed_edge"] == "proactive_capture"
+    assert engagement["envelope"]["promotion_classes"]["queue_acceptance"] == "link_acceptance"
     assert not set(commands.PRODUCT_PUBLIC_NAMES) & set(re.findall(r"\b[a-z_]+\b", capture))
 
 

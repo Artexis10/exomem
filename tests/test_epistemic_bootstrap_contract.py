@@ -174,11 +174,8 @@ def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: P
         "vocabulary_ref", "vocabulary_fingerprint"
     ]
     assert "Idempotency-Key" in workflow["application"]["rule"]
-    assert workflow["authority"] == {
-        "contract_version": "v1",
-        "scoped_delegation": False,
-        "rule": "Decision not permission; v1 writers retain confirmation.",
-    }
+    # A v1 vault's write rule is the served `promotion_classes` map, not prose here.
+    assert workflow["authority"] == {"contract_version": "v1", "scoped_delegation": False}
 
 
 def test_reduced_bootstrap_reports_missing_vocabulary_routes(vault: Path) -> None:

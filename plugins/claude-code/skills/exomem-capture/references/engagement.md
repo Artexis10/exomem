@@ -60,7 +60,8 @@ is made**, or **an observed outcome or event is reported** — capture it:
   tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
   observed events. Eligibility never creates an Entity, collection, or
-  schema: an affiliation relation uses `link_acceptance`; a new Entity follows `proactive_capture`; merge or substantial curation
+  schema: a new Entity or your own affiliation edge follows `proactive_capture`;
+  accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
 

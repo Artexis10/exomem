@@ -43,13 +43,27 @@ def test_every_active_non_hosted_capture_carrier_teaches_draft_to_adoption(vault
         assert "remote byte" in carrier, name
 
 
-def test_every_active_non_hosted_capture_carrier_maps_adoption_authority(vault: Path) -> None:
+def test_every_active_non_hosted_capture_carrier_maps_adoption_authority(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import commands
+
     for name, carrier in _active_capture_carriers(vault).items():
         assert "proactive_capture" in carrier, name
         assert "structural_suggestions" in carrier, name
+        assert "not write consent" in carrier or "not write confirmation" in carrier, name
+        if name.startswith("prominence-"):
+            continue
         assert "restructure_execution" in carrier, name
         assert "link_acceptance" in carrier, name
-        assert "not write consent" in carrier or "not write confirmation" in carrier, name
+    # The capture contract leaves the rest to the envelope served beside it: a
+    # collection's creation is confirm-required, and accepting a queued relation
+    # keeps link_acceptance.
+    for level in ("balanced", "maximal"):
+        monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+        envelope = commands.op_bootstrap(vault)["engagement"]["envelope"]
+        assert "collection creation" in envelope["confirm_required"].split(". ", 1)[0], level
+        assert envelope["promotion_classes"]["queue_acceptance"] == "link_acceptance", level
 
 
 def test_off_and_light_remain_explicit_request_only() -> None:

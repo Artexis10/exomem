@@ -118,24 +118,28 @@ def test_the_served_contract_states_the_server_side_gap_rather_than_implying_it_
     assert "(" not in clause and "_memory" not in clause
 
 
-def test_the_served_contract_routes_additive_entity_creation_to_proactive_capture(
+def test_the_served_contract_routes_owner_promotions_to_proactive_capture(
     config, tmp_path: Path
 ) -> None:
-    """Ruling R1: a new identity is additive capture, not a confirmed restructure.
-
-    Resolve-before-create already refuses an exact duplicate, so a confirmation
-    per new identity costs a question and prevents nothing a later merge cannot
-    undo. Merge, supersession and deletion stay confirm-required.
+    """Ruling R1 and owner decision O2: a new identity, a typed edge the agent
+    authors and the owner's registry save are additive capture, not a confirmed
+    restructure. Merge, supersession, deletion, edge removal and a promotion
+    revert stay confirm-required.
     """
     root = tmp_path / "served-vault"
     (root / "Knowledge Base").mkdir(parents=True)
 
     envelope = commands.op_bootstrap(root, profile="compact", section="all")["engagement"]["envelope"]
     clause = " ".join(envelope["confirm_required"].lower().split())
+    confirm_required_list = clause.split(". deletion has", 1)[0]
+    owner_rule = clause.split("owner on v1:", 1)[1]
 
-    assert "on a personal vault, additive entity creation follows proactive_capture" in clause
-    assert "entity creation and deletion" not in clause
-    assert "entity creation have no" not in clause
+    for promotion in ("entity creation", "typed edge", "registry save"):
+        assert promotion in owner_rule
+        assert promotion not in confirm_required_list
+    assert owner_rule.endswith("follow proactive_capture")
+    for removal in ("edge removal", "promotion revert"):
+        assert removal in confirm_required_list
     assert envelope["classes"]["restructure_execution"]["ceiling"] == "confirm-required"
 
 

@@ -99,23 +99,62 @@ CONFIRM_SHORTCUT: str = (
 #: as a convenience.
 FOUNDER_GATE: str = (
     "standing delegation of restructure execution would be an envelope cell above "
-    "the current ceiling. It does not exist in v1, and only a deliberate founder "
-    "ratification may ever create one; requests to create collections automatically "
-    "are refused by this rule"
+    "the ceiling. It does not exist in v1, and only a founder ratification may "
+    "create one; requests to create collections automatically are refused by this rule"
 )
+
+#: Each promotion action and the class that governs it, as (the vault owner's
+#: class, any other caller's class) on a vault that has not activated v2
+#: authority (owner decision O2 of `promote-referents-without-nudges`).
+#:
+#: A closed table is sound here: the keys are the product's own action kinds and
+#: the values are `ACTION_CLASSES`, so it holds no vault vocabulary. It is the one
+#: source of the served `promotion_classes` map and of the promotion clauses of
+#: `CONFIRM_REQUIRED`. A non-owner's registry save becomes a pending item for the
+#: owner, so for that caller the save can only be surfaced.
+PROMOTION_CLASSES: dict[str, tuple[str, str]] = {
+    "entity_creation": ("proactive_capture", "proactive_capture"),
+    "typed_edge": ("proactive_capture", "proactive_capture"),
+    "registry_save": ("proactive_capture", "structural_suggestions"),
+    "queue_acceptance": ("link_acceptance", "link_acceptance"),
+    "edge_removal": ("restructure_execution", "restructure_execution"),
+    "promotion_revert": ("restructure_execution", "restructure_execution"),
+}
+
+
+def promotion_classes(*, owner: bool) -> dict[str, str]:
+    """``promotion action -> class`` for one caller on a v1 vault. Pure; no I/O.
+
+    A v2-activated vault serves its grant rule instead, so the caller never
+    passes this map for one.
+    """
+    column = 0 if owner else 1
+    return {action: classes[column] for action, classes in PROMOTION_CLASSES.items()}
+
+
+def _owner_actions(action_class: str) -> str:
+    """The owner's promotion actions in one class, as served prose."""
+    names = [
+        action.replace("_", " ")
+        for action, (owner_class, _other) in PROMOTION_CLASSES.items()
+        if owner_class == action_class
+    ]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
 
 #: The confirm-required contract, served rather than implied.
 #:
 #: Three tiers bind it: this marker, the agent contract's in-conversation
 #: confirmation, and the server-side gates that exist today. Only two of the
-#: four `restructure_execution` surfaces HAVE a server-side gate, and the
-#: contract says so instead of letting an agent infer one — v1 adds no new
-#: confirmation parameter, because that is a tool-schema change behind the
-#: documented two-phase rollout.
+#: `restructure_execution` surfaces HAVE a server-side gate, and the contract
+#: says so instead of letting an agent infer one — v1 adds no new confirmation
+#: parameter, because that is a tool-schema change behind the documented
+#: two-phase rollout.
 #:
-#: Additive entity creation is not on the list: the entity writer resolves
-#: before it creates, so a new identity is `proactive_capture` on a personal
-#: vault, while merge, supersession and deletion stay confirm-required.
+#: The promotion clauses come from `PROMOTION_CLASSES`: the owner's promotions
+#: that are `restructure_execution` join the confirm-required list, and the ones
+#: that are `proactive_capture` are named as such, so the owner's agent is never
+#: told that a new entity, a typed edge or a registry save needs a confirmation.
 #:
 #: Command-free on purpose, exactly like the epistemic commitments:
 #: `commands._filter_bootstrap_payload` deletes any string naming a command the
@@ -123,27 +162,29 @@ FOUNDER_GATE: str = (
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
     "confirm-required: restructure application, collection creation, supersession commit, "
-    "entity merge and deletion. Deletion has a server-side confirm parameter; adoption "
-    "apply is preview-first; supersession has no server-side gate yet: future work. On a "
-    "personal vault, additive entity creation follows proactive_capture"
+    f"entity merge, deletion, {_owner_actions('restructure_execution')}. Deletion has a "
+    "server-side confirm parameter; adoption apply is preview-first; supersession has no "
+    "server-side gate yet: future work. Owner on v1: "
+    f"{_owner_actions('proactive_capture')} follow proactive_capture"
 )
 
 #: The protocol the agent contract teaches, per action the agent is about to
 #: take. Four moves, in order, and the order is the mechanism: an agent that
 #: checks the disposition before naming the class has already decided which
-#: cell it is reading from.
+#: cell it is reading from. The first move names `promotion_classes`, so an
+#: authored edge or a registry save is never read as an unclassified action,
+#: which has no envelope cell and therefore no authority.
 #:
 #: Command-free for the same reason as everything else served here.
 DECIDER_PROTOCOL: tuple[str, ...] = (
-    "name the action class before acting; an unclassified action has no envelope "
-    "cell and therefore no authority",
-    "check the ceiling: an intent above it becomes a proposal, never an act",
-    "check the disposition — off: do not initiate, though an explicit request is "
-    "never blocked; advisory: surface it in the user's own language and stop; "
-    "silent: act, narrating as the prominence contract says; confirm or "
-    "confirm-shortcut: obtain the confirmation first, a confirm-shortcut being an "
-    "inline one-action approval of that one item",
-    "record the outcome through triage, so the decision is durable and countable",
+    "name the action class first, a promotion's from promotion_classes; an "
+    "unclassified action has no authority",
+    "check the ceiling: an intent above it is a proposal, never an act",
+    "check the disposition. off: do not initiate, but never block an explicit "
+    "request; advisory: surface it in the user's language and stop; silent: act, "
+    "narrating per prominence; confirm or confirm-shortcut: confirm first, a "
+    "shortcut is an inline approval of that item",
+    "record the outcome through triage so it is durable and countable",
 )
 
 _CONFIG_KEY = "envelope"
@@ -294,7 +335,11 @@ def _proactive_permitted(
 
 
 def resolved(
-    level: str | None = None, surface: str | None = None, *, capture_gate: dict | None = None
+    level: str | None = None,
+    surface: str | None = None,
+    *,
+    capture_gate: dict | None = None,
+    promotion_classes: dict[str, str] | None = None,
 ) -> dict:
     """Bootstrap-shaped view: every class, its ceiling, disposition and provenance.
 
@@ -307,6 +352,10 @@ def resolved(
     Pass it whenever the envelope is served BESIDE that gate -- both keys of one
     `engagement` block then come from one object, so they cannot drift apart in
     the payload an agent actually reads.
+
+    `promotion_classes` is the caller's promotion map, served as is. Only a
+    caller that knows the vault's authority mode and the principal can pass it;
+    a v2-activated vault passes none and serves its grant rule instead.
     """
     from . import prominence as prominence_module
 
@@ -355,6 +404,8 @@ def resolved(
         # improvise a consent -- when a user asks for standing delegation.
         "founder_gate": FOUNDER_GATE,
     }
+    if promotion_classes is not None:
+        served["promotion_classes"] = dict(promotion_classes)
     if ignored:
         # Present only when there is something to report. An always-present empty
         # list would spend bytes on every session start to say nothing, and this

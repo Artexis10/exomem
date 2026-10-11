@@ -870,9 +870,21 @@ def op_bootstrap(
     # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
     # a command the active surface cannot call, and a ceiling that vanished on a
     # reduced surface would be a ceiling nobody was told about.
+    from .governance.raw_protection import is_owner
+    from .vocabulary_authority import VocabularyAuthority
+
+    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
+    # The promotion map is the v1 rule for this caller; a v2-activated or
+    # unavailable authority state serves its own rule in `vocabulary_workflow`.
+    promotion_classes = (
+        envelope_module.promotion_classes(owner=is_owner(principal_module.effective_principal()))
+        if authority_mode == "v1"
+        else None
+    )
     engagement_policy["envelope"] = envelope_module.resolved(
         level=engagement_policy["level"],
         capture_gate=engagement_policy["contract"]["effective_capture"],
+        promotion_classes=promotion_classes,
     )
     active_descriptor = _active_bootstrap_descriptor()
     # A released hosted profile is a published identity: it keeps the complete
@@ -1089,7 +1101,10 @@ def op_bootstrap(
                 "semantic_decider": "active-agent-only",
                 "candidate": "structural_suggestions",
                 "mutation": "governed-curation-restructure_execution",
-                "relation_outside_curation": "link_acceptance",
+                # The class of an edge the agent authors; a v2 vault keeps its rule.
+                "relation_outside_curation": (
+                    promotion_classes["typed_edge"] if promotion_classes else "link_acceptance"
+                ),
             },
         }
     else:
@@ -1310,19 +1325,13 @@ def op_bootstrap(
                 "schema_memory", {"operation": "save-relations", "subject": "relations"}
             ),
         },
-        "authority": {
-            "contract_version": "v1",
-            "scoped_delegation": False,
-            "rule": "Decision not permission; v1 writers retain confirmation.",
-        },
+        # A v1 vault's write rule is `engagement.envelope.promotion_classes`.
+        "authority": {"contract_version": "v1", "scoped_delegation": False},
     }
     if "schema_memory" in active_product_names:
         vocabulary_workflow_projection["page_status"] = vocabulary_operation(
             "schema_memory", {"subject": "statuses", "operation": "inspect"}
         )
-    from .vocabulary_authority import VocabularyAuthority
-
-    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
     if authority_mode != "v1":
         vocabulary_workflow_projection["authority"] = {
             "contract_version": authority_mode,
