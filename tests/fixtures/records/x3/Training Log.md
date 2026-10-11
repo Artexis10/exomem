@@ -66,7 +66,7 @@ counts, notes, and historical entries describe no person's training.
 
 **Notation**
 - `14+4` — 14 reps, then a rest-pause for four more.
-- `!` — continuous reps after the marker in the historical archive.
+- `!` — continuous reps after `!` in the historical archive.
 - `?` — an uncertain rep count.
 - `short` and `long` — example band lengths.
 - `green ×2` or `green + blue` in the band field — stacked bands. A `+` in the reps field means rest-pause.
