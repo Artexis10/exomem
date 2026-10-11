@@ -344,9 +344,11 @@ def test_every_degraded_state_serves_exactly_the_off_packet(runs: Runs) -> None:
 
 
 def test_semantic_evidence_changes_only_the_anchor_the_turn_is_about(runs: Runs) -> None:
-    """With nothing but the planted topic in reach, the on arm is the off arm
-    plus `vector_band` on that one anchor, and whatever resolution the band
-    completes: no other anchor gains, loses or changes anything."""
+    """The band changes only its topic when worded contact reaches that anchor.
+
+    A topic with only vector contact stays omitted; every other anchor stays
+    unchanged between the arms.
+    """
     for case in CASES:
         on, off = _anchors(runs.packets["on"][case.case_id]), _anchors(runs.packets["off"][case.case_id])
         topic = TOPICS.get(case.case_id)
@@ -355,8 +357,12 @@ def test_semantic_evidence_changes_only_the_anchor_the_turn_is_about(runs: Runs)
             path: value for path, value in off.items() if path != about
         }, case.case_id
         if about is not None:
-            assert "vector_band" in on[about][1], case.case_id
-            assert on[about][1] - {"vector_band"} == off.get(about, ("", frozenset()))[1], case.case_id
+            if case.kind == "named_rare_twin":
+                assert about not in on and about not in off, case.case_id
+            else:
+                assert off[about][1] & WORDED_CONTACT_KINDS, case.case_id
+                assert "vector_band" in on[about][1], case.case_id
+                assert on[about][1] - {"vector_band"} == off[about][1], case.case_id
 
 
 # --------------------------------------------------------------------------- #
@@ -375,12 +381,18 @@ def test_a_rare_name_plus_the_band_resolves_and_the_name_alone_stays_partial(run
 
 @pytest.mark.parametrize(("case_id", "named"), [("N1-de", "e_idris_calloway"), ("N1-ru", "e_hollis_marchetti")])
 def test_two_kinds_on_two_anchors_resolve_neither(runs: Runs, case_id: str, named: str) -> None:
-    """Risk 4: the turn names anchor B and is about anchor A. B earns the word,
-    A earns the band, and neither is resolved."""
-    anchors = _anchors(runs.packets["on"][case_id])
+    """Risk 4: the turn names anchor B and is about anchor A.
+
+    B stays a worded partial lead; A has only vector contact and stays omitted.
+    Neither serves material.
+    """
+    packet = runs.packets["on"][case_id]
+    anchors = _anchors(packet)
     about = _path(runs, TOPICS[case_id])
     assert anchors[_path(runs, named)] == ("partial", frozenset({"rare_term"}))
-    assert anchors[about] == ("partial", frozenset({"vector_band"}))
+    assert about not in anchors
+    assert packet["abstained"] is True
+    assert packet["units"] == packet["pointers"] == packet["current_state"] == []
 
 
 def test_a_name_inside_an_unrelated_compound_stays_partial(runs: Runs) -> None:

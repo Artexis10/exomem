@@ -280,7 +280,7 @@ def _load_parent_snapshot(
     if page is None:
         return None
     try:
-        state = semantic_index.build_parent_index_state(root, path, source=source)
+        state = semantic_index.selected_parent_index_state(root, path, source=source)
     except (OSError, UnicodeError, ValueError):
         return None
     return page, state

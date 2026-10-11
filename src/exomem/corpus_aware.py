@@ -1359,7 +1359,7 @@ def detect_contradictions(
         # candidates a contradiction can actually be reconciled against.
         if not type_basis.selects(page.page_type, note_types.ranks_as_compiled):
             continue
-        if status_basis.classify(page.frontmatter.get("status")).historical:
+        if status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).historical:
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue

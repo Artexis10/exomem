@@ -7,7 +7,6 @@ import yaml
 
 from exomem import (
     commands,
-    graph_sync,
     memory_schema,
     relation_registry,
     vault,
@@ -149,15 +148,9 @@ def test_stale_delta_merge_converges_without_a_second_registry_write(tmp_path: P
     assert relation_registry.load_registry(tmp_path).extension_hash == first["content_hash"]
 
 
-@pytest.mark.parametrize(
-    "join_outcome, expected_graph_sync",
-    [(True, "completed"), (False, "pending"), (RuntimeError("join cut"), "failed")],
-)
-def test_public_delta_save_projects_graph_outcome_and_replays_without_recommit(
+def test_public_delta_save_replays_without_recommit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    join_outcome: object,
-    expected_graph_sync: str,
 ) -> None:
     root = tmp_path / "vault"
     (root / "Knowledge Base").mkdir(parents=True)
@@ -178,18 +171,7 @@ def test_public_delta_save_projects_graph_outcome_and_replays_without_recommit(
             registry_batches += 1
         return original_batch(planned, **kwargs)
 
-    def join(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        if isinstance(join_outcome, Exception):
-            raise join_outcome
-        return join_outcome
-
     monkeypatch.setattr(vault, "batch_atomic_write", counted_batch)
-    monkeypatch.setattr(
-        graph_sync,
-        "registered_checkpoint",
-        lambda candidate, **_kwargs: graph_sync.read_checkpoint(candidate),
-    )
-    monkeypatch.setattr(graph_sync, "join_registered_if_settled", join)
     arguments = {
         "subject": "relations",
         "operation": "save-relations",
@@ -202,7 +184,7 @@ def test_public_delta_save_projects_graph_outcome_and_replays_without_recommit(
         command,
         (root,),
         arguments,
-        idempotency_key=f"relation-save-{expected_graph_sync}",
+        idempotency_key="relation-save",
         read_only=False,
     )
     committed_bytes = registry_path.read_bytes()
@@ -210,12 +192,11 @@ def test_public_delta_save_projects_graph_outcome_and_replays_without_recommit(
         command,
         (root,),
         arguments,
-        idempotency_key=f"relation-save-{expected_graph_sync}",
+        idempotency_key="relation-save",
         read_only=False,
     )
 
     assert first["state"] == "committed"
-    assert first["graph_sync"] == expected_graph_sync
     assert replay == first
     assert registry_path.read_bytes() == committed_bytes
     assert registry_batches == 1

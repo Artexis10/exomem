@@ -156,7 +156,14 @@ def resolve_entity_candidate(
     holds answers exactly as `no_match`. (A write that creates such an entity
     then proceeds; reconciling the duplicate is the owner's work.)
     """
+    from .entity_types import SPEC
     from .governance import egress
+    from .vocabulary.contract import selected_admission_refusal
+
+    # Private registry aliases and folders cannot influence public resolution;
+    # this operation is unavailable until the whole selected registry is admitted.
+    if selected_admission_refusal(vault_root, SPEC) is not None:
+        raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
 
     needle = identity_key(name)
     if not needle:
@@ -190,6 +197,9 @@ def resolve_entity_candidate(
         for path in sorted(folder.glob("*.md"), key=lambda item: item.name.casefold()):
             if path.name.casefold() == "index.md":
                 continue
+            rel_path = path.relative_to(vault_root).as_posix()
+            if visible is not None and not visible(rel_path):
+                continue
             try:
                 source, _guard = read_guarded_text(vault_root, path)
                 logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
@@ -213,9 +223,6 @@ def resolve_entity_candidate(
             title_matches = needle == identity_key(title)
             alias_matches = any(needle == identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
             if not title_matches and not alias_matches:
-                continue
-            rel_path = path.relative_to(vault_root).as_posix()
-            if visible is not None and not visible(rel_path):
                 continue
             candidate = {
                 "path": rel_path,

@@ -421,21 +421,46 @@ class CorpusStatistics:
         candidates: Mapping[str, Sequence[str]],
         query_tokens: Sequence[str],
         k: int,
+        *,
+        min_matched_terms: int = 1,
+        term_units: Sequence[Sequence[object]] | None = None,
+        corroboration_tokens: Sequence[str] | None = None,
+        corroboration_groups: Sequence[Sequence[str]] | None = None,
     ) -> list[tuple[str, float]]:
         """Rank candidates of this corpus that hold a query token, best first."""
         if not query_tokens or not self.average_length:
             return []
         wanted = set(query_tokens)
+        idfs = [(word, self._idf(word) or 0) for word in query_tokens]
+        units: dict[int, tuple[set[str], int]] = {}
+        for stem, unit, needed in term_units or ():
+            stems, _needed = units.setdefault(int(unit), (set(), int(needed)))
+            stems.add(str(stem))
+        counted = set(corroboration_tokens) if corroboration_tokens is not None else wanted
+        groups = [frozenset(group) for group in corroboration_groups or () if group]
         scored = []
         for path, document in candidates.items():
-            if not wanted.intersection(document):
-                continue
             counts = Counter(document)
+            if not wanted.intersection(counts):
+                continue
+            if min_matched_terms > 1 or groups:
+                # Eligibility and scoring share one document counter; groups
+                # remain alternatives to the distinct-unit count.
+                matched = (
+                    sum(len(stems.intersection(counts)) >= needed for stems, needed in units.values())
+                    if term_units is not None and corroboration_tokens is None
+                    else len(counted.intersection(counts))
+                )
+                if not (
+                    (min_matched_terms > 1 and matched >= min_matched_terms)
+                    or any(group.issubset(counts) for group in groups)
+                ):
+                    continue
             norm = self.k1 * (1 - self.b + self.b * len(document) / self.average_length)
             total = 0.0
-            for word in query_tokens:
+            for word, idf in idfs:
                 frequency = counts.get(word) or 0
-                total += (self._idf(word) or 0) * (frequency * (self.k1 + 1) / (frequency + norm))
+                total += idf * (frequency * (self.k1 + 1) / (frequency + norm))
             scored.append((path, float(total)))
         return sorted(scored, key=lambda item: (-item[1], item[0]))[:max(0, k)]
 

@@ -447,7 +447,6 @@ def preserve_members(
     Raises `ArchiveError` or `preserve.PreserveError`; neither leaves a manifest.
     """
     from . import preserve as preserve_module
-    from .vault import kb_root
 
     refusals = [
         refusal
@@ -459,7 +458,10 @@ def preserve_members(
     ]
     if refusals:
         raise preserve_module.PreserveError("INVALID_PRESERVE", ["scope", "category"], "; ".join(refusals))
-    folder = kb_root(vault_root) / "Evidence" / scope / category
+    folder = preserve_module.evidence_folder(vault_root, scope, category)
+    # Before the family is read or a blob is written: a refused caller learns
+    # nothing of a stored archive and leaves no bytes behind.
+    preserve_module.admit_destination(vault_root, folder, directory=True, members=True)
     preserve_module.validate_raw_capture(
         filename, destination=str(folder.relative_to(vault_root)), raw_protection=True
     )

@@ -712,16 +712,9 @@ def test_tag_and_section_words_alone_never_constitute_an_overlap() -> None:
     assert resolution.status == "unresolved"
 
 
-def test_one_rare_authored_word_plus_one_section_word_plus_retrieval_still_resolves_via_rare_term() -> None:
-    """Correction round 1: one RARE authored word ("wardrobe") plus one
-    section word ("notes", never authored) is still a real two-term BROAD
-    overlap, but a single shared NAME term is never `lexical_overlap` --
-    only `rare_term`, regardless of rarity (see `test_a_single_shared_name_
-    term_never_grants_lexical_overlap_even_tag_completed`). With `retrieval`
-    alongside it the anchor still resolves, via `rare_term` this time.
-    Without the rarity count a single shared name term earns nothing at all
-    -- see `test_a_common_authored_word_plus_one_section_word_is_no_longer_overlap`.
-    """
+def test_one_partial_name_term_and_one_section_word_need_independent_retrieval() -> None:
+    """The partial name and the page hit both need "wardrobe". Without an
+    independent-evidence callback, that hit cannot supply a second contact."""
     row = _term_row(
         "wardrobe2.md", "Wardrobe inventory", terms=("wardrobe", "inventory", "notes")
     )
@@ -733,9 +726,9 @@ def test_one_rare_authored_word_plus_one_section_word_plus_retrieval_still_resol
         term_anchor_counts={"wardrobe": 1},
     )
 
-    assert candidates[0].evidence == frozenset({"rare_term", "retrieval"})
+    assert candidates[0].evidence == frozenset({"rare_term"})
     resolution = resolve_module.resolve(candidates)
-    assert resolution.anchors[0].status == "resolved"
+    assert resolution.anchors[0].status == "partial"
 
 
 def test_a_common_authored_word_plus_one_section_word_is_no_longer_overlap() -> None:

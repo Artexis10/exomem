@@ -38,6 +38,36 @@ def test_unknown_headings_are_not_semantic_blocks_or_errors() -> None:
     assert document.warnings == []
 
 
+def test_neutral_headings_preserve_private_nested_blocks_and_empty_parent_suppression() -> None:
+    markdown = (
+        "# Private heading\n## Background\n### Private heading\n"
+        "- id: private-block\n- relations: private_link: Bare target\nPrivate body.\n"
+        "## Claim\n### Private heading\n- id: empty-child\n"
+        "## End\nOrdinary text.\n"
+    )
+    candidates = semantic_blocks.scan_semantic_blocks(markdown)
+    selected = semantic_blocks.interpret_semantic_blocks(
+        candidates, kind_resolver=lambda title: "finding" if title == "Private heading" else None
+    )
+    ordinary = semantic_blocks.parse_semantic_blocks(markdown)
+
+    assert [(item.title, item.line, item.end_line, item.ancestor_line) for item in candidates] == [
+        ("Private heading", 1, 11, None), ("Background", 2, 6, 1),
+        ("Private heading", 3, 6, 2), ("Claim", 7, 9, 1),
+        ("Private heading", 8, 9, 7), ("End", 10, 11, 1),
+    ]
+    assert [(block.type, block.id) for block in selected.blocks] == [("finding", "private-block")]
+    assert ordinary.blocks == []
+    assert [(error.code, error.line) for error in selected.errors if error.code == "empty_rich_unit"] == [
+        ("empty_rich_unit", 7)
+    ]
+    private = candidates[2]
+    assert private.metadata["id"] == "private-block"
+    assert [(relation.kind, relation.target, relation.grammar_valid) for relation in private.relations] == [
+        ("private_link", "Bare target", True)
+    ]
+
+
 def test_metadata_relations_and_body_are_parsed() -> None:
     markdown = """\
 ## Claim

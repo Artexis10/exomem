@@ -116,6 +116,22 @@ bounded independently without changing the full-set verdict. Capacity omission
 SHALL use section-level `missing` reasons without omitted names or hidden counts,
 derived only from the caller's released view.
 
+A packet SHALL list a `partial` anchor only when worded contact reached it, or
+`continuity` or `conversation` did, or it was carried from this conversation's
+own thread or the earlier conversation, or it is listed through a carried page
+(`carried_link`). A candidate whose only contact is retrieved (`retrieval`,
+`vector_band`), with whatever qualifiers, SHALL NOT be listed, in an abstention
+or beside a resolved anchor. This decides only what a packet lists: resolution,
+ambiguity and admission are unchanged, and such a candidate still never serves
+material.
+
+#### Scenario: A hub whose page shares everyday words with the turn is not listed
+- **WHEN** a turn resolves no anchor, and a hub's own page is a recall hit for it
+  only because both use everyday words, with no word of the turn reaching the hub's
+  names, terms or claims
+- **THEN** the packet abstains `unresolved` and does not list the hub, as `partial`
+  or otherwise
+
 #### Scenario: A competitor beyond an old cut remains a competitor
 - **WHEN** a caller-visible indexed alternative beyond the former six-anchor or
   24-candidate cut changes the existing sense adjudication

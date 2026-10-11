@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from exomem import bm25, find as find_module, freshness
+from exomem.governance.principal import library_scope
 from exomem.vault import walk_vault_md
 
 
@@ -65,6 +66,7 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch):
     bm25.clear_cache()
 
 
+@library_scope()
 def test_identical_repeated_query_hits_cache_without_intervening_write(tmp_path: Path) -> None:
     _write_page(tmp_path, "Knowledge Base/Notes/match.md", body="needle target")
     _seed(tmp_path)
@@ -94,6 +96,7 @@ def test_freshness_key_is_deterministic_for_identical_inputs(tmp_path: Path) -> 
     assert current_key() == current_key()
 
 
+@library_scope()
 def test_unrelated_write_does_not_evict_cached_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -213,6 +216,7 @@ def test_access_policy_change_always_evicts_cached_query(tmp_path: Path) -> None
     assert all(hit.path != secret.relative_to(tmp_path).as_posix() for hit in second)
 
 
+@library_scope()
 def test_incomplete_recall_delta_always_misses(tmp_path: Path) -> None:
     _write_page(tmp_path, "Knowledge Base/Notes/match.md", body="needle target")
     _seed(tmp_path)

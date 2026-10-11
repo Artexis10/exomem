@@ -1085,6 +1085,21 @@ def _with_catalog_scope(function):
     return scoped
 
 
+def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
+    """The content floors of the current caller, or None when it may see every page.
+
+    `find` applies this whenever its caller hands in no predicate, so no consumer
+    can rank, classify or count a page withheld from its caller.
+    """
+    from .governance import egress
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    if egress.unrestricted_content_access(vault_root, who):
+        return None
+    return lambda path: egress.content_permits(vault_root, path, who)
+
+
 @_with_catalog_scope
 def find(
     vault_root: Path,
@@ -1238,7 +1253,13 @@ def find(
     caller asks for. A managed reader serves it from the maintained catalogue
     over the index-resolved out-of-KB eligible set, and declines rather than
     scanning when the catalogue cannot answer.
+
+    `admit_path`: the caller's content floors, applied before any candidate is
+    ranked, classified or counted. Omitted, it is `caller_admission`, so a
+    restricted caller's find can never run unadmitted.
     """
+    if admit_path is None:
+        admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     type_basis = type_basis or note_types.Basis(vault_root)
 
@@ -2201,7 +2222,7 @@ def _eligible_unit_records(
         ):
             continue
         try:
-            state = semantic_index.current_parent_index_state(vault_root, page.path)
+            state = semantic_index.selected_parent_index_state(vault_root, page.path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning(
                 "semantic-unit retrieval parse failed for %s: %s",
@@ -2219,7 +2240,7 @@ def _eligible_unit_records(
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,
-                unit=structured_filters.unit_view(unit),
+                unit=structured_filters.unit_view(unit, instance=state.instance_id),
             ):
                 eligible[unit.unit_ref] = (page, unit, source_order)
     return eligible
@@ -2244,6 +2265,7 @@ class _UnitParent:
 
     page: ParsedPage | None
     state: Any = None
+    neutral: Any = None
     prose: tuple[Any, ...] | None = None
 
     def current_for(self, generation: str) -> bool:
@@ -2294,11 +2316,12 @@ def _read_unit_parent(vault_root: Path, parent_path: str) -> _UnitParent | None:
     ):
         return None
     try:
-        state = semantic_index.current_parent_index_state(vault_root, parent_path)
+        neutral = semantic_index.current_parent_index_state(vault_root, parent_path)
+        state = semantic_index.selected_parent_index_state(vault_root, parent_path, state=neutral)
     except (OSError, UnicodeError, ValueError) as error:
         log.warning("semantic-unit candidate hydration failed for %s: %s", parent_path, error)
         return _UnitParent(page=None)
-    return _UnitParent(page=page, state=state)
+    return _UnitParent(page=page, state=state, neutral=neutral)
 
 
 def _hydrate_indexed_unit_records(
@@ -2316,6 +2339,9 @@ def _hydrate_indexed_unit_records(
     Otherwise it reads the parent again, as it would alone, and keeps the
     newer read for later calls.
     """
+    from . import semantic_index
+    from .governance import egress
+
     parents: dict[str, tuple[ParsedPage, Any, tuple[Any, ...]] | None] = {}
     records: dict[str, tuple[ParsedPage, Any, int]] = {}
     reads = {} if parent_reads is None else parent_reads.parents
@@ -2336,6 +2362,19 @@ def _hydrate_indexed_unit_records(
                     stale_out.append(hit.unit_ref)
                 parents[path] = None
                 continue
+            # A shared body read grants no continuing disclosure or definition authority.
+            if not recall_policy.is_recall_candidate(
+                vault_root, vault_root / path
+            ) or not egress.quick_page_visible(vault_root, path):
+                parents[path] = None
+                continue
+            if read.state.definitions is None or not read.state.definitions.current(vault_root):
+                read.state = semantic_index.selected_parent_index_state(
+                    vault_root,
+                    path,
+                    state=read.neutral,
+                )
+                read.prose = None
             if read.prose is None:
                 read.prose = find_results.prose_units(
                     vault_root, read.page, read.state.document.units
@@ -2363,10 +2402,12 @@ def _hydrate_indexed_unit_records(
         if not structured_filters.evaluate_filter(
             plan,
             page=structured_filters.page_view(page),
-            unit=structured_filters.unit_view(unit),
+            unit=structured_filters.unit_view(unit, instance=state.instance_id),
         ):
             continue
-        records[hit.unit_ref] = (page, unit, getattr(hit, "source_order", source_order))
+        # The stored ordinal counts every structural occurrence; source order is
+        # the unit's place among this reader's selected units, as the Python rung reads it.
+        records[hit.unit_ref] = (page, unit, source_order)
     return records
 
 
@@ -2420,7 +2461,7 @@ def _unit_rank_score(
     config: RankingConfig,
     status_basis: lifecycle_statuses.Basis,
 ) -> float:
-    if not prefer_active or status_basis.classify(page.frontmatter.get("status")).require() != "superseded":
+    if not prefer_active or status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).require() != "superseded":
         return raw_score
     penalty = config.superseded_penalty
     return raw_score * penalty if raw_score >= 0 else raw_score / penalty
@@ -2515,15 +2556,27 @@ def _vector_unit_candidates(
                 with recall_space.encoding_for(index):
                     query_vector = embeddings.embed_texts([query], is_query=True)[0]
         recall_space.require_same_space(index, encoded_for, query_vector)
+        incomplete: list[str] = []
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
             allowed_unit_refs=allowed_unit_refs,
             allowed_parent_paths=allowed_parent_paths,
             validate=False,
+            incomplete_out=incomplete,
+            encoded_for=encoded_for,
         )
+        if incomplete and not hits:
+            # Unproved coverage is never a proved miss. The status, reason and
+            # coverage values are tokens of the closed vector-profile protocol.
+            return (
+                [],
+                {"status": "unavailable", "reason": "coverage_incomplete", "model": model_name},
+                "kb",
+            )
         profile = {
             "status": "participated" if hits else "available_nonmatching",
+            **({"coverage": "incomplete"} if incomplete else {}),
             "backend": type(index).__name__,
             "model": recall_space.serving_model(index),
             "metric": {
@@ -2817,7 +2870,11 @@ def _find_semantic_units(
         if prefer_active:
             ordered.sort(
                 key=lambda record: (
-                    status_basis.classify(record[0].frontmatter.get("status")).require()
+                    status_basis.classify(
+                        record[0].frontmatter.get("status"),
+                        path=record[0].rel_path,
+                        frontmatter=record[0].frontmatter,
+                    ).require()
                     == "superseded"
                 )
             )
@@ -2848,12 +2905,18 @@ def _find_semantic_units(
         vector_candidate_limit = (
             len(vector_allowed_refs) if vector_allowed_refs is not None else candidate_limit + 1
         )
+        vector_parent_paths = snapshot.recall_paths(scope)
+        if allowed_parent_paths is not None:
+            vector_parent_paths = vector_parent_paths & allowed_parent_paths
+        if vector_allowed_refs is not None:
+            # Public refs are per-reader meanings; their parents bound the rows read.
+            vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
         vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
             vault_root,
             query=query,
             candidate_limit=vector_candidate_limit,
             allowed_unit_refs=vector_allowed_refs,
-            allowed_parent_paths=(snapshot.recall_paths(scope) if allowed_parent_paths is None else snapshot.recall_paths(scope) & allowed_parent_paths),
+            allowed_parent_paths=vector_parent_paths,
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
@@ -2971,7 +3034,9 @@ def _find_semantic_units(
                 bool(
                     prefer_active
                     and status_basis.classify(
-                        records[unit_ref][0].frontmatter.get("status")
+                        records[unit_ref][0].frontmatter.get("status"),
+                        path=records[unit_ref][0].rel_path,
+                        frontmatter=records[unit_ref][0].frontmatter,
                     ).require()
                     == "superseded"
                 ),
@@ -3019,7 +3084,9 @@ def _find_semantic_units(
                     bool(
                         prefer_active
                         and status_basis.classify(
-                            records[item[0]][0].frontmatter.get("status")
+                            records[item[0]][0].frontmatter.get("status"),
+                            path=records[item[0]][0].rel_path,
+                            frontmatter=records[item[0]][0].frontmatter,
                         ).require()
                         == "superseded"
                     ),
@@ -3155,7 +3222,7 @@ def _annotate_matched_units(
             hit.matched_units = []
             continue
         try:
-            state = semantic_index.current_parent_index_state(vault_root, page.rel_path)
+            state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning("matched-unit parse failed for %s: %s", hit.path, error)
             hit.matched_units = []
@@ -3167,7 +3234,7 @@ def _annotate_matched_units(
             if structured_filters.evaluate_filter(
                 plan,
                 page=page_value,
-                unit=structured_filters.unit_view(unit),
+                unit=structured_filters.unit_view(unit, instance=state.instance_id),
             )
         ]
         hit.matched_units = [
@@ -3244,9 +3311,10 @@ def _eligible_filter_paths(
                 try:
                     from . import semantic_index
 
-                    state = semantic_index.current_parent_index_state(vault_root, emitted.path)
+                    state = semantic_index.selected_parent_index_state(vault_root, emitted.path)
                     units = tuple(
-                        structured_filters.unit_view(unit) for unit in state.document.units
+                        structured_filters.unit_view(unit, instance=state.instance_id)
+                        for unit in state.document.units
                     )
                 except (OSError, UnicodeError, ValueError) as error:
                     log.warning(
@@ -3357,8 +3425,11 @@ class RetrievalIndexWarming(cli_ops.OpError):
 
 def _raise_catalog_outcome(readiness: object) -> None:
     outcome = str(getattr(readiness, "status", "stale"))
+    # Closed `CatalogReadiness` statuses that index warm-up does not resolve.
     public_status = (
-        "temporarily_unavailable" if outcome in {"transient_failure", "unsupported"} else "warming"
+        "temporarily_unavailable"
+        if outcome in {"transient_failure", "unsupported", "definitions_unavailable"}  # nosemgrep: ep-word-membership -- CatalogReadiness declares these closed statuses.
+        else "warming"
     )
     raise RetrievalIndexWarming(site="catalog_outcome", status=public_status)
 
@@ -3433,9 +3504,13 @@ def _resolve_relation_filter(
             f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
             f"got {relation_direction!r}",
         )
-    from . import epistemic_graph, relation_registry, traversal_profiles
+    from . import epistemic_graph, traversal_profiles
 
-    registry = relation_registry.load_registry(vault_root)
+    graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    # An anchored filter inherits its anchor page's instance; otherwise public.
+    registry = graph_index.relation_query_registry(anchor=relation_of)
+    if registry is None:
+        raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
     for raw in relations or ():
         resolution = registry.resolve(raw)
         if resolution.canonical is None or resolution.status == "unregistered":
@@ -3448,7 +3523,6 @@ def _resolve_relation_filter(
                 },
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
-    graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     result = graph_index.relation_participants(
         relations or (), anchor=relation_of, direction=relation_direction, keep=keep
     )
@@ -3742,8 +3816,11 @@ def _managed_page_metadata(
                 source = (
                     "---\n" + vault.serialize_frontmatter(page.frontmatter) + "\n---\n" + page.body
                 )
-                state = semantic_index.build_parent_index_state(vault_root, rel, source=source)
-                units = tuple(structured_filters.unit_view(unit) for unit in state.document.units)
+                state = semantic_index.selected_parent_index_state(vault_root, rel, source=source)
+                units = tuple(
+                    structured_filters.unit_view(unit, instance=state.instance_id)
+                    for unit in state.document.units
+                )
             metadata[rel] = lexstore.EligibilityMetadata(
                 structured_filters.page_view(page),
                 page.parent_media + ".md" if page.parent_media else None,
@@ -3944,9 +4021,10 @@ def _indexed_eligible_filter_paths(
             units: tuple[dict[str, Any], ...] = ()
             if plan.has_unit_predicate:
                 try:
-                    state = semantic_index.current_parent_index_state(vault_root, emitted.rel_path)
+                    state = semantic_index.selected_parent_index_state(vault_root, emitted.rel_path)
                     units = tuple(
-                        structured_filters.unit_view(unit) for unit in state.document.units
+                        structured_filters.unit_view(unit, instance=state.instance_id)
+                        for unit in state.document.units
                     )
                 except (OSError, UnicodeError, ValueError) as error:
                     log.warning(
@@ -4925,7 +5003,9 @@ def _find_semantic(
                         page = _page_of(h.path)
                         factor = _status_multiplier(
                             status_basis.classify(
-                                page.frontmatter.get("status") if page else h.status
+                                page.frontmatter.get("status") if page else h.status,
+                                path=h.path,
+                                frontmatter=page.frontmatter if page else None,
                             ).require(), config
                         )
                         before = adjusted

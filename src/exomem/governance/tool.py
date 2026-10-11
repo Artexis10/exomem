@@ -41,12 +41,14 @@ from .. import (
     vault,
 )
 from ..kbdir import kb_dirname
+from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
 from . import (
     authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
     catalog_publication,
     companion_backfill,
+    connector_boundary,
     decisions,
     graph_producer,
     membership,
@@ -154,8 +156,24 @@ def _principal(value: RequestPrincipal | None) -> RequestPrincipal:
     return value if value is not None else effective_principal()
 
 
-def _require_owner(value: RequestPrincipal | None) -> RequestPrincipal:
+def _require_global_policy(vault_root: Path, who: RequestPrincipal) -> None:
+    # These owners read global hashes and membership inventories. A limited
+    # connector cannot inspect or rewrite them; the host maintains this policy.
+    if not connector_boundary.unrestricted(vault_root, who):
+        raise GovernanceError("GOVERNANCE_OPERATION_UNAVAILABLE", "global policy is unavailable")
+
+
+def _require_owner(value: RequestPrincipal | None, *, vault_root: Path,
+                   offline_authority: object | None = None) -> RequestPrincipal:
     who = _principal(value)
+    if offline_authority is None:
+        _require_global_policy(vault_root, who)
+    else:
+        from ..state_migration import _require_offline_authority
+
+        # A stopped restore must install protection before host configuration can
+        # resolve it. Only the existing sealed maintenance authority opens this seam.
+        _require_offline_authority(offline_authority)
     if not who.resolved or who.audience_id != OWNER_AUDIENCE:
         raise GovernanceError("GOVERNANCE_OWNER_REQUIRED", "operation is owner-only")
     return who
@@ -658,7 +676,7 @@ def _authorize_operation(
 ) -> None:
     """Apply the registry's coarse authorization before handler-specific bounds."""
     if selection.authorization == "owner":
-        _require_owner(kwargs.get("principal"))
+        _require_owner(kwargs.get("principal"), vault_root=vault_root)
     elif selection.authorization in {"self_session", "token_session"}:
         who = _principal(kwargs.get("principal"))
         if who.verified_authorization_session is None:
@@ -759,7 +777,11 @@ def _memberships_for_path(
 
 def _is_operational_membership_path(vault_root: Path, candidate: Path) -> bool:
     """Whether a current internal-state owner, rather than content, owns a path."""
-    from .. import claims, reserved_paths, voice_profiles
+    from .. import activation_manifest, claims, reserved_paths, voice_profiles
+
+    # The activation owner binds the whole-corpus baseline; its YAML is not a content subject.
+    if candidate == activation_manifest.manifest_path(vault_root):
+        return True
 
     logical = reserved_paths.classify_logical(
         candidate.relative_to(vault_root).as_posix()
@@ -895,6 +917,25 @@ def _membership_manifest(
         {"path": rel, "content_hash": rows[rel]}
         for rel in sorted(rows)
     ]
+
+
+def _proposal_evidence(vault_root: Path, current: policy_module.Policy,
+                       prospective: policy_module.Policy, documents: Mapping[str, str],
+                       payload: Mapping[str, Any]):
+    """Choose evidence once; continuity never supplies read or grant membership."""
+    from ..restore_journal import RestoreJournalError, active_protection
+
+    kind = payload.get("proposal_evidence", MEMBERSHIP_EVIDENCE)
+    if kind == MEMBERSHIP_EVIDENCE:
+        return _membership_manifest(vault_root, current, prospective, set(documents))
+    recovery = active_protection(vault_root)
+    if kind != CONTINUITY_EVIDENCE or recovery is None:
+        raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "proposal evidence has no restore authority")
+    try:
+        recovery.validate_proposal(payload)
+        return recovery.continuity(documents)
+    except RestoreJournalError as error:
+        raise GovernanceError("STALE_GOVERNANCE_POLICY", "restore continuity changed") from error
 
 
 def _resolved_membership_manifest(
@@ -1066,7 +1107,8 @@ def _purpose_direction(
 
 
 def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    _require_owner(kwargs.get("principal"))
+    _require_owner(kwargs.get("principal"), vault_root=vault_root,
+                   offline_authority=kwargs.get("_offline_authority"))
     intent = str(kwargs.get("intent") or "").strip()
     if not intent:
         raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "intent is required")
@@ -1132,35 +1174,36 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             "refresh_required": False,
             "projection_readiness": _projection_runtime_readiness(vault_root),
         }
-    manifest = (
-        []
-        if projection_refresh
-        else _membership_manifest(vault_root, current_policy, prospective, set(documents))
-    )
+    recovery = kwargs.get("_restore_recovery")
+    payload = {"interpretation": intent, "documents": documents, "duration": kwargs.get("duration")}
+    if recovery is not None:
+        from ..restore_journal import active_protection
+
+        if recovery is not active_protection(vault_root):
+            raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "restore continuation is invalid")
+        recovery.bind_missing(documents)
+        payload.update(proposal_evidence=CONTINUITY_EVIDENCE, restore_binding=recovery.digest)
+    manifest = ([] if projection_refresh else
+                _proposal_evidence(vault_root, current_policy, prospective, documents, payload))
     expires_at = now + max(1, int(kwargs.get("ttl_seconds", DEFAULT_PROPOSAL_TTL_SECONDS)))
     target_ceiling = int(kwargs.get("target_ceiling", policy_module.DISCLOSURE_MAX))
     if not policy_module.DISCLOSURE_MIN <= target_ceiling <= policy_module.DISCLOSURE_MAX:
         raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "target ceiling is invalid")
-    (
-        consequences,
-        samples,
-        direction,
-        overlaps,
-        all_open,
-        derived_ceiling,
-        unnamed_audience_ceiling,
-    ) = _proposal_analysis(vault_root, current_policy, prospective, manifest)
+    if recovery is None:
+        consequences, samples, direction, overlaps, _all_open, derived_ceiling, unnamed_audience_ceiling = _proposal_analysis(
+            vault_root, current_policy, prospective, manifest)
+    else:
+        # Continuity proves unchanged bytes, not measured disclosure consequences.
+        consequences, samples, direction, overlaps, _all_open = {"membership": "unevaluated"}, [], "widening", [], False
+        derived_ceiling = unnamed_audience_ceiling = None
     hint_diagnostics: list[str] = []
+    if recovery is not None:
+        hint_diagnostics.append("transition direction is conservative; membership consequences are unevaluated")
     if patterns:
         hint_diagnostics.append("selector_paths are compatibility hints; concrete membership is authoritative")
     if derived_ceiling is None or target_ceiling != derived_ceiling:
         hint_diagnostics.append("target_ceiling is a compatibility hint, not an authorization fact")
-    proposal_id = uuid.uuid4().hex
-    payload = {
-        "interpretation": intent,
-        "documents": documents,
-        "duration": kwargs.get("duration"),
-    }
+    proposal_id = recovery.proposal_id if recovery is not None else uuid.uuid4().hex
     if semantic_operation is not None:
         if semantic_operation not in {"commit", "suspend", "resume", "undo"}:
             raise GovernanceError(
@@ -1265,7 +1308,8 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     return {
         "interpretation": intent,
         "canonical_yaml": documents,
-        "membership_preview": {"count": len(manifest), "samples": samples},
+        "membership_preview": ({"count": len(manifest), "samples": samples} if recovery is None
+                               else {"state": "unevaluated", "count": None, "samples": []}),
         "consequences": {
             **consequences,
             "target_ceiling": derived_ceiling,
@@ -1542,7 +1586,7 @@ def _standing_grant_relative_path(vault_root: Path, raw_grant_id: Any) -> tuple[
 
 
 def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
     grant_id, rel = _standing_grant_relative_path(vault_root, kwargs.get("grant_id"))
     reconciliation = reconcile_governance_operations(vault_root)
     if reconciliation["blocked"]:
@@ -1616,7 +1660,7 @@ def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
 
 
 def _standing_revoke(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
     grant_id, _rel = _standing_grant_relative_path(vault_root, kwargs.get("grant_id"))
     reconciliation = reconcile_governance_operations(vault_root)
     if reconciliation["blocked"]:
@@ -3169,8 +3213,8 @@ def _proposal_matches_exact_prior(
         prospective = _prospective_policy(vault_root, documents)
         if prospective.blocked:
             return False
-        current_manifest = _membership_manifest(
-            vault_root, current_policy, prospective, set(documents)
+        current_manifest = _proposal_evidence(
+            vault_root, current_policy, prospective, documents, payload
         )
         return (
             current_policy.fingerprint == fingerprint
@@ -3212,8 +3256,8 @@ def _validate_proposal_values(
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY", _canonical_json(list(prospective.findings))
         )
-    current_manifest = _membership_manifest(
-        vault_root, current_policy, prospective, set(documents)
+    current_manifest = _proposal_evidence(
+        vault_root, current_policy, prospective, documents, payload
     )
     if current_policy.fingerprint != fingerprint or _canonical_json(current_manifest) != manifest:
         raise GovernanceError(
@@ -4049,11 +4093,8 @@ def _validate_v4_proposal_binding(
     current_manifest = (
         []
         if decoded.projection_refresh
-        else _membership_manifest(
-            vault_root,
-            active_snapshot.policy,
-            target_policy,
-            set(documents),
+        else _proposal_evidence(
+            vault_root, active_snapshot.policy, target_policy, documents, decoded.payload,
         )
     )
     if current_manifest != binding["membership_manifest"]:
@@ -4064,12 +4105,8 @@ def _validate_v4_proposal_binding(
     recomputed_direction = (
         "narrowing"
         if decoded.projection_refresh
-        else _proposal_analysis(
-            vault_root,
-            active_snapshot.policy,
-            target_policy,
-            current_manifest,
-        )[2]
+        else "widening" if decoded.payload.get("proposal_evidence") == CONTINUITY_EVIDENCE
+        else _proposal_analysis(vault_root, active_snapshot.policy, target_policy, current_manifest)[2]
     )
     if recomputed_direction != decoded.direction:
         raise GovernanceError(
@@ -4924,10 +4961,18 @@ def _v4_commit_terminal(
 
 
 def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root,
+                         offline_authority=kwargs.get("_offline_authority"))
     proposal_id = str(kwargs.get("proposal_id") or "")
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
+    recovery = kwargs.get("_restore_recovery")
+    if recovery is not None:
+        from ..restore_journal import ProtectionRecovery
+
+        if (not isinstance(recovery, ProtectionRecovery) or recovery.root != vault_root
+                or recovery.proposal_id != proposal_id):
+            raise GovernanceError("GOVERNANCE_BLOCKED", "restore continuation differs")
     now = float(kwargs.get("now", time.time()))
     if (
         store.authorization_session_schema_version_if_readable(vault_root)
@@ -4947,6 +4992,16 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             if status not in {"pending", "spent"}:
                 raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
             proposal_json = str(row[0])
+            payload = json.loads(proposal_json)
+            if recovery is not None:
+                recovery.validate_proposal(payload)
+                if payload.get("proposal_evidence") == CONTINUITY_EVIDENCE:
+                    evidence = _proposal_evidence(vault_root, policy_module.EMPTY_POLICY, policy_module.EMPTY_POLICY,
+                                                  payload["documents"], payload)
+                    if evidence != json.loads(str(row[1])):
+                        raise GovernanceError("STALE_GOVERNANCE_POLICY", "restore continuity changed")
+            elif payload.get("proposal_evidence") == CONTINUITY_EVIDENCE:
+                raise GovernanceError("INVALID_GOVERNANCE_PROPOSAL", "restore continuation is required")
             manifest_json = str(row[1])
             created_at = float(row[4])
             decoded = _decode_v4_proposal_binding(
@@ -5125,6 +5180,31 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if reconcile["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
     store.require_authoring_schema(vault_root)
+    recovery = kwargs.get("_restore_recovery")
+    if recovery is not None:
+        from . import recovery as operation_recovery
+
+        connection = store.open_connection(vault_root)
+        try:
+            row = connection.execute("SELECT proposal_json, status FROM governance_proposals WHERE proposal_id=?",
+                                     (proposal_id,)).fetchone()
+            if row is not None and row[1] == "spent":
+                recovery.validate_proposal(json.loads(row[0]))
+                events = connection.execute("SELECT event_id FROM governance_operation_journals WHERE proposal_id=?",
+                                            (proposal_id,)).fetchall()
+                for (event_id,) in events:
+                    journal = operation_recovery._validated_persisted_journal(connection, event_id)
+                    if (journal is not None and journal["phase"] == "closed"
+                            and operation_recovery._matches_phase(vault_root, connection, event_id, "final")
+                            and receipts.verify_chain(vault_root)["valid"]):
+                        intents, terminals = operation_recovery._receipt_evidence(vault_root)
+                        transition = operation_variant("commit")
+                        if (operation_recovery._required_intents_match(journal, transition, intents, require_all=True)
+                                and set(json.loads(journal["required_child_terminals"])) <= terminals):
+                            return {"status": "committed", "event_id": event_id, "proposal_id": proposal_id}
+                raise GovernanceError("GOVERNANCE_BLOCKED", "restore publication has no exact committed outcome")
+        finally:
+            connection.close()
     _validate_proposal_drift(vault_root, proposal_id, now=now)
     conn = store.open_connection(vault_root)
     try:
@@ -5136,8 +5216,10 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         conn.close()
     if row is None:
         raise GovernanceError("PROPOSAL_UNKNOWN", "no such proposal")
-    proposed_documents = json.loads(str(row[0]))["documents"]
-    direction = _effective_transition_direction(vault_root, proposed_documents)
+    proposal_payload = json.loads(str(row[0]))
+    proposed_documents = proposal_payload["documents"]
+    direction = ("widening" if proposal_payload.get("proposal_evidence") == CONTINUITY_EVIDENCE
+                 else _effective_transition_direction(vault_root, proposed_documents))
     event_id, payload, digests, affected = _prepare_commit_attempt(
         vault_root,
         proposal_id,
@@ -5215,7 +5297,7 @@ def _backfill_payload(
 
 
 def _backfill_preview(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    _require_owner(kwargs.get("principal"))
+    _require_owner(kwargs.get("principal"), vault_root=vault_root)
     store.require_authoring_schema(
         vault_root,
         supported_versions=(store.SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION),
@@ -5351,7 +5433,7 @@ def _actual_backfill_value(vault_root: Path, companion_path: str) -> dict[str, A
 
 
 def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
     proposal_id = str(kwargs.get("proposal_id") or "")
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
@@ -6009,7 +6091,7 @@ def _active_semantic_request_digest() -> str | None:
 
 
 def _toggle_rules(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
     reconciliation = reconcile_governance_operations(vault_root)
     if reconciliation["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
@@ -6224,7 +6306,7 @@ def _v4_undo_generations(
 
 
 def _undo(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
-    who = _require_owner(kwargs.get("principal"))
+    who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
     reconciliation = reconcile_governance_operations(vault_root)
     if reconciliation["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
@@ -6583,6 +6665,7 @@ def _session(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
 def _inspect(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:
     from .inspection import InspectionError, inspect_operation
 
+    _require_global_policy(vault_root, _principal(kwargs.get("principal")))
     try:
         return inspect_operation(vault_root, operation, **kwargs)
     except InspectionError as exc:
@@ -6636,6 +6719,139 @@ _HANDLER_STRATEGIES: Mapping[str, Any] = MappingProxyType(
 )
 if frozenset(_HANDLER_STRATEGIES) != HANDLER_STRATEGY_KEYS:
     raise RuntimeError("governance handler strategies do not cover registry keys")
+
+
+def restore_scope_documents(documents: dict) -> dict[str, str]:
+    """Use the policy publication serializer for portable protection mirrors."""
+    policy_module.compile_protective_scopes(documents)
+    return _canonical_documents({f"scopes/{key}.yaml": _canonical_json(value)
+                                 for key, value in documents.items()})
+
+
+def restore_residue_paths(evidence_root: Path, *, recovery) -> set[str]:
+    """Verify exact Scope mirrors and original proposal evidence before publication."""
+    from ..restore_journal import RestoreJournalError
+    from . import recovery as operation_recovery
+
+    paths = set()
+    for relative, text in recovery.record["documents"].items():
+        path = policy_module.governance_root(evidence_root) / relative
+        if path.exists():
+            if path.is_symlink() or path.stat().st_nlink != 1 or path.read_bytes() != text.encode():
+                raise RestoreJournalError("restore Scope mirror differs")
+            paths.add(path.relative_to(evidence_root).as_posix())
+    connection = (store.open_active_governance_read_connection(recovery.root)
+                  if store.authorization_session_schema_version_if_readable(recovery.root) == schema_v4.SCHEMA_USER_VERSION
+                  else store.open_readonly_connection(recovery.root))
+    if connection is None:
+        return paths
+    try:
+        row = connection.execute(
+            "SELECT proposal_json, membership_manifest, created_at FROM governance_proposals WHERE proposal_id=?",
+            (recovery.proposal_id,),
+        ).fetchone()
+        if row is None:
+            return paths
+        recovery.validate_proposal(json.loads(row[0]))
+        event_ids = set()
+        if connection.execute("PRAGMA user_version").fetchone()[0] == schema_v4.SCHEMA_USER_VERSION:
+            decoded = _decode_v4_proposal_binding(
+                recovery.root, proposal_id=recovery.proposal_id, proposal_json=row[0],
+                membership_manifest=row[1], created_at=float(row[2]),
+            )
+            event_ids.update((decoded.policy.receipt_event_id, _v4_workspace_mirror_event_id(decoded)))
+        else:
+            rows = connection.execute("SELECT event_id FROM governance_operation_journals WHERE proposal_id=?",
+                                      (recovery.proposal_id,)).fetchall()
+            intents, _ = operation_recovery._receipt_evidence(evidence_root)
+            marker = operation_recovery._marker_path(evidence_root)
+            marker_verified = False
+            for (event_id,) in rows:
+                journal = operation_recovery._validated_persisted_journal(connection, event_id)
+                if journal is None or not operation_recovery._required_intents_match(
+                        journal, operation_variant("commit"), intents, require_all=False):
+                    raise RestoreJournalError("restore publication evidence differs")
+                event_ids.update(json.loads(journal["required_child_intents"]))
+                if marker.exists() and operation_recovery._validated_marker(recovery.root, journal, evidence_root=evidence_root):
+                    marker_verified = True
+            if marker.exists():
+                if not marker_verified:
+                    raise RestoreJournalError("restore mutation marker differs")
+                paths.add(marker.relative_to(evidence_root).as_posix())
+        if receipts.event_records(evidence_root):
+            paths.update(receipts.restore_evidence_paths(evidence_root, authority_root=recovery.root,
+                                                         event_ids=frozenset(event_ids)))
+    except receipts.ReceiptError as error:
+        raise RestoreJournalError("restore receipt evidence differs") from error
+    finally:
+        connection.close()
+    return paths
+
+
+def restore_protective_scopes(vault_root: Path, documents: dict, *, authority: object,
+                             recovery=None) -> None:
+    from contextlib import nullcontext
+
+    from ..restore_journal import ProtectionRecovery
+    from ..state_migration import _require_offline_authority
+
+    _require_offline_authority(authority)
+    if recovery is not None and (not isinstance(recovery, ProtectionRecovery) or recovery.root != vault_root):
+        raise GovernanceError("GOVERNANCE_BLOCKED", "restore continuation differs")
+    with recovery.scope() if recovery is not None else nullcontext():
+        _restore_protective_scopes(vault_root, documents, authority=authority, recovery=recovery)
+
+
+def _restore_protective_scopes(vault_root: Path, documents: dict, *, authority: object,
+                              recovery=None) -> None:
+    """Install portable selectors through destination-owned proposal and publication."""
+    from ..state_migration import _require_offline_authority
+    from .principal import owner_principal, request_scope
+
+    _require_offline_authority(authority)
+    canonical = restore_scope_documents(documents)
+    who = owner_principal(surface="cli")
+    if recovery is not None:
+        from ..restore_journal import ProtectionRecovery
+
+        if (not isinstance(recovery, ProtectionRecovery) or recovery.root != vault_root
+                or recovery.record["documents"] != canonical):
+            raise GovernanceError("GOVERNANCE_BLOCKED", "restore continuation differs")
+        connection = store.open_connection(vault_root)
+        try:
+            row = connection.execute("SELECT proposal_json FROM governance_proposals WHERE proposal_id=?",
+                                     (recovery.proposal_id,)).fetchone()
+        finally:
+            connection.close()
+        if row is not None:
+            recovery.validate_proposal(json.loads(row[0]))
+            with request_scope(who), reserved_paths._owner_authority_scope("govern_memory"):
+                terminal = _commit(vault_root, principal=who, proposal_id=recovery.proposal_id,
+                                   _offline_authority=authority, _restore_recovery=recovery)
+                # A stopped restore retains later workspace edits instead of declaring incomplete protection ready.
+                if terminal.get("mirror_status", "complete") != "complete":
+                    raise GovernanceError("GOVERNANCE_BLOCKED", "restore protection mirror remains unavailable")
+    current = policy_module.load(vault_root)
+    if current.blocked:
+        raise GovernanceError("GOVERNANCE_BLOCKED", "destination policy is unavailable")
+    existing = frozenset(documents).intersection(current.scopes)
+    if existing and policy_module.protective_scope_documents(current, existing) != {
+            key: documents[key] for key in existing}:
+        raise GovernanceError("GOVERNANCE_SCOPE_CONFLICT", "destination protective selectors differ")
+    missing = {f"scopes/{scope_id}.yaml": canonical[f"scopes/{scope_id}.yaml"]
+               for scope_id in documents if scope_id not in existing}
+    if not missing:
+        return
+    if recovery is not None:
+        recovery.bind_missing(missing)
+    with request_scope(who), reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = _proposal(vault_root, principal=who, documents=missing,
+                             intent="Restore portable protective Scope selectors",
+                             _offline_authority=authority, _restore_recovery=recovery)
+        terminal = _commit(vault_root, principal=who, proposal_id=proposed["proposal_id"],
+                           _offline_authority=authority, _restore_recovery=recovery)
+        if terminal.get("mirror_status", "complete") != "complete":
+            raise GovernanceError("GOVERNANCE_BLOCKED", "restore protection mirror remains unavailable")
 
 
 def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:

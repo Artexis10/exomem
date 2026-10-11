@@ -263,6 +263,31 @@ def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
     assert receipts.verify_chain(vault)["valid"] is True
 
 
+def test_staged_evidence_requires_its_destination_authority(vault: Path, tmp_path: Path) -> None:
+    """A copied valid chain cannot authorize restore residue under another destination."""
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    staging = tmp_path / "staging"
+    events = Path("Knowledge Base/_Governance/events")
+    shutil.copytree(vault / events, staging / events)
+    before = {path.relative_to(staging): path.read_bytes() for path in (staging / events).rglob("*.jsonl")}
+    assert receipts.verify_chain(staging, authority_root=vault)["valid"] is True
+    displaced = tmp_path / "unpublished-destination"
+    vault.rename(displaced)
+    try:
+        assert receipts.verify_chain(staging, authority_root=vault)["valid"] is True
+        assert not vault.exists()
+    finally:
+        displaced.rename(vault)
+    assert receipts.verify_chain(staging, authority_root=tmp_path / "absent")["valid"] is False
+    unrelated = tmp_path / "unrelated"
+    (unrelated / "Knowledge Base").mkdir(parents=True)
+    receipts.append_event(unrelated, event_type="disclosure", payload={"outcomes": []})
+    assert receipts.verify_chain(staging, authority_root=unrelated)["valid"] is False
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert receipts.verify_chain(staging, authority_root=vault)["valid"] is False
+    assert {path.relative_to(staging): path.read_bytes() for path in (staging / events).rglob("*.jsonl")} == before
+
+
 def test_events_follow_the_configured_knowledge_base_directory(
     vault: Path, monkeypatch
 ) -> None:

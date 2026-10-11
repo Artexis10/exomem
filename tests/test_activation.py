@@ -80,6 +80,7 @@ def test_scan_measures_coverage_and_four_structural_deficits(tmp_path: Path) -> 
         "provenance_candidate_pages": 2,
         "provenance_linked_pages": 1,
         "unregistered_relation_observations": 1,
+        "definitions_unavailable_pages": 0,
     }
     assert paths["disconnected"].relative_to(tmp_path).as_posix() in by_category["relation_debt"]
     assert paths["generic"].relative_to(tmp_path).as_posix() in by_category["typed_relation_debt"]

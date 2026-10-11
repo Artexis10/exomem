@@ -158,18 +158,16 @@ def test_a_caller_that_is_not_a_replay_still_refreshes_an_unchanged_page(
 
 
 def _unit_generations(root: Path, rel: str) -> set[str]:
+    """The parent generations stamped on the page's stored unit occurrences."""
     connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
     try:
         rows = connection.execute(
-            "SELECT metadata FROM graph_nodes WHERE path = ?", (rel,)
+            "SELECT metadata FROM graph_nodes WHERE path = ? AND kind = ?",
+            (rel, epistemic_graph.CANDIDATE_KIND),
         ).fetchall()
     finally:
         connection.close()
-    return {
-        str(metadata["parent_generation"])
-        for (raw,) in rows
-        if (metadata := json.loads(raw)).get("record_type") == "semantic_unit"
-    }
+    return {str(json.loads(raw)["parent_generation"]) for (raw,) in rows}
 
 
 def test_a_replayed_page_with_stale_generation_unit_rows_is_repaired(
@@ -182,15 +180,15 @@ def test_a_replayed_page_with_stale_generation_unit_rows_is_repaired(
     connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
     try:
         for node_key, raw in connection.execute(
-            "SELECT node_key, metadata FROM graph_nodes WHERE path = ?", (UNITS,)
+            "SELECT node_key, metadata FROM graph_nodes WHERE path = ? AND kind = ?",
+            (UNITS, epistemic_graph.CANDIDATE_KIND),
         ).fetchall():
             metadata = json.loads(raw)
-            if metadata.get("record_type") == "semantic_unit":
-                metadata["parent_generation"] = "stale-generation"
-                connection.execute(
-                    "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
-                    (json.dumps(metadata, sort_keys=True), node_key),
-                )
+            metadata["parent_generation"] = "stale-generation"
+            connection.execute(
+                "UPDATE graph_nodes SET metadata = ? WHERE node_key = ?",
+                (json.dumps(metadata, sort_keys=True), node_key),
+            )
         connection.commit()
     finally:
         connection.close()

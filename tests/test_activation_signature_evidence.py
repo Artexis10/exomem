@@ -182,7 +182,7 @@ def test_explicit_agent_choice_does_not_request_an_encode(signatures, monkeypatc
     assert encodes == []
 
 
-@pytest.mark.parametrize("turn", ["sled rated", "cargo 400 kg"])
+@pytest.mark.parametrize("turn", ["sled rated towed", "cargo 400 kg"])
 def test_lean_activation_preserves_page_content_corroboration(signatures, monkeypatch, turn):
     from test_latency_gate import _seed_freshness_live
 
@@ -216,7 +216,7 @@ def test_activation_catalog_query_forbids_foreground_repairs(signatures, monkeyp
     assert working_set_runtime._PACKET_CACHE == {}
 
 
-@pytest.mark.parametrize("turn", ["Give me a poem about a sled.", "sled sleds", "the sled"])
+@pytest.mark.parametrize("turn", ["Give me a poem about a sled.", "sled sleds", "the sled", "sled rated"])
 def test_one_shared_word_is_not_its_own_lexical_corroboration(signatures, monkeypatch, turn):
     from test_latency_gate import _seed_freshness_live
 
@@ -230,7 +230,7 @@ def test_one_shared_word_is_not_its_own_lexical_corroboration(signatures, monkey
     assert sled["status"] == "partial"
     assert "retrieval" not in sled["evidence"]
     assert packet["abstained"] is True
-    assert packet["units"] == []
+    assert packet["units"] == packet["pointers"] == packet["current_state"] == []
 
 
 def test_single_word_exact_alias_still_resolves_without_lexical_corroboration(
@@ -272,10 +272,16 @@ def test_collection_override_keeps_outcome_and_next_action(signatures, monkeypat
     }
 
 
-def test_new_anchor_gets_lexical_evidence_on_first_activation(signatures, monkeypatch):
+@pytest.mark.parametrize(
+    ("turn", "corroborated"),
+    [("hauler winter", False), ("hauler ready winter", True), ("Polar Hauler winter", True)],
+)
+def test_new_anchor_gets_lexical_evidence_on_first_activation(
+    signatures, monkeypatch, turn, corroborated
+):
     from test_latency_gate import _seed_freshness_live
 
-    vault, _calls, _background = signatures
+    vault, calls, _background = signatures
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     _write(
         vault / "Knowledge Base/Products/Polar Hauler.md",
@@ -283,10 +289,15 @@ def test_new_anchor_gets_lexical_evidence_on_first_activation(signatures, monkey
     )
     _seed_freshness_live(vault)
     lexstore.ensure_fresh(vault)
-    packet = commands.op_activate_context(vault, turn="hauler winter")
+    packet = commands.op_activate_context(vault, turn=turn)
     hauler = next(a for a in packet["anchors"] if a["title"] == "Polar Hauler")
-    assert hauler["status"] == "resolved"
-    assert "retrieval" in hauler["evidence"]
+    assert hauler["status"] == ("resolved" if corroborated else "partial")
+    assert ("retrieval" in hauler["evidence"]) is corroborated
+    assert packet["generation"]["lexical_evidence"] == "available"
+    assert calls == []
+    if not corroborated:
+        assert packet["abstained"] is True
+        assert packet["units"] == packet["pointers"] == packet["current_state"] == []
 
 
 def test_publication_between_evidence_and_compilation_cannot_mix_generations(
