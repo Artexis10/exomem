@@ -165,6 +165,7 @@ def observe_query_timeouts(log_path: Path):
                               **{key: value for key, value in frame.items() if key != "stack"},
                               "phase_timings_overlap": True}
                     encoded = json.dumps(record, allow_nan=False) + "\n"
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
                     with log_path.open("a", encoding="utf-8") as handle:
                         handle.write(encoded)
             except Exception:  # noqa: BLE001 - encoding and I/O cannot replace the original exception
