@@ -248,7 +248,8 @@ def test_budget_is_never_exceeded_and_overflow_becomes_pointers() -> None:
     # budget is not reported at all rather than breaking the bound.
     assert len(packet["units"]) + len(packet["pointers"]) <= len(items)
     for pointer in packet["pointers"]:
-        assert set(pointer) == {"ref", "role", "title", "why", "reason"}
+        assert {"ref", "role", "title", "why", "reason"} <= pointer.keys()
+        assert pointer["anchor"] == "anchor"
         assert "text" not in pointer
 
 
@@ -635,7 +636,8 @@ def test_pointers_carry_a_why() -> None:
 
     assert packet["pointers"]
     for pointer in packet["pointers"]:
-        assert set(pointer) == {"ref", "role", "title", "why", "reason"}
+        assert {"ref", "role", "title", "why", "reason"} <= pointer.keys()
+        assert pointer["anchor"] == "anchor"
         assert pointer["why"], "a pointer must say what admitted it"
         assert "text" not in pointer
 
