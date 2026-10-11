@@ -757,16 +757,19 @@ class Journey:
             self.timings[name] = round(time.monotonic() - started, 1)
 
     @contextlib.asynccontextmanager
-    async def service(self, label: str) -> AsyncIterator[Session]:
+    async def service(self, label: str, *, observe_timeouts: bool = False) -> AsyncIterator[Session]:
         """The installed stdio service on this vault, holding the writer lease while it runs."""
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
 
         log = self.work / f"service-{label}.log"
+        command = self.observed_server("--transport", "stdio") if observe_timeouts else [
+            str(self.executable), "--transport", "stdio",
+        ]
         client = Client(
             StdioTransport(
-                command=str(self.executable),
-                args=["--transport", "stdio"],
+                command=command[0],
+                args=command[1:],
                 env=self.lease_env(),
                 cwd=str(self.work),
                 keep_alive=False,
@@ -784,6 +787,13 @@ class Journey:
                     f"service '{label}' did not start ({error})\n--- {log.name} tail ---\n{tail}"
                 ) from error
             yield Session(client, self.timeout)
+
+    def observed_server(self, *arguments: str) -> list[str]:
+        """Launch the same installed module with temporary failure-only observation."""
+        from _recipient_query_observer import LOG_NAME
+
+        return [str(self.python), str(Path(__file__).resolve()),
+                "--observe-query-timeouts", str(self.work / LOG_NAME), *arguments]
 
     @contextlib.asynccontextmanager
     async def recipient_service(self) -> AsyncIterator[tuple[str, Session]]:
@@ -820,10 +830,10 @@ class Journey:
             reservation.close()
         log = self.work / "service-recipient.log"
         with log.open("w", encoding="utf-8") as handle:
-            process = subprocess.Popen([
-                str(self.python), "-m", "exomem", "--transport", "http",
+            process = subprocess.Popen(self.observed_server(
+                "--transport", "http",
                 "--host", "127.0.0.1", "--port", str(port),
-            ], cwd=self.work, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
+            ), cwd=self.work, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
             try:
                 loop._wait_http_ready(
                     lambda: loop._http_json(f"{base_url}/api/openapi.json", timeout=1)[0] == 200,
@@ -1594,7 +1604,7 @@ async def copy_and_restore(journey: Journey) -> None:
         blob = member_blob(restored)
         held = restored.work / "held-member.gz"
         blob.replace(held)
-        async with restored.service("restored") as service:
+        async with restored.service("restored", observe_timeouts=True) as service:
             async def rebuilding():
                 try:
                     result = await service.query(SAMPLE_ROWS, SAMPLES_ID)
@@ -1871,6 +1881,12 @@ def start_coordinator(journey: Journey) -> tuple[subprocess.Popen, Any]:
 
 def print_log_tails(work: Path, chars: int = 1500) -> None:
     """The services' own logs, which the scratch root deletes with everything else."""
+    from _recipient_query_observer import LOG_NAME
+
+    for log in sorted(work.rglob(LOG_NAME)):
+        with contextlib.suppress(OSError):
+            record = log.read_text(encoding="utf-8")
+            print(f"--- s1-journey {log.relative_to(work)} (complete aggregate) ---\n{record}", file=sys.stderr)
     for log in sorted(work.glob("*.log")):
         with contextlib.suppress(OSError):
             tail = log.read_text(encoding="utf-8", errors="replace")[-chars:]
@@ -1911,6 +1927,16 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--observe-query-timeouts"]:
+        import runpy
+
+        from _recipient_query_observer import observe_query_timeouts
+
+        log_path = Path(sys.argv[2])
+        sys.argv = ["exomem", *sys.argv[3:]]
+        with observe_query_timeouts(log_path):
+            runpy.run_module("exomem", run_name="__main__", alter_sys=True)
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", required=True, help="the installed wheel's python")
     parser.add_argument("--executable", required=True, help="the installed wheel's exomem")
