@@ -125,13 +125,26 @@ class _WitnessBasis:
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class _TitleBasis:
+    """The authored Markdown title that supplied literal support."""
+
+    path: str
+    expected_title: str
+
+    def current(self, root: Path) -> bool:
+        from . import working_set
+
+        return working_set._page_title(root, self.path) == self.expected_title
+
+
 class InferredPacket(dict[str, Any]):
     """Request-local inference marker, preserved by deepcopy but not serialized."""
 
     #: The unit ref of the unit that licensed a single carry; egress drops the
     #: carry claim when it removes that unit.
     witness_ref: str | None = None
-    witness_bases: tuple[_WitnessBasis, ...] = ()
+    witness_bases: tuple[_WitnessBasis | _TitleBasis, ...] = ()
 
 
 _REFERENCE_FIELDS = frozenset({

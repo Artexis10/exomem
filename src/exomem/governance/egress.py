@@ -3449,7 +3449,7 @@ def guard_working_set(
         record="all",
     )
     if ctx is None:
-        return _finalize_working_set(vault_root, guarded)
+        return _finalize_working_set(vault_root, guarded, principal=who, purpose=purpose)
     decisions, withheld = ctx.decisions, ctx.withheld
     frozen, invalid_refs = ctx.frozen, ctx.invalid_refs
     #: Sections whose removals are reported. `ambiguity` and `missing` are
@@ -3629,11 +3629,12 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
-    return _finalize_working_set(vault_root, guarded, noticed=noticed)
+    return _finalize_working_set(vault_root, guarded, principal=who, purpose=purpose, noticed=noticed)
 
 
 def _finalize_working_set(
-    vault_root: Path, guarded: dict[str, Any], *, noticed: bool = False
+    vault_root: Path, guarded: dict[str, Any], *, principal: RequestPrincipal,
+    purpose: str | None, noticed: bool = False,
 ) -> dict[str, Any]:
     """Recount inferred prose and check its chosen support after release projection."""
     from .. import lifecycle_statuses, working_set_conversation
@@ -3649,7 +3650,12 @@ def _finalize_working_set(
         witness_removed = witness is not None and all(
             unit.get("ref") != witness for unit in guarded.get("units", ())
         )
-        stale = any(not basis.current(vault_root) for basis in guarded.witness_bases)
+        stale = any(
+            (isinstance(basis, working_set_conversation._TitleBasis) and not quick_page_visible(
+                vault_root, basis.path, principal=principal, purpose=purpose,
+            )) or not basis.current(vault_root)
+            for basis in guarded.witness_bases
+        )
         # Expired support costs this optional carry, including an already-abstained ambiguity.
         if stale or witness_removed:
             guarded.get("generation", {}).pop("carried_by", None)

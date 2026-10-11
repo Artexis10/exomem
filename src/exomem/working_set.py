@@ -3278,7 +3278,10 @@ def _conversation_support(
     freshness_snapshot: Any,
     visible: Callable[[str], bool] | None,
     purpose: str | None,
-) -> tuple[bool, LaneItem | None, working_set_conversation._WitnessBasis | None]:
+) -> tuple[
+    bool, LaneItem | None,
+    tuple[working_set_conversation._WitnessBasis | working_set_conversation._TitleBasis, ...],
+]:
     """License from the first 200 admitted units, in stable reference order.
 
     Raw keyset pages are transport only: withheld units spend no admitted slot.
@@ -3288,14 +3291,26 @@ def _conversation_support(
     from . import find, lexstore, semantic_index, semantic_language_registry, structured_filters
     from .governance import egress
 
+    title_bases: tuple[working_set_conversation._TitleBasis, ...] = ()
+    # Markdown pages, collection manifests and plan refs have fixed source formats and different title owners.
+    if (
+        subject.path.endswith(".md") and Path(subject.path).name != "_collection.md"
+        and not subject.anchor_id.startswith("plan:")
+    ):
+        if visible is not None and not visible(subject.path):
+            return False, None, ()
+        title_basis = working_set_conversation._TitleBasis(subject.path, subject.title)
+        if not title_basis.current(vault_root):
+            return False, None, ()
+        title_bases = (title_basis,)
     if working_set_conversation.may_carry(analysis, subject_title=subject.title):
-        return True, None, None
+        return True, None, title_bases
     with (visible.page_batch() if isinstance(visible, egress.ReaderView) else nullcontext(visible)) as keep:
         paths = _neighbourhood_paths(vault_root, (subject,), keep=keep)
         if keep is not None:
             paths = frozenset(path for path in paths if keep(path))
     if not paths:
-        return False, None, None
+        return False, None, ()
     # No reader view means nothing is withheld from this caller (`egress.reader_view`),
     # as every other lane reads it; the final guard still decides the packet.
     reader = visible if isinstance(visible, egress.ReaderView) else None if visible is None else egress.ReaderView(
@@ -3317,7 +3332,7 @@ def _conversation_support(
             recall_checkpoint=checkpoint, allow_delta=False,
         )
         if not result.readiness.complete:
-            return False, None, None
+            return False, None, ()
         candidates = list(result.value or ())
         if not candidates:
             break
@@ -3332,18 +3347,18 @@ def _conversation_support(
                 parser_version=candidate.parser_version,
             )
             if not current.current:
-                return False, None, None
+                return False, None, ()
             read = parent_reads.parents.get(candidate.parent_path)
             if read is not None and (
                 read.state.definitions is None or not read.state.definitions.current(vault_root)
             ):
-                return False, None, None
+                return False, None, ()
         records = find._hydrate_indexed_unit_records(
             vault_root, candidates, plan=structured_filters.compile_filter(None), stale_out=stale,
             parent_reads=parent_reads,
         )
         if stale:
-            return False, None, None
+            return False, None, ()
         hits = [
             find._semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
             for candidate in candidates if candidate.unit_ref in records
@@ -3394,10 +3409,13 @@ def _conversation_support(
                 parent_source_hash=state.parent_source_hash,
                 parser_version=state.parser_version, definitions=state.definitions,
             )
-            if not basis.current(vault_root):
-                return False, None, None
-            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane"), basis
-    return False, None, None
+            bases = (*title_bases, basis)
+            if title_bases and visible is not None and not visible(subject.path):
+                return False, None, ()
+            if not all(chosen.current(vault_root) for chosen in bases):
+                return False, None, ()
+            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane"), bases
+    return False, None, ()
 
 
 def _follow_up_packet(
@@ -4197,7 +4215,15 @@ def _compile_packet(
                 for item in verdict.anchors
             ]
             licensed = bool(support) and all(allowed for allowed, _witness, _basis in support)
-            bases = tuple(basis for _allowed, _witness, basis in support if basis is not None)
+            bases = tuple(basis for allowed, _witness, chosen in support if allowed for basis in chosen)
+
+        def support_current() -> bool:
+            return all(
+                (not isinstance(basis, working_set_conversation._TitleBasis)
+                 or visible is None or visible(basis.path)) and basis.current(root)
+                for basis in bases
+            )
+
         if verdict.status == "one" and licensed:
             (found,) = verdict.anchors
             source = next(item for item in rows if item.anchor_id == found.anchor_id)
@@ -4227,7 +4253,7 @@ def _compile_packet(
             # A retained ref needs the same authored support and selected definitions.
             licensed = (
                 witness is None or any(unit.get("ref") == witness.ref for unit in packet["units"])
-            ) and all(basis.current(root) for basis in bases)
+            ) and support_current()
             if licensed:
                 if isinstance(packet, working_set_conversation.InferredPacket):
                     packet.witness_ref = witness.ref if witness is not None else None
@@ -4257,7 +4283,7 @@ def _compile_packet(
                 conversation_inferred=True,
                 status_basis=status_basis,
             )
-            if all(basis.current(root) for basis in bases):
+            if support_current():
                 packet.witness_bases = bases
                 return packet
 

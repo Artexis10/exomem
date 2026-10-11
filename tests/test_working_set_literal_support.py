@@ -473,3 +473,176 @@ def test_title_only_carry_has_no_unit_currency_dependency(vault, monkeypatch):
     assert changed
     assert packet["generation"].get("carried_by") == "conversation"
     assert packet["anchors"][0]["title"] == "Lattice transport"
+
+
+@pytest.mark.parametrize("phase,owner", [
+    ("before_support", False), ("after_support", False), ("terminal", False), ("terminal", True),
+])
+def test_authored_title_currency_controls_a_title_only_carry(vault, monkeypatch, phase, owner):
+    title = "Lattice transport cost"
+    _write(vault, SUBJECT, "- [fact] Maintenance is scheduled. ^support", title)
+    for index in range(5):
+        _write(vault, f"Knowledge Base/Notes/Insights/transport-cost-{index}.md",
+               "- [fact] An unrelated topic. ^topic", f"Other transport topic {index} cost")
+    if not owner:
+        write_scope(vault, paths="Notes/Restricted/**")
+        write_rule(vault, ceiling=0)
+    conversation = {"recent": [{"role": "user", "text": "Tell me about " + title + "."}]}
+    _ready(vault, monkeypatch)
+    with request_scope(owner_principal(surface="library") if owner else _external()):
+        unchanged = commands.op_activate_context(vault, turn="What does it cost?", conversation=conversation)
+    assert unchanged["generation"].get("carried_by") == "conversation"
+    assert unchanged["anchors"][0]["title"] == title
+    _ready(vault, monkeypatch)
+    target = vault / SUBJECT
+    before = target.read_text()
+    changed = False
+    support = working_set._conversation_support
+    release_packet = egress._packet_release
+
+    def edit_title():
+        nonlocal changed
+        target.write_text(before.replace("# " + title, "# Lattice transport schedule", 1))
+        changed = True
+
+    def edit_at_support(*args, **kwargs):
+        if phase == "before_support":
+            edit_title()
+        result = support(*args, **kwargs)
+        if phase == "after_support":
+            assert result[0] and result[1] is None
+            edit_title()
+        return result
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if phase == "terminal" and packet.get("generation", {}).get("carried_by") == "conversation":
+            assert (ctx is None) == owner
+            edit_title()
+        return ctx
+
+    monkeypatch.setattr(working_set, "_conversation_support", edit_at_support)
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    with request_scope(owner_principal(surface="library") if owner else _external()):
+        packet = commands.op_activate_context(vault, turn="What does it cost?", conversation=conversation)
+    assert changed
+    assert target.read_text() == before.replace("# " + title, "# Lattice transport schedule", 1)
+    assert packet["generation"].get("carried_by") != "conversation"
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert packet["anchors"] == []
+    assert packet["ambiguity"] == []
+    assert packet["units"] == []
+
+
+@pytest.mark.parametrize("phase", ["after_support", "terminal"])
+def test_a_neighbour_unit_cannot_reuse_a_changed_subject_title(vault, monkeypatch, phase):
+    from exomem import epistemic_graph
+
+    neighbour = "Knowledge Base/Notes/Insights/zinc-documentation.md"
+    title = "Lattice maintenance transport"
+    _write(vault, SUBJECT, f"A public introduction.\n\n## Relations\n- supports [[{neighbour.removesuffix('.md')}]]", title)
+    _write(vault, neighbour, "- [fact] Replacement costs twenty tokens. ^support", "Zinc documentation")
+    for index in range(5):
+        _write(vault, f"Knowledge Base/Notes/Insights/maintenance-topic-{index}.md",
+               "A separate subject.", f"Other maintenance topic {index}")
+    conversation = {"recent": [{"role": "user", "text": "Tell me about " + title + "."}]}
+    _ready(vault, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    unchanged = _activate(vault, "What is its maintenance cost?", conversation=conversation)
+    assert unchanged["generation"].get("carried_by") == "conversation"
+    assert any(unit["provenance"]["path"] == neighbour for unit in unchanged["units"])
+    _ready(vault, monkeypatch)
+    target = vault / SUBJECT
+    before = target.read_text()
+    neighbour_before = (vault / neighbour).read_text()
+    support = working_set._conversation_support
+    release_packet = egress._packet_release
+    changed = False
+
+    def edit_title():
+        nonlocal changed
+        target.write_text(before.replace("# " + title, "# Lattice scheduled transport", 1))
+        changed = True
+
+    def edit_after_support(*args, **kwargs):
+        result = support(*args, **kwargs)
+        if phase == "after_support":
+            assert result[0] and result[1].path == neighbour
+            edit_title()
+        return result
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if phase == "terminal" and packet.get("generation", {}).get("carried_by") == "conversation":
+            edit_title()
+        return ctx
+
+    monkeypatch.setattr(working_set, "_conversation_support", edit_after_support)
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    packet = _activate(vault, "What is its maintenance cost?", conversation=conversation)
+    assert changed
+    assert target.read_text() == before.replace("# " + title, "# Lattice scheduled transport", 1)
+    assert (vault / neighbour).read_text() == neighbour_before
+    assert packet["generation"].get("carried_by") != "conversation"
+    assert packet["anchors"] == []
+    assert packet["units"] == []
+
+
+def test_title_currency_uses_the_declared_purpose_of_an_identity_grant(vault, monkeypatch):
+    from test_governance_egress import GRANT_ID, SCOPE_ID
+
+    title = "Lattice transport cost"
+    _write(vault, SUBJECT, "- [fact] Maintenance is scheduled. ^support", title)
+    for index in range(5):
+        _write(vault, f"Knowledge Base/Notes/Insights/transport-cost-{index}.md",
+               "- [fact] An unrelated topic. ^topic", f"Other transport topic {index} cost")
+    write_scope(vault, paths="Notes/Insights/lattice-transport.md", default_deny=True)
+    write_rule(vault, ceiling=0, extra="kind: org_cap\npurpose: marketing\npurpose_condition: matches\n")
+    grant = vault / "Knowledge Base/_Governance/grants/transport.yaml"
+    grant.parent.mkdir(parents=True, exist_ok=True)
+    grant.write_text(
+        f"governance_version: 1\nid: {GRANT_ID}\nkind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\naudience: external\nceiling: 6\n'
+    )
+    conversation = {"recent": [{"role": "user", "text": "Tell me about " + title + "."}]}
+    _ready(vault, monkeypatch)
+    with request_scope(_external(purpose="marketing")):
+        denied = commands.op_activate_context(vault, turn="What does it cost?", conversation=conversation)
+        allowed = commands.op_activate_context(
+            vault, turn="What does it cost?", conversation=conversation, purpose="audit",
+        )
+    assert denied["generation"].get("carried_by") != "conversation"
+    assert denied["anchors"] == []
+    assert allowed["generation"].get("carried_by") == "conversation"
+    assert allowed["anchors"][0]["title"] == title
+
+
+def test_terminal_projection_revokes_a_title_only_ambiguity(vault, monkeypatch):
+    _write(vault, SUBJECT, "An ordinary introduction.", "Lattice transport cost")
+    _write(vault, OTHER, "An ordinary introduction.", "Prism routing cost")
+    for index in range(5):
+        _write(vault, f"Knowledge Base/Notes/Insights/cost-topic-{index}.md",
+               "An unrelated topic.", f"Other cost topic {index}")
+    conversation = {"recent": [{"role": "user", "text": "Compare Lattice transport cost and Prism routing cost."}]}
+    _ready(vault, monkeypatch)
+    unchanged = _activate(vault, conversation=conversation)
+    assert unchanged["abstention"]["reason"] == "ambiguous"
+    assert {entry["title"] for entry in unchanged["ambiguity"]} == {"Lattice transport cost", "Prism routing cost"}
+    release_packet = egress._packet_release
+    changed = False
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        nonlocal changed
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if packet.get("abstention", {}).get("reason") == "ambiguous":
+            _write(root, SUBJECT, "An ordinary introduction.", "Lattice transport schedule")
+            changed = True
+        return ctx
+
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    packet = _activate(vault, conversation=conversation)
+    assert changed
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert packet["ambiguity"] == []
+    assert packet["anchors"] == []
+    assert packet["units"] == []
