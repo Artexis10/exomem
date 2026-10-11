@@ -10,6 +10,7 @@ stale hash, a restricted principal's save, and a hand-edited overlay.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -370,6 +371,54 @@ def test_schema_watcher_invalidates_a_same_fingerprint_hand_edit(
     file_watcher.FileWatcher(vault)._record(overlay, deleted=False)
 
     assert entity_types.load_entity_types(vault).resolve("site").label == "Spot"
+
+
+def test_warm_registry_load_does_not_read_the_overlay_again(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.vocabulary import registry
+
+    path = entity_types.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+    registry.invalidate(vault)
+    expected = entity_types.load_entity_types(vault).extension_hash
+    identity = path.stat()
+    read = os.read
+    reads = []
+
+    def observe(descriptor: int, size: int) -> bytes:
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
+            reads.append(size)
+        return read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", observe)
+    assert entity_types.load_entity_types(vault).extension_hash == expected
+    assert reads == []
+
+
+@pytest.mark.parametrize("alias", ["hardlink", "parent-symlink"])
+def test_warm_registry_cache_does_not_admit_a_new_alias(
+    vault: Path, tmp_path: Path, alias: str
+) -> None:
+    from exomem.vault import PathGuardError
+    from exomem.vocabulary import registry
+
+    path = entity_types.extension_registry_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+    registry.invalidate(vault)
+    entity_types.load_entity_types(vault)
+    if alias == "hardlink":
+        (tmp_path / "outside.yaml").hardlink_to(path)
+    else:
+        outside = tmp_path / "outside-schema"
+        path.parent.rename(outside)
+        path.parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PathGuardError):
+        entity_types.load_entity_types(vault)
 
 
 @pytest.mark.parametrize("bound", [False, True])
