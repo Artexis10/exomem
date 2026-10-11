@@ -47,6 +47,15 @@ reports, cancellation precedence and disposable PostgreSQL split grants.
 
 The built Cloud image passed a real age roundtrip with networking disabled.
 Disposable PostgreSQL tests cover cleanup failure, controller restart, service
-recovery, bounded retry and eventual cleanup. Real-K3s/PKCE rehearsal, bucket
-lifecycle/CORS and production rollout remain separate evidence requirements. The owner restore was previously
-performed; unchecked historical tasks do not authorize repeating it.
+recovery, bounded retry and eventual cleanup. The real-K3s rehearsal passed an
+accepted encrypted import into a running cell. A retained cleanup Pod kept
+admission occupied and the runtime paused until every phase Job and Pod was
+gone. Source hashes matched, and the identity, ciphertext and staging files
+were absent after cleanup.
+
+The CLI passed a trusted-TLS rehearsal with a synthetic OAuth server and PKCE.
+Live-K3s refusal cases, production OAuth registration, bucket lifecycle/CORS
+and production rollout remain open. The local storage rehearsal does not prove
+multi-node storage behavior or production bucket restrictions. The owner
+restore was previously performed; unchecked historical tasks do not authorize
+repeating it.
