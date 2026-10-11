@@ -12,7 +12,7 @@ from datetime import datetime
 
 DESIRED_STATES = ("running", "read_only", "stopped", "deleted")
 TERMINAL_OBSERVED_STATES = frozenset({"running", "read_only", "stopped", "deleted", "failed"})
-HOLD_KINDS = ("upgrade", "backup", "restore", "import")
+HOLD_KINDS = ("upgrade", "backup", "restore", "import", "export")
 # move-cloud-cells-to-local-storage D3: the hourly backup of a cell on local
 # storage, a hold that does not stop the cell.
 SNAPSHOT_BACKUP = "snapshot-backup"
@@ -95,6 +95,11 @@ class CellRow:
     # move-cloud-cells-to-local-storage D10: the size cellctl grew the cell's
     # local volume to, or None while it has never grown.
     grown_storage_gib: int | None = None
+    # The filesystem's used and total bytes as the last backup or export Job
+    # measured them, and when. All None until a Job first reports them.
+    used_bytes: int | None = None
+    filesystem_bytes: int | None = None
+    usage_observed_at: datetime | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
 
@@ -296,6 +301,14 @@ class Decision:
     prepare_import_upload: bool = False
     cleanup_import_transport: bool = False
     finalize_import: bool = False
+
+    # C6: the S3 step for this pass's export ("create", "complete" or
+    # "remove"), whether to render its Job, its observation columns, and
+    # whether to delete its Job.
+    export_transport: str | None = None
+    run_export_job: bool = False
+    export_updates: dict[str, object] = field(default_factory=dict)
+    stop_export_job: bool = False
 
     row_updates: dict[str, object] = field(default_factory=dict)
     rollout_updates: dict[str, object] = field(default_factory=dict)

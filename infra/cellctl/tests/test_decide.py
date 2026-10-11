@@ -551,6 +551,25 @@ def test_desired_state_flips_to_read_only_during_backup_hold_stays_stopped_then_
     assert finished.row_updates["last_backup_snapshot"] == NIGHTLY_SNAPSHOT
 
 
+def test_a_recorded_backup_records_the_disk_use_its_job_measured() -> None:
+    """Defect: Home shows a storage figure that no backup measured, or none at all."""
+    held_row = row(hold_kind="backup", hold_started_at=NOW, observed_image=IMAGE_A)
+    measured = obs(
+        statefulset_exists=True,
+        statefulset_image=IMAGE_A,
+        statefulset_hold_kind="backup",
+        statefulset_hold_started_at=NOW - timedelta(minutes=2),
+        backup_job_succeeded=True,
+        backup_job_snapshot_id=NIGHTLY_SNAPSHOT,
+        backup_job_used_bytes=3 * 1024**3,
+        backup_job_total_bytes=10 * 1024**3,
+    )
+    finished = decide(held_row, rollout(), measured, now=NOW, cell_image=IMAGE_A, start_upgrade=False, config=CONFIG)
+    assert finished.row_updates["used_bytes"] == 3 * 1024**3
+    assert finished.row_updates["filesystem_bytes"] == 10 * 1024**3
+    assert finished.row_updates["usage_observed_at"] == finished.row_updates["last_backup_at"]
+
+
 def test_backup_hold_honours_a_flip_to_stopped() -> None:
     # H2: replicas must come from desired_state throughout every hold, not a
     # hardcoded 1.

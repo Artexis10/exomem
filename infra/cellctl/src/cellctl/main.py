@@ -82,16 +82,19 @@ def build_reconcile_config() -> ReconcileConfig:
     concurrency_raw = os.environ.get("CELLCTL_BACKUP_CONCURRENCY")
     if concurrency_raw is not None:
         kwargs["backup_concurrency"] = int(concurrency_raw)
-    for field, variable in (
-        ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES"),
-        ("import_cleanup_deadline", "CELLCTL_IMPORT_CLEANUP_DEADLINE_MINUTES"),
-        ("import_cleanup_retry", "CELLCTL_IMPORT_CLEANUP_RETRY_MINUTES"),
+    for field, variable, unit in (
+        ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES", "minutes"),
+        ("import_cleanup_deadline", "CELLCTL_IMPORT_CLEANUP_DEADLINE_MINUTES", "minutes"),
+        ("import_cleanup_retry", "CELLCTL_IMPORT_CLEANUP_RETRY_MINUTES", "minutes"),
+        ("export_deadline", "CELLCTL_EXPORT_DEADLINE_MINUTES", "minutes"),
+        # C6 names this setting; only cellctl reads it, and expires_at carries it to Substrate.
+        ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
     ):
         if variable in os.environ:
-            minutes = int(os.environ[variable])
-            if minutes <= 0:
+            amount = int(os.environ[variable])
+            if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
-            kwargs[field] = timedelta(minutes=minutes)
+            kwargs[field] = timedelta(**{unit: amount})
     if not kwargs:
         return DEFAULT_RECONCILE_CONFIG
     return ReconcileConfig(**kwargs)
