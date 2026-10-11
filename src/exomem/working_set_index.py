@@ -397,19 +397,6 @@ def terms_of(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens_of(text)))
 
 
-def hyphen_parts(token: str) -> tuple[str, ...]:
-    """The words one `tokens_of` term joins with in-word hyphens, or `()`.
-
-    "kitchen-renovation" gives ("kitchen", "renovation"). `tokens_of` keeps a
-    hyphen inside a term (`_TOKEN_JOINERS`); this reads the words back out. The
-    other joiner, the apostrophe, ends a word with a possessive or a
-    contraction (`fold_possessive`), so it joins no second word.
-    """
-    if "-" not in token:
-        return ()
-    return tuple(part for part in token.split("-") if part)
-
-
 #: What may sit just before a reference: whitespace, the start of the turn,
 #: or one of these (brackets, quotes, backticks, markdown emphasis, `=`, `,`).
 _OPENERS = "([{<\"'`=*_,\u2018\u2019\u201c\u201d"

@@ -1015,11 +1015,11 @@ def _lexical_query(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
-    counted: list[str] | None = None,
+    excluded_corroboration_stems: frozenset[str] | None = None,
 ):
     """The activation lexical query: `paths` ranked by the content words of
-    `words`, each hit matching at least two distinct content units, or two
-    distinct stems of `counted` when it is given."""
+    `words`, each hit matching at least two distinct content units.
+    Units containing `excluded_corroboration_stems` cannot corroborate."""
     from . import lexstore
 
     # A full-page match on the same single name word is not a second fact.
@@ -1037,7 +1037,7 @@ def _lexical_query(
         recall_checkpoint=recall_checkpoint,
         term_budget=lexical_term_budget(),
         term_selection=selection,
-        corroboration_tokens=counted,
+        excluded_corroboration_stems=excluded_corroboration_stems,
     )
 
 
@@ -1055,11 +1055,10 @@ def lexical_hits_without(
     (`working_set_resolve.candidates_for`'s dependence check).
 
     Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
-    bring "hedge" back unless its stem is what is left out. Only spaced words
-    count (`pairable_stems`): an unspaced run yields several bigram stems,
-    and one shared phrase would count as two matches. The turn's stems are
-    counted without the first pass's term budget, so on a long turn this
-    answers "would an unbounded pass without the word still reach the page".
+    bring "hedge" back unless its stem is what is left out. The query keeps
+    the first pass's budget and unit grouping: a word or unspaced run counts
+    once, and a run needs a strict majority of its content stems. A unit
+    containing a left-out stem cannot corroborate.
     Empty when the catalogue cannot answer: the anchors then stay leads, as
     they do when nothing is asked.
     """
@@ -1067,8 +1066,7 @@ def lexical_hits_without(
 
     turn = working_set_index.subject_text(turn)
     dropped = frozenset(bm25_module.tokenize(" ".join(left_out), query=True))
-    counted = [stem for stem in pairable_stems(turn) if stem not in dropped]
-    if not pages or len(counted) < 2:
+    if not pages:
         return frozenset()
     try:
         result = _lexical_query(
@@ -1078,7 +1076,7 @@ def lexical_hits_without(
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
-            counted=counted,
+            excluded_corroboration_stems=dropped,
         )
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical dependence check unavailable", exc_info=True)

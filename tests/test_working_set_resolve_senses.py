@@ -379,14 +379,20 @@ def test_kitchen_punctuation_and_coordinator_controls_keep_both_hubs(turn: str) 
 
 
 def test_an_unpunctuated_run_with_a_hyphenated_word_still_narrows() -> None:
-    resolution = _resolve(
-        "Where does the kitchen-renovation budget stand?",
+    """Kitchen and renovation corroborate the budget page without "budget".
+    The packet test proves those two units through the real lexical query."""
+    analysis = resolve_module.analyze_turn("Where does the kitchen-renovation budget stand?")
+    candidates = resolve_module.candidates_for(
+        analysis,
         (KITCHEN, KITCHEN_BUDGET),
-        counts=KITCHEN_COUNTS,
-        retrieved=(KITCHEN.path, KITCHEN_BUDGET.path),
+        term_anchor_counts=KITCHEN_COUNTS,
+        retrieval_paths=frozenset({KITCHEN.path, KITCHEN_BUDGET.path}),
+        retrieval_without=lambda pages, _words: pages & frozenset({KITCHEN_BUDGET.path}),
     )
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
 
     assert resolution.status == "resolved"
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [KITCHEN_BUDGET.path]
 
 
 @pytest.mark.parametrize("separator", [" and ", ", "])

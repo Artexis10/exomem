@@ -35,7 +35,6 @@ from .working_set_index import (
     derived_short_name,
     fold_plural,
     fold_possessive,
-    hyphen_parts,
     normalize,
     subject_text,
     tokens_of,
@@ -326,9 +325,6 @@ class TurnAnalysis:
     #: Words the raw turn writes with a capital anywhere, a sentence start
     #: included, folded like the lexical terms. Empty when `cased_turn` is false.
     capitalised_anywhere: frozenset[str] = frozenset()
-    #: Words the raw turn writes at least once without an initial capital,
-    #: folded like the lexical terms. Empty when `cased_turn` is false.
-    lower_case: frozenset[str] = frozenset()
     #: Does this turn point back (`working_set_anaphora.points_back`): a
     #: pronoun or possessive, a demonstrative, a follow-up marker, an ordinal
     #: plus "one"/"option", a governed pointer or a referential cue?
@@ -1083,7 +1079,6 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
         request_breaks=_run_breaks(text, tokens, pattern=_REQUEST_BREAK),
         cased_turn=_casing_signal(turn),
         capitalised_anywhere=_capitalised_terms(turn, anywhere=True),
-        lower_case=_lower_case_terms(turn),
         points_back=pointing,
         content_words=content,
         anaphoric=pointing and not content,
@@ -1172,36 +1167,6 @@ def _capitalised_terms(turn: str, *, anywhere: bool = False) -> frozenset[str]:
 def _is_cased(term: str) -> bool:
     """Does `term`'s script distinguish capitals at all?"""
     return any(character.upper() != character.lower() for character in term)
-
-
-def _lower_case_terms(turn: str) -> frozenset[str]:
-    """Words the raw turn writes at least once without an initial capital,
-    folded as lexical terms are (`TurnAnalysis.lower_case`). Empty for a turn
-    whose casing says nothing (`_casing_signal`)."""
-    raw = unicodedata.normalize("NFKC", str(turn or ""))
-    if not _casing_signal(raw):
-        return frozenset()
-    return frozenset(
-        folded
-        for word in _RAW_WORD.findall(raw)
-        if _is_cased(word[:1]) and not word[:1].isupper()
-        for token in tokens_of(normalize(word))
-        if (folded := _fold_lexical_term(token)) is not None
-    )
-
-
-def _written_as_ordinary_words(terms: frozenset[str], analysis: TurnAnalysis) -> bool:
-    """Did a turn whose casing says something write each of `terms`, in a
-    cased script, in lower case at least once and never with a capital away
-    from a sentence start? A capital that only opens a sentence marks nothing,
-    so a word written only that way is not read as ordinary either."""
-    return bool(
-        terms
-        and analysis.cased_turn
-        and all(_is_cased(term) for term in terms)
-        and terms <= analysis.lower_case
-        and not terms & analysis.capitalised
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1425,8 +1390,8 @@ def candidates_for(
     `retrieval_without(pages, words)` answers which of `pages` are still
     lexical hits for the turn when `words` (folded lexical terms) and every
     form that stems like them are not counted. It is asked only when an
-    anchor's recall hit may rest on the one word it shares with the turn
-    (`ordinary_name_word`), once for each distinct shared word, and those
+    anchor's recall hit may rest on a singleton partial-name contact,
+    once for each distinct excluded-term set, and those
     anchors keep `retrieval` only for the pages it returns. Without it they
     lose it.
 
@@ -1477,15 +1442,6 @@ def candidates_for(
         folded
         for term in frozenset(analysis.tokens) - stopwords
         if (folded := _fold_lexical_term(term)) is not None
-    )
-    # The words inside the turn's hyphenated tokens ("kitchen-renovation").
-    # The comparison below reads each such token as one word, so it never
-    # sees them; `ordinary_name_word` counts them as name words the turn wrote.
-    joined_words = frozenset(
-        folded
-        for token in analysis.tokens
-        for part in hyphen_parts(token)
-        if part not in stopwords and (folded := _fold_lexical_term(part)) is not None
     )
     phrases = _turn_phrases(analysis, stopwords)
     cue_categories = eligible_categories
@@ -1608,9 +1564,9 @@ def candidates_for(
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
-        # Does `rare_term` rest on one word of a longer name, written as an
-        # ordinary word? The `retrieval` grant below says why that matters.
-        ordinary_name_word = False
+        # Does `rare_term` rest on a singleton partial-name contact?
+        # The `retrieval` grant below checks whether the hit needs it.
+        partial_name_contact = False
         if _lexical_overlap(shared_broad, shared_name, min_terms):
             evidence.add("lexical_overlap")
             name_contact = shared_name
@@ -1645,11 +1601,9 @@ def candidates_for(
                 if not consumed:
                     evidence.add("rare_term")
                     name_contact = shared_name
-                    ordinary_name_word = (
+                    partial_name_contact = (
                         not matched_phrases
                         and not shared_name & whole_names
-                        and not (joined_words - shared_name) & name_terms_folded
-                        and _written_as_ordinary_words(shared_name, analysis)
                     )
         # An unspaced script writes a name inside a run of words, never as a
         # token of its own: containment is its `rare_term` (design §6.3),
@@ -1671,21 +1625,13 @@ def candidates_for(
         # it is corroborated instead, and only from a WORDED partner (see
         # `add_graph_corroboration`).
         #
-        # A recall hit may rest on the one word `rare_term` shares, when that
-        # word is only part of the anchor's names and the turn writes it as an
-        # ordinary word (`ordinary_name_word`). The page carries its own
-        # title, so the hit counts that word as one of the two content words
-        # the lexical lane requires, and any other turn word on the page
-        # completes it: `rare_term` counted twice, not the independent second
-        # kind the third clause of `_status_for_evidence` needs. Such a hit
-        # waits for the dependence check after this loop. Casing is read
-        # only to tell a name from an ordinary word: a cased turn that writes
-        # the word in lower case and never capitalises it after a sentence's
-        # first word wrote an ordinary word. A turn with no casing signal, a
-        # word written only with a sentence-opening capital, and an uncased
-        # script say nothing, and the hit counts as before.
+        # A recall hit that needs the singleton partial-name term is the
+        # same contact as `rare_term`: the page carries its own title, so
+        # that term and any other matched unit complete the lexical hit.
+        # Require two remaining content units without that term's stems;
+        # casing cannot establish independence or decide the caller's intent.
         if row.path and row.path in retrieval_paths:
-            if ordinary_name_word:
+            if partial_name_contact:
                 dependent[row.anchor_id] = (row.path, shared_name)
             else:
                 evidence.add("retrieval")
@@ -1733,9 +1679,8 @@ def candidates_for(
                 name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
-                # Capitals anywhere, sentence starts included: the band-yield
-                # and bare-name rules keep this older, stricter reading, not
-                # `_written_as_ordinary_words`.
+                # Capitals anywhere, sentence starts included: the existing
+                # band-yield and bare-name rules keep this stricter reading.
                 name_lower_case=bool(
                     name_contact
                     and analysis.cased_turn
@@ -1745,7 +1690,7 @@ def candidates_for(
             )
         )
     if dependent and retrieval_without is not None:
-        # The dependence check, one query for each distinct shared word, so
+        # The dependence check, one query for each distinct excluded-term set, so
         # one anchor's word never takes a match away from another's page. A
         # page that is still a hit without its own word matched the turn
         # apart from it, so its `retrieval` is a second fact after all.
