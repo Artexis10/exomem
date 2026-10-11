@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field
 from datetime import date
 from functools import wraps
 from pathlib import Path
@@ -2232,58 +2233,115 @@ def _origin_view(vault_root: Path) -> bool:
     return egress.projects_origin_for_caller(vault_root)
 
 
+@dataclass
+class _UnitParent:
+    """One parent page as unit hydration read it.
+
+    `state` is None when the page is missing or cannot be parsed: every row
+    read off it is then stale. `prose` is the page's prose units, filled the
+    first time a row's generation matches.
+    """
+
+    page: ParsedPage | None
+    state: Any = None
+    prose: tuple[Any, ...] | None = None
+
+    def current_for(self, generation: str) -> bool:
+        return self.state is not None and self.state.parent_generation == generation
+
+
+@dataclass
+class UnitParentReads:
+    """What one request read off unit parents, so each is read once.
+
+    Activation's role lanes select overlapping units off the same pages. Each
+    lane still runs its own query and checks its own rows; only the reads of
+    a parent's Markdown are shared. `parents` is `_read_unit_parent` by path,
+    `validated` is `lexstore.search_semantic_units_result`'s currency check
+    by row stamp.
+
+    The request serves one view of each page. A page whose catalogue rows
+    change between two lanes is read again by the later lane. A page whose
+    file changes while its catalogue rows do not is served by every later
+    lane as the request first read it.
+    """
+
+    parents: dict[str, _UnitParent | None] = field(default_factory=dict)
+    validated: dict[tuple[str, str, str, int], bool] = field(default_factory=dict)
+
+
+def _read_unit_parent(vault_root: Path, parent_path: str) -> _UnitParent | None:
+    """One parent as unit hydration reads it, before any row is checked.
+
+    `None` when recall does not admit the page or a page filter rejects it.
+    """
+    from . import semantic_index
+
+    if not recall_policy.is_recall_candidate(vault_root, vault_root / parent_path):
+        return None
+    page = _CACHE.get(vault_root / parent_path, vault_root)
+    if page is None:
+        return _UnitParent(page=None)
+    if not _passes_filters(
+        page,
+        vault_root=vault_root,
+        types=None,
+        projects=None,
+        tags=None,
+        speakers=None,
+        file_types=None,
+        exclude_file_types=None,
+    ):
+        return None
+    try:
+        state = semantic_index.current_parent_index_state(vault_root, parent_path)
+    except (OSError, UnicodeError, ValueError) as error:
+        log.warning("semantic-unit candidate hydration failed for %s: %s", parent_path, error)
+        return _UnitParent(page=None)
+    return _UnitParent(page=page, state=state)
+
+
 def _hydrate_indexed_unit_records(
     vault_root: Path,
     indexed: list[Any],
     *,
     plan: structured_filters.FilterPlan,
     stale_out: list[str] | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
-    """Hydrate only sidecar-selected parents, rejecting any generation race."""
-    from . import semantic_index
+    """Hydrate only sidecar-selected parents, rejecting any generation race.
 
+    With `parent_reads`, this call reuses a read another call of the same
+    request made only when that read is current for this call's rows.
+    Otherwise it reads the parent again, as it would alone, and keeps the
+    newer read for later calls.
+    """
     parents: dict[str, tuple[ParsedPage, Any, tuple[Any, ...]] | None] = {}
     records: dict[str, tuple[ParsedPage, Any, int]] = {}
+    reads = {} if parent_reads is None else parent_reads.parents
     for hit in indexed:
         parent = parents.get(hit.parent_path)
         if hit.parent_path not in parents:
-            if not recall_policy.is_recall_candidate(vault_root, vault_root / hit.parent_path):
-                parents[hit.parent_path] = None
+            path = hit.parent_path
+            read = reads.get(path)
+            if read is None or not read.current_for(hit.parent_generation):
+                # No earlier read is current for this call's rows: a write may
+                # have landed since, so read the page now, as a call alone would.
+                read = reads[path] = _read_unit_parent(vault_root, path)
+            if read is None:
+                parents[path] = None
                 continue
-            page = _CACHE.get(vault_root / hit.parent_path, vault_root)
-            if page is None or not _passes_filters(
-                page,
-                vault_root=vault_root,
-                types=None,
-                projects=None,
-                tags=None,
-                speakers=None,
-                file_types=None,
-                exclude_file_types=None,
-            ):
-                if page is None and stale_out is not None:
+            if not read.current_for(hit.parent_generation):
+                if stale_out is not None:
                     stale_out.append(hit.unit_ref)
-                parents[hit.parent_path] = None
+                parents[path] = None
                 continue
-            try:
-                state = semantic_index.current_parent_index_state(vault_root, hit.parent_path)
-            except (OSError, UnicodeError, ValueError) as error:
-                log.warning(
-                    "semantic-unit candidate hydration failed for %s: %s",
-                    hit.parent_path,
-                    error,
+            if read.prose is None:
+                read.prose = find_results.prose_units(
+                    vault_root, read.page, read.state.document.units
                 )
-                if stale_out is not None:
-                    stale_out.append(hit.unit_ref)
-                parents[hit.parent_path] = None
-                continue
-            if state.parent_generation != hit.parent_generation:
-                if stale_out is not None:
-                    stale_out.append(hit.unit_ref)
-                parents[hit.parent_path] = None
-                continue
-            parent = (page, state, find_results.prose_units(vault_root, page, state.document.units))
-            parents[hit.parent_path] = parent
+            parent = (read.page, read.state, read.prose)
+            parents[path] = parent
         if parent is None:
             continue
         page, state, prose_units = parent
@@ -2534,6 +2592,7 @@ def _find_semantic_units(
     max_catalog_candidates: int | None = None,
     truncated_out: list[bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -2608,12 +2667,15 @@ def _find_semantic_units(
                             _repair_stale=True,
                             repair=exact_repair,
                             allow_delta=exact_allow_delta,
+                            validated=parent_reads.validated if parent_reads else None,
                         )
                         _set_catalog_timing_profile(timings, catalog_result.readiness)
                         if not catalog_result.readiness.complete:
                             _raise_catalog_outcome(catalog_result.readiness)
                         indexed = list(catalog_result.value or [])
-                        records = _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                        records = _hydrate_indexed_unit_records(
+                            vault_root, indexed, plan=plan, parent_reads=parent_reads
+                        )
                         if len(records) >= requested_limit or len(indexed) < prefix_size:
                             break
                         if (
@@ -2648,6 +2710,7 @@ def _find_semantic_units(
                         _repair_stale=True,
                         repair=exact_repair,
                         allow_delta=exact_allow_delta,
+                        validated=parent_reads.validated if parent_reads else None,
                     )
                     _set_catalog_timing_profile(timings, catalog_result.readiness)
                     if not catalog_result.readiness.complete:
@@ -2656,7 +2719,9 @@ def _find_semantic_units(
                     records = (
                         {}
                         if mode == "vector"
-                        else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                        else _hydrate_indexed_unit_records(
+                            vault_root, indexed, plan=plan, parent_reads=parent_reads
+                        )
                     )
         else:
             indexed = lexstore.search_semantic_units(
@@ -2701,7 +2766,9 @@ def _find_semantic_units(
             records = (
                 {}
                 if mode == "vector"
-                else _hydrate_indexed_unit_records(vault_root, indexed, plan=plan)
+                else _hydrate_indexed_unit_records(
+                    vault_root, indexed, plan=plan, parent_reads=parent_reads
+                )
             )
     else:
         records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
@@ -2833,7 +2900,11 @@ def _find_semantic_units(
     # produce a trustworthy ranking. This avoids reparsing the same candidate
     # parents twice while preserving the deterministic lexical fallback.
     if mode == "vector" and not vector_hits and indexed:
-        records.update(_hydrate_indexed_unit_records(vault_root, indexed, plan=plan))
+        records.update(
+            _hydrate_indexed_unit_records(
+                vault_root, indexed, plan=plan, parent_reads=parent_reads
+            )
+        )
 
     if not records:
         if candidate_window_exhausted and failed_out is not None:

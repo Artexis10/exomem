@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib
 import importlib.util
@@ -345,6 +346,31 @@ def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path
             assert replaced.ok
             with filesystem.file(parent, "item.txt").require() as current:
                 assert filesystem.read(current).require() == b"two"
+
+
+@_requires_native_route
+def test_publish_copies_parts_and_removes_a_temporary_a_failed_copy_left(tmp_path: Path) -> None:
+    """A large artifact publishes from parts, never whole in memory. A copy that fails
+    part-way, as on a full disk, must not leave a hidden temporary in the vault."""
+    held_fs = _module()
+
+    def parts():
+        yield b"one-"
+        yield b"two"
+
+    def full_disk():
+        yield b"partial"
+        raise OSError(errno.ENOSPC, "no space left on device")
+
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent("publish", create=True).require() as parent:
+            assert held_fs.publish_bytes(filesystem, parent, "item.bin", held_fs.Chunks(parts)).ok
+            with filesystem.file(parent, "item.bin").require() as current:
+                assert filesystem.read(current).require() == b"one-two"
+            refused = held_fs.publish_bytes(filesystem, parent, "other.bin", held_fs.Chunks(full_disk))
+            assert not refused.ok
+
+    assert sorted(path.name for path in (tmp_path / "publish").iterdir()) == ["item.bin"]
 
 
 @_requires_native_route

@@ -11,7 +11,7 @@ import os
 import secrets
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -35,6 +35,21 @@ class HeldFsError(Exception):
 
     def __str__(self) -> str:
         return f"{self.code}: {self.detail}"
+
+
+@dataclass(frozen=True, slots=True)
+class Chunks:
+    """Bytes a held write copies a part at a time, so a large file is never whole in memory.
+
+    Each write calls `open` for a fresh pass, so a retried publication copies the same bytes.
+    """
+
+    open: Callable[[], Iterable[bytes]]
+
+
+def write_parts(data: bytes | Chunks) -> Iterable[bytes]:
+    """The parts a held write copies, in order."""
+    return (data,) if isinstance(data, bytes) else data.open()
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +189,7 @@ class HeldFilesystem:
     def read(self, file: HeldFile) -> HeldResult[bytes]:
         raise NotImplementedError
 
-    def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
+    def write(self, file: HeldFile, data: bytes | Chunks) -> HeldResult[None]:
         raise NotImplementedError
 
     def flush_directory(self, directory: HeldDirectory) -> HeldResult[None]:
@@ -358,20 +373,24 @@ def publish_bytes(
     filesystem: HeldFilesystem,
     parent: HeldDirectory,
     leaf: str,
-    data: bytes,
+    data: bytes | Chunks,
     *,
     expected_identity: StableIdentity | None = None,
     expected_sha256: str | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
 ) -> HeldResult[StableIdentity]:
-    """Atomically publish bytes under one held parent.
+    """Atomically publish bytes, or `Chunks` of them, under one held parent.
+
+    A read error from a `Chunks` source returns as the publish's own refusal; any other
+    exception the source raises, such as a path guard's, propagates after the temporary
+    is removed.
 
     With no expected identity the publish is create-only and uses a no-replace
     hard-link installation. With an expected identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.
     """
 
-    if not isinstance(data, bytes):
+    if not isinstance(data, bytes | Chunks):
         return HeldResult(error=HeldFsError("INVALID_INPUT", "data must be bytes"))
     existing: HeldFile | None = None
     staged: HeldFile | None = None
@@ -425,12 +444,13 @@ def publish_bytes(
         if not created.ok:
             return HeldResult(error=created.error)
         with created.require() as writable:
+            # Known before the copy, so a copy that stops part-way still removes the temporary.
+            temporary_identity = writable.identity
             written = filesystem.write(writable, data)
             if not written.ok:
                 return HeldResult(error=written.error)
             if prepare is not None:
                 prepare(writable)
-            temporary_identity = writable.identity
 
         mutable = filesystem.file(parent, temporary, access="mutate")
         if not mutable.ok:
