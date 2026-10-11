@@ -163,3 +163,25 @@ before recording private completion and permitting ciphertext cleanup.
 
 - **WHEN** discard removes transport material for a committed protected import
 - **THEN** the protected manifest and member blobs remain governed sources
+
+### Requirement: Cleanup completion preserves exclusive admission and current intent
+
+The controller SHALL record `cleanup_running`, the original work outcome and cleared upload URLs before removing private keys. It SHALL retry only idempotent local and transport cleanup from that state. It SHALL record `cleanup_stopping` after both cleanup stages succeed and before removing Jobs. `cleanup_running`, `cleanup_stopping`, and `cleanup_pending` SHALL occupy the cell's open import slot.
+
+The controller SHALL publish the terminal outcome only after every import phase Job controller and Pod is absent. It SHALL lock C1 and C5 in API admission order, read current requested intent and lifecycle state, and publish the outcome with C1 hold release atomically. A new import SHALL use its current recorded C1 hold or a fresh deadline, never a predecessor's StatefulSet deadline.
+
+#### Scenario: Completed cleanup restarts while Kubernetes removes Pods
+
+- **WHEN** the controller restarts after recording `cleanup_stopping` and a terminating or orphan import Pod remains
+- **THEN** it keeps the hold and open slot, removes remaining Jobs, and never replays prepare, import, or cleanup
+
+#### Scenario: Cancellation arrives after the controller reads completion
+
+- **WHEN** cancellation commits after the controller reads `cleanup_stopping` but before terminal publication
+- **THEN** the terminal transaction reads that intent and publishes `discarded` while preserving the original error
+- **AND** it releases C1 in the same transaction and preserves current lifecycle state
+
+#### Scenario: Publication stops before hold release
+
+- **WHEN** the terminal transaction fails before clearing C1
+- **THEN** both terminal publication and hold release roll back and the open slot remains occupied

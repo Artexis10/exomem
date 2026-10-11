@@ -295,7 +295,7 @@ class Decision:
     stop_import_jobs: list[str] = field(default_factory=list)
     prepare_import_upload: bool = False
     cleanup_import_transport: bool = False
-    retry_import_cleanup: bool = False
+    finalize_import: bool = False
 
     row_updates: dict[str, object] = field(default_factory=dict)
     rollout_updates: dict[str, object] = field(default_factory=dict)

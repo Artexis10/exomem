@@ -69,6 +69,7 @@ def test_protected_import_recovers_receipt_and_never_exposes_zip(vault, tmp_path
     ) == result
     assert len(list(cloud_import_job.receipt_directory(vault).glob("*.json"))) == 1
     cloud_import_job.discard(vault, import_id)
+    cloud_import_job.discard(vault, import_id)  # Retry after cleanup completed before its controller journal.
     assert blob.exists() and archive_members.read_manifest(vault, receipt["manifest"])
     assert not (vault.parent / ".import-keys" / import_id).exists()
     assert cloud_import_job.run_import(request, vault, lambda: pytest.fail("completed replay fetched ciphertext")) == result

@@ -1527,9 +1527,19 @@ async def _reconcile_row(
     )
     import_storage = None
     if import_decision is not None:
-        if decision.cleanup_import_transport and not decision.retry_import_cleanup and item.observed_state != "cleanup_pending":
-            # Journal the work outcome before ciphertext deletion can make multipart replay impossible.
-            await db.write_import(connection, item.import_id, {"observed_state": "cleanup_pending",
+        if decision.finalize_import:
+            current = await db.finalize_import(connection, row.cell_id, item.import_id)
+            if current is None:
+                return False  # Lifecycle or a newer observation wins; reread next pass.
+            row = dataclass_replace(current, hold_kind=None, hold_started_at=None, last_error_code=None)
+            decision.hold_kind = None
+            decision.hold_started_at = None
+            decision.replicas = 0 if row.desired_state == "stopped" else 1
+            decision.read_only = row.desired_state == "read_only"
+            decision.row_updates.update(hold_kind=None, hold_started_at=None, last_error_code=None)
+        if decision.cleanup_import_transport:
+            # Ciphertext deletion must leave a durable cleanup-only recovery path.
+            await db.write_import(connection, item.import_id, {"observed_state": "cleanup_running",
                                   "error_code": decision.import_updates.get("error_code", item.error_code),
                                   "part_urls": None, "urls_expire_at": None})
         try:
@@ -1558,15 +1568,6 @@ async def _reconcile_row(
             decision = decision or Decision()
             decision.import_updates.update(observed_state="cleanup_pending", error_code=original_error,
                                            part_urls=None, urls_expire_at=None)
-        else:
-            if decision.retry_import_cleanup:
-                decision = Decision(apply_manifests=True, replicas=0,
-                                    image=observation.statefulset_image or row.observed_image,
-                                    read_only=row.desired_state == "read_only", hold_kind="import", hold_started_at=now,
-                                    row_updates={"hold_kind": "import", "hold_started_at": now,
-                                                 "ready": False, "observed_state": "stopping"})
-                if not observation.pod_uses_volume:
-                    decision.import_action = "discard" if item.requested_state in ("cancelled", "discard_requested") else "cleanup"
         if decision.prepare_import_upload:
             try:
                 upload_id, parts = await asyncio.to_thread(import_storage.prepare, item)
@@ -1575,6 +1576,7 @@ async def _reconcile_row(
             else:
                 decision.import_updates.update(upload_id=upload_id, part_urls=parts,
                                                urls_expire_at=now + timedelta(hours=24))
+        # Journal cleanup before a Job removes private keys or a completion Job disappears.
         await db.write_import(connection, item.import_id, decision.import_updates)
         for phase in decision.stop_import_jobs:
             cluster.delete_job(namespace_name(row.cell_id), job_name(item.import_id, phase))

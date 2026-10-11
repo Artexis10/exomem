@@ -289,19 +289,30 @@ never encrypts again during resume. Its separate storage HTTP client carries no
 API bearer. Terminal completion removes local ciphertext; failures retain only
 the resumable material until the next authenticated terminal observation.
 
-Cleanup failure uses the explicit C5 state `cleanup_pending`. It retains the
-original work outcome and occupies the cell's single open import slot. Entering
-cleanup clears upload URLs. A failed attempt removes every import Job and waits
-for every corresponding pod to disappear before releasing the runtime hold.
-Kubernetes deletion failures remain visible as `IMPORT_STOP_PENDING`.
+The controller records `cleanup_running`, the original work error and cleared
+upload URLs before local cleanup removes private keys. Cleanup can repeat after
+a restart because local removal and verified transport deletion are idempotent.
+The controller never prepares or imports from a cleanup observation.
+
+Successful local and transport cleanup becomes `cleanup_stopping` before the
+controller removes completed Jobs. That state never repeats cleanup, including
+when cancellation arrives later. Every prepare, import, cleanup and discard Job
+controller and Pod must be absent before terminal publication. The controller
+locks C1 and C5 in the API's C1-first order, reads current cancellation intent,
+and publishes the terminal outcome with C1 hold release in one transaction.
+This keeps the open slot occupied while Kubernetes removes Jobs and Pods.
+
+Cleanup failure uses `cleanup_pending`. It retains the original work outcome
+and occupies the cell's single open import slot. A failed attempt removes every
+import Job and waits for every corresponding Pod to disappear before releasing
+the runtime hold. Kubernetes deletion failures remain visible as
+`IMPORT_STOP_PENDING`.
 
 The controller retries pending cleanup after a configurable one-hour delay.
-It first deletes and verifies object versions and multipart uploads without a
-volume hold. It then takes one configurable two-minute hold for local cleanup.
-C5's update timestamp records a failed or deferred attempt; starting or polling
-a retry does not refresh it. The controller journals pending cleanup before
-final object deletion, so a crash cannot restart multipart completion afterward.
-Both cleanup stages must finish before the controller publishes a terminal state.
+Each attempt takes one configurable two-minute hold and records
+`cleanup_running` before starting local cleanup. C5's update timestamp records
+a failed or deferred attempt for backoff. C1 owns the current hold deadline;
+a new import ignores an older StatefulSet hold timestamp.
 
 Suspension interrupts unfinished work with `IMPORT_INTERRUPTED` and keeps the
 runtime stopped. Deletion stops import Jobs, then uses ordinary verified cell

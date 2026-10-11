@@ -3,6 +3,8 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from cellctl.imports import ImportJob, ImportRow, decide_import
 from cellctl.state import CellRow, ClusterObservation
 
@@ -33,7 +35,7 @@ def test_cancel_and_expiry_stop_active_import_before_cleanup():
     after_release = decide_import(row, item, observed, {}, now=NOW)
     assert after_release.import_action == "discard" and after_release.replicas == 0
     completed = decide_import(row, item, observed, {"discard": ImportJob(exists=True, succeeded=True)}, now=NOW)
-    assert completed.cleanup_import_transport and completed.import_updates["observed_state"] == "discarded"
+    assert completed.cleanup_import_transport and completed.import_updates["observed_state"] == "cleanup_stopping"
     assert completed.replicas == 0 and completed.stop_import_jobs == ["discard"]
     finished = replace(item, observed_state="discarded")
     assert decide_import(row, finished, observed, {}, now=NOW).replicas == 1
@@ -49,10 +51,10 @@ def test_completed_protected_import_needs_cleanup_before_done():
     observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell", statefulset_hold_kind="import")
     jobs = {"import": ImportJob(exists=True, succeeded=True)}
     pending = decide_import(row, item, observed, jobs, now=NOW)
-    assert pending.import_action == "cleanup" and "observed_state" not in pending.import_updates
+    assert pending.import_action == "cleanup" and pending.import_updates["observed_state"] == "cleanup_running"
     jobs["cleanup"] = ImportJob(exists=True, succeeded=True)
     done = decide_import(row, item, observed, jobs, now=NOW)
-    assert done.cleanup_import_transport and done.import_updates["observed_state"] == "done"
+    assert done.cleanup_import_transport and done.import_updates["observed_state"] == "cleanup_stopping"
     assert done.import_updates["part_urls"] is None and done.import_updates["recipient"] is None
 
 
@@ -134,6 +136,12 @@ def test_multipart_sdk_signs_exact_parts_completes_report_and_deletes_all_versio
         stub.add_response("list_multipart_uploads", {"Uploads": []}, {"Bucket": "example-bucket", "Prefix": item.key})
         stub.add_response("list_object_versions", {"Versions": [], "DeleteMarkers": []}, {"Bucket": "example-bucket", "Prefix": item.key})
         storage.cleanup(accepted)
+        # Restart after deletion must also prove that no upload or version remains.
+        stub.add_response("list_multipart_uploads", {"Uploads": []}, {"Bucket": "example-bucket", "Prefix": item.key})
+        stub.add_response("list_object_versions", {"Versions": [], "DeleteMarkers": []}, {"Bucket": "example-bucket", "Prefix": item.key})
+        stub.add_response("list_multipart_uploads", {"Uploads": []}, {"Bucket": "example-bucket", "Prefix": item.key})
+        stub.add_response("list_object_versions", {"Versions": [], "DeleteMarkers": []}, {"Bucket": "example-bucket", "Prefix": item.key})
+        storage.cleanup(accepted)
         stub.assert_no_pending_responses()
 
 
@@ -152,9 +160,9 @@ def test_failed_cleanup_releases_only_after_controllers_and_terminating_pods_dis
     unheld = replace(observed, statefulset_hold_kind=None)
     assert decide_import(converged, item, unheld, {}, now=NOW + timedelta(minutes=20)) is None
     retry = decide_import(converged, item, unheld, {}, now=NOW + timedelta(hours=2))
-    assert retry.cleanup_import_transport and retry.retry_import_cleanup and not retry.apply_manifests
+    assert retry.import_updates["observed_state"] == "cleanup_running" and retry.hold_started_at == NOW + timedelta(hours=2)
     held = replace(row, hold_started_at=NOW + timedelta(hours=2))
-    overdue = decide_import(held, item, observed, {"cleanup": ImportJob(exists=True, active=True)}, now=NOW + timedelta(hours=2, minutes=3))
+    overdue = decide_import(held, replace(item, observed_state="cleanup_running"), observed, {"cleanup": ImportJob(exists=True, active=True)}, now=NOW + timedelta(hours=2, minutes=3))
     assert overdue.import_updates["observed_state"] == "cleanup_pending"
     assert "error_code" not in overdue.import_updates
     assert overdue.stop_import_jobs == ["cleanup"]
@@ -167,8 +175,8 @@ def test_cleanup_keeps_success_after_upload_expiry_and_honors_suspension_and_del
     observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell", statefulset_hold_kind="import")
     assert decide_import(row, item, observed, {}, now=NOW + timedelta(days=2)).replicas == 0
     retry = replace(row, hold_started_at=NOW + timedelta(days=2))
-    completed = decide_import(retry, item, observed, {"cleanup": ImportJob(exists=True, succeeded=True)}, now=NOW + timedelta(days=2, seconds=30))
-    assert completed.import_updates["observed_state"] == "done" and completed.replicas == 0
+    completed = decide_import(retry, replace(item, observed_state="cleanup_running"), observed, {"cleanup": ImportJob(exists=True, succeeded=True)}, now=NOW + timedelta(days=2, seconds=30))
+    assert completed.import_updates["observed_state"] == "cleanup_stopping" and completed.replicas == 0
     unfinished = replace(item, observed_state="importing")
     interrupted = decide_import(row, unfinished, observed, {"import": ImportJob(exists=True, active=True)}, now=NOW)
     assert interrupted.import_updates["error_code"] == "IMPORT_INTERRUPTED"
@@ -236,6 +244,12 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         monkeypatch.setattr(ImportStorage, "cleanup", storage_unavailable)
         current = stamp + timedelta(hours=2)
         await step()
+        assert (await db.select_all_rows(controller))[0].hold_kind == "import"
+        assert (await db.read_import(controller, CELL)).observed_state == "cleanup_running"
+        jobs["cleanup"] = ImportJob(exists=True, succeeded=True)
+        await step()
+        jobs.clear()
+        await step()
         assert (await db.select_all_rows(controller))[0].hold_kind is None
         failed_retry = await db.read_import(controller, CELL)
         assert failed_retry.observed_state == "cleanup_pending" and failed_retry.error_code is None
@@ -250,12 +264,210 @@ async def test_cleanup_failure_restart_releases_runtime_then_retries_durably(cel
         jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
         current += timedelta(seconds=30)
         await step()
-        assert (await db.read_import(controller, CELL)).observed_state == "done"
+        assert (await db.read_import(controller, CELL)).observed_state == "cleanup_stopping"
         assert cluster.observations[CELL].statefulset_replicas == 0
         jobs.clear()
         await step()
         assert (await db.select_all_rows(controller))[0].hold_kind is None
+        assert await db.read_import(controller, CELL) is None
+        assert await app.fetchval("SELECT observed_state FROM exomem_cloud_imports WHERE import_id=$1", import_id) == "done"
         assert cluster.observations[CELL].statefulset_replicas == 1
+    finally:
+        await app.close()
+        await controller.close()
+
+
+def test_stopping_drains_every_phase_without_replaying_cleanup_after_new_cancel():
+    row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1, hold_kind="import", hold_started_at=NOW)
+    item = ImportRow(str(uuid.uuid4()), CELL, "adopt", 4, 1, "cancelled", NOW,
+                     observed_state="cleanup_stopping", error_code="IMPORT_FAILED")
+    observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell")
+    for phase in ("prepare", "import", "cleanup", "discard"):
+        for job in (ImportJob(exists=True, succeeded=True), ImportJob(pods_present=True)):
+            waiting = decide_import(row, item, observed, {phase: job}, now=NOW + timedelta(days=2))
+            assert waiting.stop_import_jobs == [phase] and waiting.replicas == 0
+            assert not waiting.import_action and not waiting.cleanup_import_transport
+            assert not waiting.finalize_import and not waiting.import_updates
+    finished = decide_import(row, item, observed, {}, now=NOW + timedelta(days=2))
+    assert finished.finalize_import and not finished.import_action
+
+
+def test_running_retains_outcome_after_key_and_ciphertext_cleanup_jobs_disappear():
+    row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1, hold_kind="import", hold_started_at=NOW)
+    item = ImportRow(str(uuid.uuid4()), CELL, "archive_members", 4, 1, "uploaded", NOW - timedelta(days=2),
+                     observed_state="cleanup_running", error_code="IMPORT_FAILED")
+    observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell")
+    replay = decide_import(row, item, observed, {}, now=NOW)
+    assert replay.import_action == "cleanup" and "error_code" not in replay.import_updates
+    assert replay.import_updates.get("observed_state") is None
+
+
+def test_new_request_starts_fresh_deadline_despite_predecessor_statefulset_hold():
+    row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1)
+    item = ImportRow(str(uuid.uuid4()), CELL, "adopt", 4, 1, "requested", NOW)
+    observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell",
+                                  statefulset_hold_kind="import", statefulset_hold_started_at=NOW - timedelta(days=2))
+    fresh = decide_import(row, item, observed, {}, now=NOW)
+    assert fresh.hold_started_at == NOW and fresh.import_action == "prepare"
+    assert "error_code" not in fresh.import_updates
+
+
+async def test_cleanup_crash_journals_survive_removed_keys_jobs_and_late_cancel(cell_db, monkeypatch, caplog, tmp_path):
+    import asyncpg
+
+    from cellctl import db, reconcile
+    from cellctl.imports import ImportStorage
+    from cellctl.storage.fake_b2 import FakeB2
+    from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
+    from tests.test_reconcile import (
+        FakeClusterGateway,
+        _cluster_config,
+        _observed_from_applied,
+        _secrets_config,
+        _seed_cell,
+    )
+
+    await _seed_cell(cell_db, CELL, "crash-cleanup-tenant")
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster, b2, volume = FakeClusterGateway(), FakeB2(), FakeHetznerVolumeProvider()
+    jobs = {}
+    cluster.observe_import_jobs = lambda namespace, import_id: jobs.copy()
+    current = datetime.now(UTC)
+    config = replace(_cluster_config(), object_storage_endpoint="https://storage.example")
+    key_file = tmp_path / "private-key"
+    ciphertext = tmp_path / "ciphertext.age"
+    key_file.write_bytes(b"disposable key")
+    ciphertext.write_bytes(b"disposable ciphertext")
+
+    async def step():
+        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), config, now=current)
+        cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
+
+    try:
+        await step()
+        await step()
+        import_id = await app.fetchval("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                                      "VALUES($1,'archive_members',12,2) RETURNING import_id", CELL)
+        jobs["import"] = ImportJob(exists=True, failed=True, report={"error": "IMPORT_FAILED"})
+        await step()
+        assert (await db.read_import(controller, CELL)).error_code == "IMPORT_FAILED"
+        jobs.clear()
+
+        def removed_key_then_crash(manifest):
+            assert manifest["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+            key_file.unlink(missing_ok=True)
+            raise RuntimeError("cleanup process stopped after private key deletion")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(cluster, "run_job", removed_key_then_crash)
+            await step()
+            assert "RuntimeError" in caplog.text
+            caplog.clear()
+        running = await db.read_import(controller, CELL)
+        assert running.observed_state == "cleanup_running" and running.error_code == "IMPORT_FAILED"
+        assert not key_file.exists()
+        await step()  # A missing completion Job replays only idempotent local cleanup.
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        jobs["cleanup"] = ImportJob(exists=True, succeeded=True, pods_present=True)
+        cleanup_calls = []
+        def delete_ciphertext(self, item):
+            ciphertext.unlink(missing_ok=True)
+            cleanup_calls.append(item.import_id)
+
+        monkeypatch.setattr(ImportStorage, "cleanup", delete_ciphertext)
+        write_import = db.write_import
+
+        async def ciphertext_deleted_then_crash(connection, selected_id, updates):
+            if updates.get("observed_state") == "cleanup_stopping":
+                raise RuntimeError("ciphertext deleted before stopping journal")
+            await write_import(connection, selected_id, updates)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "write_import", ciphertext_deleted_then_crash)
+            await step()
+            assert "RuntimeError" in caplog.text
+            caplog.clear()
+        assert (await db.read_import(controller, CELL)).observed_state == "cleanup_running"
+        assert not ciphertext.exists()
+        jobs.clear()  # The old completed Job also disappeared during the restart.
+        await step()
+        assert cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2] == "discard"
+        jobs["cleanup"] = ImportJob(exists=True, succeeded=True)
+
+        def stopping_journal_then_crash(namespace, name):
+            raise RuntimeError("controller stopped after stopping journal")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(cluster, "delete_job", stopping_journal_then_crash)
+            await step()
+            assert "RuntimeError" in caplog.text
+            caplog.clear()
+        assert (await db.read_import(controller, CELL)).observed_state == "cleanup_stopping"
+        assert len(cleanup_calls) == 2
+        for phase in ("prepare", "import", "cleanup", "discard"):
+            jobs.clear()
+            jobs[phase] = ImportJob(pods_present=True)
+            await step()
+            assert (await db.read_import(controller, CELL)).observed_state == "cleanup_stopping"
+            with pytest.raises(asyncpg.UniqueViolationError):
+                await app.execute("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                                  "VALUES($1,'adopt',1,1)", CELL)
+        jobs.clear()
+        finalize = db.finalize_import
+
+        async def cancel_after_snapshot(connection, cell_id, selected_id):
+            async with app.transaction():
+                await app.fetchval("SELECT cell_id FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", CELL)
+                await app.execute("UPDATE exomem_cloud_imports SET requested_state='cancelled' WHERE import_id=$1", import_id)
+                await app.execute("UPDATE exomem_cloud_cells SET desired_state='stopped' WHERE cell_id=$1", CELL)
+            return await finalize(connection, cell_id, selected_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "finalize_import", cancel_after_snapshot)
+            await step()
+        assert len(cleanup_calls) == 2  # Stopping never repeats local or transport cleanup.
+        outcome = await app.fetchrow("SELECT observed_state,error_code FROM exomem_cloud_imports WHERE import_id=$1", import_id)
+        assert dict(outcome) == {"observed_state": "discarded", "error_code": "IMPORT_FAILED"}
+        assert (await db.select_all_rows(controller))[0].hold_kind is None
+        assert cluster.observations[CELL].statefulset_replicas == 0
+    finally:
+        await app.close()
+        await controller.close()
+
+
+@pytest.mark.parametrize(("error_code", "terminal"), [("IMPORT_FAILED", "failed"), ("IMPORT_HOLD_EXPIRED", "expired")])
+async def test_terminal_publication_rolls_back_with_hold_release_failure(cell_db, monkeypatch, error_code, terminal):
+    import asyncpg
+
+    from cellctl import db
+    from tests.test_reconcile import _seed_cell
+
+    await _seed_cell(cell_db, CELL, "atomic-cleanup-tenant")
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        import_id = await app.fetchval("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                                      "VALUES($1,'adopt',1,1) RETURNING import_id", CELL)
+        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='cleanup_stopping',error_code=$2 WHERE import_id=$1", import_id, error_code)
+        await controller.execute("UPDATE exomem_cloud_cells SET hold_kind='import',hold_started_at=$2 WHERE cell_id=$1", CELL, datetime.now(UTC))
+
+        async def stopped_before_release(*args, **kwargs):
+            raise RuntimeError("controller stopped before C1 release")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "write_observed", stopped_before_release)
+            with pytest.raises(RuntimeError, match="before C1 release"):
+                await db.finalize_import(controller, CELL, str(import_id))
+        assert (await db.read_import(controller, CELL)).observed_state == "cleanup_stopping"
+        assert (await db.select_all_rows(controller))[0].hold_kind == "import"
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await app.execute("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES($1,'adopt',1,1)", CELL)
+        await db.finalize_import(controller, CELL, str(import_id))
+        assert await db.read_import(controller, CELL) is None
+        assert await app.fetchval("SELECT observed_state FROM exomem_cloud_imports WHERE import_id=$1", import_id) == terminal
+        assert (await db.select_all_rows(controller))[0].hold_kind is None
+        assert await app.fetchval("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES($1,'adopt',1,1) RETURNING import_id", CELL) != import_id
     finally:
         await app.close()
         await controller.close()

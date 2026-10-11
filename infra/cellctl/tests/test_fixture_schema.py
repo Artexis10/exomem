@@ -180,16 +180,23 @@ async def test_c5_cleanup_and_terminal_discard_both_keep_the_open_import_slot(ce
         await owner.execute("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')", "abcdefghijklmnop", tenant)
         insert = "INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES('abcdefghijklmnop','adopt',0,0) RETURNING import_id"
         import_id = await app.fetchval(insert)
-        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='cleanup_pending' WHERE import_id=$1", import_id)
-        assert (await db.read_import(controller, "abcdefghijklmnop")).observed_state == "cleanup_pending"
-        with pytest.raises(asyncpg.UniqueViolationError):
-            await app.fetchval(insert)
+        for state in ("cleanup_running", "cleanup_stopping", "cleanup_pending"):
+            await controller.execute("UPDATE exomem_cloud_imports SET observed_state=$2 WHERE import_id=$1", import_id, state)
+            assert (await db.read_import(controller, "abcdefghijklmnop")).observed_state == state
+            with pytest.raises(asyncpg.UniqueViolationError):
+                await app.fetchval(insert)
         await controller.execute("UPDATE exomem_cloud_imports SET observed_state='done' WHERE import_id=$1", import_id)
+        # Newer terminal history must not hide this older open discard behind C1's hold.
+        newer = await app.fetchval(insert)
+        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='done' WHERE import_id=$1", newer)
+        await controller.execute("UPDATE exomem_cloud_cells SET hold_kind='import' WHERE cell_id='abcdefghijklmnop'")
         await app.execute("UPDATE exomem_cloud_imports SET requested_state='discard_requested' WHERE import_id=$1", import_id)
         assert (await db.read_import(controller, "abcdefghijklmnop")).import_id == str(import_id)
         with pytest.raises(asyncpg.UniqueViolationError):
             await app.fetchval(insert)
         await controller.execute("UPDATE exomem_cloud_imports SET observed_state='discarded' WHERE import_id=$1", import_id)
+        assert (await db.read_import(controller, "abcdefghijklmnop")).import_id == str(newer)
+        await controller.execute("UPDATE exomem_cloud_cells SET hold_kind=NULL WHERE cell_id='abcdefghijklmnop'")
         assert await db.read_import(controller, "abcdefghijklmnop") is None
         assert await app.fetchval(insert) != import_id
     finally:

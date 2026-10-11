@@ -313,12 +313,14 @@ async def write_capacity_snapshot(
 async def read_import(connection: asyncpg.Connection, cell_id: str):
     from .imports import ImportRow
 
+    # Migration 0061 fixes the open predicate; terminal history only repairs an orphan C1 hold.
     record = await connection.fetchrow(
-        "SELECT * FROM exomem_cloud_imports WHERE cell_id=$1 AND "
-        "(observed_state IS NULL OR observed_state IN ('key_ready','importing','cleanup_pending') OR "
-        "(requested_state='discard_requested' AND observed_state <> 'discarded') OR "
-        "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import')) "
-        "ORDER BY created_at DESC LIMIT 1", cell_id,
+        "SELECT * FROM (SELECT i.*, (observed_state IS NULL OR "
+        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_pending') OR "
+        "(requested_state='discard_requested' AND observed_state IS DISTINCT FROM 'discarded')) AS is_open "
+        "FROM exomem_cloud_imports i WHERE cell_id=$1) requests WHERE is_open OR "
+        "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import') "
+        "ORDER BY is_open DESC, created_at DESC, import_id DESC LIMIT 1", cell_id,
     )
     if record is None:
         return None
@@ -344,3 +346,32 @@ async def write_import(connection: asyncpg.Connection, import_id: str, updates: 
     assignments, parameters = _assignments(values, start=2)
     await connection.execute(f"UPDATE exomem_cloud_imports SET {assignments} WHERE import_id=$1",
                              uuid.UUID(import_id), *parameters)
+
+
+async def finalize_import(connection: asyncpg.Connection, cell_id: str, import_id: str) -> CellRow | None:
+    """Publish cleanup completion and release admission under the API's C1-first row lock."""
+    import uuid
+
+    async with connection.transaction():
+        record = await connection.fetchrow(
+            f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id,
+        )
+        if record is None or record["desired_state"] == "deleted" or record["hold_kind"] not in (None, "import"):
+            return None
+        item = await connection.fetchrow(
+            "SELECT requested_state, observed_state, error_code FROM exomem_cloud_imports "
+            "WHERE cell_id=$1 AND import_id=$2 FOR UPDATE", cell_id, uuid.UUID(import_id),
+        )
+        if item is None or item["observed_state"] != "cleanup_stopping":
+            return None
+        # C5 fixes intent, expiry codes and terminal observations.
+        if item["requested_state"] in ("cancelled", "discard_requested"):
+            terminal = "discarded"
+        elif item["error_code"] in ("IMPORT_EXPIRED", "IMPORT_HOLD_EXPIRED"):
+            terminal = "expired"
+        else:
+            terminal = "failed" if item["error_code"] else "done"
+        await write_import(connection, import_id, {"observed_state": terminal})
+        await write_observed(connection, cell_id, {"hold_kind": None, "hold_started_at": None,
+                                                  "last_error_code": None})
+        return _row_from_record(record)

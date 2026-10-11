@@ -72,14 +72,17 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
     from .decide import DEFAULT_RECONCILE_CONFIG
 
     config = config or DEFAULT_RECONCILE_CONFIG
-    active_hold = observation.statefulset_hold_kind or row.hold_kind
+    active_hold = row.hold_kind or observation.statefulset_hold_kind
     if active_hold not in (None, "import"):
         return None
     if item.cell_id != row.cell_id:
         raise ValueError("import cell mismatch")
     image = observation.statefulset_image or row.observed_image
     remaining = [phase for phase, job in jobs.items() if job.exists or job.pods_present or job.active]
-    start = row.hold_started_at or observation.statefulset_hold_started_at or now
+    # C1 owns the deadline; an older StatefulSet annotation belongs to the predecessor.
+    start = row.hold_started_at if row.hold_kind == "import" else None
+    if start is None or start < item.created_at:
+        start = now
 
     def held():
         return Decision(apply_manifests=bool(image), replicas=0, image=image,
@@ -99,25 +102,6 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             decision.row_updates.update(hold_kind=None, hold_started_at=None, last_error_code=None)
         return decision
 
-    def terminal():
-        if item.requested_state in ("cancelled", "discard_requested"):
-            return "discarded"
-        if item.error_code in ("IMPORT_EXPIRED", "IMPORT_HOLD_EXPIRED"):
-            return "expired"
-        return "failed" if item.error_code else "done"
-
-    def finish(decision):
-        decision.import_updates.update(observed_state=terminal(), recipient=None, upload_id=None,
-                                       part_urls=None, urls_expire_at=None)
-        decision.stop_import_jobs = remaining
-        # A later observation, never this delete request, permits runtime restart.
-        if not remaining:
-            released = release()
-            released.import_updates = decision.import_updates
-            released.cleanup_import_transport = decision.cleanup_import_transport
-            return released
-        return decision
-
     if row.desired_state == "deleted":
         # Namespace/PVC and verified prefix deletion supersede import cleanup.
         if remaining:
@@ -129,36 +113,34 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
         return release() if active_hold == "import" or remaining else None
     if image is None:
         return None  # Ordinary first provisioning must produce the cell image and claim.
-    pending = item.observed_state == "cleanup_pending"
+    if item.observed_state == "cleanup_stopping":
+        decision = held()
+        decision.stop_import_jobs = remaining
+        if not remaining:
+            decision.finalize_import = True
+        return decision
+
     cleanup_phase = "discard" if item.requested_state in ("cancelled", "discard_requested") else "cleanup"
     cleanup_job = jobs.get(cleanup_phase, ImportJob())
-    if pending:
+    if item.observed_state == "cleanup_pending":
         updated = item.updated_at or item.created_at
-        if active_hold == "import" and updated >= start:
-            return release()  # A persisted failed attempt still has Jobs to stop.
-        if active_hold != "import":
-            if remaining:
-                return release()
-            if now - updated < config.import_cleanup_retry:
-                return None
-            # Object cleanup runs without a volume hold. Success starts one bounded attempt.
-            return Decision(cleanup_import_transport=True, retry_import_cleanup=True)
+        if active_hold == "import" or remaining:
+            return release()  # A failed attempt must drain before another acquires the volume.
+        if now - updated < config.import_cleanup_retry:
+            return None
+        start = now
         decision = held()
-        if now - start >= config.import_cleanup_deadline or cleanup_job.failed:
-            decision.import_updates.update(observed_state="cleanup_pending", part_urls=None, urls_expire_at=None)
-            decision.stop_import_jobs = remaining
-            return decision
-        if cleanup_job.succeeded:
-            return finish(decision)
-        if not observation.pod_uses_volume and not cleanup_job.active and not cleanup_job.exists:
+        decision.import_updates.update(observed_state="cleanup_running", part_urls=None, urls_expire_at=None)
+        if not observation.pod_uses_volume:
             decision.import_action = cleanup_phase
         return decision
 
     imported = jobs.get("import", ImportJob())
     prepared = jobs.get("prepare", ImportJob())
     cleanup_started = cleanup_job.exists or cleanup_job.active or cleanup_job.succeeded or cleanup_job.failed
+    running = item.observed_state == "cleanup_running"
     failure = item.error_code
-    if not cleanup_started:
+    if not running and not cleanup_started:
         if row.desired_state == "stopped" and not imported.succeeded:
             failure = failure or "IMPORT_INTERRUPTED"
         elif active_hold == "import" and now - start >= config.import_deadline:
@@ -170,14 +152,16 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             # The trusted cell command emits fixed uppercase error tokens, never exception text.
             failure = reported if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported) else "IMPORT_FAILED"
     cancelled = item.requested_state in ("cancelled", "discard_requested")
-    if cancelled or failure or imported.succeeded or cleanup_started:
+    if running or cancelled or failure or imported.succeeded or cleanup_started:
+        if not running:
+            start = now
         decision = held()
         decision.import_updates.update(part_urls=None, urls_expire_at=None)
-        if failure != item.error_code:
-            decision.import_updates["error_code"] = failure
+        if not running:
+            decision.import_updates.update(observed_state="cleanup_running", error_code=failure)
         decision.stop_import_jobs = [phase for phase in remaining if phase != cleanup_phase and
                                      (jobs[phase].active or cancelled or failure)]
-        if cleanup_job.failed or (active_hold == "import" and now - start >= config.import_deadline):
+        if cleanup_job.failed or now - start >= config.import_cleanup_deadline:
             decision.import_updates["observed_state"] = "cleanup_pending"
             decision.stop_import_jobs = remaining
             return decision
@@ -185,8 +169,9 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
             return decision
         if cleanup_job.succeeded:
             decision.cleanup_import_transport = True
-            # Original outcome is already durable before terminal cleanup succeeds.
-            return finish(decision)
+            decision.import_updates.update(observed_state="cleanup_stopping", recipient=None, upload_id=None)
+            decision.stop_import_jobs = remaining
+            return decision
         if not cleanup_job.active and not cleanup_job.exists:
             decision.import_action = cleanup_phase
         return decision
