@@ -33,7 +33,9 @@ have no page, so they can neither bridge two anchors nor be anyone's neighbour, 
 resolved project anchors are therefore trivially competing); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet that still lists its `partial` candidates and their
-evidence. A term SHALL be a maximal run of letters, digits and combining marks in any
+evidence, except a candidate whose only contact is retrieved, which is not listed
+(close-memory-loop: a packet lists a `partial` anchor only when worded contact or the
+conversation reached it). A term SHALL be a maximal run of letters, digits and combining marks in any
 script, which may contain an apostrophe or a hyphen after its first character, taken
 after compatibility normalisation and case folding, with a typographic apostrophe read
 as the plain one, a typographic or non-breaking hyphen read as the plain hyphen, and a
@@ -170,9 +172,10 @@ routing.
   leading name is added, neither carries `exact_alias` from the short name
 
 #### Scenario: An unresolved turn hands its candidates to the agent
-- **WHEN** a turn reaches anchors by retrieved contact only
+- **WHEN** a turn reaches anchors by worded contact that resolves none of them
 - **THEN** the packet abstains as `unresolved`, serves no units or pointers, and lists
   those anchors as `partial` with their evidence kinds
+- **AND** an anchor the turn reached by retrieved contact only is not listed
 
 #### Scenario: A shared topic prefix is nobody's name
 - **WHEN** one anchor is titled with a leading word, a dash and a subtopic, and that
@@ -264,7 +267,8 @@ linked to the anchor, entity or profile page facets, `graph_context` under a
 traversal profile from resolved anchors at depth at most 2, and evidence pointers. No
 lane SHALL run for a `partial` anchor and nothing of a `partial` anchor's page or
 neighbourhood SHALL enter `units`, `pointers` or `current_state`: a `partial` anchor is
-listed in `anchors[]` with its status and evidence so the agent can choose it, and is
+listed in `anchors[]` with its status and evidence so the agent can choose it, unless
+its only contact is retrieved, in which case it is not listed at all, and is
 served only after it resolves or is chosen. The packet SHALL contain `anchors[]` (ref, title,
 kind, status, evidence), `roles[]`, `units[]` (ref, role, text of at most 360
 characters cut only at a boundary that leaves no unclosed wikilink, lifecycle,
@@ -331,10 +335,10 @@ remains the only `due_state` carrier.
 - **THEN** `missing[]` carries no `withheld` marker for it, and a packet whose every
   anchor was removed abstains with `abstention.reason = "unresolved"`
 
-#### Scenario: A partial anchor beside a resolved one is listed, not served
+#### Scenario: A retrieved-only candidate beside a resolved anchor is neither listed nor served
 - **WHEN** a turn resolves one anchor and reaches a second anchor by retrieved contact
   only
-- **THEN** the second anchor appears in `anchors[]` as `partial`, and no unit, pointer
+- **THEN** the second anchor does not appear in `anchors[]`, and no unit, pointer
   or current-state entry in the packet comes from its page or its neighbourhood
 
 #### Scenario: One authored word and one tag word do not resolve

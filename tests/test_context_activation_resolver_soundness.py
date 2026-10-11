@@ -192,15 +192,16 @@ def test_a_tag_every_hub_carries_is_not_a_name_for_the_others(tmp_path: Path) ->
     assert packet["abstained"] is True
 
 
-def test_a_partial_anchor_besides_a_resolved_one_contributes_nothing_to_units(
+def test_a_retrieval_only_candidate_beside_a_resolved_anchor_is_neither_listed_nor_served(
     tmp_path: Path,
 ) -> None:
     """BLOCKER 2 (the reviewer's shape): one resolved anchor (exact_alias) and
-    one retrieval-only `partial` anchor. The partial anchor's own lede must
-    not appear anywhere in the packet -- not as a unit, not as a pointer, not
-    as current state (canonical spec's restated "Bounded role lanes"
-    requirement, "A partial anchor beside a resolved one is listed, not
-    served").
+    one candidate only recall reached. Its own lede must not appear anywhere
+    in the packet -- not as a unit, not as a pointer, not as current state --
+    and it is not listed either: a packet lists a `partial` anchor only when
+    the turn's words or the conversation reached it ("Bounded role lanes",
+    "A retrieved-only candidate beside a resolved anchor is neither listed
+    nor served").
     """
     from test_working_set_index import _write
 
@@ -219,24 +220,26 @@ def test_a_partial_anchor_besides_a_resolved_one_contributes_nothing_to_units(
         f"# Other thing\n\n{secret_lede}\n",
     )
 
+    other = "Knowledge Base/Products/other-thing.md"
+    # Resolution still reaches it: only the listing changed.
+    resolution = _resolve_turn(vault, "what about the widget", frozenset({other}))
+    assert {a.path: a.status for a in resolution.anchors}[other] == "partial"
     index = working_set_index.WorkingSetIndex(vault)
     index.rebuild()
     packet = working_set.compile_packet(
         vault,
         turn="what about the widget",
-        retrieval_paths=frozenset({"Knowledge Base/Products/other-thing.md"}),
+        retrieval_paths=frozenset({other}),
         index=index,
     )
 
-    by_path = {a["path"]: a for a in packet["anchors"]}
-    widget = by_path["Knowledge Base/Products/widget.md"]
-    other = by_path["Knowledge Base/Products/other-thing.md"]
-    assert widget["status"] == "resolved"
-    assert other["status"] == "partial"
+    assert [(a["path"], a["status"]) for a in packet["anchors"]] == [
+        ("Knowledge Base/Products/widget.md", "resolved")
+    ]
     packet_text = str(packet)
     assert secret_lede not in packet_text
-    assert all(unit.get("provenance", {}).get("path") != other["path"] for unit in packet["units"])
-    assert all(pointer.get("ref") != other["path"] for pointer in packet["pointers"])
+    assert all(unit.get("provenance", {}).get("path") != other for unit in packet["units"])
+    assert all(pointer.get("ref") != other for pointer in packet["pointers"])
 
 
 def test_a_graph_hop_only_hit_does_not_grant_the_linked_hub_retrieval(

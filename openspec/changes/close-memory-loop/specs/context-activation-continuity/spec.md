@@ -69,7 +69,11 @@ name another thread; a thread whose authentication is missing or does not verify
 be treated as lapsed.
 Where the caller supplies no session key of its own, a valid thread SHALL be its session
 key for the heat projection: its admitted picks and its last served thread are recorded
-under it, and its session tier ranks by it. It SHALL be stored only as a salted
+under it, and its session tier ranks by it. The packet that starts a fresh thread for
+such a caller SHALL record what it served as that thread's last served thread, exactly
+as a later packet of the thread would, so the first page of a keyless conversation is
+there for a follow-up that echoes its token; that packet is still ranked as a keyless
+caller's, and a fresh thread that served nothing records nothing. It SHALL be stored only as a salted
 derivation scoped to the caller's audience, distinct from any supplied session key's,
 never as the value. It SHALL NOT entitle the caller to the vault tier's referent
 (memory-loop: "A turn that names nothing MAY resolve to the hottest recent anchor"). An
@@ -156,6 +160,12 @@ index or a spent request budget.
   packet reports `generation.continuity_thread = "applied"` and
   `generation.continuity = "absent"`, and its token names the same thread
 - **AND** the heat projection holds no copy of the thread's value
+
+#### Scenario: A keyless conversation's first carried page survives an abstention under token echo
+- **WHEN** a caller that supplies no session or workspace key is carried one page on its
+  first call, passes each returned token back, and its second turn abstains
+- **THEN** a short follow-up on its third call is carried on that page as a `partial`
+  anchor marked `generation.carried_by = "follow_up"`
 
 #### Scenario: A lapsed or unreadable thread is served as keyless
 - **WHEN** a caller passes a token whose thread lapsed, or a string that is not a token
