@@ -59,6 +59,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import hashlib
+import heapq
 import itertools
 import json
 import logging
@@ -8405,14 +8406,17 @@ class LexicalStore:
         query_units: list | None = None,
         term_budget: QueryTermBudget | None = None,
         retained_query_units: list | None = None,
+        after_unit_ref: str | None = None,
         registry_scope: str | None = None,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
         `retained_query_units` receives the MATCH's selected units on the same
         read snapshot, for request-local allocation within the returned pool.
+        `after_unit_ref` pages query-independent candidates by stable reference;
+        callers apply admission before counting their semantic-unit bound.
         """
-        if not (categories or kinds or clauses or query_units):
+        if not (categories or kinds or clauses or query_units or after_unit_ref is not None):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
             )
@@ -8448,6 +8452,7 @@ class LexicalStore:
                 literal_tokens, dnf_clauses=clauses,
                 allowed_parent_paths=allowed_parent_paths, admitted_parent_paths=admitted_parent_paths,
                 excluded_categories_by_parent=excluded_categories_by_parent,
+                after_unit_ref=after_unit_ref,
                 registry_scope=registry_scope,
             )
 
@@ -8475,6 +8480,7 @@ class LexicalStore:
         allowed_parent_paths: set[str] | None = None,
         admitted_parent_paths: set[str] | None = None,
         excluded_categories_by_parent: dict[str, list[str]] | None = None,
+        after_unit_ref: str | None = None,
         registry_scope: str | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
@@ -8516,7 +8522,18 @@ class LexicalStore:
         hits: list[SemanticUnitLexicalHit] = []
         # Literal selection is exact metadata: it never ranks and needs no FTS5.
         ranked = bool(tokens) and not literal_tokens
-        if ranked and admitted_parent_paths is not None:
+        if not ranked and after_unit_ref is not None:
+            # SQL stores occurrence keys; only the selected public ref orders this cursor.
+            rows = conn.execute(
+                f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params
+            )
+            candidates = (
+                (row, unit) for row, unit in view.served(rows)
+                if wanted(row, unit) and str(unit.unit_ref) > after_unit_ref
+            )
+            selected = heapq.nsmallest(k, candidates, key=lambda candidate: str(candidate[1].unit_ref))
+            hits = [_unit_hit(row, unit, None) for row, unit in selected]
+        elif ranked and admitted_parent_paths is not None:
             # Statistics over the admitted parents' selected units, keyed and
             # tie-broken by public identity as the ranked hits are.
             corpus = view.corpus(col, admitted_parent_paths)

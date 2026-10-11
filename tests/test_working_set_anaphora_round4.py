@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import pytest
-from anaphor_acceptance_sets import EARLIER, POSITIVES as ACCEPTANCE_POSITIVES
-from anaphor_heldout_sets import EARLIER as HELDOUT_EARLIER, POSITIVES as HELDOUT_POSITIVES
+from anaphor_acceptance_sets import EARLIER
 from anaphor_round6_sets import (
     FIFTH_NEGATIVES,
     FIFTH_POSITIVES,
     LICENCE_NEGATIVES,
-    LICENCE_POSITIVES,
     STRUCTURAL_NEGATIVES,
     STRUCTURAL_POSITIVES,
     earlier as repeated_earlier,
 )
 from test_working_set_conversation_carry import _carried, analyze
 from anaphor_round7_sets import (
-    CODE_TURNS, CONTENT_FREE_FIFTH_IDS, CONTENT_FREE_VARIANTS,
-    STEM_COLLISION_WORDS, TOPIC_SWITCH_VARIANTS,
+    CODE_TURNS, CONTENT_FREE_FIFTH_IDS,
+    STEM_COLLISION_WORDS, TASK_WORD_FIFTH_IDS, TOPIC_SWITCH_VARIANTS,
 )
 
 TIME_NEGATIVES = (
@@ -55,13 +53,20 @@ TIME_EARLIER = (
 
 
 # Recall is reported, not gated: no pointing word in the first case, and
-# "wait" remains content under the frozen task vocabulary in the second.
+# "wait" is content that the subject does not support in the second.
 # Round 7 supersedes round 4: neutral time leaves these content-free carries.
+# "best" is content since T2e, so "this is the best time of year" no longer carries.
 TIME_CONTENT_FREE = {
     "is it in the morning or the evening", "is it after the spring equinox",
-    "this is the best time of year",
 }
 TIME_MISSES = {"can priya do saturday", "can it wait until monday"}
+#: One admitted unit of the earlier subject. Since T2e its words, not a task
+#: vocabulary, license a follow-up's content; time words stay neutral.
+TIME_SUPPORT = (
+    "Step one is done and the copy is ready and on track, due friday; her results compare "
+    "well with the last round, and we may drop it from the plan once the vendor replies "
+    "that it is finished."
+)
 
 
 @pytest.mark.parametrize("turn", [t for t in TIME_NEGATIVES if t not in TIME_CONTENT_FREE])
@@ -71,13 +76,7 @@ def test_a_time_subject_does_not_carry(turn: str) -> None:
 
 @pytest.mark.parametrize("turn", [turn for turn in TIME_POSITIVES if turn not in TIME_MISSES])
 def test_a_follow_up_with_a_time_modifier_carries(turn: str) -> None:
-    assert _carried([turn], TIME_EARLIER) == [turn]
-
-
-@pytest.mark.parametrize("word", ["figure", "figures", "number", "numbers"])
-def test_task_word_forms_match_the_same_generic_vocabulary(word: str) -> None:
-    turn = f"is that the final {word}"
-    assert _carried([turn], EARLIER) == [turn]
+    assert _carried([turn], TIME_EARLIER, supporting_text=TIME_SUPPORT) == [turn]
 
 
 @pytest.mark.parametrize(
@@ -89,7 +88,7 @@ def test_task_word_forms_match_the_same_generic_vocabulary(word: str) -> None:
     ],
 )
 def test_a_preposition_can_place_an_article_time_phrase(turn: str) -> None:
-    assert _carried([turn], TIME_EARLIER) == [turn]
+    assert _carried([turn], TIME_EARLIER, supporting_text=TIME_SUPPORT) == [turn]
 
 
 @pytest.mark.parametrize("turn", sorted(TIME_MISSES))
@@ -153,7 +152,7 @@ def test_dummy_time_and_closing_turns_do_not_carry_even_with_shared_words(turn: 
 @pytest.mark.parametrize("turn", [t for t in ROUND5_POSITIVES
                                   if t != "is it still late in the evening there for the review"])
 def test_a_referential_it_or_comparison_keeps_its_subject(turn: str) -> None:
-    assert _carried([turn], ROUND5_EARLIER) == [turn]
+    assert _carried([turn], ROUND5_EARLIER, supporting_text=TIME_SUPPORT) == [turn]
 
 
 @pytest.mark.parametrize("weekday", ["wednesday", "saturday", "sunday"])
@@ -168,29 +167,14 @@ def test_a_neutral_time_word_can_carry_without_a_shared_stem() -> None:
     assert _carried(["is that the evening"], earlier) == ["is that the evening"]
 
 
-@pytest.mark.parametrize(
-    "turn,earlier,subject",
-    [(turn, EARLIER, "Marlow Quay Survey") for turn in ACCEPTANCE_POSITIVES
-     if turn not in {"does this affect the rota", "has anything changed there since",
-                         "the second option sounds better"}]
-    + [(turn, HELDOUT_EARLIER, "Harbour Lantern Budget") for turn in HELDOUT_POSITIVES
-       if turn not in {
-           "how bad is it now", "what did they say about the seats",
-           "can you remind me why it grew", "and the shortlists, any news on those?",
-           "what happens if we can't close it",
-       }],
-)
-def test_licensed_acceptance_positives_keep_their_subject(turn, earlier, subject) -> None:
-    assert _carried([turn], earlier, subject_title=subject) == [turn]
-
-
 # Round 6: verbatim fifth-set disclosures plus 40 variants frozen pre-fix.
 
 
 @pytest.mark.parametrize("case_id,turn,subject", FIFTH_NEGATIVES)
 def test_each_disclosed_fifth_case_follows_the_round7_classification(case_id, turn, subject) -> None:
-    # Round 8 local quotations supersede the three quoted-task exceptions.
-    expected = [turn] if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"} else []
+    # Round 8 local quotations supersede the three quoted-task exceptions; T2e
+    # removes the task-word licence the six TASK_WORD_FIFTH_IDS relied on.
+    expected = [turn] if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"} - TASK_WORD_FIFTH_IDS else []
     assert _carried([turn], repeated_earlier(subject, turn), subject_title=subject) == expected, case_id
 
 
@@ -206,8 +190,8 @@ def test_round6_authored_negative_variants_abstain(turn: str) -> None:
                     subject_title="Alder database migration") == []
 
 
-@pytest.mark.parametrize("turn", LICENCE_POSITIVES + STRUCTURAL_POSITIVES)
-def test_round6_authored_positive_variants_carry(turn: str) -> None:
+@pytest.mark.parametrize("turn", STRUCTURAL_POSITIVES)
+def test_round6_authored_temporal_positive_variants_carry(turn: str) -> None:
     assert _carried([turn], repeated_earlier("Alder database migration", turn),
                     subject_title="Alder database migration") == [turn]
 
@@ -219,7 +203,9 @@ def test_round6_authored_positive_variants_carry(turn: str) -> None:
     ("Raven-telescope Plan", "can you compare its raven-telescope figures"),
 ])
 def test_the_subjects_own_title_forms_license_content(title, turn) -> None:
-    assert _carried([turn], repeated_earlier(title, turn), subject_title=title) == [turn]
+    # The unit supports every other word; only the title's own forms license the rest.
+    support = "The final version is ready; compare the figures before any change."
+    assert _carried([turn], repeated_earlier(title, turn), subject_title=title, supporting_text=support) == [turn]
 
 
 def test_an_older_subjects_title_does_not_license_the_selected_subject() -> None:
@@ -292,16 +278,13 @@ def test_round7_code_and_new_content_never_carry(turn: str) -> None:
                     subject_title="Alder database migration") == []
 
 
-@pytest.mark.parametrize("turn", CODE_TURNS[:4])
+# CODE_TURNS[:4]'s code forms, with no content word outside the code.
+@pytest.mark.parametrize("turn", (
+    "what is `it = 1`", "is `they` so", "can you do ``that = 2``", "what is ```\nit = 1\n```",
+))
 def test_round7_pointers_inside_code_never_point(turn: str) -> None:
     assert not analyze(turn).points_back
     assert len(analyze(turn).content_words) == 1
-
-
-@pytest.mark.parametrize("turn", CONTENT_FREE_VARIANTS)
-def test_round7_frozen_content_free_variants_carry(turn: str) -> None:
-    assert _carried([turn], repeated_earlier("Alder database migration", turn),
-                    subject_title="Alder database migration") == [turn]
 
 
 def test_round7_a_function_word_in_vault_vocabulary_cannot_license_its_stem() -> None:

@@ -9,7 +9,7 @@ which the compiler decides, and here:
   pointer ("that one", "the other one", "which one"), an elliptical "what
   about ..." opener, or the vault's referential cue;
 * (b) LICENSED CONTENT: every content word belongs to the carried subject's
-  own name/title or the frozen generic task vocabulary below. A word merely
+  own name/title or one admitted semantic unit. A word merely
   shared with an earlier turn supplies no licence. Function words, pointing
   words, numbers, time words and the vault's referential vocabulary are neutral.
   An unlicensed content word is a topic switch:
@@ -17,7 +17,7 @@ which the compiler decides, and here:
   day" all bring words of their own, so none is carried.
 
 A pronoun alone says little; the content gate carries the weight. These tables
-are parts of speech and a generic task vocabulary, never a vault's referential
+are parts of speech, never a vault's referential
 cues, which stay vault data (`tests/test_activation_conventions_referential.py`
 pins that).
 
@@ -92,25 +92,6 @@ _TIME_WORDS: frozenset[str] = frozenset(
     noon midnight midday dawn dusk sunrise sunset equinox clock oclock
     """.split()
 )
-#: The closed generic task vocabulary: words for asking about a work item's
-#: state, owner, decision, timing, cost, risk or outcome, which any follow-up
-#: may use without naming anything new. Kept short on purpose; everything else
-#: is content.
-TASK_VOCABULARY: frozenset[str] = frozenset(
-    """
-    update latest news progress track block blocked blocker stuck due deadline
-    done finish ready open close closed start ship merge live delay slip late
-    owns owner owned handle lead involved responsible assign team chase follow
-    decide decision agree approve approval sign signoff pick chose chosen plan idea
-    reply respond response hear heard remind mention explain feedback
-    reason outcome result risk issue problem impact affect change numbers figures
-    cost price total compare comparison better worse best worst cheaper right wrong
-    true correct different important urgent priority version draft review detail
-    expand fix fail broken round phase stage cycle sprint milestone step
-    budget current final prefer check page move worth send own push settle reject
-    safe summarise summarize drop revisit manager expensive matter
-    """.split()
-)
 #: These governors make a demonstrative temporal deixis ("this week"),
 #: rather than a pointing word. Time words themselves are neutral.
 _TIME_GOVERNORS: frozenset[str] = frozenset(
@@ -173,12 +154,9 @@ def forms(word: str) -> frozenset[str]:
     return frozenset(out)
 
 
-#: Normalize the closed task vocabulary exactly as the turn's words. The
-#: vocabulary entries themselves stay frozen; e.g. "figures" also covers "figure".
-_TASK_FORMS: frozenset[str] = frozenset(form for word in TASK_VOCABULARY for form in forms(word))
 _TIME_FORMS: frozenset[str] = frozenset(form for word in _TIME_WORDS for form in forms(word))
 #: Grammar for a dummy subject's bare copular complement. Work predicates
-#: ("ready", "due") stay outside it; these are not task vocabulary additions.
+#: ("ready", "due") stay outside it.
 _COPULAS = frozenset("am is are was were be been being".split())
 _CLOCK_NUMBERS = frozenset(
     "one two three four five six seven eight nine ten eleven twelve thirteen "
@@ -186,7 +164,7 @@ _CLOCK_NUMBERS = frozenset(
 )
 # Only surface words are neutral; inflectional stems cannot become grammar.
 _KNOWN: frozenset[str] = _FUNCTION_WORDS | _POINTERS | _CLOCK_NUMBERS
-# An opaque token outside any title/task licence, never a pointing word.
+# An opaque token outside any title/unit licence, never a pointing word.
 _CODE_SPAN = "`code`"
 _BACKTICKS = re.compile(r"`+")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)[\r\n]*$")
@@ -751,18 +729,16 @@ def _dummy_time_it(words: Sequence[str], index: int) -> bool:
 
 def content_words(tokens: Sequence[str], *, vocabulary: frozenset[str] = frozenset()) -> tuple[str, ...]:
     """The turn's content words, in order: every word that is not a function
-    word, a pointing word, a number, a neutral time word, in
-    `TASK_VOCABULARY` or in `vocabulary` (the vault's referential cue and
-    filler words)."""
+    word, a pointing word, a number, a neutral time word, or in
+    `vocabulary` (the vault's referential cue and filler words)."""
     words = _words(tokens)
     return tuple(
         word
         for word in words
         if any(ch.isalpha() for ch in word)
         and word not in _KNOWN
-        and not (word_forms := forms(word)) & _TASK_FORMS
         # Neutral grammar words in vault filler still use surface matching.
-        and not word_forms & (vocabulary - _KNOWN)
+        and not (word_forms := forms(word)) & (vocabulary - _KNOWN)
         and not word_forms & _TIME_FORMS
     )
 

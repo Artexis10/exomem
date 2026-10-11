@@ -785,7 +785,7 @@ def test_empty_policy_bridge_fast_path_never_parses_or_creates_governance_state(
     def _boom(*_args, **_kwargs):
         raise AssertionError("bridge machinery must not run on an empty-policy route")
 
-    monkeypatch.setattr(bridges, "maybe_bridge", _boom)
+    monkeypatch.setattr(bridges, "parse_bridge_frontmatter", _boom)
     monkeypatch.setattr(bridges, "admit", _boom)
     monkeypatch.setattr(bridges, "strip_provenance", _boom)
     page = {"path": BRIDGE_PATH, "body": "ordinary bridge-shaped bytes", "frontmatter": {}}

@@ -28,9 +28,14 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from pathlib import Path
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from . import lifecycle_statuses
+
+if TYPE_CHECKING:
+    from .vocabulary.instances import PageDefinitions
 
 FOCUS_MAX_CHARS = 240
 USER_ENTRY_MAX_CHARS = 600
@@ -95,8 +100,71 @@ class Conversation:
 NONE = Conversation()
 
 
+@dataclass(frozen=True, slots=True)
+class _WitnessBasis:
+    """The source and selected definitions that supplied one admitted witness."""
+
+    unit_ref: str
+    parent_path: str
+    parent_generation: str
+    parent_source_hash: str
+    parser_version: int
+    definitions: PageDefinitions
+    served_unit: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        # Selected served units have scalar fields and flat provenance scalars/string lists.
+        unit = dict(self.served_unit)
+        unit["provenance"] = MappingProxyType({
+            key: tuple(value) if isinstance(value, list) else value
+            for key, value in unit["provenance"].items()
+        })
+        object.__setattr__(self, "served_unit", MappingProxyType(unit))
+
+    def packet_unit(self) -> dict[str, Any]:
+        """Restore lists for the packet classifier's reference walk."""
+        unit = dict(self.served_unit)
+        unit["provenance"] = {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in unit["provenance"].items()
+        }
+        return unit
+
+    def current(self, root: Path) -> bool:
+        from . import semantic_index
+
+        return semantic_index.validate_parent_record(
+            root, parent_path=self.parent_path,
+            parent_generation_value=self.parent_generation,
+            parent_source_hash=self.parent_source_hash,
+            parser_version=self.parser_version,
+        ).current and self.definitions.current(root)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _WitnessBasis:
+        # Immutable source and served-unit evidence contains mapping proxies; only packet payloads copy.
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class _TitleBasis:
+    """The authored Markdown title that supplied literal support."""
+
+    path: str
+    expected_title: str
+
+    def current(self, root: Path) -> bool:
+        from . import working_set
+
+        return working_set._page_title(root, self.path) == self.expected_title
+
+
 class InferredPacket(dict[str, Any]):
     """Request-local inference marker, preserved by deepcopy but not serialized."""
+
+    #: The unit ref of the unit that licensed a single carry; egress drops the
+    #: carry claim when it removes that unit.
+    witness_ref: str | None = None
+    witness_bases: tuple[_WitnessBasis | _TitleBasis, ...] = ()
 
 
 _REFERENCE_FIELDS = frozenset({
@@ -478,10 +546,8 @@ def apply(
     return tuple(ordered), origins, entry_candidates
 
 
-def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
-    """Ruling C1 on #1463, round 6: pointing plus a narrow content licence.
-    Only the subject's own title/name or frozen task forms license content.
-    Words merely shared with earlier turns are never evidence of reference."""
+def may_carry(analysis: Any, *, subject_title: str = "", supporting_text: str = "") -> bool:
+    """License pointing content from the subject title and one admitted unit."""
     if analysis.local_material or not analysis.points_back:
         return False
     if not analysis.content_words:
@@ -489,9 +555,9 @@ def may_carry(analysis: Any, *, subject_title: str = "") -> bool:
     from . import working_set_anaphora
     from .working_set_index import normalize, tokens_of
 
-    licensed = working_set_anaphora._TASK_FORMS | frozenset(
+    licensed = frozenset(
         form
-        for word in working_set_anaphora._words(tokens_of(normalize(subject_title)))
+        for word in working_set_anaphora._words(tokens_of(normalize(subject_title + " " + supporting_text)))
         for form in working_set_anaphora.forms(word)
     )
     return all(working_set_anaphora.forms(word) & licensed for word in analysis.content_words)

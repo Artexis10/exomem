@@ -16,8 +16,8 @@ import pytest
 from conversation_vault import seed
 from anaphor_round6_sets import FIFTH_NEGATIVES, FIFTH_POSITIVES, earlier as repeated_earlier
 from anaphor_round7_sets import (
-    CODE_TURNS, CONTENT_FREE_FIFTH_IDS, CONTENT_FREE_VARIANTS,
-    RESIDUAL_TOPIC_SWITCH_IDS, STEM_COLLISION_WORDS, TOPIC_SWITCH_VARIANTS,
+    CODE_TURNS, CONTENT_FREE_FIFTH_IDS,
+    RESIDUAL_TOPIC_SWITCH_IDS, STEM_COLLISION_WORDS, TASK_WORD_FIFTH_IDS, TOPIC_SWITCH_VARIANTS,
 )
 from test_governance_egress import _reset_caches
 from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
@@ -35,10 +35,9 @@ from exomem import (
 
 analyze = working_set_resolve.analyze_turn
 
-RICH = (
-    "Given everything above, how did her numbers compare with last year, and "
-    "should we change anything before the next one?"
-)
+#: A long follow-up: length is no criterion. Its one content word needs the
+#: subject's title or one admitted unit (`OTTILIE_SUPPORT`).
+RICH = "Given everything above, how did her figures look before the next one?"
 
 
 @pytest.fixture
@@ -110,10 +109,10 @@ def _titles(packet: dict) -> list[str]:
         "can you check whether it still works",
     ],
 )
-def test_an_anaphoric_turn_is_recognised(turn: str) -> None:
-    # Round 7 surface-only neutral matching discloses these recall losses.
-    expected = turn not in {"the second option looks better to me", "that one looks better"}
-    assert analyze(turn).anaphoric is expected, turn
+def test_an_anaphoric_turn_points_back(turn: str) -> None:
+    # Pointing is decided apart from content, which the subject's title or one
+    # admitted unit must license (`may_carry`).
+    assert analyze(turn).points_back, turn
 
 
 #: Ordinary, pronoun-bearing turns that point back at nothing (ruling C1 on
@@ -177,21 +176,32 @@ def test_a_turn_with_no_anaphor_is_not_anaphoric(turn: str) -> None:
     assert not analyze(turn).anaphoric, turn
 
 
-def test_length_is_not_a_criterion() -> None:
-    assert analyze(RICH).anaphoric and len(analyze(RICH).tokens) > 8
-
-
 # --------------------------------------------------------------------------- #
 # The carry
 # --------------------------------------------------------------------------- #
 
 THREAD = {"recent": [_user("How did Ottilie Marsh do in the spring?"), _assistant("Fine, all things told.")]}
+#: One admitted unit of Ottilie Marsh's page that supports RICH's content. A unit
+#: that holds several of a turn's words lets the turn reach the page itself, and
+#: the conversation then only qualifies that resolution.
+OTTILIE_SUPPORT = "Her figures held steady through the season."
 
 
-def test_a_rich_follow_up_keeps_the_conversations_subject(cvault: Path) -> None:
-    plain = _activate(cvault, RICH)
+@pytest.fixture
+def supported_cvault(cvault: Path) -> Path:
+    page = cvault / "Knowledge Base/Entities/People/Ottilie Marsh.md"
+    page.write_text(page.read_text() + f"- [fact] {OTTILIE_SUPPORT} ^support\n")
+    working_set_index.WorkingSetIndex(cvault).rebuild()
+    _reset_caches()
+    lexstore.ensure_fresh(cvault)
+    working_set_runtime.reset_caches_for_tests()
+    return cvault
+
+
+def test_a_rich_follow_up_keeps_the_conversations_subject(supported_cvault: Path) -> None:
+    plain = _activate(supported_cvault, RICH)
     assert plain["abstention"] == {"reason": "unresolved"}
-    carried = _activate(cvault, RICH, conversation=THREAD)
+    carried = _activate(supported_cvault, RICH, conversation=THREAD)
     assert carried["abstained"] is False
     (anchor,) = carried["anchors"]
     assert anchor["title"] == "Ottilie Marsh"
@@ -199,7 +209,7 @@ def test_a_rich_follow_up_keeps_the_conversations_subject(cvault: Path) -> None:
     assert anchor["evidence"] == ["conversation"]
     assert anchor["origin"] == "conversation"
     assert carried["generation"]["carried_by"] == "conversation"
-    assert carried["units"], "the carried anchor's material is served under the ordinary lanes"
+    assert OTTILIE_SUPPORT in [unit["text"] for unit in carried["units"]], "the supporting unit is served"
 
 
 @pytest.mark.parametrize(
@@ -218,7 +228,7 @@ def test_an_ordinary_turn_is_never_carried_from_the_conversation(cvault: Path, t
     assert "Ottilie Marsh" not in _titles(packet), turn
 
 
-@pytest.mark.parametrize("turn", ["it's still on track for the autumn?", "that's what I meant"])
+@pytest.mark.parametrize("turn", ["it's still on for the autumn?", "that's what I meant"])
 def test_a_contracted_anaphor_is_carried(cvault: Path, turn: str) -> None:
     packet = _activate(cvault, turn, conversation=THREAD)
     assert packet["generation"].get("carried_by") == "conversation", turn
@@ -228,7 +238,7 @@ def test_a_contracted_anaphor_is_carried(cvault: Path, turn: str) -> None:
 def test_the_newest_subject_wins_over_an_older_one(cvault: Path) -> None:
     packet = _activate(
         cvault,
-        "what are the risks with that?",
+        "what about the next one",
         conversation={
             "recent": [
                 _user("the Harbor Lantern Budget is over"),
@@ -244,7 +254,7 @@ def test_the_newest_subject_wins_over_an_older_one(cvault: Path) -> None:
 def test_two_subjects_in_the_newest_entry_abstain_ambiguous_and_choose_nothing(cvault: Path) -> None:
     packet = _activate(
         cvault,
-        "what are the risks with that?",
+        "what about the next one",
         conversation={"recent": [_user("the Kestrel Hiring Plan and the Marlow Quay Survey both slipped")]},
     )
     assert packet["abstention"] == {"reason": "ambiguous"}
@@ -279,8 +289,9 @@ def test_a_turn_that_names_its_own_subject_is_not_carried(cvault: Path) -> None:
     assert packet["anchors"][0]["title"] == "Ottilie Marsh"
 
 
-def test_a_carried_anchor_never_enters_the_token(cvault: Path) -> None:
-    packet = _activate(cvault, RICH, conversation=THREAD)
+def test_a_carried_anchor_never_enters_the_token(supported_cvault: Path) -> None:
+    packet = _activate(supported_cvault, RICH, conversation=THREAD)
+    assert packet["generation"]["carried_by"] == "conversation"
     payload = working_set_runtime.decode_continuity(packet["continuity"])
     assert payload["refs"] == []
 
@@ -327,8 +338,10 @@ def test_the_compiler_classifies_all_disclosed_fifth_cases(fifth_disclosures_vau
         packet = _activate(fifth_disclosures_vault, turn, max_chars=1200,
                            conversation={"recent": repeated_earlier(title, turn)},
                            session=f"round7-negative-{case_id}")
-        # Round 8 local quotations supersede N50/N52/N53's task-only labels.
-        if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"}:
+        # Round 8 local quotations supersede N50/N52/N53's task-only labels. The
+        # TASK_WORD_FIFTH_IDS lost their task-word licence; their subjects support
+        # none of their content, so they fall through.
+        if case_id in CONTENT_FREE_FIFTH_IDS - {"N50", "N52", "N53"} - TASK_WORD_FIFTH_IDS:
             _assert_bounded_conversation(packet, title, 1200)
         else:
             assert packet["generation"].get("carried_by") != "conversation", case_id
@@ -348,9 +361,9 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Pat
     working_set_index.WorkingSetIndex(cvault).rebuild()
     lexstore.ensure_fresh(cvault)
     working_set_runtime.reset_caches_for_tests()
-    carried = _activate(cvault, "which one should we review", max_chars=limit, conversation=THREAD)
+    carried = _activate(cvault, "what about the next one", max_chars=limit, conversation=THREAD)
     _assert_bounded_conversation(carried, "Ottilie Marsh", limit)
-    named = _activate(cvault, "which one should we review for Ottilie Marsh", max_chars=limit)
+    named = _activate(cvault, "what about the next one for Ottilie Marsh", max_chars=limit)
     assert named["generation"].get("carried_by") != "conversation"
     assert _carry_cost(named) > limit // 3
     assert named["budget"]["limit_chars"] == limit
@@ -361,18 +374,12 @@ def test_round7_the_rest_of_the_budget_keeps_unresolved_recent_context(cvault: P
 
     recent = ({"title": "Recent work", "statement": "A recent detail. " * 20},)
     monkeypatch.setattr(working_set, "_recent_context", lambda *args, **kwargs: recent)
-    unresolved = _activate(cvault, "can you review that", max_chars=1000)
-    carried = _activate(cvault, "can you review that", max_chars=1000, conversation=THREAD)
+    unresolved = _activate(cvault, "what about the next one", max_chars=1000)
+    carried = _activate(cvault, "what about the next one", max_chars=1000, conversation=THREAD)
     _assert_bounded_conversation(carried, "Ottilie Marsh", 1000)
     assert carried["recent_context"] == unresolved["recent_context"] == list(recent)
     assert carried["budget"]["used_chars"] > 1000 // 3
     assert carried["budget"]["used_chars"] <= 1000
-
-
-@pytest.mark.parametrize("turn", CONTENT_FREE_VARIANTS)
-def test_round7_full_compiler_content_free_variants_use_the_footprint(cvault: Path, turn: str) -> None:
-    packet = _activate(cvault, turn, max_chars=1000, conversation=THREAD)
-    _assert_bounded_conversation(packet, "Ottilie Marsh", 1000)
 
 
 @pytest.mark.parametrize("turn", TOPIC_SWITCH_VARIANTS + CODE_TURNS + tuple(
@@ -498,14 +505,14 @@ def test_every_existing_carry_is_untouched_without_a_conversation(cvault: Path) 
 MAX_FALSE_POSITIVE_RATE = 0.05
 
 
-def _carried(turns, earlier, *, subject_title: str = "") -> list[str]:
-    """The licence seam; callers supply the selected subject's actual title.
-    Earlier text is retained for identical before/after case inputs but is
-    deliberately not passed as licensing evidence."""
+def _carried(turns, earlier, *, subject_title: str = "", supporting_text: str = "") -> list[str]:
+    """The licence seam; callers supply the selected subject's actual title and
+    the text of one admitted unit. Earlier text is retained for identical
+    before/after case inputs but is deliberately not passed as licensing evidence."""
     from exomem import working_set_conversation
 
     return [turn for turn in turns if working_set_conversation.may_carry(
-        analyze(turn), subject_title=subject_title,
+        analyze(turn), subject_title=subject_title, supporting_text=supporting_text,
     )]
 
 
@@ -527,4 +534,3 @@ def test_a_new_content_word_is_a_topic_switch_even_after_a_pointing_word() -> No
                  "is it normal for a sourdough starter to smell like vinegar", "could it be that the router needs a reboot",
                  "it's been a long day"):
         assert _carried([turn], earlier) == [], turn
-    assert _carried(["is that still on track for the rounds?"], earlier) == ["is that still on track for the rounds?"]

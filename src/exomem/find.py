@@ -2384,14 +2384,21 @@ def _hydrate_indexed_unit_records(
         if parent is None:
             continue
         page, state, prose_units = parent
-        located = next(
-            (
-                (source_order, candidate)
-                for source_order, candidate in enumerate(state.document.units)
-                if candidate.unit_ref == hit.unit_ref
-            ),
-            None,
-        )
+        located = None
+        indexed_order = getattr(hit, "source_order", None)
+        if isinstance(indexed_order, int) and 0 <= indexed_order < len(state.document.units):
+            candidate = state.document.units[indexed_order]
+            if candidate.unit_ref == hit.unit_ref:
+                located = (indexed_order, candidate)
+        if located is None:
+            located = next(
+                (
+                    (source_order, candidate)
+                    for source_order, candidate in enumerate(state.document.units)
+                    if candidate.unit_ref == hit.unit_ref
+                ),
+                None,
+            )
         if located is None:
             if stale_out is not None:
                 stale_out.append(hit.unit_ref)
