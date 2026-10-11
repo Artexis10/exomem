@@ -1434,13 +1434,17 @@ def _append_all(descriptor: int, content: bytes) -> None:
         written += count
 
 
-def _descriptor_bytes(descriptor: int, expected: PathIdentity) -> bytes:
+def _descriptor_chunks(descriptor: int, expected: PathIdentity) -> Iterator[bytes]:
+    """The bytes of a held regular file from its start, a chunk at a time.
+
+    Raises once the descriptor no longer has the expected identity, whether at the
+    start or after the last chunk.
+    """
     try:
         offset = os.lseek(descriptor, 0, os.SEEK_CUR)
         os.lseek(descriptor, 0, os.SEEK_SET)
     except OSError as error:
         raise PathGuardError("PATH_GUARD_IO", "batch artifact is not seekable") from error
-    chunks: list[bytes] = []
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
@@ -1452,12 +1456,15 @@ def _descriptor_bytes(descriptor: int, expected: PathIdentity) -> bytes:
                 continue
             if not chunk:
                 break
-            chunks.append(chunk)
+            yield chunk
         if not _same_identity(expected, os.fstat(descriptor)):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
     finally:
         os.lseek(descriptor, offset, os.SEEK_SET)
-    return b"".join(chunks)
+
+
+def _descriptor_bytes(descriptor: int, expected: PathIdentity) -> bytes:
+    return b"".join(_descriptor_chunks(descriptor, expected))
 
 
 _UNSUPPORTED_XATTR_ERRNOS = frozenset(
@@ -2296,7 +2303,10 @@ class _BatchWorkspace:
                 raise PathGuardError(
                     "PATH_GUARD_TARGET", "batch destination escaped the vault"
                 ) from error
-            content = _descriptor_bytes(artifact.descriptor, artifact.identity)
+            # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
+            content = held_fs.Chunks(
+                functools.partial(_descriptor_chunks, artifact.descriptor, artifact.identity)
+            )
             acquired = held_fs.acquire(root)
             if not acquired.ok:
                 raise PathGuardError(
