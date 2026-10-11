@@ -31,7 +31,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     activation_conventions,
@@ -47,6 +47,9 @@ from . import (
     working_set_resolve,
     working_set_state,
 )
+
+if TYPE_CHECKING:
+    from .find import UnitParentReads
 
 log = logging.getLogger(__name__)
 
@@ -967,6 +970,7 @@ def run_lanes(
     graph work to widen a claim that rests on one recall score.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    from . import find
     from .governance import egress
 
     root = Path(vault_root)
@@ -979,6 +983,9 @@ def run_lanes(
         )
     if visible is not None:
         neighbourhood = frozenset(path for path in neighbourhood if visible(path))
+    # The unit lanes select overlapping units off the same pages: each page is
+    # read, checked and parsed once for all of them.
+    parent_reads = find.UnitParentReads()
     for role in roles:
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
@@ -1017,6 +1024,7 @@ def run_lanes(
                     request_anchors=request_anchors,
                     visible=visible,
                     status_basis=status_basis,
+                    parent_reads=parent_reads,
                 )
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
@@ -1235,6 +1243,7 @@ def _lane(
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1256,6 +1265,7 @@ def _lane(
             admit=admit,
             visible=visible,
             status_basis=status_basis,
+            parent_reads=parent_reads,
         )
     if role.lane == "material" and registry is not None:
         return _material_lane(
@@ -1271,6 +1281,7 @@ def _lane(
             request_anchors=request_anchors,
             visible=visible,
             status_basis=status_basis,
+            parent_reads=parent_reads,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1294,6 +1305,7 @@ def _units_lane(
     admit: Callable[[str, Any], bool] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Semantic units by category, restricted to the anchor neighbourhood.
 
@@ -1333,6 +1345,7 @@ def _units_lane(
             max_catalog_candidates=size,
             truncated_out=capped,
             status_basis=status_basis,
+            parent_reads=parent_reads,
         )
         return found, bool(capped)
 
@@ -1418,6 +1431,7 @@ def _material_lane(
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    parent_reads: UnitParentReads | None = None,
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -1492,6 +1506,7 @@ def _material_lane(
         records = find._hydrate_indexed_unit_records(
             vault_root, list(candidates),
             plan=structured_filters.compile_filter(None), stale_out=stale,
+            parent_reads=parent_reads,
         )
         if stale:
             raise RuntimeError("material units are stale")
