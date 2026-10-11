@@ -1075,7 +1075,9 @@ def test_activation_wrapper_thread_stores_strict_final_flags(
     assert ("activation_result" in row) == (observation is not None)
 
 
-def test_activation_observation_uses_the_final_postfilter(vault, ledger_dir, activation_owner, monkeypatch):
+def test_activation_observation_uses_the_final_postfilter(
+    vault, ledger_dir, activation_owner, monkeypatch
+):
     from dataclasses import replace
 
     from exomem import commands, writer_lease
