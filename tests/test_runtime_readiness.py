@@ -605,7 +605,7 @@ def test_runtime_readiness_uses_vault_path_identity_for_a_real_held_boundary(
 
 
 def test_coordination_graph_health_requires_a_readable_sidecar(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """Epoch state alone must not make readiness claim the graph is current."""
     from exomem import epistemic_graph, writer_lease
@@ -614,12 +614,11 @@ def test_coordination_graph_health_requires_a_readable_sidecar(
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert manager.status(empty)["graph_sync"] == {"state": "unavailable", "generation": 0}
-    from exomem import runtime_readiness as readiness_module
-
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(empty))
-    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
-    readiness = readiness_module.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
+    measured = manager.status(empty)
+    assert measured["graph_sync"] == {"state": "unavailable", "generation": 0}
+    readiness = build_runtime_readiness(
+        coordination=measured, release="1.2.3", mcp_tool_surface_sha256="a" * 64
+    )
     assert readiness["coordination"]["graph_sync"] == {
         "state": "unavailable",
         "generation": 0,

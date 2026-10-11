@@ -1426,3 +1426,29 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         first_batch,
     )
     assert count(store.connection) == len(valid(records[:96])) + first_batch
+
+
+def test_cloud_import_grant_does_not_survive_copy_to_another_cell(store, monkeypatch):
+    """A persisted Cloud owner job must not gain authority in a different cell or desktop."""
+    setup(store)
+    small(monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "abcdefghijklmnop")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "example-credential-" * 3)
+    who = RequestPrincipal(audience_id="owner", surface="mcp", issuer_family="cloud-cell:abcdefghijklmnop")
+    job = start(store, who)
+    run(store, max_batches=1)
+    before = count(store.connection)
+    assert before > 0
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "ponmlkjihgfedcba")
+    run(store)
+    assert count(store.connection) == before
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "abcdefghijklmnop")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "rotated-credential-" * 3)
+    assert call(store, who, mode="start", continuation=job["continuation"])["state"] == "running"
+    run(store, max_batches=1)
+    assert count(store.connection) > before
+    before = count(store.connection)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "0")
+    run(store)
+    assert count(store.connection) == before

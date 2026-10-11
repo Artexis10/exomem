@@ -51,7 +51,7 @@ Facts verified against the code, including by the independent critic review of 2
 - Multi-node and multi-region. The design keeps them possible.
 - A marketplace listing or client plugin packaging.
 - Direct browser transfers, media workers, and a self-serve export UI.
-- Owner-only governance authoring from a Cloud client. The Cloud principal is a non-owner, as with the desktop's remote clients.
+- Desktop remote-owner binding changes. Cloud owner binding uses its own concrete verifier token and immutable configured cell ID.
 - Moving the Substrate website off Vercel.
 
 ## Decisions
@@ -65,7 +65,7 @@ Facts verified against the code, including by the independent critic review of 2
    - A configured token shorter than 32 characters, current or previous, fails startup with `CLOUD_CELL_CONFIG_INVALID`, without echoing the value. A C4 bearer is always 43 characters, so this fires only on a mis-rendered Secret.
    - There is no GitHub OAuth proxy and no OAuth storage.
    - The verifier emits fixed claims `{sub: <cell_id>, iss: "exomem-cloud-cell"}` and the cell-service scope. The claims are never derived from the bearer or from a key version.
-   - The resulting principal is a resolved **non-owner**, exactly as a remote OAuth principal is on the desktop.
+   - The concrete verified token resolves to the configured Cloud cell owner, under the protected-import amendment. Copied claims remain non-owner.
    - Ordinary product commands and governed writes work.
    - Owner-only governance operations, which include policy authoring, return `GOVERNANCE_OWNER_REQUIRED`. That loss is accepted and listed under Non-Goals.
 2. **Logging.**
@@ -78,7 +78,7 @@ Facts verified against the code, including by the independent critic review of 2
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
    - Each entry uses the `HostedSurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
-   - The initial members are `transfer_artifact`, `adopt_vault`, `process_media` and `read_media`.
+   - The current members are `transfer_artifact`, `process_media` and `read_media`; staged import enables `adopt_vault`.
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
 5. **Routes.** Only MCP (`/mcp`), `/health` and `/health/ready` are registered. REST (`/api/*`), `/upload` and `/download` are not, because FastMCP custom routes do not inherit MCP authentication.

@@ -7,6 +7,10 @@ on:
       - "infra/helm/platform/**"
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
+      - "src/exomem/cloud_import*.py"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
   push:
     branches: [main]
@@ -15,6 +19,10 @@ on:
       - "infra/helm/platform/**"
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
+      - "src/exomem/cloud_import*.py"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
   # A manual run also replays the live K3s suite (live-k3s below).
   workflow_dispatch:
@@ -130,11 +138,11 @@ jobs:
           # all platform templates (including cellctl's scope policy), the
           # values schema and validation values, the vendored subcharts, the
           # cell manifest renderer, the node audit policy it mounts, and the
-          # live suite itself. values.yaml
+          # live suite, import commands, image inputs and this workflow. values.yaml
           # is left out because release bumps touch it; chart tests pin the
           # invariants it carries. Git quotes a path with special or
           # non-ASCII characters, hence the optional leading quote.
-          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$)'
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|src/exomem/cloud_import[^/]*\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$)'
         run: |
           case "$EVENT" in
             workflow_dispatch) run=true ;;
@@ -156,15 +164,15 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "live K3s suite runs: $run"
 
-  # The live suite builds stand-in images and runs K3s and MinIO in Docker
-  # (privileged) for about 15 minutes. It runs on manual dispatch, at each
-  # delivery, and on pull requests live-k3s-scope matches.
+  # The live suite builds the source Cloud image and stand-ins, then runs
+  # K3s and MinIO. Four encrypted-import cases add about 11 minutes to the
+  # existing 15-minute suite; the job also allows the model-bearing build.
   live-k3s:
     name: Live K3s integration suite
     if: needs.live-k3s-scope.outputs.run == 'true'
     needs: [checks, live-k3s-scope]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -201,12 +209,31 @@ jobs:
           helm repo add jetstack https://charts.jetstack.io
           helm repo add topolvm https://topolvm.github.io/topolvm
           helm dependency build infra/helm/platform
+      - name: Read the source image build metadata
+        id: import-meta
+        run: |
+          build_time=$(git show -s --format=%cI HEAD)
+          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build the source Cloud image for encrypted import
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        timeout-minutes: 25
+        with:
+          context: .
+          target: cloud
+          load: true
+          push: false
+          tags: cellctl-import-source:ci-${{ github.sha }}
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.import-meta.outputs.build_time }}
+          cache-from: type=gha,scope=cloud-k3s
+          cache-to: type=gha,mode=max,scope=cloud-k3s
       # A skip (no Docker, a missing variable) must fail the job, never pass it.
       - name: Live K3s suite
         working-directory: infra/cellctl
         shell: bash
         env:
           RUN_CELLCTL_K3S_TEST: "1"
+          CELLCTL_K3S_IMPORT_IMAGE: cellctl-import-source:ci-${{ github.sha }}
           PYTHONUNBUFFERED: "1"
         run: |
           HELM_BIN="$(command -v helm)" \
