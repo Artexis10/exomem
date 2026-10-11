@@ -203,11 +203,33 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
    missing full run blocks the release-PR merge.
 5. Merge the Release Please PR.
 6. Release Please tags `vX.Y.Z` and creates the GitHub Release.
-7. The release workflow builds `dist/` with `uv build` and uploads the wheel/sdist
-   to the GitHub Release.
-8. If `PYPI_PUBLISH_ENABLED=true`, the release workflow builds the same package
-   artifacts in the `pypi` environment and publishes them through PyPI trusted
-   publishing.
+7. The release workflow's `plan` job finds the release artifacts that are missing
+   and hands the publish to a run of the same workflow on the `vX.Y.Z` tag.
+8. The run on the tag builds `dist/` with `uv build` and uploads the wheel, the
+   sdist and the Cloud archives to the GitHub Release.
+9. The same run publishes the missing artifacts whose gate is on:
+   - PyPI, from the same wheel and sdist, if `PYPI_PUBLISH_ENABLED=true`;
+   - the MCP Registry entry, if `MCP_REGISTRY_PUBLISH_ENABLED=true`;
+   - the lean, ml, cuda, hosted, cloud and cellctl images, if
+     `GHCR_PUBLISH_ENABLED=true`.
+
+Every later push to `main` checks the newest release again and hands any missing
+artifact to a run on its tag. An artifact that is already published is skipped,
+never rebuilt. After three failed publish runs on one tag, pushes stop handing
+that tag off.
+
+### Publish a release by hand
+
+A tag released before this workflow existed refuses the hand-off. For any other
+tag, use these steps:
+
+1. Run `gh workflow run release-please.yml --ref main -f tag=vX.Y.Z -f dry_run=true`.
+2. Check that run's `plan` summary and image builds. The dry run builds every
+   artifact and publishes nothing.
+3. Run `gh workflow run release-please.yml --ref main -f tag=vX.Y.Z`.
+
+The run on `main` hands the publish to a run on `refs/tags/vX.Y.Z`. That run
+publishes only the artifacts the release lacks.
 
 The initial `0.1.0` baseline is recorded in `.release-please-manifest.json` and
 `CHANGELOG.md`; future releases should come from Release Please rather than

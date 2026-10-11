@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to re-publish (PyPI and/or GHCR), for example v0.2.1
+        description: Existing release tag, for example v0.2.1. Publishes only what the release lacks; a dispatch from another ref hands the publish to a run on the tag
         required: true
         type: string
+      dry_run:
+        description: Build every artifact from the tag and publish nothing (no release upload, PyPI or MCP registry publish, image push or attestation)
+        required: false
+        default: false
+        type: boolean
       records_rollback_runtime_target_json:
         description: Optional reviewed six-field runtime target to sign this image as a Records reader-v2 rollback unit
         required: false
@@ -24,6 +29,12 @@ permissions:
   issues: write
   pull-requests: write
 
+# Only a run on a release tag publishes, one run per tag at a time. GitHub
+# replaces an older pending run with a newer one, which checks again.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && github.ref == format('refs/tags/{0}', inputs.tag) && format('release-publish-{0}', inputs.tag) || format('release-please-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 # Each Dockerfile target owns a cache; the default scope overwrites prior builds.
 env:
   IMAGE_CACHE_LEAN: exomem-lean
@@ -31,6 +42,7 @@ env:
   IMAGE_CACHE_CUDA: exomem-cuda
   IMAGE_CACHE_HOSTED: exomem-hosted
   IMAGE_CACHE_CLOUD: exomem-cloud
+  IMAGE_CACHE_CELLCTL: cellctl
 
 jobs:
   release-please:
@@ -39,8 +51,6 @@ jobs:
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
       release_branch: ${{ steps.release.outputs.pr && fromJson(steps.release.outputs.pr).headBranchName }}
     steps:
       - name: Mint GitHub App installation token
@@ -170,16 +180,283 @@ jobs:
           git commit -m "chore(hosted): regenerate plugin artifacts for the release"
           git push
 
-  build-artifacts:
+  # Every run finds the release it serves and checks which of its artifacts are
+  # present. Only a run on the release tag publishes, so every attestation
+  # names the tag's ref and commit. Any other run hands the publish to a run on
+  # the tag: a push heals a release whose own run never published, and a
+  # dispatch from main reaches the tag.
+  plan:
     needs: release-please
-    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release-please.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      packages: read
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      source_commit: ${{ steps.plan.outputs.source_commit }}
+      publish: ${{ steps.plan.outputs.publish }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      latest: ${{ steps.plan.outputs.latest }}
+      pypi: ${{ steps.plan.outputs.pypi }}
+      pypi_present: ${{ steps.plan.outputs.pypi_present }}
+      mcp: ${{ steps.plan.outputs.mcp }}
+      images: ${{ steps.plan.outputs.images }}
+      publish_images: ${{ steps.plan.outputs.publish_images }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check which release artifacts are present
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run == true }}
+          RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}
+          PYPI_ENABLED: ${{ vars.PYPI_PUBLISH_ENABLED == 'true' }}
+          MCP_ENABLED: ${{ vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
+          GHCR_ENABLED: ${{ vars.GHCR_PUBLISH_ENABLED == 'true' }}
+          # A push stops handing a tag off after this many of its publish runs
+          # failed, so a build the tag's content breaks is not retried forever.
+          HANDOFF_FAILURE_LIMIT: 3
+        run: |
+          set -euo pipefail
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          # HTTP 200 means present and 404 means missing; any other answer is unknown.
+          probe() {
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "$@") || true
+            case "$code" in
+              200) echo present ;;
+              404) echo missing ;;
+              *) echo "unknown (HTTP ${code:-000})" ;;
+            esac
+          }
+
+          if [[ "$EVENT" == push ]]; then
+            tag="v$(jq -er '.["."]' .release-please-manifest.json)"
+          else
+            tag="$INPUT_TAG"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$tag' is not a release tag such as v1.2.3"
+            exit 1
+          fi
+          version="${tag#v}"
+          {
+            echo "tag=$tag"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+
+          tag_state=$(probe -H "Authorization: Bearer $GH_TOKEN" "$api/git/ref/tags/$tag")
+          release_state=$(probe -H "Authorization: Bearer $GH_TOKEN" "$api/releases/tags/$tag")
+          if [[ "$tag_state" != present || "$release_state" != present ]]; then
+            # A push can land before Release Please tags and releases its manifest version.
+            if [[ "$EVENT" == push && "$tag_state$release_state" != *unknown* ]]; then
+              echo "::notice::$tag has tag $tag_state and GitHub release $release_state; nothing to publish yet"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::$tag needs a tag and a GitHub release: tag $tag_state, release $release_state"
+            exit 1
+          fi
+          git fetch --quiet --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
+          source_commit=$(git rev-parse "refs/tags/$tag^{commit}")
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          package=$(git show "$tag:pyproject.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["name"])')
+          server=$(git show "$tag:server.json" | jq -er .name)
+
+          rows=()
+          missing=()
+          unknown=()
+          listed() { local joined; printf -v joined '%s, ' "$@"; echo "${joined%, }"; }
+          track() {
+            rows+=("| $1 | \`$2\` | $3 |")
+            case "$3" in
+              missing) missing+=("$1") ;;
+              unknown*) unknown+=("$1") ;;
+            esac
+          }
+
+          # The wheel and sdist go up in the same step as the Cloud archives, so
+          # their presence stands for that upload.
+          dist_kinds=$(gh release view "$tag" --json assets \
+            --jq '[.assets[].name | select(endswith(".whl") or endswith(".tar.gz")) | split(".") | last] | unique | length')
+          track "release assets" "$tag" "$([[ "$dist_kinds" == 2 ]] && echo present || echo missing)"
+
+          pypi_state=$(probe "https://pypi.org/pypi/$package/$version/json")
+          pypi_present=$([[ "$pypi_state" == present ]] && echo true || echo false)
+          pypi=false
+          if [[ "$PYPI_ENABLED" == true ]]; then
+            track PyPI "$package==$version" "$pypi_state"
+            [[ "$pypi_state" == missing ]] && pypi=true
+          else
+            track PyPI "$package==$version" "$pypi_state; publishing disabled"
+          fi
+
+          # The registry is non-blocking for a release, so an unknown answer only warns.
+          mcp=false
+          if [[ "$MCP_ENABLED" == true ]]; then
+            server_path=$(jq -rn --arg name "$server" '$name | @uri')
+            mcp_state=$(probe "https://registry.modelcontextprotocol.io/v0.1/servers/$server_path/versions/$version")
+            if [[ "$mcp_state" == unknown* ]]; then
+              echo "::warning::MCP registry entry $server $version is $mcp_state; this run leaves it alone"
+              mcp_state="registry answer $mcp_state; not published by this run"
+            fi
+            track "MCP registry" "$server $version" "$mcp_state"
+            [[ "$mcp_state" == missing ]] && mcp=true
+          else
+            track "MCP registry" "$server $version" "publishing disabled"
+          fi
+
+          # The versioned tag of each image publish-image builds. That job pushes
+          # these refs, so the publish and this check read one list.
+          image_list=(
+            "lean ghcr.io/artexis10/exomem:$version"
+            "ml ghcr.io/artexis10/exomem:$version-ml"
+            "cuda ghcr.io/artexis10/exomem:$version-cuda"
+            "hosted ghcr.io/artexis10/exomem:$version-hosted"
+            "cloud ghcr.io/artexis10/exomem:$version-cloud"
+            "cellctl ghcr.io/artexis10/exomem-cellctl:$version"
+          )
+          manifest_types="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
+          image_state() {
+            local repository=${1%:*} reference=${1##*:} token
+            repository=${repository#ghcr.io/}
+            if ! token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" "https://ghcr.io/token?scope=repository:$repository:pull" | jq -er .token); then
+              echo "unknown (no registry token)"
+              return
+            fi
+            probe -I -H "Authorization: Bearer $token" -H "Accept: $manifest_types" "https://ghcr.io/v2/$repository/manifests/$reference"
+          }
+          images='{}'
+          for entry in "${image_list[@]}"; do
+            read -r name ref <<<"$entry"
+            build=false
+            if [[ "$GHCR_ENABLED" == true ]]; then
+              state=$(image_state "$ref")
+              # A Records rollback request signs a new hosted runtime candidate,
+              # which needs a hosted image this run builds and attests.
+              if [[ "$name" == hosted && -n "$RECORDS_TARGET" && "$state" == present ]]; then
+                state="present; rebuilt for the Records rollback request"
+                missing+=("hosted (Records rollback)")
+                build=true
+              fi
+              track "$name image" "$ref" "$state"
+              [[ "$state" == missing ]] && build=true
+            else
+              track "$name image" "$ref" "publishing disabled"
+            fi
+            [[ "$DRY_RUN" == true ]] && build=true
+            images=$(jq -c --arg name "$name" --arg ref "$ref" --argjson build "$build" \
+              '.[$name] = {ref: $ref, publish: $build}' <<<"$images")
+          done
+
+          # Only the latest release moves the floating image tags.
+          latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          latest=$([[ "$latest_tag" == "$tag" ]] && echo true || echo false)
+          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow=${workflow##*/}
+          publish=false
+          status=0
+          if (( ${#unknown[@]} )); then
+            action="stopped: cannot tell whether $(listed "${unknown[@]}") are present"
+            echo "::error::$action"
+            status=1
+          elif [[ "$DRY_RUN" == true ]]; then
+            action="dry run: build every artifact from $tag and publish nothing"
+            publish=true
+            pypi=true
+            mcp=true
+          elif (( ${#missing[@]} == 0 )); then
+            action="nothing to publish: every enabled artifact of $tag is present"
+          elif [[ "$GITHUB_REF" == "refs/tags/$tag" ]]; then
+            if [[ "$GITHUB_SHA" != "$source_commit" ]]; then
+              action="stopped: $tag now points at $source_commit, not at this run's commit $GITHUB_SHA"
+              echo "::error::$action"
+              status=1
+            else
+              action="publish here: $(listed "${missing[@]}")"
+              publish=true
+            fi
+          else
+            failed=0
+            if [[ "$EVENT" == push ]]; then
+              failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?event=workflow_dispatch&branch=$tag&status=failure&per_page=1" --jq .total_count)
+            fi
+            if (( failed >= HANDOFF_FAILURE_LIMIT )); then
+              action="held: $failed publish runs on $tag failed; fix the cause, then dispatch this workflow with tag=$tag"
+              echo "::warning::$action"
+            else
+              body=$(jq -cn --arg tag "$tag" --arg records "$RECORDS_TARGET" \
+                '{ref: $tag, inputs: {tag: $tag, dry_run: "false", records_rollback_runtime_target_json: $records}}')
+              code=$(curl -sS -o "$RUNNER_TEMP/dispatch.json" -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$api/actions/workflows/$workflow/dispatches" -d "$body") || true
+              case "$code" in
+                204)
+                  action="handed off to a run on $tag: $(listed "${missing[@]}")"
+                  ;;
+                # A tag whose workflow predates this hand-off declares no dry_run
+                # input, so GitHub refuses it rather than run that tag's old,
+                # non-idempotent publish jobs.
+                422)
+                  action="not handed off: the workflow at $tag refused it ($(jq -r '.message // empty' "$RUNNER_TEMP/dispatch.json")); publish $(listed "${missing[@]}") by hand or release a new version"
+                  echo "::warning::$action"
+                  ;;
+                *)
+                  action="stopped: the hand-off to $tag failed with HTTP ${code:-000}"
+                  echo "::error::$action"
+                  status=1
+                  ;;
+              esac
+            fi
+          fi
+
+          publish_images=$(jq -r '[.[] | .publish] | any' <<<"$images")
+          # Only a run that publishes hands the publish jobs anything to do.
+          if [[ "$publish" != true ]]; then
+            pypi=false
+            mcp=false
+            publish_images=false
+          fi
+          {
+            echo "publish=$publish"
+            echo "latest=$latest"
+            echo "pypi=$pypi"
+            echo "pypi_present=$pypi_present"
+            echo "mcp=$mcp"
+            echo "images=$images"
+            echo "publish_images=$publish_images"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release artifacts of $tag"
+            echo
+            echo "| Artifact | Reference | State |"
+            echo "| --- | --- | --- |"
+            printf '%s\n' "${rows[@]}"
+            echo
+            echo "This run: $action"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  build-artifacts:
+    needs: plan
+    if: ${{ needs.plan.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+
+      - name: Verify the checkout is the planned tag commit
+        env:
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -188,7 +465,7 @@ jobs:
 
       - name: Verify package version matches release tag
         env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           python - <<'PY'
           import os
@@ -214,6 +491,16 @@ jobs:
       - name: Build package artifacts
         run: uv build
 
+      - name: Keep the wheel and sdist for the PyPI upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Verify and stage current Cloud distribution archives
         run: |
           uv run --frozen python scripts/cloud-plugin.py check
@@ -237,37 +524,49 @@ jobs:
           print(payload["tool_count"], payload["sha256"])
           PY
 
-      - name: Upload artifacts to GitHub release
+      - name: Upload missing artifacts to the GitHub release
+        if: ${{ needs.plan.outputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG" dist/* --clobber
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # An asset the release already has stays; a rebuild never replaces it.
+          present=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          upload=()
+          for file in dist/*; do
+            if grep -qxF "${file##*/}" <<<"$present"; then
+              echo "kept ${file##*/}: the release already has it"
+            else
+              upload+=("$file")
+            fi
+          done
+          if (( ${#upload[@]} )); then
+            gh release upload "$TAG" "${upload[@]}"
+          fi
 
+  # A dry run skips this job, because entering the pypi environment records a deployment.
   publish-pypi:
-    needs: [release-please, build-artifacts]
-    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.PYPI_PUBLISH_ENABLED == 'true' }}
+    needs: [plan, build-artifacts]
+    if: ${{ needs.plan.outputs.pypi == 'true' && needs.plan.outputs.dry_run != 'true' && vars.PYPI_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch the wheel and sdist built from the tag
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Build package artifacts
-        run: uv build
+          name: python-distributions
+          path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # A file PyPI already has stays, so a repeat publish uploads only what is missing.
+          skip-existing: true
 
   # Lists the server in the official MCP Registry, which is where MCP-aware
   # clients and directories discover servers. Runs after PyPI because the
@@ -281,8 +580,8 @@ jobs:
   # Gated on a repo variable and deliberately non-blocking: a registry outage or
   # a CLI change must not fail a release that already shipped to PyPI.
   publish-mcp-registry:
-    needs: [release-please, publish-pypi]
-    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
+    needs: [plan, publish-pypi]
+    if: ${{ !cancelled() && needs.plan.outputs.mcp == 'true' && vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' && (needs.publish-pypi.result == 'success' || needs.plan.outputs.pypi_present == 'true' || needs.plan.outputs.dry_run == 'true') }}
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
@@ -291,7 +590,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+
+      - name: Verify the checkout is the planned tag commit
+        env:
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
       - name: Install mcp-publisher
         run: |
@@ -300,24 +604,32 @@ jobs:
           chmod +x mcp-publisher
 
       - name: Authenticate via GitHub OIDC
+        if: ${{ needs.plan.outputs.dry_run != 'true' }}
         run: ./mcp-publisher login github-oidc
 
       - name: Publish server.json
+        if: ${{ needs.plan.outputs.dry_run != 'true' }}
         run: ./mcp-publisher publish
 
+  # Builds only the images the plan found missing. A dry run builds all six and
+  # pushes, attests and records nothing.
   publish-image:
-    needs: [release-please, build-artifacts]
-    if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_created == 'true' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
+    needs: [plan, build-artifacts]
+    if: ${{ needs.plan.outputs.publish_images == 'true' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+    env:
+      IMAGES: ${{ needs.plan.outputs.images }}
+      DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      LATEST: ${{ needs.plan.outputs.latest }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -330,60 +642,67 @@ jobs:
       - name: Resolve image version from the release tag
         id: meta
         env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          test "$GITHUB_REF" = "refs/heads/main"
-          source_commit=$(git rev-parse "$TAG^{commit}")
-          test "$(git rev-parse HEAD)" = "$source_commit"
-          test "$GITHUB_SHA" = "$source_commit"
-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          # Each attestation names this run's ref and commit, so only a run on
+          # the tag itself may publish.
+          if [[ "$DRY_RUN" != true ]]; then
+            test "$GITHUB_REF" = "refs/tags/$TAG"
+            test "$GITHUB_SHA" = "$SOURCE_COMMIT"
+          fi
+          echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
           echo "source_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
-          build_time=$(git show -s --format=%cI "$TAG")
+          build_time=$(git show -s --format=%cI HEAD)
           echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push lean image (multi-arch)
+        if: ${{ fromJSON(env.IMAGES).lean.publish }}
         uses: docker/build-push-action@v6
         with:
           context: .
           target: lean
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ env.DRY_RUN != 'true' }}
           tags: |
-            ghcr.io/artexis10/exomem:latest
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}
+            ${{ env.LATEST == 'true' && 'ghcr.io/artexis10/exomem:latest' || '' }}
+            ${{ fromJSON(env.IMAGES).lean.ref }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_LEAN }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_LEAN) || '' }}
 
       - name: Build and push ml image (multi-arch)
+        if: ${{ fromJSON(env.IMAGES).ml.publish }}
         uses: docker/build-push-action@v6
         with:
           context: .
           target: ml
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ env.DRY_RUN != 'true' }}
           tags: |
-            ghcr.io/artexis10/exomem:ml
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-ml
+            ${{ env.LATEST == 'true' && 'ghcr.io/artexis10/exomem:ml' || '' }}
+            ${{ fromJSON(env.IMAGES).ml.ref }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_ML }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_ML) || '' }}
 
       - name: Build and push cuda image (linux/amd64)
+        if: ${{ fromJSON(env.IMAGES).cuda.publish }}
         uses: docker/build-push-action@v6
         with:
           context: .
           target: cuda
           platforms: linux/amd64
-          push: true
+          push: ${{ env.DRY_RUN != 'true' }}
           tags: |
-            ghcr.io/artexis10/exomem:cuda
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
+            ${{ env.LATEST == 'true' && 'ghcr.io/artexis10/exomem:cuda' || '' }}
+            ${{ fromJSON(env.IMAGES).cuda.ref }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CUDA }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_CUDA) || '' }}
 
       - name: Build and push hosted image (linux/amd64)
         id: hosted-build
+        if: ${{ fromJSON(env.IMAGES).hosted.publish }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -391,19 +710,20 @@ jobs:
           platforms: linux/amd64
           build-args: |
             EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
-          push: true
+          push: ${{ env.DRY_RUN != 'true' }}
           tags: |
-            ghcr.io/artexis10/exomem:hosted
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
+            ${{ env.LATEST == 'true' && 'ghcr.io/artexis10/exomem:hosted' || '' }}
+            ${{ fromJSON(env.IMAGES).hosted.ref }}
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_HOSTED }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_HOSTED }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_HOSTED) || '' }}
 
       - name: Attest the exact hosted runtime image
         id: hosted-attestation
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-name: ghcr.io/artexis10/exomem
@@ -413,324 +733,9 @@ jobs:
 
       - name: Record the hosted runtime candidate
         id: runtime-candidate
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
-          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
-          HOSTED_DIGEST: ${{ steps.hosted-build.outputs.digest }}
-          ATTESTATION_BUNDLE: ${{ steps.hosted-attestation.outputs.bundle-path }}
-        run: |
-          set -euo pipefail
-          digest_hex=${HOSTED_DIGEST#sha256:}
-          evidence_stem="exomem-hosted-runtime-${SOURCE_COMMIT}-${digest_hex}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          candidate="${evidence_stem}.candidate-v1.json"
-          bundle="${evidence_stem}.sigstore.json"
-          cp "$ATTESTATION_BUNDLE" "$bundle"
-          immutable_image="ghcr.io/artexis10/exomem@${HOSTED_DIGEST}"
-          discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"
-          storage_uri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}"
-          python3 infra/scripts/hosted_image_candidate.py record \
-            --component runtime \
-            --source-repository "$GITHUB_REPOSITORY" \
-            --source-ref "$SOURCE_REF" \
-            --source-commit "$SOURCE_COMMIT" \
-            --release "$VERSION" \
-            --image "$immutable_image" \
-            --discovery-tag "$discovery_tag" \
-            --producer-repository "$GITHUB_REPOSITORY" \
-            --producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml" \
-            --producer-workflow-commit "$GITHUB_WORKFLOW_SHA" \
-            --producer-oidc-source-ref "$GITHUB_REF" \
-            --producer-oidc-source-commit "$GITHUB_SHA" \
-            --producer-event "$GITHUB_EVENT_NAME" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --bundle "$bundle" \
-            --storage-kind github-release \
-            --storage-uri "$storage_uri" \
-            --output "$candidate"
-          {
-            echo "candidate=$candidate"
-            echo "bundle=$bundle"
-            echo "immutable_image=$immutable_image"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Attest the exact hosted runtime candidate
-        id: runtime-candidate-attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-path: ${{ steps.runtime-candidate.outputs.candidate }}
-          create-storage-record: false
-
-      - name: Verify the hosted runtime image and signed candidate
-        id: runtime-candidate-proof
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          IMAGE_BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.runtime-candidate-attestation.outputs.bundle-path }}
-          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
-        run: |
-          set -euo pipefail
-          candidate_bundle="${CANDIDATE%.candidate-v1.json}.candidate.sigstore.json"
-          cp "$CANDIDATE_ATTESTATION_BUNDLE" "$candidate_bundle"
-          python3 infra/scripts/hosted_image_candidate.py verify \
-            --candidate "$CANDIDATE" \
-            --bundle "$IMAGE_BUNDLE" \
-            --candidate-bundle "$candidate_bundle"
-          docker pull "$IMMUTABLE_IMAGE"
-          observed_version=$(docker run --rm --network=none "$IMMUTABLE_IMAGE" --version)
-          test "$observed_version" = "exomem ${VERSION}"
-          observed_revision=$(docker image inspect \
-            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-            "$IMMUTABLE_IMAGE")
-          test "$observed_revision" = "$SOURCE_COMMIT"
-          echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
-
-      - name: Upload bounded runtime candidate workflow evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: hosted-runtime-candidate-${{ steps.meta.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ steps.runtime-candidate.outputs.candidate }}
-            ${{ steps.runtime-candidate.outputs.bundle }}
-            ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Retain the runtime candidate with the matching release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-        run: gh release upload "$TAG" "$CANDIDATE" "$BUNDLE" "$CANDIDATE_BUNDLE"
-
-      - name: Record the runtime candidate inputs
-        env:
-          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-        run: |
-          {
-            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
-            echo "Candidate asset: ${CANDIDATE}"
-            echo "Image attestation bundle asset: ${BUNDLE}"
-            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Build and push Exomem Cloud cell image (linux/amd64)
-        id: cloud-build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: cloud
-          platforms: linux/amd64
-          build-args: |
-            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem:cloud
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CLOUD }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CLOUD }}
-
-      - name: Attest the exact Exomem Cloud cell image
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-name: ghcr.io/artexis10/exomem
-          subject-digest: ${{ steps.cloud-build.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Record the cloud image tag and digest in the release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          CLOUD_DIGEST: ${{ steps.cloud-build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"
-          cloud_tag="ghcr.io/artexis10/exomem:${VERSION}-cloud"
-          existing_body=$(gh release view "$TAG" --json body -q .body)
-          {
-            printf '%s\n\n' "$existing_body"
-            echo "## Exomem Cloud cell image"
-            echo "- Tag: \`${cloud_tag}\`"
-            echo "- Digest: \`${cloud_image}\`"
-          } | gh release edit "$TAG" --notes-file -
-          {
-            echo "Cloud cell image tag: ${cloud_tag}"
-            echo "Cloud cell image digest: ${cloud_image}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # The platform chart consumes cellctl by digest (cellctl.image), so it
-      # ships on the same release trigger as the cell image it rolls out.
-      - name: Build and push Exomem Cloud cellctl image (linux/amd64)
-        id: cellctl-build
-        uses: docker/build-push-action@v6
-        with:
-          context: infra/cellctl
-          file: infra/cellctl/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}
-            ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=cellctl
-          cache-to: type=gha,mode=max,scope=cellctl
-
-      - name: Attest the exact Exomem Cloud cellctl image
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-name: ghcr.io/artexis10/exomem-cellctl
-          subject-digest: ${{ steps.cellctl-build.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Record the cellctl image tag and digest in the release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          CELLCTL_DIGEST: ${{ steps.cellctl-build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"
-          cellctl_tag="ghcr.io/artexis10/exomem-cellctl:${VERSION}"
-          existing_body=$(gh release view "$TAG" --json body -q .body)
-          {
-            printf '%s\n\n' "$existing_body"
-            echo "## Exomem Cloud cellctl image"
-            echo "- Tag: \`${cellctl_tag}\`"
-            echo "- Digest: \`${cellctl_image}\`"
-          } | gh release edit "$TAG" --notes-file -
-          {
-            echo "cellctl image tag: ${cellctl_tag}"
-            echo "cellctl image digest: ${cellctl_image}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  publish-existing-image:
-    if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve image version from the input tag
-        id: meta
-        env:
-          TAG: ${{ inputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          expected_ref="refs/tags/$TAG"
-          test "$GITHUB_REF" = "$expected_ref"
-          source_commit=$(git rev-parse "$TAG^{commit}")
-          test "$(git rev-parse HEAD)" = "$source_commit"
-          test "$GITHUB_SHA" = "$source_commit"
-          test "$(gh release view "$TAG" --json tagName --jq .tagName)" = "$TAG"
-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
-          echo "source_ref=$expected_ref" >> "$GITHUB_OUTPUT"
-          build_time=$(git show -s --format=%cI "$TAG")
-          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push lean image (multi-arch)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: lean
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_LEAN }}
-
-      - name: Build and push ml image (multi-arch)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: ml
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-ml
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_ML }}
-
-      - name: Build and push cuda image (linux/amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: cuda
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_CUDA }}
-
-      - name: Build and push hosted image (linux/amd64)
-        id: hosted-build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: hosted
-          platforms: linux/amd64
-          build-args: |
-            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
-          push: true
-          tags: |
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
-            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_HOSTED }}
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_CACHE_HOSTED }}
-
-      - name: Attest the exact hosted runtime image
-        id: hosted-attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-name: ghcr.io/artexis10/exomem
-          subject-digest: ${{ steps.hosted-build.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Record the hosted runtime candidate
-        id: runtime-candidate
-        env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
           SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
           SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
@@ -789,6 +794,7 @@ jobs:
 
       - name: Attest the exact hosted runtime candidate
         id: runtime-candidate-attestation
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-path: ${{ steps.runtime-candidate.outputs.candidate }}
@@ -796,6 +802,7 @@ jobs:
 
       - name: Verify the hosted runtime image and signed candidate
         id: runtime-candidate-proof
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -822,6 +829,7 @@ jobs:
           echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
 
       - name: Upload bounded runtime candidate workflow evidence
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hosted-runtime-candidate-${{ steps.meta.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -833,15 +841,17 @@ jobs:
           retention-days: 30
 
       - name: Retain the runtime candidate with the matching release
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
           CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
           BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
           CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
         run: gh release upload "$TAG" "$CANDIDATE" "$BUNDLE" "$CANDIDATE_BUNDLE"
 
       - name: Record the runtime candidate inputs
+        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
         env:
           IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
           CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
@@ -855,42 +865,105 @@ jobs:
             echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  publish-existing-pypi:
-    if: ${{ github.event_name == 'workflow_dispatch' && vars.PYPI_PUBLISH_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
+      - name: Build and push Exomem Cloud cell image (linux/amd64)
+        id: cloud-build
+        if: ${{ fromJSON(env.IMAGES).cloud.publish }}
+        uses: docker/build-push-action@v6
         with:
-          ref: ${{ inputs.tag }}
+          context: .
+          target: cloud
+          platforms: linux/amd64
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          push: ${{ env.DRY_RUN != 'true' }}
+          tags: |
+            ${{ env.LATEST == 'true' && 'ghcr.io/artexis10/exomem:cloud' || '' }}
+            ${{ fromJSON(env.IMAGES).cloud.ref }}
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CLOUD }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_CLOUD) || '' }}
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Attest the exact Exomem Cloud cell image
+        if: ${{ fromJSON(env.IMAGES).cloud.publish && env.DRY_RUN != 'true' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          enable-cache: true
+          subject-name: ghcr.io/artexis10/exomem
+          subject-digest: ${{ steps.cloud-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
-      - name: Verify package version matches release tag
+      - name: Record the cloud image tag and digest in the release notes
+        if: ${{ fromJSON(env.IMAGES).cloud.publish && env.DRY_RUN != 'true' }}
         env:
-          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          CLOUD_TAG: ${{ fromJSON(env.IMAGES).cloud.ref }}
+          CLOUD_DIGEST: ${{ steps.cloud-build.outputs.digest }}
         run: |
-          python - <<'PY'
-          import os
-          import tomllib
+          set -euo pipefail
+          cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"
+          existing_body=$(gh release view "$TAG" --json body -q .body)
+          {
+            printf '%s\n\n' "$existing_body"
+            echo "## Exomem Cloud cell image"
+            echo "- Tag: \`${CLOUD_TAG}\`"
+            echo "- Digest: \`${cloud_image}\`"
+          } | gh release edit "$TAG" --notes-file -
+          {
+            echo "Cloud cell image tag: ${CLOUD_TAG}"
+            echo "Cloud cell image digest: ${cloud_image}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          expected = os.environ["TAG"].removeprefix("v")
-          with open("pyproject.toml", "rb") as fh:
-              actual = tomllib.load(fh)["project"]["version"]
-          if actual != expected:
-              raise SystemExit(f"pyproject version {actual} does not match release tag {expected}")
-          PY
-
-      - name: Build package artifacts
-        run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      # The platform chart consumes cellctl by digest (cellctl.image), so it
+      # ships on the same release trigger as the cell image it rolls out.
+      - name: Build and push Exomem Cloud cellctl image (linux/amd64)
+        id: cellctl-build
+        if: ${{ fromJSON(env.IMAGES).cellctl.publish }}
+        uses: docker/build-push-action@v6
         with:
-          packages-dir: dist
+          context: infra/cellctl
+          file: infra/cellctl/Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.DRY_RUN != 'true' }}
+          tags: |
+            ${{ fromJSON(env.IMAGES).cellctl.ref }}
+            ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CELLCTL }}
+          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_CELLCTL) || '' }}
+
+      - name: Attest the exact Exomem Cloud cellctl image
+        if: ${{ fromJSON(env.IMAGES).cellctl.publish && env.DRY_RUN != 'true' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-name: ghcr.io/artexis10/exomem-cellctl
+          subject-digest: ${{ steps.cellctl-build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Record the cellctl image tag and digest in the release notes
+        if: ${{ fromJSON(env.IMAGES).cellctl.publish && env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          CELLCTL_TAG: ${{ fromJSON(env.IMAGES).cellctl.ref }}
+          CELLCTL_DIGEST: ${{ steps.cellctl-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"
+          existing_body=$(gh release view "$TAG" --json body -q .body)
+          {
+            printf '%s\n\n' "$existing_body"
+            echo "## Exomem Cloud cellctl image"
+            echo "- Tag: \`${CELLCTL_TAG}\`"
+            echo "- Digest: \`${cellctl_image}\`"
+          } | gh release edit "$TAG" --notes-file -
+          {
+            echo "cellctl image tag: ${CELLCTL_TAG}"
+            echo "cellctl image digest: ${cellctl_image}"
+          } >> "$GITHUB_STEP_SUMMARY"
