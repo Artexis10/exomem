@@ -14,7 +14,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from botocore.exceptions import ClientError
 
@@ -302,7 +302,3 @@ class ExportStorage:
 
     def remove(self, item: ExportRow) -> None:
         remove_object(self.client, self.bucket, item.key)
-
-
-def link_seconds(config: ReconcileConfig) -> int:
-    return int(config.export_link_ttl / timedelta(seconds=1))
