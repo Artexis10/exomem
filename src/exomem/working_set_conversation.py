@@ -29,6 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from . import lifecycle_statuses
@@ -109,6 +110,25 @@ class _WitnessBasis:
     parent_source_hash: str
     parser_version: int
     definitions: PageDefinitions
+    served_unit: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        # Selected served units have scalar fields and flat provenance scalars/string lists.
+        unit = dict(self.served_unit)
+        unit["provenance"] = MappingProxyType({
+            key: tuple(value) if isinstance(value, list) else value
+            for key, value in unit["provenance"].items()
+        })
+        object.__setattr__(self, "served_unit", MappingProxyType(unit))
+
+    def packet_unit(self) -> dict[str, Any]:
+        """Restore lists for the packet classifier's reference walk."""
+        unit = dict(self.served_unit)
+        unit["provenance"] = {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in unit["provenance"].items()
+        }
+        return unit
 
     def current(self, root: Path) -> bool:
         from . import semantic_index
@@ -121,7 +141,7 @@ class _WitnessBasis:
         ).current and self.definitions.current(root)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> _WitnessBasis:
-        # Immutable evidence contains registry mapping proxies; only packet payloads copy.
+        # Immutable source and served-unit evidence contains mapping proxies; only packet payloads copy.
         return self
 
 

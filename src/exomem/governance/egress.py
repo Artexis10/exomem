@@ -3656,6 +3656,15 @@ def _finalize_working_set(
             )) or not basis.current(vault_root)
             for basis in guarded.witness_bases
         )
+        units = [
+            basis.packet_unit() for basis in guarded.witness_bases
+            if isinstance(basis, working_set_conversation._WitnessBasis)
+        ]
+        if units:
+            rejected = any(verdict != UNIT_KEPT for verdict in classify_units(
+                vault_root, units, principal=principal, purpose=purpose,
+            ))
+            stale = stale or rejected
         # Expired support costs this optional carry, including an already-abstained ambiguity.
         if stale or witness_removed:
             guarded.get("generation", {}).pop("carried_by", None)
@@ -7019,17 +7028,18 @@ class ReaderView:
         new = list(dict.fromkeys(key for key in keys if key not in self._verdicts))
         if new:
             first = {key: unit for key, unit in zip(keys, units, strict=True)}
-            try:
-                found = classify_units(
-                    self._root,
-                    [first[key] for key in new],
-                    principal=self._principal,
-                    purpose=self._purpose,
-                )
-            except Exception as error:  # noqa: BLE001 - the compiler abstains on it
-                raise ReaderViewUnavailable("the release plane could not decide a unit") from error
+            found = self.current_verdicts([first[key] for key in new])
             self._verdicts.update(zip(new, found, strict=True))
         return [self._verdicts[key] for key in keys]
+
+    def current_verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Reclassify selected support under this view's current authority, without retained verdicts."""
+        try:
+            return classify_units(
+                self._root, units, principal=self._principal, purpose=self._purpose,
+            )
+        except Exception as error:  # noqa: BLE001 - the compiler abstains on it
+            raise ReaderViewUnavailable("the release plane could not decide a unit") from error
 
 
 def in_reader_view(

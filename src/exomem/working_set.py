@@ -3403,18 +3403,20 @@ def _conversation_support(
         if role is None and not owners:
             role = next((role for role in selected if role.lane == "material"), None)
         if role is not None:
+            licensed_item = replace(item, role=role.id, why=role.description or f"{role.id} lane")
             basis = working_set_conversation._WitnessBasis(
                 unit_ref=item.ref, parent_path=state.path,
                 parent_generation=state.parent_generation,
                 parent_source_hash=state.parent_source_hash,
                 parser_version=state.parser_version, definitions=state.definitions,
+                served_unit=_served_unit(licensed_item),
             )
             bases = (*title_bases, basis)
             if title_bases and visible is not None and not visible(subject.path):
                 return False, None, ()
             if not all(chosen.current(vault_root) for chosen in bases):
                 return False, None, ()
-            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane"), bases
+            return True, licensed_item, bases
     return False, None, ()
 
 
@@ -4218,11 +4220,23 @@ def _compile_packet(
             bases = tuple(basis for allowed, _witness, chosen in support if allowed for basis in chosen)
 
         def support_current() -> bool:
-            return all(
+            from .governance import egress
+
+            if not all(
                 (not isinstance(basis, working_set_conversation._TitleBasis)
                  or visible is None or visible(basis.path)) and basis.current(root)
                 for basis in bases
-            )
+            ):
+                return False
+            units = [
+                basis.packet_unit() for basis in bases
+                if isinstance(basis, working_set_conversation._WitnessBasis)
+            ]
+            if not units:
+                return True
+            verdicts = (visible.current_verdicts(units) if isinstance(visible, egress.ReaderView)
+                        else egress.classify_units(root, units, purpose=purpose))
+            return all(verdict == egress.UNIT_KEPT for verdict in verdicts)
 
         if verdict.status == "one" and licensed:
             (found,) = verdict.anchors

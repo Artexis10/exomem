@@ -646,3 +646,109 @@ def test_terminal_projection_revokes_a_title_only_ambiguity(vault, monkeypatch):
     assert packet["ambiguity"] == []
     assert packet["anchors"] == []
     assert packet["units"] == []
+
+
+@pytest.mark.parametrize("phase", ["after_support", "before_guard", "after_projection"])
+def test_revoked_unit_admission_removes_an_ambiguity_with_current_sources(vault, monkeypatch, phase):
+    _write(vault, SECRET, "Initially public.", "Restricted dependency")
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} See [[Restricted dependency]]. ^support")
+    _write(vault, OTHER, f"- [fact] {SUPPORT} See [[Restricted dependency]]. ^support", "Prism routing")
+    write_scope(vault, paths="Notes/Restricted/**")
+    write_rule(vault, ceiling=6)
+    _ready(vault, monkeypatch)
+    conversation = {"recent": [{"role": "user", "text": "Lattice transport and Prism routing"}]}
+    unchanged = _activate(vault, conversation=conversation)
+    assert unchanged["abstention"]["reason"] == "ambiguous"
+    assert {entry["title"] for entry in unchanged["ambiguity"]} == {"Lattice transport", "Prism routing"}
+    authored = {path: (vault / path).read_bytes() for path in (SUBJECT, OTHER)}
+    support = working_set._conversation_support
+    guard = egress.guard_working_set
+    release = egress._packet_release
+    selected = 0
+    changed = False
+    check_compiler_emission = True
+
+    def revoke(root):
+        nonlocal changed
+        write_rule(root, ceiling=0)
+        _reset_caches()
+        changed = True
+
+    def revoke_after_support(*args, **kwargs):
+        nonlocal selected
+        result = support(*args, **kwargs)
+        if phase == "after_support" and result[0]:
+            selected += 1
+            if selected == 2:
+                revoke(vault)
+        return result
+
+    def revoke_before_guard(root, packet, *args, **kwargs):
+        if phase == "after_support" and changed and check_compiler_emission:
+            assert packet.get("abstention", {}).get("reason") != "ambiguous"
+        if phase == "before_guard" and not changed and packet.get("abstention", {}).get("reason") == "ambiguous":
+            revoke(root)
+        return guard(root, packet, *args, **kwargs)
+
+    def revoke_after_projection(root, packet, *args, **kwargs):
+        ctx = release(root, packet, *args, **kwargs)
+        if phase == "after_projection" and not changed and packet.get("abstention", {}).get("reason") == "ambiguous":
+            revoke(root)
+        return ctx
+
+    monkeypatch.setattr(working_set, "_conversation_support", revoke_after_support)
+    monkeypatch.setattr(egress, "guard_working_set", revoke_before_guard)
+    monkeypatch.setattr(egress, "_packet_release", revoke_after_projection)
+    packet = _activate(vault, conversation=conversation)
+    fresh = _activate(vault, conversation=conversation)
+    assert changed and {path: (vault / path).read_bytes() for path in authored} == authored
+    for result in (packet, fresh):
+        assert result["abstention"]["reason"] == "unresolved"
+        assert result["ambiguity"] == []
+        assert result["anchors"] == []
+        assert result["units"] == []
+        assert result["generation"].get("carried_by") != "conversation"
+    assert packet["recent_context"] == unchanged["recent_context"]
+    assert packet["budget"]["used_chars"] == sum(
+        len(entry.get("title", "")) + len(entry.get("statement", ""))
+        for entry in packet["recent_context"]
+    )
+    check_compiler_emission = False
+    with request_scope(owner_principal(surface="library")):
+        owner = commands.op_activate_context(vault, turn="What does it cost?", conversation=conversation)
+    assert owner["abstention"]["reason"] == "ambiguous"
+    assert {entry["title"] for entry in owner["ambiguity"]} == {"Lattice transport", "Prism routing"}
+
+
+def test_private_witness_successor_lists_reach_current_disclosure_decisions(vault, monkeypatch):
+    _write(vault, SECRET, "Initially public.", "Restricted dependency")
+    for path, title in ((SUBJECT, "Lattice transport"), (OTHER, "Prism routing")):
+        _write(vault, path, f"- [fact] {SUPPORT} ^support", title)
+        target = vault / path
+        target.write_text(target.read_text().replace(
+            "status: active\n", f'status: active\nsuperseded_by: ["{SECRET}"]\n', 1,
+        ))
+    write_scope(vault, paths="Notes/Restricted/**")
+    write_rule(vault, ceiling=6)
+    _ready(vault, monkeypatch)
+    conversation = {"recent": [{"role": "user", "text": "Lattice transport and Prism routing"}]}
+    assert _activate(vault, conversation=conversation)["abstention"]["reason"] == "ambiguous"
+    release = egress._packet_release
+    changed = False
+
+    def revoke_after_projection(root, packet, *args, **kwargs):
+        nonlocal changed
+        ctx = release(root, packet, *args, **kwargs)
+        if not changed and packet.get("abstention", {}).get("reason") == "ambiguous":
+            write_rule(root, ceiling=0)
+            _reset_caches()
+            changed = True
+        return ctx
+
+    monkeypatch.setattr(egress, "_packet_release", revoke_after_projection)
+    with egress.disclosure_boundary(vault, "activate_context") as collector:
+        packet = _activate(vault, conversation=conversation)
+    assert changed
+    assert packet["abstention"]["reason"] == "ambiguous"
+    assert {entry["title"] for entry in packet["ambiguity"]} == {"Lattice transport", "Prism routing"}
+    assert (SECRET, "withheld", 0) in collector.path_outcomes
