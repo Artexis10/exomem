@@ -163,8 +163,17 @@ def _recent_only(ref: str, path: str) -> list:
 
 
 def _recency_carried(ref: str, path: str) -> list:
+    """A packet the edit-time prior carried: an anchor, a served unit and a pointer, all of the entity."""
+
     anchor = {"ref": ref, "path": path, "status": "resolved", "evidence": ["recency"], "origin": "turn"}
-    packet = {"anchors": [anchor], "units": [], "pointers": [], "generation": {"carried_by": "recency"}}
+    unit = {"ref": ref, "provenance": {"path": path, "anchor": ref}}
+    (pointer,) = _unit_pointer(ref, path)[0][0]["pointers"]
+    packet = {
+        "anchors": [anchor],
+        "units": [unit],
+        "pointers": [pointer],
+        "generation": {"carried_by": "recency"},
+    }
     return [(packet, None)]
 
 
@@ -284,7 +293,7 @@ def test_the_fresh_session_packet_is_recorded_and_its_refs_map_to_snapshot_ids(t
 
 @pytest.mark.parametrize("results", [_recent_only, _recency_carried], ids=["recent_context", "recency_carry"])
 def test_a_ref_the_question_did_not_choose_is_not_served(tmp_path, results) -> None:
-    """Fails when recent work or a recency-carried anchor counts as serving (rulings 1 and 1b).
+    """Fails when recent work, or anything in a recency-carried packet, serves (rulings 1 and 1b).
 
     A capture session edits the referent's page, so edit time names it whatever the
     question was; the answer here states the key value, and "uses" must still fail.
@@ -294,8 +303,10 @@ def test_a_ref_the_question_did_not_choose_is_not_served(tmp_path, results) -> N
     result = _run(tmp_path, agent, case_ids=[PET], repeats=1)
 
     rule = result["manifest"]["uses_rule"]
-    assert rule["fixed_before_any_baseline"] is True and "recency_anchors" in rule
+    assert rule["fixed_before_any_baseline"] is True and "recency_carry" in rule
     run = _run_file(tmp_path, PET)
+    if results is _recency_carried:
+        assert {ref["section"] for ref in run["packet"]["refs"]} >= {"anchors", "units", "pointers"}
     assert {(ref["item_id"], ref["serves"]) for ref in run["packet"]["refs"]} == {(_entity_id(), False)}
     uses = run["assertions"]["referent_used_in_fresh_session"]
     assert (uses["outcome"], "does not serve" in uses["evidence"]) == ("fail", True)

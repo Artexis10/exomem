@@ -87,9 +87,9 @@ SERVING_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         "pointers": frozenset({"ref"}),
     }
 )
-#: Ruling 1b of 2026-10-11: the anchors of a packet that the edit-time prior
-#: carried do not serve, for the same reason. The product marks that packet with
-#: this `generation.carried_by` value (`exomem.working_set`, the recency carry).
+#: Ruling 1b of 2026-10-11: nothing in a packet that the edit-time prior carried
+#: serves (anchors, units or pointers), for the same reason. The product marks
+#: that packet with this `generation.carried_by` value (`exomem.working_set`).
 RECENCY_CARRY = "recency"
 USES_RULE = {
     "fixed_on": "2026-10-11",
@@ -100,9 +100,10 @@ USES_RULE = {
         "served unit, or a pointer, resolved by its part before '#'. recent_context never "
         "serves: edit time, not the question, chooses it."
     ),
-    "recency_anchors": (
-        "The anchors of a packet whose generation.carried_by is 'recency' do not serve, for "
-        "the same reason. Anchors from the turn, focus, conversation or continuity serve."
+    "recency_carry": (
+        "Nothing in a packet whose generation.carried_by is 'recency' serves: not its "
+        "anchors, units or pointers. Edit time chose the whole packet. Packets that the "
+        "turn, focus, conversation or continuity reached serve under the rule above."
     ),
     "no_activation": (
         "A complete fresh stream with no activate_context call received an empty packet, so "
@@ -452,9 +453,7 @@ def served_refs(
         recency = (packet.get("generation") or {}).get("carried_by") == RECENCY_CARRY
         for section, value in packet.items():
             for field, ref in _packet_refs(value):
-                serves = field in SERVING_FIELDS.get(section, ()) and not (
-                    recency and section == "anchors"
-                )
+                serves = not recency and field in SERVING_FIELDS.get(section, ())
                 out.append(
                     {"section": section, "field": field, "ref": ref, "item_id": item_for(ref),
                      "serves": serves}
