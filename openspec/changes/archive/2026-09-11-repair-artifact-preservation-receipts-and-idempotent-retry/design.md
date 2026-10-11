@@ -5,7 +5,7 @@ The serving host's call ledger (`~/.local/share/exomem/service/logs/ledger.jsonl
 - Six `preserve_artifacts` calls ended `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` (12 to 39 s each). Every one carries post-commit spans `index.upsert_after_write` (1 to 15 s) and, from 2026-09-09, `graph.refresh_paths` and `derived.canonical_commit`. The canonical bytes committed; the derived acknowledgement did not.
 - Two `MUTATION_OUTCOME_UNKNOWN` rows follow an acknowledgement-uncertain row by about ten seconds with identical `request_bytes`: the client retried the same identity and got the fail-closed terminal.
 - `preserve_artifacts` durations run 14 to 95 s all week; two 2026-09-08 calls the conversation reported as failed logged `ok` after 30.4 s and 21.9 s.
-- The 2026-09-09 19:22Z and 21:45Z rows have argument shapes `scope` 36 bytes and `category` 35 bytes, which equal `canonical_json({"v": "food/caviarhouse-group-order"})` and `canonical_json({"v": "roe-tasting-and-butter-mayo"})`; the server wrote `Evidence/foodcaviarhouse-group-order/...`.
+- The 2026-09-09 19:22Z and 21:45Z rows have argument shapes `scope` 36 bytes and `category` 35 bytes, which equal `canonical_json({"v": "work/studio-equipment-orders"})` and `canonical_json({"v": "lens-and-tripod-quotes-2026"})`; the server wrote `Evidence/workstudio-equipment-orders/...`.
 - Every `preserve_artifacts` row has `target_paths: []`, because the ledger derives targets from path-shaped arguments only.
 
 Code facts behind them (tree at origin/main 86054c0a):
@@ -75,7 +75,7 @@ Control accounting: prevents silent path forks; a wrong refusal costs the caller
 
 ## Migration
 
-No data migration. Canonical rows persisted before this change keep their behaviour; new commits carry retained terminals. The split `foodcaviarhouse-group-order` Evidence tree is operator repair after deploy, through governed tooling, recorded for closure only.
+No data migration. Canonical rows persisted before this change keep their behaviour; new commits carry retained terminals. The split `workstudio-equipment-orders` Evidence tree is operator repair after deploy, through governed tooling, recorded for closure only.
 
 ## Open Questions
 

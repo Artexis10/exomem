@@ -1019,8 +1019,8 @@ def destination_segment_refusal(value: object, *, field: str) -> str | None:
 
     Validation, never normalisation. `_sanitize_segment` deletes the offending
     character and writes somewhere else: the live vault holds one logical case
-    split across `Evidence/food/caviarhouse-group-order/` and
-    `Evidence/foodcaviarhouse-group-order/` because a separator was silently
+    split across `Evidence/work/studio-equipment-orders/` and
+    `Evidence/workstudio-equipment-orders/` because a separator was silently
     removed. A refusal costs the caller one corrected call and names the field;
     a silent fork costs a reader the case.
     """

@@ -4,7 +4,7 @@
 The preservation commands SHALL treat `scope` and `category` as single path segments. A value containing a path separator, a reserved filesystem character, a control character, leading or trailing whitespace, or that differs from its sanitised form SHALL be refused with `INVALID_PRESERVE` whose `details` name the offending field, the reason, and the accepted form, before any file handle is fetched or staged. The commands SHALL NOT silently normalise a destination segment.
 
 #### Scenario: Scope carries a path separator
-- **WHEN** `preserve_artifacts` is called with `scope="food/caviarhouse-group-order"` and a valid category
+- **WHEN** `preserve_artifacts` is called with `scope="work/studio-equipment-orders"` and a valid category
 - **THEN** the call refuses with `INVALID_PRESERVE`, `details.field="scope"`, and a reason that says a segment cannot contain `/`
 - **AND** no handle is fetched, no byte is staged, and no Evidence path is created
 
