@@ -50,8 +50,10 @@ personal server migrating from another model keeps reading the old, complete
 sidecar with that model's encoder.
 
 Before the job first plans, a vault with no active pointer has nothing that
-says its serving sidecar covers it (`coverage_unchecked`): recall is marked
-warming then too, so a fresh vault's empty sidecar never answers as complete.
+says its serving sidecar covers it (`coverage_unchecked`). A server records
+the job as starting when it commits to its workers (`will_start`), before it
+admits a request, so until the plan its recall is marked warming and a fresh
+vault's empty sidecar does not answer as complete.
 """
 
 from __future__ import annotations
@@ -696,14 +698,28 @@ def _run_logged(vault_root: Path, stop: threading.Event) -> None:
         _update(vault_root, state="failed", error=type(error).__name__)
 
 
+def will_start(vault_root: Path) -> None:
+    """Record that this process will run the job for `vault_root`.
+
+    A server calls it when it commits to its workers, before it admits a
+    request: the job starts last of them, and `coverage_unchecked` holds from
+    here until the job plans.
+    """
+    _update(vault_root, state="starting")
+
+
 def start(vault_root: Path, stop: threading.Event) -> threading.Thread:
     """Run the job on a daemon thread of its own; `stop` ends it between batches."""
-    # Before the thread runs, so no query finds the job without a state.
-    _update(vault_root, state="starting")
+    will_start(vault_root)
     thread = threading.Thread(
         target=_run_logged, args=(vault_root, stop), name=THREAD_NAME, daemon=True
     )
-    thread.start()
+    try:
+        thread.start()
+    except Exception as error:
+        # No job will plan, so "starting" must not mark recall for the process's life.
+        _update(vault_root, state="failed", error=type(error).__name__)
+        raise
     return thread
 
 
@@ -757,10 +773,10 @@ def status(vault_root: Path) -> dict[str, Any]:
     """
     with _LOCK:
         current = dict(_STATUS.get(_key(vault_root), {}))
-    if not current:
+    if "serving" not in current:  # no job has run, or it has not planned yet
         from . import embeddings
 
         active = embeddings.get_embedding_index(vault_root)
-        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None}
+        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None, **current}
     current["reembed"] = "on" if reembed_enabled() else "off"
     return current
