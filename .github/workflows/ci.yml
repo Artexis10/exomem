@@ -170,6 +170,11 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
+      - name: Prepare bytecode for installed hook commands
+        # Editable source lives outside site-packages; prepare both with the test interpreter.
+        run: >-
+          uv run --frozen --compile-bytecode --python ${{ matrix.python-version }}
+          python -m compileall -q src/exomem
       - name: Run tests (harness tier — benchmark-importing modules)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
