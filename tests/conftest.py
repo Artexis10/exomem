@@ -301,6 +301,10 @@ def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
     return False
 
 
+# The call-phase report, so `_isolate_state_root` can keep a failed test's state root.
+_CALL_REPORT = pytest.StashKey[pytest.TestReport]()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
@@ -351,6 +355,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     refusal or a Git refusal there stays a failure and is meant to.
     """
     report = (yield).get_result()
+    if report.when == "call":
+        item.stash[_CALL_REPORT] = report
     # `setup` as well as `call`: a fixture that builds its subject through the
     # absent capability raises before the body runs, and an error there is the
     # same missing prerequisite reported one phase earlier.
@@ -749,7 +755,7 @@ def _isolate_state_root_for_session(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_state_root(tmp_path: Path):
+def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
     """No test writes the real user state root (task 1.5 of
     relocate-machine-local-state, mirroring the EXOMEM_VAULT_PATH rule below).
 
@@ -794,6 +800,12 @@ def _isolate_state_root(tmp_path: Path):
         if writer_lease_module is not None:
             writer_lease_module.reset_managers_for_tests()
         private.undo()
+        # The sibling is outside tmp_path, so pytest's retention never reaches it:
+        # apply the same rule here, keeping it only when the test failed.
+        if request.config.getini("tmp_path_retention_policy") == "failed":
+            report = request.node.stash.get(_CALL_REPORT, None)
+            if report is None or report.passed:
+                shutil.rmtree(state_root, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
