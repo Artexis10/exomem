@@ -282,7 +282,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             }.issubset(tools):
                 issues.append("capability_mismatch")
             if set(tools).intersection(
-                {"transfer_artifact", "adopt_vault", "process_media", "read_media"}
+                {"transfer_artifact", "process_media", "read_media"}
             ):
                 issues.append("excluded_capability_exposed")
             engagement = result.get("engagement", {})

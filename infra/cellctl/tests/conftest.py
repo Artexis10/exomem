@@ -98,13 +98,23 @@ async def _bootstrap_roles(admin_dsn: str) -> None:
     connection = await asyncpg.connect(admin_dsn)
     try:
         for role in ROLES:
-            await connection.execute(f'CREATE ROLE "{role}" LOGIN')
+            if not await connection.fetchval("SELECT 1 FROM pg_roles WHERE rolname=$1", role):
+                await connection.execute(f'CREATE ROLE "{role}" LOGIN')
     finally:
         await connection.close()
 
 
 @pytest.fixture(scope="session")
 def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[PostgresServer]:
+    external = os.environ.get("CELLCTL_TEST_POSTGRES_DSN")
+    if external:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(external)
+        asyncio.run(_wait_ready(external))
+        asyncio.run(_bootstrap_roles(external))
+        yield PostgresServer(host=parsed.hostname, port=parsed.port, admin_dsn=external)
+        return
     pg_bin = _default_pg_bin()
     data_dir = tmp_path_factory.mktemp("cellctl-pgdata")
     port = _free_port()
@@ -178,6 +188,13 @@ async def _create_cell_db(server: PostgresServer) -> str:
     try:
         await owner_connection.execute(TENANTS_STANDIN_SQL)
         await owner_connection.execute(SCHEMA_SQL)
+        await owner_connection.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        # C5's canonical migration also seeds the CLI client. Earlier OAuth migrations own this table.
+        await owner_connection.execute("CREATE TABLE exomem_oauth_clients (client_id text PRIMARY KEY, "
+                                       "admission_mode text, enabled boolean, redirect_uris jsonb, "
+                                       "redirect_uris_digest bytea)")
+        await owner_connection.execute((FIXTURES / "exomem_cloud_imports.sql").read_text())
+        await owner_connection.execute((FIXTURES / "exomem_cloud_import_cleanup.sql").read_text())
         await owner_connection.execute(GRANTS_SQL)
     finally:
         await owner_connection.close()

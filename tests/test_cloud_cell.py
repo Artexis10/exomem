@@ -519,10 +519,9 @@ def test_cloud_mcp_request_with_previous_bearer_authenticates(
 # ---------------------------------------------------------------------------
 
 
-def test_cloud_surface_exclusions_are_exactly_four_technical_exclusions() -> None:
+def test_cloud_surface_exclusions_keep_live_transfer_and_media_unavailable() -> None:
     assert set(commands_module.CLOUD_SURFACE_EXCLUSIONS) == {
         "transfer_artifact",
-        "adopt_vault",
         "process_media",
         "read_media",
     }
@@ -531,7 +530,7 @@ def test_cloud_surface_exclusions_are_exactly_four_technical_exclusions() -> Non
         assert exclusion.lifted_when
 
 
-def test_cloud_tool_list_excludes_the_four_but_keeps_the_rest(
+def test_cloud_tool_list_allows_staged_adoption(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp, _ = _build_cloud_server(monkeypatch)
@@ -539,7 +538,7 @@ def test_cloud_tool_list_excludes_the_four_but_keeps_the_rest(
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
         assert "transfer_artifact" not in names
-        assert "adopt_vault" not in names
+        assert "adopt_vault" in names
         assert "process_media" not in names
         assert "read_media" not in names
         assert "configure_memory" in names
@@ -567,7 +566,7 @@ def test_cloud_never_registers_legacy_aliases_even_with_the_opt_in_set(
         # The excluded commands stay excluded -- a legacy alias must not
         # re-expose what CLOUD_SURFACE_EXCLUSIONS just removed.
         assert "transfer_artifact" not in names
-        assert "adopt_vault" not in names
+        assert "adopt_vault" in names
     finally:
         _teardown_activation(mcp)
 
@@ -944,3 +943,34 @@ def test_cli_dotenv_loaders_still_read_dotenv_outside_cloud_mode(
     monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
     cli._load_cwd_dotenv()
     assert os.environ.get(_DOTENV_SENTINEL) == "from-dotenv"
+
+
+@pytest.mark.parametrize("presented", [TOKEN, "previous-token-" * 4])
+def test_verified_cloud_owner_requires_current_configured_cell(vault: Path, monkeypatch, presented):
+    from fastmcp.server.auth.auth import AccessToken
+
+    from exomem.server_auth import CloudCellTokenVerifier
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL_ID)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", TOKEN)
+    token = asyncio.run(CloudCellTokenVerifier(
+        cell_id=CELL_ID, token=TOKEN, previous_token="previous-token-" * 4
+    ).verify_token(presented))
+    monkeypatch.setattr(principal_module, "_verified_access_token", lambda: token)
+    monkeypatch.setattr(principal_module, "_mcp_identity_claims", lambda: (dict(token.claims), None))
+    owner = principal_module.resolve_mcp_principal()
+    assert owner.audience_id == "owner"
+    assert owner.issuer_family == f"cloud-cell:{CELL_ID}"
+    assert not owner.local_owner and not owner.remote_owner
+    _require_owner(owner, vault_root=vault)
+
+    copied = AccessToken(token="copied", client_id=CELL_ID, scopes=token.scopes, claims=token.claims)
+    monkeypatch.setattr(principal_module, "_verified_access_token", lambda: copied)
+    assert principal_module.resolve_mcp_principal().audience_id != "owner"
+    monkeypatch.setattr(principal_module, "_verified_access_token", lambda: token)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "another-cell")
+    assert principal_module.resolve_mcp_principal().audience_id != "owner"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL_ID)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "0")
+    assert principal_module.resolve_mcp_principal().audience_id != "owner"

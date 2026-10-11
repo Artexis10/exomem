@@ -1,3 +1,4 @@
+-- Imported from Substrate 100485eeced0b94c9ab550bb65cb3bb2b60f0eb2:scripts/exomem-cloud-grants.sql
 -- Idempotent least-privilege grants for the Exomem Cloud control plane
 -- (design D7). This script is the single implementation of:
 --
@@ -6,7 +7,7 @@
 --    schema_migrations, and
 --    USAGE and SELECT on every sequence. ALTER DEFAULT PRIVILEGES FOR ROLE
 --    substrate_owner extends the same grants to tables and sequences
---    created by later migrations. The only exceptions are C1 through C1d."
+--    created by later migrations. The exceptions are C1 through C1d and C5."
 -- 2. The C1 privilege table in the companion Exomem design's "Shared
 --    contracts with Substrate" section (`adopt-exomem-cloud-plain-cells/design.md`):
 --
@@ -45,6 +46,7 @@ DO $$
 DECLARE
   target_schema text := current_schema();
   cloud_role text;
+  oauth_table text;
 BEGIN
   -- 1. Schema-wide substrate_app DML, plus default privileges for whatever a
   -- later migration creates. Guarded on substrate_app existing so a database
@@ -84,7 +86,7 @@ BEGIN
     );
   END IF;
 
-  -- 2. C1-C1d are the only exception to the schema-wide grant above: revoke
+  -- 2. C1-C1d and C5 are the exceptions to the schema-wide grant above: revoke
   -- whatever it (and PUBLIC) just gave every role on these four tables, then
   -- apply the exact C1 privilege table below. A rerun of this whole script
   -- therefore always converges to the same state, never accumulating a
@@ -143,8 +145,9 @@ BEGIN
       hold_kind, hold_started_at
     ) ON exomem_cloud_cells TO exomem_cellctl;
     -- Migration 0059 (move-cloud-cells-to-local-storage D10): the size cellctl
-    -- grew a local cell's volume to. Guarded on the column's own existence, as
-    -- 0057's grant is, since grants also run after a partial upgrade.
+    -- grew a local cell's volume to, an observed column the Exomem design's
+    -- C1 contract lists. Guarded on the column's own existence, as 0057's
+    -- grant is, since grants also run after a partial upgrade.
     IF EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = target_schema AND table_name = 'exomem_cloud_cells'
@@ -160,6 +163,29 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'exomem_gateway')
      AND to_regclass('exomem_cloud_cells') IS NOT NULL THEN
     GRANT SELECT (cell_id, tenant_id, desired_state) ON exomem_cloud_cells TO exomem_gateway;
+  END IF;
+
+  -- C5 exists only after migration 0060. Revoke inherited table grants before
+  -- applying request/observation column grants, including on upgrade reruns.
+  IF to_regclass('exomem_cloud_imports') IS NOT NULL THEN
+    REVOKE ALL ON exomem_cloud_imports FROM PUBLIC;
+    FOREACH cloud_role IN ARRAY ARRAY['substrate_app', 'exomem_cellctl', 'exomem_gateway'] LOOP
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = cloud_role) THEN
+        EXECUTE format('REVOKE ALL ON exomem_cloud_imports FROM %I', cloud_role);
+      END IF;
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'substrate_app') THEN
+      GRANT SELECT ON exomem_cloud_imports TO substrate_app;
+      GRANT INSERT (import_id, cell_id, kind, declared_bytes, declared_files, requested_state,
+        part_etags, ciphertext_sha256, ciphertext_bytes) ON exomem_cloud_imports TO substrate_app;
+      GRANT UPDATE (requested_state, part_etags, ciphertext_sha256, ciphertext_bytes)
+        ON exomem_cloud_imports TO substrate_app;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'exomem_cellctl') THEN
+      GRANT SELECT ON exomem_cloud_imports TO exomem_cellctl;
+      GRANT UPDATE (recipient, upload_id, part_urls, urls_expire_at, observed_state, error_code)
+        ON exomem_cloud_imports TO exomem_cellctl;
+    END IF;
   END IF;
 
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'exomem_gateway')
@@ -203,11 +229,26 @@ BEGIN
         ON exomem_oauth_access_tokens TO exomem_gateway;
     END IF;
     IF to_regclass('exomem_oauth_token_families') IS NOT NULL THEN
-      GRANT SELECT (id, revoked_at, expires_at) ON exomem_oauth_token_families TO exomem_gateway;
+      GRANT SELECT (id, grant_id, client_id, revoked_at, expires_at)
+        ON exomem_oauth_token_families TO exomem_gateway;
     END IF;
     IF to_regclass('exomem_oauth_grants') IS NOT NULL THEN
-      GRANT SELECT (id, user_id, tenant_id, revoked_at) ON exomem_oauth_grants TO exomem_gateway;
+      GRANT SELECT (id, user_id, tenant_id, client_id, resource, revoked_at)
+        ON exomem_oauth_grants TO exomem_gateway;
     END IF;
+    -- Migration 0036 adds candidate/reviewer lineage to these tables. Keep
+    -- partial historical upgrades safe while granting the lookup's exact reads.
+    FOREACH oauth_table IN ARRAY ARRAY[
+      'exomem_oauth_access_tokens', 'exomem_oauth_token_families', 'exomem_oauth_grants'
+    ] LOOP
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = target_schema AND table_name = oauth_table AND column_name = 'candidate_id'
+      ) THEN
+        EXECUTE format('GRANT SELECT (candidate_id, reviewer_credential_id) ON %I.%I TO exomem_gateway',
+          target_schema, oauth_table);
+      END IF;
+    END LOOP;
     IF EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = target_schema AND table_name = 'exomem_oauth_clients'
@@ -231,6 +272,18 @@ BEGIN
     -- above only because it predates this fix.
     IF to_regclass('exomem_tenants') IS NOT NULL THEN
       GRANT SELECT (id, status) ON exomem_tenants TO exomem_gateway;
+    END IF;
+    -- Migration 0058's predicates are SECURITY INVOKER. The gateway needs
+    -- only their eligibility reads, never credential secrets or billing writes.
+    IF to_regprocedure('exomem_cloud_reviewer_authorized(uuid,uuid,uuid,text)') IS NOT NULL THEN
+      GRANT SELECT (owner_user_id, marketplace_reviewer_purpose, desired_state, deleted_at)
+        ON exomem_tenants TO exomem_gateway;
+      GRANT SELECT (id, deleted_at) ON users TO exomem_gateway;
+      GRANT SELECT (tenant_id, source, source_state, effective_state,
+        provider_customer_ref, provider_subscription_ref, provider_transaction_ref)
+        ON exomem_entitlements TO exomem_gateway;
+      GRANT SELECT (id, tenant_id, owner_user_id, credential_kind, revoked_at, expires_at, provider)
+        ON exomem_marketplace_reviewer_credentials TO exomem_gateway;
     END IF;
   END IF;
 END

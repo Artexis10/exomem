@@ -329,7 +329,10 @@ FROM cell-runtime AS cloud
 COPY --from=restic-fetch /usr/local/bin/restic /usr/local/bin/restic
 COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
 USER root
-RUN usermod --home /data/host exomem
+RUN usermod --home /data/host exomem \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends age \
+ && rm -rf /var/lib/apt/lists/*
 
 # Media engines (change `add-cloud-multimodal-processing`, design D3–D5).
 #
