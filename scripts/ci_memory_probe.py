@@ -10,40 +10,53 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
+from _pytest.junitxml import bin_xml_escape, mangle_test_address
 
 TARGET = "test_a_governed_session_previews_and_starts_without_loading_the_source"
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_finish(session):
+    items = session.items
+    if session.testsfailed:
+        print("CI_SHARD", json.dumps({"retained_named": len(items),
+              "selection_matches_original": None, "collection_failed": True}))
+        return
     with zipfile.ZipFile(os.environ["PROBE_JUNIT_ZIP"]) as archive:
         xml_files = [name for name in archive.namelist() if name.endswith(".xml")]
         if len(xml_files) != 1:
             raise RuntimeError("The probe requires one original JUnit report")
         report = ElementTree.fromstring(archive.read(xml_files[0]))
-    wanted = []
-    for case in report.iter("testcase"):
-        if case.get("classname"):
-            wanted.append((case.get("classname"), case.get("name")))
-        if case.get("name") == TARGET:
-            break
-    else:
-        raise RuntimeError("The original report does not contain the target")
-    by_id = {}
+    wanted = [(case.get("classname"), case.get("name"))
+              for case in report.iter("testcase") if case.get("classname")]
+    actual = []
     for item in items:
-        # Pytest node IDs use ::; JUnit writes module and class names with dots.
-        parts = item.nodeid.split("::")
-        module = parts[0].removesuffix(".py").replace("/", ".")
-        classname = ".".join([module, *parts[1:-1]])
-        by_id[(classname, parts[-1])] = item
-    missing = [pair for pair in wanted if pair not in by_id]
-    if missing:
-        raise RuntimeError(f"CI prefix cases absent from this exact source: {missing}")
-    selected = [by_id[pair] for pair in wanted]
-    selected_set = set(selected)
-    config.hook.pytest_deselected(items=[item for item in items if item not in selected_set])
-    items[:] = selected
-    print("CI_PREFIX", json.dumps({"named_cases": len(selected), "last": selected[-1].name}))
+        # Reuse the pinned pytest writer so parameter IDs retain its exact JUnit form.
+        names = mangle_test_address(item.nodeid)
+        actual.append((".".join(names[:-1]), bin_xml_escape(names[-1])))
+    if actual != wanted:
+        raise RuntimeError("The selected shard or its order differs from the original report")
+    targets = [index for index, item in enumerate(items) if item.name == TARGET]
+    if len(targets) != 1:
+        raise RuntimeError("The selected shard must contain the target once")
+    print("CI_SHARD", json.dumps({"retained_named": len(items),
+          "prefix_named": targets[0] + 1, "selection_matches_original": True}))
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    result = yield
+    if item.name == TARGET:
+        # Stop after the complete protocol so teardown reports and timeout cleanup remain intact.
+        session = item.session
+        status = pytest.ExitCode.OK
+        if session.testsfailed or session.shouldfail:
+            status = pytest.ExitCode.TESTS_FAILED
+        elif session.shouldstop:
+            status = pytest.ExitCode.INTERRUPTED
+        print("CI_STOP", json.dumps({"phase": "after_target_protocol",
+              "retained_named": len(session.items), "exitstatus": int(status)}))
+        pytest.exit("Diagnostic completed through target teardown", returncode=int(status))
+    return result
 
 
 @pytest.hookimpl(hookwrapper=True)

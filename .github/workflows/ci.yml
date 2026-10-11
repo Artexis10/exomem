@@ -78,7 +78,13 @@ jobs:
         run: >-
           uv run --frozen --python 3.13.14 python -m pytest -q -rA
           -p ci_memory_probe
+          --splits=12
+          --group=9
+          --splitting-algorithm=least_duration
+          --durations-path=.test_durations.json
           --session-timeout=1400
+          --durations=50
+          --durations-min=1
           --junitxml=test-results/memory-prefix.xml
       - name: Retain diagnostic results
         if: always()
