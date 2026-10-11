@@ -946,7 +946,7 @@ def test_cli_dotenv_loaders_still_read_dotenv_outside_cloud_mode(
 
 
 @pytest.mark.parametrize("presented", [TOKEN, "previous-token-" * 4])
-def test_verified_cloud_owner_requires_current_configured_cell(monkeypatch, presented):
+def test_verified_cloud_owner_requires_current_configured_cell(vault: Path, monkeypatch, presented):
     from fastmcp.server.auth.auth import AccessToken
 
     from exomem.server_auth import CloudCellTokenVerifier
@@ -963,7 +963,7 @@ def test_verified_cloud_owner_requires_current_configured_cell(monkeypatch, pres
     assert owner.audience_id == "owner"
     assert owner.issuer_family == f"cloud-cell:{CELL_ID}"
     assert not owner.local_owner and not owner.remote_owner
-    _require_owner(owner)
+    _require_owner(owner, vault_root=vault)
 
     copied = AccessToken(token="copied", client_id=CELL_ID, scopes=token.scopes, claims=token.claims)
     monkeypatch.setattr(principal_module, "_verified_access_token", lambda: copied)
