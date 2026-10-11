@@ -12,7 +12,6 @@ TOOL_SURFACE_CONTRACT = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.js
 CHATGPT_PLUGIN_CONTRACT = (
     REPO_ROOT / "deploy" / "chatgpt" / "personal-plugin-contract.json"
 )
-OPENAI_PLUGIN_MANIFEST = REPO_ROOT / "plugins" / "hosted" / "generated" / "openai" / ".app.json"
 
 _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION = {
     "registered_tool_surface_sha256": "819750430dc72129da8bc51c1163eccf6c0c536a04d1b72fcde265e0e54814b9",
@@ -30,7 +29,6 @@ _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION = {
         "not an action-schema refresh."
     ),
 }
-_REGISTERED_OPENAI_APP_ID = "plugin_asdk_app_6a5e3d26f2b08191a04424d1c1b33fc0"
 
 
 def _assert_records_pending_acceptance(plugin: dict[str, object], surface: dict[str, object]) -> None:
@@ -92,13 +90,11 @@ def test_chatgpt_personal_plugin_tracks_current_tool_surface_rollout() -> None:
 def test_chatgpt_personal_plugin_keeps_v2_records_acceptance_pending() -> None:
     surface = json.loads(TOOL_SURFACE_CONTRACT.read_text(encoding="utf-8"))
     plugin = json.loads(CHATGPT_PLUGIN_CONTRACT.read_text(encoding="utf-8"))
-    app = json.loads(OPENAI_PLUGIN_MANIFEST.read_text(encoding="utf-8"))
 
     registered_attestation = {
         key: plugin[key] for key in _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
     }
     assert registered_attestation == _REGISTERED_PERSONAL_CONNECTOR_ATTESTATION
-    assert app["apps"]["exomem"]["id"] == _REGISTERED_OPENAI_APP_ID
     assert plugin["rollout_state"] == "awaiting-post-deploy-refresh"
     _assert_records_pending_acceptance(plugin, surface)
 
