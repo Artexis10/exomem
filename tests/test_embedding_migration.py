@@ -440,11 +440,13 @@ def test_recall_is_marked_warming_until_the_job_first_plans(preseeded_world, mon
         return {"hits": result} if isinstance(result, list) else result
 
     job = recall_migration.start(vault, threading.Event())
-    assert planning.wait(timeout=60)
-    marked = {"components": ["embeddings"], "since_s": None}
-    assert _recall(vault, "retry backoff")["warming"] == marked
-    assert unit_recall()["warming"] == marked
-    proceed.set()
+    try:
+        assert planning.wait(timeout=60)
+        marked = {"components": ["embeddings"], "since_s": None}
+        assert _recall(vault, "retry backoff")["warming"] == marked
+        assert unit_recall()["warming"] == marked
+    finally:
+        proceed.set()  # never leave the job waiting on a vault the fixture deletes
     job.join(timeout=60)
     assert recall_migration.status(vault)["state"] == "current"
 
