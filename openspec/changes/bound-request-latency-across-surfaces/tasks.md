@@ -14,6 +14,7 @@
 - [ ] 2.3 Extend `latency_watch` counts and summaries; verify unknown, partial, insufficient and evicted observations cannot establish complete-population acceptance.
 - [ ] 2.4 Wire MCP middleware, REST facade and activation observations; verify one sample per boundary, including refusal/error and nested activation cases.
 - [ ] 2.5 Update existing operator documentation; verify bootstrap isolation, doctor coverage and structured log output through real isolated calls.
+- [ ] 2.6 Project the nine-field caller-local advisory for compact and session bootstrap; retain full spans and coverage for full and diagnostics. Correct populated spans and verify unchanged ceilings on every maintained surface.
 
 ## 3. Complete existing gates and repair attributed costs
 

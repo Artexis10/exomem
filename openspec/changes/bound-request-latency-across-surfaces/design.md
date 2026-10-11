@@ -76,6 +76,22 @@ The ring reports retained coverage and its oldest retained instant. It never pro
 
 Bootstrap keeps its client isolation and bounded advisory presentation. Existing structured logs and doctor expose coverage and pending or insufficient states. No source read, fsync or content capture is added to public request execution. A malformed bar or source produces an unavailable observation, not a request refusal or a fabricated default. This prevents false performance claims; its cost is a missing diagnostic verdict, paid by the operator rather than the caller.
 
+The bootstrap helper reads caller-filtered breaches once. Compact sections and
+session project nine fixed advisory fields from those summaries: `tool`, `deep`,
+`samples`, `p50_ms`, `p90_ms`, `ceiling_ms`, `bar_id`, `contract_revision`, and
+`source`. The bar identity resolves the profile, population, observed-service
+reference, window, minimum samples and eligible terminal outcomes through the packaged
+contract. Samples count eligible known timings retained in the live ring.
+The advisory makes no coverage or installed acceptance claim.
+
+Full and diagnostics bootstrap retain all summary fields except the client,
+including every dominant span and coverage. The compact core keeps its breach
+pointer, and healthy profiles omit latency. Doctor remains an independent report
+over its disk sources and coverage, rather than an exact advisory expansion.
+This projection changes no byte ceiling, latency bar or measurement population.
+The populated fixture uses producer-shaped dictionary spans and exercises both
+detail levels through the same helper.
+
 ### 4. Attribute cost before changing runtime behavior
 
 The current activation index update already writes changed rows and signature vectors incrementally. `WorkingSetIndex._write()` still calls `_collect()` and enumerates/stats the corpus; optimize only the measured remaining work. `EmbeddingIndex.upsert_file()` and `_patch_cache()` already splice chunk data; `_unit_vectors()` still reloads the unit matrix after generation changes. `due_state.apply_write_delta()` already exists. Reuse these paths instead of introducing another delta system.

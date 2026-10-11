@@ -2333,11 +2333,10 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
-    # The calling client's own recall-latency breaches. The core carries only a pointer
-    # (the figures are bounded only by how many tools breach, and no turn needs them);
-    # they ride in the reference payload, so `diagnostics_reading` serves them and a session
-    # client, which has no other way to hear that its recalls went slow, gets them too.
-    latency_block = _bootstrap_latency_block()
+    # Compact sections and session carry the calling client's retained-ring advisory;
+    # the core carries only a pointer. The bootstrap contract fixes the full-detail
+    # profiles below; session already normalizes to compact.
+    latency_block = _bootstrap_latency_block(full=profile in ("full", "diagnostics"))
     if latency_block is not None and core_payload is not None:
         compact_payload = {**compact_payload, "latency": latency_block}
         # The core carries the fact, not the figures: a client that has gone slow
@@ -2358,8 +2357,8 @@ def op_bootstrap(
     else:
         result = core_payload if core_payload is not None else compact_payload
     # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
-    # keeps today's shape: absent when healthy, appended after the projection so the
-    # session whitelist cannot drop it.
+    # appends the selected latency detail after projection so the session whitelist
+    # cannot drop it. Healthy profiles omit the block.
     if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
     # A delivery is recording what was handed over. Without it the first recall of the
@@ -2375,13 +2374,13 @@ def op_bootstrap(
     return result
 
 
-def _bootstrap_latency_block() -> list[dict] | None:
+def _bootstrap_latency_block(*, full: bool = False) -> list[dict] | None:
     """The calling client's recall-latency breaches, from the in-process watch only."""
     try:
         from . import latency_watch
         from .command_surface import mcp_caller_identity
 
-        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"))
+        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"), full=full)
     except Exception:  # noqa: BLE001 — a watch failure never breaks a bootstrap
         return None
 

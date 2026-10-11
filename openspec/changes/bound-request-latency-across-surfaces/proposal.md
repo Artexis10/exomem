@@ -24,7 +24,9 @@ Existing latency checks measure different boundaries, populations and percentile
 
 ### Modified Capabilities
 
-None. Existing capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
+- `agent-bootstrap-contract`: Keep compact and session latency advisories within existing budgets while full and diagnostics profiles retain spans and coverage.
+
+Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
 
 ## Impact
 

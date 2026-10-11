@@ -232,18 +232,23 @@ def test_a_breach_logs_one_event_per_interval(monkeypatch: pytest.MonkeyPatch) -
     assert len(events) == 2
 
 
-def test_bootstrap_block_reports_only_the_calling_client() -> None:
+@pytest.mark.parametrize("full", [False, True])
+def test_bootstrap_block_reports_only_the_calling_client(full: bool) -> None:
     watch = latency_watch.reset(started_at=T0, clock=_Clock(AFTER_GRACE))
     try:
         _fill(watch, n=25, total_ms=3000, client="openai-mcp/1.0.0")
         _fill(watch, n=25, total_ms=150, client="claude-code")
-        block = latency_watch.bootstrap_block("openai-mcp/1.0.0")
+        block = latency_watch.bootstrap_block("openai-mcp/1.0.0", full=full)
         assert block is not None and len(block) == 1
         assert block[0]["contract_revision"] == "request-latency-v1"
-        assert block[0]["coverage"]["population"] == "retained"
+        assert block[0]["bar_id"] == "watch-ordinary" and block[0]["source"] == "live-ring"
+        if full:
+            assert block[0]["coverage"]["population"] == "retained"
+        else:
+            assert "coverage" not in block[0]
         assert "client" not in block[0]
-        assert latency_watch.bootstrap_block("claude-code") is None
-        assert latency_watch.bootstrap_block(None) is None
+        assert latency_watch.bootstrap_block("claude-code", full=full) is None
+        assert latency_watch.bootstrap_block(None, full=full) is None
     finally:
         latency_watch.reset()
 

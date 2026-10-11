@@ -4,13 +4,13 @@ An empty vault understates the always-served core: the core carries vault-derive
 blocks that grow with what the vault holds. This builds the worst case those blocks
 can reach, so the ceiling is asserted against it and not against a best case.
 
-The blocks and what bounds them in the core (the sections carry them in full):
+The blocks and what bounds them in the core and sections:
 
 - `due_state`: built here from more rows than `due_state.TOP_LIMIT` with long refs and
   every category present; the core serves a counts summary of at most 200 bytes.
-- `latency`: `latency_watch` reports one row per watched (tool, deep) pair for the
-  calling client, each with `DOMINANT_SPANS` spans; every pair breaches here. The core
-  carries only the breach pointer (`LATENCY_POINTER`).
+- `latency`: every watched (tool, deep) pair breaches for the calling client.
+  Compact and session rows carry the advisory fields; full and diagnostics rows
+  retain `DOMINANT_SPANS` spans. The core carries only `LATENCY_POINTER`.
 - custom entity types: nothing in the code caps their count, so `CUSTOM_ENTITY_TYPES` is
   a stated bound (32, well over the 12 keys the `vocabulary` section lists, so its cap
   is exercised); the core lists none and points at the `vocabulary` section.
@@ -66,7 +66,7 @@ def maximal_due_state() -> dict:
     return block
 
 
-def maximal_latency() -> list[dict]:
+def maximal_latency(*, full: bool = False) -> list[dict]:
     watch = latency_watch.reset(started_at=0.0, clock=lambda: 1_000_000.0)
     names = [f"recall.stage.span-name-{index}" for index in range(latency_watch.DOMINANT_SPANS + 3)]
     for tool in sorted(latency_watch.WATCHED_TOOLS):
@@ -77,10 +77,10 @@ def maximal_latency() -> list[dict]:
                     client="claude-code",
                     deep=deep,
                     total_ms=90_000.0,
-                    spans=[(name, 10_000.0 + index) for index, name in enumerate(names)],
+                    spans=[{"name": name, "ms": 10_000.0 + index} for index, name in enumerate(names)],
                     at=999_990.0,
                 )
-    rows = latency_watch.bootstrap_block("claude-code", now=1_000_000.0)
+    rows = latency_watch.bootstrap_block("claude-code", now=1_000_000.0, full=full)
     latency_watch.reset()
     assert rows
     return rows
@@ -92,8 +92,7 @@ def populated_blocks() -> Iterator[None]:
     from exomem import commands
 
     block = maximal_due_state()
-    latency = maximal_latency()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(due_state, "served", lambda *a, **k: block)
-        patch.setattr(commands, "_bootstrap_latency_block", lambda: latency)
+        patch.setattr(commands, "_bootstrap_latency_block", maximal_latency)
         yield

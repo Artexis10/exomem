@@ -701,15 +701,26 @@ def observe(**kwargs: Any) -> None:
         _WATCH.record_failure()
 
 
-def bootstrap_block(client: str | None, *, now: float | None = None) -> list[dict[str, Any]] | None:
-    """The `latency` block for one client's bootstrap, or None when nothing breaches."""
+def bootstrap_block(
+    client: str | None, *, now: float | None = None, full: bool = False
+) -> list[dict[str, Any]] | None:
+    """One client's retained-ring advisory, or full detail; None when nothing breaches."""
     try:
         rows = _WATCH.breaches(client=client, now=now)
     except Exception:  # noqa: BLE001 - a watch failure never breaks a bootstrap
         return None
     if not rows:
         return None
-    return [{key: value for key, value in row.items() if key != "client"} for row in rows]
+    if full:
+        return [{key: value for key, value in row.items() if key != "client"} for row in rows]
+    # Advisory fields are closed protocol fields in the agent-bootstrap contract.
+    return [
+        {key: row[key] for key in (
+            "tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms",
+            "bar_id", "contract_revision", "source",
+        )}
+        for row in rows
+    ]
 
 
 def reset(*, started_at: float | None = None, clock=time.time) -> Watch:

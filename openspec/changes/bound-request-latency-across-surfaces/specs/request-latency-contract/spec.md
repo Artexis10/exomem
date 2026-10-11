@@ -120,6 +120,12 @@ Each report SHALL state its window, source, observed count, eligible known timin
 
 Latency observation SHALL reuse existing operator surfaces and preserve their caller isolation. New latency evidence SHALL contain aggregate timings, closed outcome codes and counts, never queries, content, credentials or raw caller identities. Observation failures SHALL remain contained and visible through coverage or failure counts, without changing a request's result or adding synchronous disk reads.
 
+Compact and session bootstrap SHALL serve a caller-local retained-ring breach
+advisory with its bar identity and contract revision. This advisory MUST NOT claim
+coverage or installed acceptance. Full and diagnostics bootstrap SHALL retain
+spans and coverage. Doctor SHALL report its independent source coverage rather
+than imply that its population exactly expands the bootstrap advisory.
+
 #### Scenario: Observation fails
 
 - **WHEN** the watch cannot process an otherwise successful request
