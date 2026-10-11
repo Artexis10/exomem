@@ -783,6 +783,36 @@ def test_preserve_refuses_oversized_stream_without_canonical_residue(
     assert not (folder / "too-large.bin.md").exists()
 
 
+def test_a_large_preserved_stream_is_never_held_whole_in_memory(vault: Path, tmp_path: Path) -> None:
+    """An upload session commits a file of up to 2 GiB through `preserve_stream`. The
+    vault's atomic publish read the staged file into memory, twice over, so one large
+    upload could exhaust the service's memory. Scaled down: a 32 MiB file publishes
+    with a traced peak far below its size."""
+    import tracemalloc
+
+    size = 32 * 1024 * 1024
+    source = tmp_path / "samples.bin"
+    with source.open("wb") as handle:
+        handle.truncate(size)
+    # A first preserve imports what the path loads lazily, so the trace sees only the copy.
+    preserve_module.preserve_stream(
+        vault, scope="Device", category="Exports", filename="first.bin", stream=io.BytesIO(b"x"), today=TODAY,
+    )
+    tracemalloc.start()
+    try:
+        with source.open("rb") as stream:
+            result = preserve_module.preserve_stream(
+                vault, scope="Device", category="Exports", filename="samples.bin", stream=stream,
+                max_bytes=size, today=TODAY,
+            )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert (vault / result.path).stat().st_size == size
+    assert peak < size // 4, peak
+
+
 def test_preserve_auto_creates_scope_and_category_dirs(vault: Path) -> None:
     """Evidence/<scope>/<category>/ folders materialize on first write."""
     folder = vault / "Knowledge Base" / "Evidence" / "NewScope" / "NewCat"
