@@ -248,6 +248,48 @@ def test_capture_namespace_preserves_useful_creation_without_hidden_collision_ob
     assert "Allowed new note" in (vault / result.path).read_text()
 
 
+def test_a_restricted_archive_upload_writes_nothing_and_reveals_no_stored_archive(
+    configured_boundary, vault
+):
+    """Archive members decide the destination before they read the family or write a blob."""
+    import contextlib
+    import io
+    import zipfile
+
+    from exomem import archive_members, state_migration
+    from exomem.preserve import PreserveError
+
+    _, authenticate = configured_boundary
+    authority = state_migration.assert_offline_migration_authority(source="isolated capture stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("export/day-01.json", b'{"heart_rate": 61}')
+    family = vault / "Knowledge Base/Evidence/Device/Exports"
+
+    def upload():
+        return archive_members.preserve_members(
+            vault, guard=contextlib.nullcontext, scope="Device", category="Exports",
+            filename="export.zip", stream=io.BytesIO(buffer.getvalue()), max_bytes=1024 * 1024,
+            verified="upload",
+        )
+
+    def tree():
+        return sorted(path.relative_to(vault) for path in family.rglob("*")) if family.exists() else []
+
+    outcomes = []
+    for stored in (False, True):
+        if stored:
+            with principal.request_scope(authenticate("full")):
+                upload()
+        before = tree()
+        with principal.request_scope(authenticate("limited")), pytest.raises(PreserveError) as refused:
+            upload()
+        assert tree() == before
+        outcomes.append((refused.value.code, refused.value.reason))
+    assert outcomes == [("WRITE_REFUSED", "target is unavailable")] * 2
+
+
 def test_capture_namespace_rejects_private_writes_even_from_unrestricted_owner(configured_boundary, vault):
     from exomem import state_migration
     from exomem import vault as vault_module

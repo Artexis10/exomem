@@ -460,6 +460,16 @@ def preserve_members(
     if refusals:
         raise preserve_module.PreserveError("INVALID_PRESERVE", ["scope", "category"], "; ".join(refusals))
     folder = kb_root(vault_root) / "Evidence" / scope / category
+    from .governance import connector_boundary
+
+    # Decide the destination before the family is read or a blob is written, so a
+    # refused caller learns nothing of a stored archive and leaves no bytes behind.
+    try:
+        connector_boundary.require_create(
+            vault_root, folder.relative_to(vault_root).as_posix(), directory=True
+        )
+    except ValueError:
+        raise preserve_module.PreserveError("WRITE_REFUSED", [], "target is unavailable") from None
     preserve_module.validate_raw_capture(
         filename, destination=str(folder.relative_to(vault_root)), raw_protection=True
     )
