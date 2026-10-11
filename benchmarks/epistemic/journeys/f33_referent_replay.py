@@ -109,7 +109,7 @@ USES_RULE = {
     "recency_only_anchor": (
         "Ruling 1c: nothing reached through an anchor that only the recency prior supplied "
         "serves, even in an ordinary packet (the resolver's fifth clause): not the anchor, "
-        "not units whose provenance path or anchor is its page, not pointers to its page. "
+        "not units or pointers reached from it, not units or pointers to its page. "
         "Such an anchor has recency evidence and no naming, conversation or continuity "
         "evidence. Edit time chose it."
     ),
@@ -479,17 +479,23 @@ def served_refs(
             for _field, ref in _packet_refs(anchor)
         } - {None}
         for section, value in packet.items():
-            for field, ref in _packet_refs(value):
-                item_id = item_for(ref)
-                serves = (
-                    not recency
-                    and item_id not in suppressed
-                    and field in SERVING_FIELDS.get(section, ())
-                )
-                out.append(
-                    {"section": section, "field": field, "ref": ref, "item_id": item_id,
-                     "serves": serves}
-                )
+            for entry in value if isinstance(value, list) else [value]:
+                origin = (
+                    entry.get("anchor") or (entry.get("provenance") or {}).get("anchor")
+                ) if isinstance(entry, dict) else None
+                suppressed_origin = bool(origin and item_for(origin) in suppressed)
+                for field, ref in _packet_refs(entry):
+                    item_id = item_for(ref)
+                    serves = (
+                        not recency
+                        and not suppressed_origin
+                        and item_id not in suppressed
+                        and field in SERVING_FIELDS.get(section, ())
+                    )
+                    out.append(
+                        {"section": section, "field": field, "ref": ref, "item_id": item_id,
+                         "serves": serves}
+                    )
     return out
 
 
@@ -839,6 +845,7 @@ def _table_row(record: Mapping[str, Any]) -> dict[str, Any]:
     invocations = [
         call for session in record["sessions"].values() for call in session["invocations"]
     ]
+    turns = [call["num_turns"] for call in invocations]
     return {
         "attempt": record["attempt"],
         "repeat": record.get("repeat"),
@@ -849,7 +856,7 @@ def _table_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "run_wall_s": record["run_wall_s"],
         "client_wall_s": round(sum(call["wall_s"] for call in invocations), 1),
         "invocations": len(invocations),
-        "agent_turns": sum(call["num_turns"] or 0 for call in invocations),
+        "agent_turns": None if None in turns else sum(turns),
         "models": sorted({call["model"] for call in invocations if call["model"]}),
         "client_versions": sorted(
             {call["claude_code_version"] for call in invocations if call["claude_code_version"]}

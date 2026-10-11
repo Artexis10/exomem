@@ -870,6 +870,7 @@ def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
     """
     return {
         "ref": item.ref,
+        "anchor": item.anchor,
         "role": item.role,
         "title": item.title,
         "why": item.why or f"{item.role} lane",

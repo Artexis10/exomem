@@ -683,3 +683,102 @@ def test_case_status_follows_the_amendment_rule(polarity, outcomes, status) -> N
     """Fails when a positive needs 3 of 3, a twin tolerates a false positive, or a short case passes."""
 
     assert _driver().case_status(polarity, outcomes, 3) == status
+
+
+@pytest.mark.parametrize("evidence", [["recency"], ["recency", "exact_alias"]])
+@pytest.mark.parametrize("lane", ["units", "graph"])
+def test_a_neighbour_keeps_its_origin_when_mapping_served_refs(evidence, lane) -> None:
+    """A recency anchor must not credit its neighbour through a unit or pointer."""
+
+    from types import SimpleNamespace
+
+    from exomem import working_set
+
+    origin, neighbour = "Entities/Origin.md", "Entities/Neighbour.md"
+    snapshot = SimpleNamespace(items=[
+        SimpleNamespace(id=path.removesuffix(".md"), locator=path, raw={})
+        for path in (origin, neighbour)
+    ])
+    unit = working_set.LaneItem(
+        role="example", level="unit", ref=f"{neighbour}#fact", path=neighbour,
+        title="Neighbour", text="A synthetic fact.", lifecycle="active", updated="",
+        anchor=origin,
+    )
+    items = [unit] if lane == "units" else working_set._graph_lane(
+        SimpleNamespace(id="example"),
+        anchors=[SimpleNamespace(ref=origin, path=origin, neighbourhood=[neighbour])],
+    )
+    packet = working_set.build_packet(
+        items=items, anchors=[{"ref": origin, "path": origin, "evidence": evidence}],
+        roles=[{"id": "example", "lane": lane}], current_state=[], ambiguity=[],
+        missing=[], max_chars=4000, generation={}, status="resolved",
+    )
+
+    rows = _driver().served_refs([{"readable": True, "packet": packet}], snapshot)
+
+    neighbour_rows = [row for row in rows if row["item_id"] == "Entities/Neighbour"]
+    assert neighbour_rows
+    assert any(row["serves"] for row in neighbour_rows) is ("exact_alias" in evidence)
+
+
+@pytest.mark.parametrize("turns, expected", [([None], None), ([2, None], None), ([2, 3], 5), ([], 0)])
+def test_unknown_invocation_usage_does_not_become_a_complete_turn_total(turns, expected) -> None:
+    """A missing terminal result must not understate usage as zero or a complete subtotal."""
+
+    driver = _driver()
+    session = {"invocations": []}
+    for count in turns:
+        stdout = "" if count is None else _stream({**_result(), "num_turns": count})
+        driver._record_invocation(session, "synthetic", [], _Proc(stdout), 1.0)
+    record = {
+        "sessions": {"capture": session}, "attempt": 1, "status": "blocked",
+        "fault_reason": "synthetic interruption", "assertions": {},
+        "repeat_outcome": None, "run_wall_s": 1.0,
+    }
+
+    assert driver._table_row(record)["agent_turns"] == expected
+
+
+@pytest.mark.parametrize("withheld", ["origin", "target", "missing", None])
+@pytest.mark.parametrize("memory_origin", [False, True])
+def test_pointer_origin_and_target_remain_governed(tmp_path, withheld, memory_origin) -> None:
+    """Preserving a pointer's origin must expose neither a hidden origin nor a hidden target."""
+
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import working_set
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+    from exomem.memory_refs import memory_ref
+
+    origin, target = "Knowledge Base/origin.md", "Knowledge Base/target.md"
+    origin_id = "00000000-0000-0000-0000-000000000001"
+    for path in (origin, target):
+        page = tmp_path / path
+        page.parent.mkdir(parents=True, exist_ok=True)
+        metadata = f"exomem_id: {origin_id}\n" if path == origin else ""
+        page.write_text(f"---\ntype: note\n{metadata}---\n\nA synthetic page.\n", encoding="utf-8")
+    write_scope(tmp_path, paths=f"{withheld or 'unrelated'}.md")
+    write_rule(tmp_path, ceiling=0)
+    origin_ref = memory_ref(origin_id) if memory_origin else origin
+    item = working_set.LaneItem(
+        role="example", level="page", ref="missing" if withheld == "missing" else target,
+        path=target, title="A pointer",
+        text="", lifecycle="active", updated="", anchor=origin_ref,
+    )
+    packet = working_set.build_packet(
+        items=[item], anchors=[], roles=[{"id": "example", "lane": "graph"}],
+        current_state=[], ambiguity=[], missing=[], max_chars=4000,
+        generation={}, status="resolved",
+    )
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(
+            tmp_path, packet, egress.AnnotatedHits(hits=[], withheld_paths=frozenset(), active=True),
+        )
+
+    assert guarded is not None
+    assert bool(guarded["pointers"]) is (withheld is None)
+    if withheld is not None:
+        assert f"Knowledge Base/{withheld}.md" not in json.dumps(guarded)
+        if withheld == "origin":
+            assert origin_ref not in json.dumps(guarded)
