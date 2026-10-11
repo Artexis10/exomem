@@ -5,10 +5,11 @@ garden that said "hedge" as an ordinary word: `rare_term` on "hedge", plus a
 recall hit on her page that the same word produced. The page carries its own
 title, so the hit counted "hedge" as one of the two content words the
 lexical lane requires, and "garden" on her page completed it. Her identity
-unit was served. A word that is only part of an anchor's names, written in
-lower case by a turn whose casing carries a signal, is now a `partial` lead
-that the anchor's own recall hit cannot resolve. The file name is a
-registered name, so a turn that says "nora" still reaches her.
+unit was served. A word that is only part of an anchor's names, written as an
+ordinary word by a turn whose casing carries a signal, now keeps the recall
+hit only when the page still matches the turn without that word. Otherwise
+the anchor is a `partial` lead. The file name is a registered name, so a turn
+that says "nora" still reaches her.
 
 Invented names and a synthetic vault throughout.
 """
@@ -25,8 +26,11 @@ from exomem import commands, lexstore, working_set_index, working_set_runtime
 
 KB = "Knowledge Base"
 PERSON = f"{KB}/Entities/People/Nora.md"
+NAMESAKE = f"{KB}/Entities/People/Nora Quill.md"
+PROJECT = f"{KB}/Entities/Projects/Kelvane Rollout.md"
 PLACE = f"{KB}/Entities/Places/Allotment.md"
 IDENTITY = "Former engineering colleague from the payments team"
+NAMESAKE_IDENTITY = "Runs the payments audit for the regional office"
 
 
 def _write(vault: Path, rel: str, text: str) -> None:
@@ -35,22 +39,34 @@ def _write(vault: Path, rel: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _entity(vault: Path, rel: str, title: str, fact: str, *, person: bool = False) -> None:
+    kind = "entity_type: person\n" if person else ""
+    _write(
+        vault,
+        rel,
+        f"---\ntype: entity\n{kind}status: active\nupdated: 2026-09-01\n---\n\n"
+        f"# {title}\n\n## Summary\n\n- [fact] {fact} ^e-1\n",
+    )
+
+
+def _reindex(vault: Path) -> Path:
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    return vault
+
+
 @pytest.fixture
 def garden_vault(vault: Path) -> Path:
     seed_ordinary_notes(vault)
-    _write(
+    _entity(
         vault,
         PERSON,
-        "---\ntype: entity\nentity_type: person\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-        f"# Nora Hedge\n\n## Summary\n\n- [fact] {IDENTITY}; her garden backs onto the"
-        " office car park. ^n-1\n",
+        "Nora Hedge",
+        f"{IDENTITY}; her garden backs onto the office car park.",
+        person=True,
     )
-    _write(
-        vault,
-        PLACE,
-        "---\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n# Allotment\n\n"
-        "## Summary\n\n- [fact] My garden plot by the railway; the shed leaks. ^p-1\n",
-    )
+    _entity(vault, PLACE, "Allotment", "My garden plot by the railway; the shed leaks.")
     garden_notes = ("Hedge trimming", "Beech hedge planting", "Winter hedge care")
     for index, title in enumerate(garden_notes):
         _write(
@@ -60,10 +76,7 @@ def garden_vault(vault: Path) -> Path:
             f"# {title}\n\n## Summary\n\n- [note] Trim the hedge after the nesting season;"
             f" keep the base wider than the top. ^g-{index}\n",
         )
-    lexstore.ensure_fresh(vault)
-    working_set_runtime.reset_caches_for_tests()
-    working_set_index.WorkingSetIndex(vault).rebuild()
-    return vault
+    return _reindex(vault)
 
 
 def _statuses(packet: dict, path: str) -> list[str]:
@@ -85,7 +98,52 @@ def test_one_word_of_a_longer_name_said_as_an_ordinary_word_resolves_no_one(
     assert IDENTITY not in json.dumps(packet), "the person's identity was served"
 
 
+def test_a_capital_that_only_opens_a_sentence_does_not_make_the_word_a_name(
+    garden_vault: Path,
+) -> None:
+    packet = commands.op_activate_context(
+        garden_vault,
+        turn=(
+            "Hedge trimming took all weekend. The garden looks better, but the hedge"
+            " by the gate is still taller than the shed"
+        ),
+    )
+
+    assert "resolved" not in _statuses(packet, PERSON), packet["anchors"]
+    assert IDENTITY not in json.dumps(packet), "the person's identity was served"
+
+
 def test_the_file_name_in_lower_case_still_reaches_the_person(garden_vault: Path) -> None:
     packet = commands.op_activate_context(garden_vault, turn="What did nora say about payments?")
 
     assert _statuses(packet, PERSON) == ["resolved"], packet["anchors"]
+
+
+def test_a_first_name_two_people_share_still_asks_which_one(garden_vault: Path) -> None:
+    """Only one of the two is stored under the bare first name."""
+    _entity(garden_vault, NAMESAKE, "Nora Quill", f"{NAMESAKE_IDENTITY}.", person=True)
+    _reindex(garden_vault)
+
+    packet = commands.op_activate_context(garden_vault, turn="What did nora say about payments?")
+
+    assert packet.get("abstention") == {"reason": "ambiguous"}, packet["anchors"]
+    served = json.dumps(packet)
+    assert IDENTITY not in served and NAMESAKE_IDENTITY not in served
+
+
+def test_a_page_that_matches_the_turn_without_the_shared_word_still_resolves(
+    garden_vault: Path,
+) -> None:
+    _entity(
+        garden_vault,
+        PROJECT,
+        "Kelvane Rollout",
+        "The rollout moves the booking system to the new host in two waves.",
+    )
+    _reindex(garden_vault)
+
+    packet = commands.op_activate_context(
+        garden_vault, turn="When does the rollout move the booking system to the new host?"
+    )
+
+    assert _statuses(packet, PROJECT) == ["resolved"], packet["anchors"]

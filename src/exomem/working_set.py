@@ -2232,6 +2232,28 @@ def _carry_by_retrieval(
     return _visible_hits(hits, visible)[: working_set_resolve.MAX_ANCHORS]
 
 
+def _lexical_hits_without(
+    vault_root: Path, pages: frozenset[str], words: str, *, freshness_snapshot: Any = None
+) -> frozenset[str]:
+    """`working_set_resolve.candidates_for`'s dependence check, read on the
+    snapshot the request's first lexical pass read. Empty when that snapshot
+    is unreadable: the anchors then stay leads."""
+    freshness = None
+    recall_checkpoint = None
+    if freshness_snapshot is not None:
+        try:
+            freshness = freshness_snapshot.for_scope("kb")
+            recall_checkpoint = freshness_snapshot.recall_checkpoint("kb")
+        except Exception:  # noqa: BLE001 - an unreadable snapshot readmits nothing
+            log.debug("activation dependence check freshness unavailable", exc_info=True)
+            return frozenset()
+    from . import working_set_runtime
+
+    return working_set_runtime.lexical_hits_without(
+        vault_root, pages, words, freshness=freshness, recall_checkpoint=recall_checkpoint
+    )
+
+
 def _visible_hits(
     hits: Sequence[tuple[str, float]], visible: Callable[[str], bool] | None
 ) -> tuple[tuple[str, float], ...]:
@@ -3545,6 +3567,15 @@ def _compile_packet(
                         analysis, registry.roles.values()
                     ),
                     row_lexicons=row_lexicons,
+                    retrieval_without=(
+                        (
+                            lambda pages, words: _lexical_hits_without(
+                                root, pages, words, freshness_snapshot=freshness_snapshot
+                            )
+                        )
+                        if retrieval_paths
+                        else None
+                    ),
                 )
 
             candidates = _candidates(rows)

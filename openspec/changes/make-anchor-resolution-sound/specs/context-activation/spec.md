@@ -151,15 +151,40 @@ routing.
 
 #### Scenario: A rare word and the anchor's own page in recall resolve
 - **WHEN** an anchor carries `rare_term`, its own page is among the recall hits, and
-  the word is a name of the anchor by itself (its title, an alias or its file name) or
-  the turn does not write it as an ordinary word
+  the turn does not write the word as an ordinary word that is only part of the
+  anchor's names
 - **THEN** it resolves with evidence `[rare_term, retrieval]`
 
 #### Scenario: One word of a longer name written as an ordinary word stays a lead
-- **WHEN** a turn whose casing carries a signal writes in lower case one rare word that
-  is only part of an anchor's names, and the anchor's own page is among the recall hits
+- **WHEN** a turn whose casing carries a signal writes one rare word in lower case and
+  never capitalises it after a sentence's first word, the word is only part of an
+  anchor's names and is no whole name (title, alias or file name) of any anchor, and the
+  anchor's own page is among the recall hits
 - **THEN** the anchor carries `rare_term` without `retrieval` and stays `partial`,
   because that recall hit counts the same word
+
+#### Scenario: A page that still matches the turn without the shared word keeps its hit
+- **WHEN** such an anchor's own page is still a lexical hit for the turn with the shared
+  word left out
+- **THEN** the anchor keeps `retrieval` and resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: A hyphenated word that covers more of the name keeps the hit
+- **WHEN** the turn writes another word of the anchor's name inside a hyphenated word,
+  such as "kitchen-renovation budget" for a hub titled "Kitchen renovation budget hub"
+- **THEN** the shared word is not read as an ordinary word and the anchor keeps
+  `retrieval`
+
+#### Scenario: A first name that two people share stays a question
+- **WHEN** two people share a first name, one of them is stored under that name, and a
+  turn writes it in lower case
+- **THEN** the word is read as a name for both people and the turn is `ambiguous`
+
+#### Scenario: Known limit: casing that says nothing keeps the hit
+- **WHEN** the turn has no casing signal (all lower case, every word capitalised or all
+  capitals), capitalises the word only at a sentence start, is in a language that
+  capitalises nouns, or is in a script without case
+- **THEN** the word is not read as an ordinary word, and the anchor keeps `retrieval` as
+  it did before this rule
 
 #### Scenario: One common word is no contact
 - **WHEN** a turn shares exactly one term with an anchor and that term names more than
