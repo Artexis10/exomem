@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 ATTEST_ACTION = "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
 
@@ -98,58 +96,12 @@ def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egr
     assert "FASTMCP_SHOW_SERVER_BANNER=false" in cloud
 
 
-def _dockerfile_release_targets(text: str) -> set[str]:
-    """The stages no other stage builds on or copies from: the images the file ships."""
-    stages: list[str] = []
-    referenced: set[str] = set()
-    for line in text.replace("\\\n", " ").splitlines():
-        words = line.split()
-        if not words or words[0].startswith("#"):
-            continue
-        if words[0].upper() == "FROM":
-            arguments = [word for word in words[1:] if not word.startswith("--")]
-            referenced.add(arguments[0])
-            if len(arguments) == 3 and arguments[1].upper() == "AS":
-                stages.append(arguments[2])
-        # `COPY --from=<stage>` and `RUN --mount=...,from=<stage>,...` both read a stage.
-        for word in words:
-            for option in word.split(","):
-                if option.startswith(("--from=", "from=")):
-                    referenced.add(option.split("=", 1)[1])
-    return set(stages) - referenced
-
-
-def test_release_publish_builds_every_dockerfile_target_the_plan_checks() -> None:
-    """An image the release builds but the heal never checks stays missing, as the
-    cloud and cellctl images of the 0.115.0 release did. Every release target in the
-    Dockerfile must have a publish step, and every publish step must take its version
-    tag and its skip decision from the plan's presence check."""
-    workflow = yaml.safe_load(_read(".github/workflows/release-please.yml"))
-    plan_script = next(
-        step["run"] for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "plan"
-    )
-    builds = [
-        step
-        for step in workflow["jobs"]["publish-image"]["steps"]
-        if str(step.get("uses", "")).startswith("docker/build-push-action@")
-    ]
-    built_targets = {step["with"]["target"] for step in builds if "target" in step["with"]}
-
-    assert _dockerfile_release_targets(_read("Dockerfile")) <= built_targets
-    for step in builds:
-        image = re.fullmatch(r"\$\{\{ fromJSON\(env\.IMAGES\)\.(\w+)\.publish \}\}", step["if"])
-        assert image, f"{step['name']} is not gated on the plan's presence check"
-        assert f"${{{{ fromJSON(env.IMAGES).{image[1]}.ref }}}}" in step["with"]["tags"]
-        assert f'"{image[1]} ghcr.io/artexis10/' in plan_script
-
-
 def test_release_workflow_publishes_cuda_tags() -> None:
     text = _read(".github/workflows/release-please.yml")
 
     assert "target: cuda" in text
     assert "platforms: linux/amd64" in text
-    assert "ghcr.io/artexis10/exomem:cuda" in text
-    assert '"cuda ghcr.io/artexis10/exomem:$version-cuda"' in text
+    assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda"' in text
 
 
 def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> None:
@@ -158,8 +110,7 @@ def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> 
     assert text.count("target: hosted") == 1
     # The hosted build and the cloud build both carry the tag commit's time.
     assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
-    assert '"hosted ghcr.io/artexis10/exomem:$version-hosted"' in text
-    assert "ghcr.io/artexis10/exomem:hosted" in text
+    assert '"hosted ghcr.io/artexis10/exomem:$version-hosted hosted"' in text
     assert text.count("build_time=$(git show -s --format=%cI HEAD)") == 1
 
 
@@ -176,18 +127,15 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     assert "attestations: write" in job
     assert "id: hosted-build" in job
     assert "steps.hosted-build.outputs.digest" in job
-    assert (
-        "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted"
-        in job
-    )
+    assert 'discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"' in job
     assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-    # The hosted image and its candidate file, plus the cloud and cellctl images.
-    assert job.count(ATTEST_ACTION) == 4
+    # Each image and the hosted candidate file retain original attestations.
+    assert job.count(ATTEST_ACTION) == 7
     assert "subject-name: ghcr.io/artexis10/exomem" in job
     assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
     assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
     assert "push-to-registry: true" in job
-    assert job.count("create-storage-record: false") == 4
+    assert job.count("create-storage-record: false") == 7
     assert "infra/scripts/hosted_image_candidate.py record" in job
     assert "infra/scripts/hosted_image_candidate.py verify" in job
     assert "GH_TOKEN: ${{ github.token }}" in proof_step
@@ -208,7 +156,7 @@ def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> 
     assert "--producer-oidc-source-ref" in job
     assert "--source-ref" in job
     assert "GITHUB_RUN_ID" in job and "GITHUB_RUN_ATTEMPT" in job
-    assert "gh release upload" in job
+    assert "release_recovery.py finish-images" in job
     assert '"$CANDIDATE_BUNDLE"' in job
     assert "--clobber" not in job
     assert "exomem-hosted-release-v1.json" not in job
@@ -223,11 +171,10 @@ def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
     assert text.count("target: cloud") == 1
     assert "id: cloud-build" in cloud
     assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
-    assert "${{ fromJSON(env.IMAGES).cloud.ref }}" in cloud
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud" in cloud
     assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
-    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in cloud
-    assert "gh release edit" in cloud
+    assert "push-by-digest=true" in cloud
+    assert "release-image-evidence-cloud" in cloud
+    assert "release_recovery.py finish-images" in cloud
 
 
 def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
@@ -241,7 +188,7 @@ def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -
     )[1].split("\njobs:", 1)[0]
     # A push has no dispatch inputs, so only an explicit request signs the claim, and
     # a hand-off carries that request to the run on the tag.
-    assert text.count("${{ inputs.records_rollback_runtime_target_json }}") == 2
+    assert text.count("${{ inputs.records_rollback_runtime_target_json }}") == 3
     assert "RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}" in plan
     assert "records_rollback_runtime_target_json: $records" in plan
     assert (
@@ -525,12 +472,11 @@ def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
     assert "id: cellctl-build" in cellctl
     assert "context: infra/cellctl" in cellctl
     assert "file: infra/cellctl/Dockerfile" in cellctl
-    assert "${{ fromJSON(env.IMAGES).cellctl.ref }}" in cellctl
-    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
     assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
     assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
-    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
-    assert "gh release edit" in cellctl
+    assert "push-by-digest=true" in cellctl
+    assert "release-image-evidence-cellctl" in cellctl
+    assert "release_recovery.py finish-images" in cellctl
 
 
 def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:

@@ -24,5 +24,25 @@ The 0.115.0 release has no Cloud cell image and no cellctl image, and its GitHub
 
 - Workflow: `.github/workflows/release-please.yml`.
 - Docs: `docs/release.md`.
-- Tests: `tests/test_container_distribution.py`.
+- Recovery: `infra/scripts/release_recovery.py`, using the existing hosted verifiers.
+- Tests: container distribution and release recovery regressions.
 - Behaviour: a normal release now publishes from a `workflow_dispatch` run on its tag, so new runtime candidates record the tag as their attested source ref. The candidate validator already accepts that shape, and the signer workflow stays `release-please.yml`.
+
+## Recovery correction
+
+The first branch dry run succeeded while skipping every package and image build.
+Dispatch jobs must override skipped ancestors while requiring successful direct
+prerequisites. Presence checks must compare package identity and immutable bytes.
+
+New images publish by digest first. Original attestations and the existing hosted
+candidate triplet must survive before discovery tags point to that digest. Retries
+recover those bytes from release assets or producer Actions artifacts, including
+runs that stopped before tagging. Legacy tags without original evidence remain
+incomplete until a complete successor ships. Temporary Actions artifacts and
+caches are allowed during dry runs; release and registry writes are not.
+
+The corrected recovery checks BuildKit targets for every platform and the signed
+producer invocation. It checks all immutable aliases before building or tagging.
+A shared image-publication concurrency group serializes floating-tag updates
+across release versions; dry runs do not occupy that queue. Complete published
+distributions take precedence, and partial recovery excludes dry-run producers.

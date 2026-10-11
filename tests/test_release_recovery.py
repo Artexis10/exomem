@@ -1,0 +1,426 @@
+"""Release retries preserve immutable files and original producer evidence."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "infra/scripts"))
+spec = importlib.util.spec_from_file_location(
+    "release_recovery", ROOT / "infra/scripts/release_recovery.py"
+)
+assert spec and spec.loader
+recovery = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recovery)
+
+
+def test_distribution_completeness_requires_matching_package_and_both_kinds():
+    assert not recovery.distributions_complete(
+        ["other-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz"], "sample", "1.2.3"
+    )
+    assert not recovery.distributions_complete(
+        ["sample-1.2.2-py3-none-any.whl", "sample-1.2.3.tar.gz"], "sample", "1.2.3"
+    )
+    assert recovery.distributions_complete(
+        ["sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz"], "sample", "1.2.3"
+    )
+
+
+def test_pypi_retry_keeps_matching_bytes_and_rejects_conflicting_immutable_file(tmp_path):
+    wheel = tmp_path / "sample-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"original wheel")
+    row = {"filename": wheel.name, "digests": {"sha256": recovery.sha256(wheel)}}
+    assert recovery.missing_distributions([wheel], [row]) == []
+    row["digests"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="immutable"):
+        recovery.missing_distributions([wheel], [row])
+
+
+def test_partial_release_triplet_can_be_completed_from_original_artifact(tmp_path):
+    release = tmp_path / "release"
+    artifact = tmp_path / "artifact"
+    release.mkdir()
+    artifact.mkdir()
+    candidate = "original.candidate-v1.json"
+    (release / candidate).write_bytes(b"original signed candidate")
+    for name, data in (
+        (candidate, b"original signed candidate"),
+        ("original.sigstore.json", b"image bundle"),
+        ("original.candidate.sigstore.json", b"candidate bundle"),
+    ):
+        (artifact / name).write_bytes(data)
+    recovery.merge_evidence(artifact, release)
+    assert sorted(p.name for p in release.iterdir()) == sorted(p.name for p in artifact.iterdir())
+    assert (release / candidate).read_bytes() == b"original signed candidate"
+    (artifact / candidate).write_bytes(b"retry identity")
+    with pytest.raises(ValueError, match="immutable"):
+        recovery.merge_evidence(artifact, release)
+
+
+def test_recovered_image_without_version_tag_finishes_each_tag_without_building(
+    tmp_path, monkeypatch
+):
+    """A producer can retain evidence and stop before any discovery tag exists."""
+    commit = "a" * 40
+    digest = "sha256:" + "b" * 64
+    repository = "ghcr.io/example/runtime"
+    version_tag = repository + ":1.2.3-cloud"
+    commit_tag = repository + ":" + commit + "-cloud"
+    receipt = tmp_path / "original.sigstore.json"
+    receipt.write_bytes(b"original signed producer bytes")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(recovery, "recovered_image", lambda *args: (digest, [receipt]))
+    monkeypatch.setattr(recovery, "image_evidence", lambda *args: None)
+    monkeypatch.setattr(recovery, "release_assets", lambda *args: [])
+    tags = {commit_tag: digest}
+    monkeypatch.setattr(recovery, "image_digest", lambda ref: tags.get(ref))
+    uploaded = {}
+    monkeypatch.setattr(
+        recovery,
+        "upload_missing",
+        lambda tag, directory: uploaded.update(
+            {p.name: p.read_bytes() for p in directory.iterdir()}
+        ),
+    )
+
+    def command(*args):
+        if args[0] == "git":
+            return commit
+        if args[:4] == ("docker", "buildx", "imagetools", "create"):
+            assert args[-1] == repository + "@" + digest
+            assert "--prefer-index=false" in args
+            tags[args[args.index("--tag") + 1]] = digest
+            return ""
+        raise AssertionError(f"Unexpected command: {args}")
+
+    monkeypatch.setattr(recovery, "run", command)
+    images = {"cloud": {"ref": version_tag, "immutable_tags": [version_tag, commit_tag]}}
+    plan = recovery.inspect_images("v1.2.3", images, tmp_path, dry_run=False)
+    assert plan["cloud"]["publish"] is False
+    assert plan["cloud"]["state"] == "missing"
+    recovery.finish_images("v1.2.3", plan, tmp_path)
+    assert tags == {version_tag: digest, commit_tag: digest}
+    assert uploaded == {receipt.name: b"original signed producer bytes"}
+
+
+def test_dry_run_does_not_consult_an_unavailable_registry(tmp_path, monkeypatch):
+    def unavailable(*args):
+        raise AssertionError("dry run must not depend on registry availability")
+
+    monkeypatch.setattr(recovery, "image_evidence", unavailable)
+    monkeypatch.setattr(recovery, "image_digest", unavailable)
+    plan = recovery.inspect_images(
+        "v1.2.3", {"cloud": {"ref": "ghcr.io/example/runtime:1.2.3-cloud"}}, tmp_path, dry_run=True
+    )
+    assert plan["cloud"]["publish"] is True
+
+
+def test_hosted_recovery_keeps_original_candidate_identity_after_partial_upload(
+    tmp_path, monkeypatch
+):
+    import json
+
+    from test_hosted_image_candidates import COMMIT, DIGEST, _record
+
+    original = tmp_path / "original.candidate-v1.json"
+    image_bundle = tmp_path / "original.sigstore.json"
+    signature = tmp_path / "original.candidate.sigstore.json"
+    image_bundle.write_bytes(b"original image signature")
+    candidate = _record()
+    candidate["attestation"]["bundleSha256"] = recovery.sha256(image_bundle)
+    original.write_text(json.dumps(candidate))
+    original_bytes = original.read_bytes()
+    monkeypatch.setattr(recovery, "verify_build_target", lambda *args: None)
+    assert recovery.recovered_image(
+        "hosted", "ghcr.io/artexis10/exomem", "v0.35.1", COMMIT, tmp_path
+    ) == (None, [])
+    signature.write_bytes(b"original candidate signature")
+    verified = []
+    monkeypatch.setattr(
+        recovery.candidate_tool,
+        "verify_candidate",
+        lambda path, **kwargs: verified.append(path.read_bytes()),
+    )
+    digest, files = recovery.recovered_image(
+        "hosted", "ghcr.io/artexis10/exomem", "v0.35.1", COMMIT, tmp_path
+    )
+    assert digest == "sha256:" + DIGEST
+    assert {p.name for p in files} == {original.name, image_bundle.name, signature.name}
+    assert verified == [original_bytes]
+    assert original.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("other_target", ["lean", None, "cloud"])
+def test_raw_bundle_cannot_bless_another_target_or_a_platform_without_provenance(
+    tmp_path, monkeypatch, other_target
+):
+    import base64
+    import json
+
+    commit = "a" * 40
+    digest = "b" * 64
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-1.sigstore.json"
+    statement = {
+        "subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}],
+        "predicate": {
+            "runDetails": {
+                "metadata": {
+                    "invocationId": "https://github.com/example/runtime/actions/runs/123/attempts/1"
+                }
+            }
+        },
+    }
+    bundle.write_text(
+        json.dumps(
+            {"dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}}
+        )
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    inspection = {
+        "images": {"linux/amd64": {}, "linux/arm64": {}},
+        "provenance": {
+            "linux/amd64": {"SLSA": {"invocation": {"parameters": {"args": {"target": "cloud"}}}}}
+        },
+    }
+    if other_target is not None:
+        inspection["provenance"]["linux/arm64"] = {
+            "SLSA": {"invocation": {"parameters": {"args": {"target": other_target}}}}
+        }
+    monkeypatch.setattr(
+        recovery,
+        "run",
+        lambda *args: (
+            json.dumps([{"verificationResult": {"statement": statement}}])
+            if args[0] == "gh"
+            else json.dumps(inspection)
+        ),
+    )
+    if other_target == "cloud":
+        assert (
+            recovery.verify_image_bundle(
+                bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud"
+            )
+            == "sha256:" + digest
+        )
+    else:
+        with pytest.raises(ValueError, match="target|platform"):
+            recovery.verify_image_bundle(
+                bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud"
+            )
+
+
+def test_raw_bundle_uses_signed_producer_attempt_instead_of_filename_claim(tmp_path, monkeypatch):
+    import base64
+    import json
+
+    commit = "a" * 40
+    digest = "b" * 64
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-2.sigstore.json"
+    statement = {
+        "subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}],
+        "predicate": {
+            "runDetails": {
+                "metadata": {
+                    "invocationId": "https://github.com/example/runtime/actions/runs/123/attempts/1"
+                }
+            }
+        },
+    }
+    bundle.write_text(
+        json.dumps(
+            {"dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}}
+        )
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(
+        recovery,
+        "run",
+        lambda *args: json.dumps([{"verificationResult": {"statement": statement}}]),
+    )
+    with pytest.raises(ValueError, match="producer"):
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
+
+
+def test_commit_alias_without_version_or_evidence_prevents_rebuild(tmp_path, monkeypatch):
+    version = "ghcr.io/example/runtime:1.2.3-cloud"
+    commit_tag = "ghcr.io/example/runtime:commit-cloud"
+    monkeypatch.setattr(recovery, "run", lambda *args: "a" * 40)
+    monkeypatch.setattr(recovery, "image_evidence", lambda *args: None)
+    monkeypatch.setattr(recovery, "recovered_image", lambda *args: (None, []))
+    monkeypatch.setattr(
+        recovery, "image_digest", lambda ref: "sha256:" + "b" * 64 if ref == commit_tag else None
+    )
+    result = recovery.inspect_images(
+        "v1.2.3",
+        {"cloud": {"ref": version, "immutable_tags": [version, commit_tag]}},
+        tmp_path,
+        dry_run=False,
+    )
+    assert not result["cloud"]["publish"]
+    assert result["cloud"]["state"].startswith("incomplete:")
+
+
+def test_late_alias_conflict_prevents_all_tag_writes(tmp_path, monkeypatch):
+    digest = "sha256:" + "b" * 64
+    receipt = tmp_path / "original.sigstore.json"
+    receipt.write_bytes(b"signed original")
+    monkeypatch.setattr(
+        recovery,
+        "run",
+        lambda *args: (
+            "a" * 40 if args[0] == "git" else pytest.fail("tag write before complete preflight")
+        ),
+    )
+    monkeypatch.setattr(
+        recovery, "upload_missing", lambda *args: pytest.fail("upload before complete preflight")
+    )
+    monkeypatch.setattr(recovery, "recovered_image", lambda *args: (digest, [receipt]))
+    monkeypatch.setattr(
+        recovery,
+        "image_digest",
+        lambda ref: "sha256:" + "c" * 64 if ref.endswith(":commit-cloud") else None,
+    )
+    images = {
+        "lean": {
+            "ref": "ghcr.io/example/runtime:1.2.3",
+            "immutable_tags": ["ghcr.io/example/runtime:1.2.3"],
+        },
+        "cloud": {
+            "ref": "ghcr.io/example/runtime:1.2.3-cloud",
+            "immutable_tags": [
+                "ghcr.io/example/runtime:1.2.3-cloud",
+                "ghcr.io/example/runtime:commit-cloud",
+            ],
+        },
+    }
+    with pytest.raises(ValueError, match="immutable"):
+        recovery.finish_images("v1.2.3", images, tmp_path)
+
+
+def test_complete_published_distributions_ignore_unrelated_dry_run_artifacts(tmp_path, monkeypatch):
+    wheel = "sample-1.2.3-py3-none-any.whl"
+    sdist = "sample-1.2.3.tar.gz"
+    published = {wheel: b"published wheel", sdist: b"published sdist"}
+    monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
+    monkeypatch.setattr(
+        recovery, "release_assets", lambda tag: [{"name": name} for name in published]
+    )
+    monkeypatch.setattr(
+        recovery,
+        "download_release",
+        lambda tag, names, directory: [
+            (directory / name).write_bytes(published[name]) for name in names
+        ],
+    )
+    monkeypatch.setattr(recovery, "pypi_files", lambda *args: [])
+    monkeypatch.setattr(
+        recovery,
+        "producer_artifacts",
+        lambda *args, **kwargs: pytest.fail("published pair must not consult dry-run artifacts"),
+    )
+    recovery.prepare_distributions("v1.2.3", tmp_path, dry_run=False)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == published
+
+
+def test_partial_distributions_select_original_publication_and_exclude_dry_run(
+    tmp_path, monkeypatch
+):
+    import json
+
+    commit = "a" * 40
+    wheel = "sample-1.2.3-py3-none-any.whl"
+    sdist = "sample-1.2.3.tar.gz"
+    original = {wheel: b"published wheel", sdist: b"original sdist"}
+    (tmp_path / wheel).write_bytes(original[wheel])
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    producers = [
+        {"id": run_id, "head_sha": commit, "head_branch": "v1.2.3", "event": "workflow_dispatch"}
+        for run_id in (200, 100)
+    ]
+
+    def command(*args):
+        endpoint = args[-1]
+        if "/workflows/" in endpoint:
+            return json.dumps([{"workflow_runs": producers}])
+        if "/artifacts?" in endpoint:
+            return json.dumps(
+                [
+                    {
+                        "artifacts": [
+                            {
+                                "id": 200 if "/200/" in endpoint else 100,
+                                "name": "python-distributions",
+                                "expired": False,
+                                "created_at": "2026-01-01T00:02:00Z",
+                            }
+                        ]
+                    }
+                ]
+            )
+        if "/jobs?" in endpoint:
+            conclusion = "skipped" if "/200/" in endpoint else "failure"
+            return json.dumps(
+                [
+                    {
+                        "jobs": [
+                            {
+                                "name": "build-artifacts",
+                                "started_at": "2026-01-01T00:00:00Z",
+                                "completed_at": "2026-01-01T00:03:00Z",
+                                "steps": [
+                                    {
+                                        "name": "Upload missing artifacts to the GitHub release",
+                                        "conclusion": conclusion,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            )
+        raise AssertionError(args)
+
+    import zipfile
+
+    def download(args, *, stdout, check):
+        assert args[-1].endswith("/artifacts/100/zip"), "select the original artifact ID"
+        with zipfile.ZipFile(stdout, "w") as archive:
+            for name, data in original.items():
+                archive.writestr(name, data)
+
+    monkeypatch.setattr(recovery.subprocess, "run", download)
+    monkeypatch.setattr(recovery, "run", command)
+    recovery.producer_artifacts(
+        "v1.2.3",
+        commit,
+        ("python-distributions",),
+        tmp_path,
+        package={"name": "sample", "version": "1.2.3"},
+    )
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == original
+
+
+@pytest.mark.parametrize(
+    "name,targets", [("cloud", ["cloud"]), ("ml", ["ml", "ml"]), ("cellctl", [None])]
+)
+def test_buildkit_target_verification_accepts_all_matching_platforms(monkeypatch, name, targets):
+    import json
+
+    proofs = [
+        {"SLSA": {"invocation": {"parameters": {"args": {"target": target} if target else None}}}}
+        for target in targets
+    ]
+    if len(proofs) == 1:
+        inspection = {"images": {"architecture": "amd64", "os": "linux"}, "provenance": proofs[0]}
+    else:
+        platforms = ("linux/amd64", "linux/arm64")
+        inspection = {
+            "images": dict.fromkeys(platforms, {}),
+            "provenance": dict(zip(platforms, proofs, strict=True)),
+        }
+    monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(inspection))
+    recovery.verify_build_target("ghcr.io/example/runtime@sha256:" + "b" * 64, name)
