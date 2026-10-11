@@ -29,7 +29,7 @@ remain open; this contract refresh does not establish their acceptance.
 - Scaffold `SKILL.md`: `browse_memory` documented in the Tier 1 table, phrasing mappings
   ("what does this vault look like" → `browse_memory(mode="overview")`), and a short "Assessing or adopting a vault you
   didn't build" block (`browse_memory(mode="overview")` →
-  `browse_memory(mode="list")` → `find_memory(scope="vault")` →
+  `browse_memory(mode="list")` → `ask_memory(scope="vault")` →
   targeted `read_memory`; never bulk-read). Generic wording only (leak test gates).
 - README core-tools table gains one row.
 - MCP schema fidelity baseline regenerated (`tests/fixtures/mcp_tool_schemas.json`).

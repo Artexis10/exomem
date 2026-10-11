@@ -2792,7 +2792,7 @@ The compact surface SHALL preserve enough public guidance to choose an operation
 The single command registry SHALL expose `result_level`, `categories`, `kinds`, the structured `filters` expression, and `explain` on recall commands; exact unit selection on read commands; category/kind contract controls on schema commands; and semantic-unit feedback on writers consistently across MCP, REST, CLI, OpenAPI, and generated capability documentation.
 
 #### Scenario: Recall schema parity
-- **WHEN** generated schemas are inspected for MCP `ask_memory`, REST `/api/ask_memory`, CLI `ask-memory`, and OpenAPI
+- **WHEN** generated schemas are inspected for MCP `ask_memory`, REST `/api/ask_memory`, CLI `ask_memory`, and OpenAPI
 - **THEN** the same accepted result-level/category/kind/filter/explanation parameters and descriptions are present
 
 #### Scenario: Existing default schema remains compatible

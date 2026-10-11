@@ -60,7 +60,7 @@ for vaults with no initialized `Knowledge Base/`.
 ### Requirement: Skill guidance steers agents away from bulk reads
 The shipped skill contract SHALL document `browse_memory(mode="overview")` as the first step for
 assessing vault structure (before `browse_memory(mode="list")`,
-`find_memory(scope="vault")`, and targeted `read_memory`), SHALL include phrasing mappings such as "what does this vault
+`ask_memory(scope="vault")`, and targeted `read_memory`), SHALL include phrasing mappings such as "what does this vault
 look like" to `browse_memory(mode="overview")`, and SHALL instruct agents never to
 bulk-read a vault to answer structural questions. Scaffold wording SHALL remain
 generic (no personal or product tokens).
