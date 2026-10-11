@@ -199,9 +199,11 @@ def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation
     # Uploading ciphertext requires no mounted volume or hold.
     decision = release()
     decision.apply_manifests = active_hold == "import" or bool(remaining)
-    if active_hold != "import" and not remaining:
-        decision.row_updates = {}
     decision.prepare_import_upload = item.ciphertext_bytes is not None and item.upload_id is None
+    if active_hold != "import" and not remaining:
+        if not decision.prepare_import_upload:
+            return None  # Ordinary reconciliation owns readiness while the owner uploads.
+        decision.row_updates = {}
     return decision
 
 

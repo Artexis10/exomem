@@ -97,6 +97,12 @@ async def test_reconcile_prepare_survives_restart_with_real_c5(cell_db):
         await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
         assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
         assert (await db.select_all_rows(controller))[0].hold_kind is None
+        jobs.clear()
+        cluster.observations[CELL] = _observed_from_applied(cluster, CELL)
+        await reconcile.reconcile_once(controller, cluster, b2, volume, _secrets_config(), _cluster_config(), now=NOW)
+        current = (await db.select_all_rows(controller))[0]
+        assert current.observed_state == "running" and current.ready
+        assert (await db.read_import(controller, CELL)).observed_state == "key_ready"
     finally:
         await app.close()
         await controller.close()

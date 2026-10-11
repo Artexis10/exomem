@@ -54,8 +54,16 @@ gone. Source hashes matched, and the identity, ciphertext and staging files
 were absent after cleanup.
 
 The CLI passed a trusted-TLS rehearsal with a synthetic OAuth server and PKCE.
-Live-K3s refusal cases, production OAuth registration, bucket lifecycle/CORS
-and production rollout remain open. The local storage rehearsal does not prove
-multi-node storage behavior or production bucket restrictions. The owner
-restore was previously performed; unchecked historical tasks do not authorize
-repeating it.
+Independent K3s rehearsals also refused an unsafe member after a valid member,
+a wrong recipient, and a substituted ciphertext part. Each refusal preserved
+the complete canonical vault manifest and removed temporary import resources.
+The readiness correction passed a fresh accepted import. C1 reported running
+and ready after key preparation and after the presigned ciphertext upload.
+The controller kept admission occupied until all phase Jobs and Pods disappeared.
+
+Task 3.5 remains open for the refusal matrix in the maintained live suite.
+Production OAuth registration, bucket lifecycle/CORS and production rollout
+also remain open. The one-node local storage rehearsal does not prove multi-node
+storage behavior, large multipart uploads or production bucket restrictions.
+The owner restore was previously performed; unchecked historical tasks do not
+authorize repeating it.
