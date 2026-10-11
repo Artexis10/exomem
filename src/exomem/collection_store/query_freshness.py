@@ -72,6 +72,25 @@ def maintain(conn, collection_id, values, *, previous=None) -> None:
                      (membership + (previous is None), _json(fields), collection_id))
 
 
+def advance_all(conn, collection_id) -> None:
+    """Count a change to every covered field at once, for writes that do not compare values.
+
+    A derived collection's import commits a member's rows outside the store, so the
+    member's log entry advances membership and every field, which ends old cursors.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError("cursor basis maintenance requires a writer transaction")
+    row = conn.execute("SELECT membership_revision,fields_json FROM query_cursor_state WHERE collection_id=?",
+                       (collection_id,)).fetchone()
+    if row is None:
+        return
+    fields = json.loads(row[1])
+    for spec in fields.values():
+        spec[1] += 1
+    conn.execute("UPDATE query_cursor_state SET membership_revision=?,fields_json=? WHERE collection_id=?",
+                 (row[0] + 1, _json(fields), collection_id))
+
+
 def uniform_basis(conn, collection_id, dependencies) -> UniformBasis | None:
     """Read a bounded basis after the caller proves uniform field admission.
 

@@ -541,7 +541,8 @@ _REGISTRY = (
         # The live structured-collection store. Canonical, so it is not in
         # the machine-local migration set; its in-vault replica and mode
         # marker are vault-canonical and are reserved by their own phase.
-        exact=_sqlite_family("collections.sqlite"),
+        # Derived collections' rows sit beside it and rebuild from its import log.
+        exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
     ),
     InternalStateDescriptor(
         "collection-replica",
