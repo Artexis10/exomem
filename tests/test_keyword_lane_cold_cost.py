@@ -10,6 +10,7 @@ import pytest
 from exomem import find as find_module
 from exomem import freshness, index_sync, lexstore, readiness
 from exomem import vault as vault_module
+from exomem.governance.principal import library_scope
 from exomem.vault import walk_vault_md
 
 pytestmark = pytest.mark.skipif(
@@ -236,6 +237,7 @@ def test_large_cold_keyword_catalog_returns_typed_warming_without_a_walk(
     assert parsed == 0
 
 
+@library_scope()
 def test_large_lazy_empty_query_returns_typed_warming_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -625,6 +627,7 @@ def test_strict_resolver_declines_missing_catalog_without_walking(
     assert observed_checkpoints == [checkpoint]
 
 
+@library_scope()
 def test_vector_graph_resolver_inherits_strict_server_projection_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -843,6 +846,7 @@ def test_failed_catalog_warm_retries_repair_before_refusing_request(
     assert scheduled == [tmp_path]
 
 
+@library_scope()
 def test_large_cold_hybrid_catalog_returns_typed_warming_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

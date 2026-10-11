@@ -67,6 +67,27 @@ def test_legacy_typed_bullet_remains_indexable_when_requested() -> None:
     assert document.errors == []
 
 
+def test_neutral_legacy_candidates_survive_until_selected_registry_admission() -> None:
+    markdown = (
+        "- Private-Link [[Bare label]]\n- private_link: [[Colon label]]\n"
+        "## Relations\n- private_link [[Canonical label]]\n"
+        "```markdown\n- private_link [[Fenced]]\n~~~\n- private_link [[After mixed fence]]\n"
+    )
+    candidates = markdown_relations.scan_markdown_relations(markdown, include_legacy=True)
+    public = markdown_relations.interpret_markdown_relations(candidates, relation_types=set(), retain_unknown=True)
+    private = markdown_relations.interpret_markdown_relations(
+        candidates, relation_types={"private_link"}, retain_unknown=True
+    )
+
+    assert [relation.target for relation in public.relations] == ["Colon label", "Canonical label", "After mixed fence"]
+    assert [relation.target for relation in private.relations] == ["Bare label", "Colon label", "Canonical label", "After mixed fence"]
+    assert [(item.raw_kind, item.kind, item.has_colon, item.canonical, item.grammar_valid)
+            for item in candidates.candidates[:2]] == [
+        ("Private-Link", "private_link", False, False, True),
+        ("private_link", "private_link", True, False, True),
+    ]
+
+
 def test_fenced_relation_example_is_ignored() -> None:
     document = markdown_relations.parse_markdown_relations(
         "## Relations\n```markdown\n- depends_on [[Example]]\n```\n"

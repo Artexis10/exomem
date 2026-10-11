@@ -120,12 +120,12 @@ def test_an_append_encodes_only_the_new_chunk_and_the_new_unit(live, monkeypatch
 
     target.write_text(_source([first]), encoding="utf-8")
     assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
+    # The section heading and its observation are both stored occurrences.
     units_before = [
-        unit.content
-        for unit in semantic_index.current_parent_index_state(vault, target).document.units
-        if unit.unit_ref is not None
+        occurrence.content
+        for occurrence in semantic_index.current_parent_index_state(vault, target).occurrences
     ]
-    assert len(units_before) == 1, "fixture must parse to one addressable unit"
+    assert len(units_before) == 2, "fixture must parse to a section and one observation"
     assert encoder.calls == [["alpha", "beta"], units_before]
 
     target.write_text(_source([first, second]), encoding="utf-8")
@@ -133,12 +133,13 @@ def test_an_append_encodes_only_the_new_chunk_and_the_new_unit(live, monkeypatch
     assert embeddings.upsert_after_write_status(vault, [target]).status == "completed"
 
     units_after = [
-        unit.content
-        for unit in semantic_index.current_parent_index_state(vault, target).document.units
-        if unit.unit_ref is not None
+        occurrence.content
+        for occurrence in semantic_index.current_parent_index_state(vault, target).occurrences
     ]
+    kept = [content for content in units_after if content in units_before]
     new_units = [content for content in units_after if content not in units_before]
-    assert len(new_units) == 1
+    # The grown section body and the new observation; the first observation is reused.
+    assert len(kept) == 1 and len(new_units) == 2
     assert encoder.calls == [["gamma"], new_units]
 
     # Unchanged texts kept the vector the first write computed (stamp 1); the
@@ -147,8 +148,8 @@ def test_an_append_encodes_only_the_new_chunk_and_the_new_unit(live, monkeypatch
     assert [(i, t) for i, t, _ in _chunk_rows(vault)] == [(0, "alpha"), (1, "beta"), (2, "gamma")]
     assert [stamp for _, _, stamp in _chunk_rows(vault)] == [1.0, 1.0, 3.0]
     stamps = _unit_rows(vault)
-    assert stamps[units_before[0]] == 2.0
-    assert stamps[new_units[0]] == 4.0
+    assert [stamps[content] for content in kept] == [2.0]
+    assert [stamps[content] for content in new_units] == [4.0, 4.0]
 
 
 def test_service_publication_proves_source_and_both_projections(live, monkeypatch) -> None:
@@ -178,15 +179,13 @@ def test_service_publication_proves_source_and_both_projections(live, monkeypatc
     assert not proof.current(vault)
     proof = embeddings.upsert_after_write_status(vault, [target]).publication
     assert proof is not None and proof.current(vault)
-    # Registry edits invalidate semantic units even when the parent is unchanged.
+    # Stored occurrences hold no selected meaning, so a registry edit owes them nothing.
     from exomem import semantic_language_registry
 
     registry = semantic_language_registry.registry_path(vault)
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text("schema_version: 1\ncategories: {}\nkinds: {}\n", encoding="utf-8")
-    assert not proof.current(vault)
-    proof = embeddings.upsert_after_write_status(vault, [target]).publication
-    assert proof is not None and proof.current(vault)
+    assert proof.current(vault)
     target.write_text(_source([]), encoding="utf-8")
     assert not proof.current(vault)
 
@@ -302,7 +301,7 @@ def test_cold_publication_refuses_malformed_semantic_unit_metadata(live, monkeyp
     assert owner.publication_ready(PAGE)
     with sqlite3.connect(embeddings.get_embedding_index(vault).path) as connection:
         connection.execute(
-            "UPDATE semantic_unit_vectors SET unit_ref = '!' || substr(unit_ref, 2) "
+            "UPDATE semantic_unit_vectors SET unit_key = '!' || substr(unit_key, 2) "
             "WHERE parent_path = ?", (PAGE,),
         )
     assert not owner.publication_ready(PAGE)
@@ -341,7 +340,7 @@ def test_reuse_budget_skips_large_old_projection_without_losing_new_write(live, 
     assert space is not None
     chunks, units, _space = index.stored_text_vectors_with_space(PAGE, max_bytes=1024 * 1024)
     assert set(chunks) == {"alpha", "beta"}
-    assert len(units) == 1
+    assert len(units) == len(semantic_index.current_parent_index_state(vault, target).occurrences)
     encoder.calls.clear()
     monkeypatch.setattr(index, "stored_text_vectors", lambda rel, **_kwargs: (
         index.stored_text_vectors_with_space(rel, max_bytes=1)[:2]

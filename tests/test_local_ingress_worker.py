@@ -124,8 +124,13 @@ def _oauth(public: SessionAuthority, local: SessionAuthority | None) -> ExomemSe
 
 
 @pytest.fixture
-def managed(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+def managed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
     """A worker whose manager gave it the proof, claimed as the worker entry does."""
+    from fastmcp import settings
+
+    # Login verification and later result consumption share the host authority.
+    monkeypatch.setattr(settings, "home", tmp_path)
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", ROOT)
     monkeypatch.setattr(local_ingress, "_PROOF_KEY", None)
     monkeypatch.setenv(INGRESS_KEY_ENV, KEY)
     local_ingress.claim_proof_key()

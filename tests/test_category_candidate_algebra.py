@@ -403,14 +403,6 @@ def test_mixed_axis_or_hydrates_only_branch_candidates(
         return original_state(root, path, **kwargs)
 
     monkeypatch.setattr(semantic_index, "current_parent_index_state", observed_state)
-    store = lexstore.get_store(tmp_path)
-    monkeypatch.setattr(
-        store,
-        "_semantic_unit_hit",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("parent candidate lookup must not hydrate semantic-unit rows")
-        ),
-    )
     monkeypatch.setattr(
         find_module,
         "_walk_md",

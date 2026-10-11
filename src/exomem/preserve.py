@@ -31,6 +31,7 @@ import logging
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -48,6 +49,7 @@ from .vault import (
     FrontmatterError,
     PlannedWrite,
     PreparedBinaryContent,
+    _is_reparse,
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
@@ -338,7 +340,8 @@ def destination_duplicate_index(
     Only wanted hashes, when supplied, reach protected-original byte verification.
     """
     index: dict[str, DuplicateArtifact] = {}
-    folder = kb_root(vault_root) / "Evidence" / scope / category
+    folder = evidence_folder(vault_root, scope, category)
+    admit_destination(vault_root, folder, directory=True)
     try:
         sidecars = sorted(folder.glob("*.md"))
     except OSError:
@@ -405,7 +408,7 @@ def _artifact_name(
 
     safe = _sanitize_filename(filename)
     protected = validate_raw_capture(
-        safe, destination=str(kb_root(vault_root).relative_to(vault_root) / "Evidence" / scope / category),
+        safe, destination=str(evidence_folder(vault_root, scope, category).relative_to(vault_root)),
         raw_protection=raw_protection,
     )
     if protected and safe and not raw_guard.marked(safe):
@@ -451,6 +454,55 @@ def stored_artifact(
     )
 
 
+#: The one refusal every upload door gives for a destination it may not use.
+_UNAVAILABLE = "target is unavailable"
+_MEMBERS_IN_CAPTURE = "archive members are unavailable in a capture namespace"
+
+
+def admit_destination(
+    vault_root: Path, target: Path, *, directory: bool = False, members: bool = False
+) -> None:
+    """Decide an Evidence destination for the caller before any existence check or write.
+
+    Every upload door calls this first: `preserve`, the duplicate index, archive
+    members and upload-session creation. `target` is the artifact, or with
+    `directory` its folder. A refusal is `WRITE_REFUSED` and says nothing of what
+    the destination holds.
+
+    `members` is an archive kept as its members. Its blobs are written outside
+    the vault's write path, so a capture namespace could not classify them and
+    refuses the manifest after they are written; such an upload refuses here.
+    """
+    from .governance import connector_boundary
+
+    root = Path(vault_root)
+    relative = target.relative_to(root)
+    try:
+        connector_boundary.require_create(root, relative.as_posix(), directory=directory)
+    except ValueError:
+        _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+    if members and connector_boundary.capture_namespace(root, relative.as_posix()):
+        _raise("WRITE_REFUSED", [], _MEMBERS_IN_CAPTURE)
+    # The vault's path guard refuses a linked ancestor; archive blobs and the
+    # duplicate index read and write beside it, so they refuse one here too.
+    parent = root
+    for part in relative.parts if directory else relative.parts[:-1]:
+        parent /= part
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            break
+        except OSError:
+            _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+            _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+
+
+def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
+    """The Evidence family folder for already-valid destination segments."""
+    return kb_root(vault_root) / "Evidence" / scope / category
+
+
 def evidence_artifact(
     vault_root: Path, *, scope: str, category: str, filename: str, raw_protection: bool = False
 ) -> tuple[Path, bool]:
@@ -462,7 +514,7 @@ def evidence_artifact(
     name, protected = _artifact_name(vault_root, scope, category, filename, raw_protection=raw_protection)
     if not name:
         _raise("INVALID_PRESERVE", ["filename"], _EMPTY_FILENAME)
-    return kb_root(vault_root) / "Evidence" / scope / category / name, protected
+    return evidence_folder(vault_root, scope, category) / name, protected
 
 
 def preserve(
@@ -531,8 +583,9 @@ def preserve(
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
     kb = kb_root(vault_root)
-    folder = kb / "Evidence" / scope_safe / category_safe
+    folder = evidence_folder(vault_root, scope_safe, category_safe)
     artifact_path = folder / filename_safe
+    admit_destination(vault_root, artifact_path)
 
     if artifact_path.exists():
         return _raise(
@@ -1018,11 +1071,10 @@ def destination_segment_refusal(value: object, *, field: str) -> str | None:
     """Why `value` is not one clean destination segment, or None if it is.
 
     Validation, never normalisation. `_sanitize_segment` deletes the offending
-    character and writes somewhere else: the live vault holds one logical case
-    split across `Evidence/food/caviarhouse-group-order/` and
-    `Evidence/foodcaviarhouse-group-order/` because a separator was silently
-    removed. A refusal costs the caller one corrected call and names the field;
-    a silent fork costs a reader the case.
+    character and writes somewhere else: a scope `work/orders` would land in
+    `Evidence/workorders/`, splitting one logical case across two trees. A
+    refusal costs the caller one corrected call and names the field; a silent
+    fork costs a reader the case.
     """
     if not isinstance(value, str) or not value:
         return f"{field} is required as {DESTINATION_ACCEPTED_FORM}"
@@ -1324,6 +1376,9 @@ def ensure_media_sidecar(
         sidecar = binary_path.with_name(name[:-3] + "-notes.md")
     else:
         sidecar = binary_path.with_name(name + ".md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -1378,6 +1433,9 @@ def ensure_artifact_page(
         page = binary_path.with_name(f"{name[:-3]}-notes.md")
     else:
         page = binary_path.with_name(f"{name}.md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
 

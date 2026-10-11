@@ -18,12 +18,13 @@ from urllib.parse import quote_plus, unquote_plus
 
 import anyio
 import mcp.types
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import PromptError, ResourceError, ToolError
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import jsonrpc_message_adapter
 
-from . import authorization_sessions
+from .. import auth_sessions
+from . import authorization_sessions, connector_boundary
 from . import principal as principal_module
 from .authorization_request import (
     ABSENT_CREDENTIAL,
@@ -736,13 +737,52 @@ class AuthorizationSessionMiddleware(Middleware):
             )
             rule = credential_rule(context.message.name, arguments)
             bound = enforce_credential_rule(admission, rule)
+            if not await auth_sessions.origin_session_active(bound):
+                raise AuthorizationContextUnavailable
+            boundary_revision = connector_boundary.cache_identity(self.vault_root, bound)
+            unrestricted = connector_boundary.unrestricted(self.vault_root, bound)
         except AuthorizationContextUnavailable as error:
             raise ToolError(str(error)) from None
         except AuthorizationRouteUnclassified as error:
             raise ToolError(str(error)) from None
+        except connector_boundary.BoundaryUnavailable:
+            raise ToolError("connector content boundary is unavailable") from None
 
         sanitized_message = context.message.model_copy(
             update={"arguments": arguments}
         )
         with principal_module.request_scope(bound):
-            return await call_next(context.copy(message=sanitized_message))
+            result = await call_next(context.copy(message=sanitized_message))
+        try:
+            # A result computed under changed admission cannot expose its old
+            # contributors. The caller retries under the current host revision.
+            changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
+            limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
+            if not await auth_sessions.origin_session_active(bound) or changed and limited:
+                raise AuthorizationContextUnavailable
+        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
+            raise ToolError("request authority changed before result consumption") from None
+        return result
+
+    async def _read_content(self, context, call_next, error_type):
+        who = principal_module.resolve_mcp_principal()
+        try:
+            if not await auth_sessions.origin_session_active(who):
+                raise AuthorizationContextUnavailable
+            revision = connector_boundary.cache_identity(self.vault_root, who)
+            unrestricted = connector_boundary.unrestricted(self.vault_root, who)
+            with principal_module.request_scope(who):
+                result = await call_next(context)
+            changed = connector_boundary.cache_identity(self.vault_root, who) != revision
+            limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, who)
+            if not await auth_sessions.origin_session_active(who) or changed and limited:
+                raise AuthorizationContextUnavailable
+            return result
+        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
+            raise error_type("request authority changed before result consumption") from None
+
+    async def on_read_resource(self, context, call_next):
+        return await self._read_content(context, call_next, ResourceError)
+
+    async def on_get_prompt(self, context, call_next):
+        return await self._read_content(context, call_next, PromptError)

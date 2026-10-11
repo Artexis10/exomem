@@ -186,7 +186,9 @@ def _legacy_replace(
     old_expected_hash = content_hash(old_text)
 
     if (
-        lifecycle_statuses.Basis(vault_root).classify(old_frontmatter.get("status")).require()
+        lifecycle_statuses.Basis(vault_root).classify(
+            old_frontmatter.get("status"), path=rel_old_with_ext, frontmatter=old_frontmatter
+        ).require()
         == "superseded"
     ):
         raise ReplaceError(
@@ -580,7 +582,11 @@ def replace(
         raise ReplaceError("UNREADABLE", ["old_path"], "old page is unreadable")
 
     status_basis = lifecycle_statuses.Basis(root)
-    predecessor_class = status_basis.classify(old_parsed.frontmatter.get("status")).require()
+    predecessor_class = status_basis.classify(
+        old_parsed.frontmatter.get("status"),
+        path=rel_old_with_ext,
+        frontmatter=old_parsed.frontmatter,
+    ).require()
     recovery_receipt = None
     predecessor_hash = hashlib.sha256(old_bytes).hexdigest()
     try:

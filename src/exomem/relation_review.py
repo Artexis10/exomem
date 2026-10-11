@@ -3730,6 +3730,7 @@ def prepare_commit_creation_draft(
             semantic_contract.corpus_validity_token(
                 root,
                 status_dependencies=preliminary.after_corpus.status_dependencies,
+                definitions=semantic_contract.page_definitions_witnesses(preliminary.candidate),
                 corpus_census=(
                     preliminary.before_corpus_census
                     if preliminary.before_corpus_census is not None

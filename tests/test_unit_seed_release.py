@@ -17,6 +17,9 @@ from urllib.parse import quote
 
 import pytest
 from starlette.testclient import TestClient
+from test_connector_boundary import PRIVATE, PUBLIC
+from test_connector_boundary import configured_boundary as configured_boundary
+from test_private_vocabulary_instances import private_instances as private_instances
 from test_semantic_unit_graph import (
     _PAGE_ID,
     _SOURCE,
@@ -24,7 +27,7 @@ from test_semantic_unit_graph import (
     _unit_context_fixture,
 )
 
-from exomem import commands, semantic_index, server
+from exomem import commands, epistemic_graph, semantic_index, server
 from exomem.governance import egress, membership, policy
 from exomem.governance import principal as principal_module
 
@@ -37,6 +40,156 @@ CF_AUDIENCE = principal_module.normalize_audience(subject=CF_SUBJECT, issuer=CF_
 CF_HEADERS = {"Cf-Access-Jwt-Assertion": "cf-jwt"}
 OWNER_HEADERS = {"Authorization": f"Bearer {REST_KEY}"}
 BOGUS_ANCHOR = f"exomem://memory/{_PAGE_ID}#no-such-anchor"
+
+
+def test_denied_uuid_twin_cannot_change_exact_unit_context(vault, configured_boundary):
+    _, authenticate = configured_boundary
+    (vault / PUBLIC).write_text(
+        f"---\nproject: public-project\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Visible\n\n- [decision] An admitted choice. ^shared\n",
+        encoding="utf-8",
+    )
+    hidden = (
+        f"---\nproject: private-project\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Hidden\n\n- [decision] A denied choice. ^shared\n"
+    )
+    limited = authenticate("limited")
+    unit_ref = f"exomem://memory/{_PAGE_ID}#shared"
+    observations = []
+    for present in (False, True):
+        with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+            if present:
+                (vault / PRIVATE).write_text(hidden, encoding="utf-8")
+            else:
+                (vault / PRIVATE).unlink(missing_ok=True)
+            _rebuild_with_live_checkpoint(vault)
+        with principal_module.request_scope(limited):
+            graph = commands.op_graph_context(vault, unit_ref=unit_ref, depth=0)
+            assembled = commands.op_connect_memory(
+                vault, operation="context", unit_ref=unit_ref, depth=0
+            )
+            observations.append((graph, assembled))
+    assert observations[0][0]["unit_status"] == "found"
+    assert observations[0][1]["documents"]
+    assert observations[0] == observations[1]
+
+
+@pytest.mark.parametrize("hidden_state", ["current", "ref_changed", "missing"])
+def test_denied_parent_rows_spend_no_context_slots_or_drift(
+    vault, configured_boundary, hidden_state
+):
+    _, authenticate = configured_boundary
+    (vault / PUBLIC).write_text(
+        f"---\nproject: public-project\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Visible\n\n- [decision] An admitted choice. ^shared\n",
+        encoding="utf-8",
+    )
+    (vault / PRIVATE).unlink()
+    limited = authenticate("limited")
+    unit_ref = f"exomem://memory/{_PAGE_ID}#shared"
+    with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+        _rebuild_with_live_checkpoint(vault)
+    with principal_module.request_scope(limited):
+        expected_graph = commands.op_graph_context(vault, unit_ref=unit_ref, depth=0)
+        expected_context = commands.op_connect_memory(
+            vault, operation="context", path=PUBLIC, unit_ref=unit_ref, depth=0
+        )
+    hidden_paths = [
+        vault / f"Knowledge Base/Notes/aa-denied-{index:02d}.md"
+        for index in range(epistemic_graph.UNIT_PARENT_REF_MAX_CANDIDATES + 1)
+    ]
+    for hidden in hidden_paths:
+        hidden.write_text(
+            f"---\nproject: private-project\nexomem_id: {_PAGE_ID}\n---\n"
+            "# Hidden\n\n- [decision] A denied choice. ^shared\n",
+            encoding="utf-8",
+        )
+    with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+        _rebuild_with_live_checkpoint(vault)
+    for hidden in hidden_paths:
+        if hidden_state == "missing":
+            hidden.unlink()
+        elif hidden_state == "ref_changed":
+            hidden.write_text(
+                hidden.read_text().replace(_PAGE_ID, "44444444-4444-4444-8444-444444444444")
+            )
+    with principal_module.request_scope(limited):
+        actual_graph = commands.op_graph_context(vault, unit_ref=unit_ref, depth=0)
+        actual_context = commands.op_connect_memory(
+            vault, operation="context", path=PUBLIC, unit_ref=unit_ref, depth=0
+        )
+    assert expected_graph["unit_status"] == "found"
+    assert actual_graph == expected_graph
+    assert actual_context == expected_context
+
+
+def test_context_path_validation_ignores_a_denied_parent(vault, configured_boundary):
+    _, authenticate = configured_boundary
+    (vault / PUBLIC).write_text("# Visible page\n", encoding="utf-8")
+    (vault / PRIVATE).unlink()
+    unit_ref = f"exomem://memory/{_PAGE_ID}#shared"
+    limited = authenticate("limited")
+    with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+        _rebuild_with_live_checkpoint(vault)
+    with principal_module.request_scope(limited):
+        absent = commands.op_connect_memory(
+            vault, operation="context", path=PUBLIC, unit_ref=unit_ref, depth=0
+        )
+    (vault / PRIVATE).write_text(
+        f"---\nproject: private-project\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Hidden\n\n- [decision] A denied choice. ^shared\n",
+        encoding="utf-8",
+    )
+    with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+        _rebuild_with_live_checkpoint(vault)
+    with principal_module.request_scope(limited):
+        denied = commands.op_connect_memory(
+            vault, operation="context", path=PUBLIC, unit_ref=unit_ref, depth=0
+        )
+    assert absent["graph"]["unit_status"] == "missing"
+    assert denied == absent
+
+
+def test_denied_earlier_vocabulary_cannot_select_the_admitted_unit_meaning(
+    vault, private_instances
+):
+    from exomem.vocabulary import instances, registry_spec
+    from test_connector_boundary import SCOPE
+
+    full, limited = private_instances("full"), private_instances("limited")
+    hidden = vault / "Knowledge Base/Notes/aa-private.md"
+    with principal_module.request_scope(full):
+        for scope, category in ((None, "quay_choice"), (SCOPE, "inlet_choice")):
+            overlay = instances.select(vault, registry_spec("categories"), scope).overlay(vault)
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text(
+                f"schema_version: 1\ncategories:\n  {category}:\n"
+                "    description: A local choice\n    aliases: [harbor-choice]\nkinds: {}\n",
+                encoding="utf-8",
+            )
+    (vault / PUBLIC).write_text(
+        f"---\nproject: public-project\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Visible\n\n- [harbor-choice] An admitted choice. ^shared\n",
+        encoding="utf-8",
+    )
+    (vault / PRIVATE).unlink()
+    observations = []
+    for present in (False, True):
+        if present:
+            hidden.write_text(
+                f"---\nproject: private-project\nexomem_id: {_PAGE_ID}\n---\n"
+                "# Hidden\n\n- [harbor-choice] A denied choice. ^shared\n",
+                encoding="utf-8",
+            )
+        with principal_module.request_scope(principal_module.owner_principal(surface="library")):
+            _rebuild_with_live_checkpoint(vault)
+        with principal_module.request_scope(limited):
+            observations.append(commands.op_graph_context(
+                vault, unit_ref=f"exomem://memory/{_PAGE_ID}#shared",
+                categories=["harbor-choice"], depth=0,
+            ))
+    assert observations[0]["seeds"][0]["metadata"]["category"] == "quay_choice"
+    assert observations[1] == observations[0]
 
 
 @pytest.fixture(autouse=True)
@@ -380,9 +533,8 @@ def test_owner_targeted_rule_still_withholds_the_owners_unit_seed(
 ) -> None:
     """A rule that names the `owner` audience is a supported configuration
     (see `test_declared_purpose_cannot_widen_even_for_the_owner` in
-    test_governance_egress.py). The owner shortcut in `unit_parent_withheld`
-    may skip only the graph's row-budget signal, never the per-candidate
-    decision, so an owner-targeted rule must still withhold the owner's own
+    test_governance_egress.py). Owner stale diagnostics never override the
+    per-candidate decision, so an owner-targeted rule must withhold the owner's own
     seed exactly as it withholds the owner's page read."""
     _source, compact, _rich = _unit_context_fixture(vault)
     client = _rest_client(monkeypatch)
@@ -399,3 +551,21 @@ def test_owner_targeted_rule_still_withholds_the_owners_unit_seed(
     assert b'"unit_status": "found"' in nopolicy[1]
     assert b'"unit_status": "missing"' in withheld[1]
     assert withheld == absent
+
+
+def test_owner_targeted_denied_twin_does_not_suppress_an_admitted_unit(vault: Path) -> None:
+    source, compact, _rich = _unit_context_fixture(vault)
+    admitted = vault / "Knowledge Base/Notes/visible.md"
+    admitted.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    _withhold_insights(vault, audience="owner")
+    _rebuild_with_live_checkpoint(vault)
+    who = principal_module.owner_principal(surface="library")
+    with principal_module.request_scope(who):
+        denied_twin = commands.op_graph_context(vault, unit_ref=compact.unit_ref, depth=0)
+    source.unlink()
+    _rebuild_with_live_checkpoint(vault)
+    with principal_module.request_scope(who):
+        absent_twin = commands.op_graph_context(vault, unit_ref=compact.unit_ref, depth=0)
+    assert denied_twin["unit_status"] == "found"
+    assert denied_twin["seeds"][0]["path"] == admitted.relative_to(vault).as_posix()
+    assert denied_twin == absent_twin

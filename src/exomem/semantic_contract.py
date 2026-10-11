@@ -41,6 +41,7 @@ from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
+from .vocabulary import instances
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -204,12 +205,20 @@ class SemanticPageState:
     status_class: str | None = None
     status_unregistered: bool = False
     status_dependency: tuple[str, str] | None = None
+    # The page needs a lifecycle class that this caller's basis cannot supply.
+    # Its eligibility reads False; a decision that depends on it must refuse.
+    status_unavailable: bool = False
     # The caller's note-type basis. Enrichment sets it; a parsed state without
     # one resolves its route and type against the shipped pack only.
     type_basis: note_types.Basis | None = field(default=None, compare=False, repr=False)
     # (target, line) for each deduped body wikilink not already on a typed
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
+    body: str = field(default="", repr=False)
+    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
+    definitions: instances.PageDefinitions | None = field(default=None, repr=False)
+    definitions_unavailable: bool = False
+    neutral_document: SemanticUnitDocument | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frontmatter", _freeze(dict(self.frontmatter)))
@@ -444,6 +453,7 @@ class RelationFact:
     authored: bool
     reviewer_accepted: bool
     target_status: str
+    registry_instance: str = "core"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authored_projects", tuple(sorted(set(self.authored_projects))))
@@ -474,6 +484,7 @@ class RelationFact:
             "authored": self.authored,
             "reviewer_accepted": self.reviewer_accepted,
             "target_status": self.target_status,
+            "registry_instance": self.registry_instance,
         }
 
 
@@ -1003,8 +1014,19 @@ def _copy_registry(
     )
 
 
+#: The writer view is not decided yet; `writer_view_relations` decides it.
+_DECIDE = object()
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticCorpusContext:
+    """One corpus judged for one operation.
+
+    `writer_visibility` is the operation's writer view, decided where the
+    context is built so evaluation reads no host or vault state; `_DECIDE`
+    means the evaluator decides it.
+    """
+
     vault_root: Path
     pages: Mapping[str, SemanticPageState]
     resolver_entries: tuple[tuple[str, str], ...]
@@ -1022,6 +1044,7 @@ class SemanticCorpusContext:
     activation_census: activation_manifest.ActivationCensus
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
+    writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1086,6 +1109,7 @@ class SemanticCorpusContext:
             by_path,
             _copy_registry(registry),
             StableIdentityCensus(tuple(identity_census.entries)),
+            writer_visibility=vault.writer_link_visibility(Path(vault_root)),
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
@@ -1117,7 +1141,11 @@ class SemanticCorpusContext:
             self.identity_census.with_page(
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
+            writer_visibility=self.writer_visibility,
         )
+
+    def registry_for(self, path: str) -> relation_registry.RelationRegistry:
+        return _authored_relations(self.pages.get(path), self.registry)
 
     @property
     def status_dependencies(self) -> tuple[tuple[str, str], ...]:
@@ -1130,6 +1158,11 @@ class SemanticCorpusContext:
                 }
             )
         )
+
+    @property
+    def status_unavailable_paths(self) -> frozenset[str]:
+        """Pages whose lifecycle eligibility this caller cannot decide."""
+        return frozenset(path for path, page in self.pages.items() if page.status_unavailable)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1198,8 +1231,8 @@ def build_page_state(
         vault_root,
         path,
         source,
-        relation_registry=relation_registry,
-        language_registry=language_registry,
+        relation_registry=globals()["relation_registry"].core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
         review_fingerprint=review_fingerprint,
         complete_authored_effects=complete_authored_effects,
     )
@@ -1208,7 +1241,13 @@ def build_page_state(
         state,
         status_basis or lifecycle_statuses.Basis(vault_root),
         type_basis,
+        relation_definitions=relation_registry,
+        language=language_registry,
     )
+
+
+#: The registry subjects whose instance definitions reinterpret a page's units.
+_PAGE_DEFINITION_SUBJECTS = ("relations", "categories")
 
 
 def enrich_page_state(
@@ -1216,9 +1255,49 @@ def enrich_page_state(
     state: SemanticPageState,
     status_basis: lifecycle_statuses.Basis,
     type_basis: note_types.Basis | None = None,
+    *,
+    relation_definitions: relation_registry.RelationRegistry | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    require_status: bool = True,
 ) -> SemanticPageState:
-    """Apply one admitted lifecycle and note-type basis to detached structural facts."""
+    """Interpret detached facts with this page's admitted instance, lifecycle and note types.
+
+    The operation's own page requires its class. Other corpus pages pass
+    ``require_status=False``: an unavailable class marks the page instead of
+    refusing the corpus, and only a decision that reads it refuses.
+    """
     type_basis = type_basis or note_types.Basis(root)
+    definitions = None
+    unavailable = False
+    try:
+        definitions = instances.page_definitions(
+            root, state.path, dict(state.frontmatter), _PAGE_DEFINITION_SUBJECTS,
+        )
+        if definitions.binding_revision is not None or relation_definitions is None:
+            relation_definitions = definitions.snapshots["relations"].typed
+        if definitions.binding_revision is not None or language is None:
+            language = definitions.snapshots["categories"].typed
+    except ValueError:
+        # Core meanings remain public; missing assignment never makes an overlay public.
+        unavailable = True
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
+    document = state.document
+    language_hash = f"{language.schema_version}:{language.content_hash}"
+    relation_hash = f"{relation_definitions.core_version}:{relation_definitions.extension_hash}"
+    if (state.language_registry_hash, state.relation_registry_hash) != (language_hash, relation_hash):
+        # The same parent input as the detached parse: a page without an
+        # `exomem_id` derives its legacy path ref, which is not a memory ref.
+        document = semantic_units.parse_semantic_units(
+            state.body, path=state.path,
+            parent_ref=(
+                memory_refs.memory_ref(state.identity) if state.identity_kind == "exomem_id" else None
+            ),
+            candidates=state.candidates,
+            language_registry=semantic_language_registry.for_attached_projects(language, state.projects),
+            relation_registry=relation_definitions, include_legacy_relations=True,
+            retain_unknown_relations=True, page_type=state.page_type,
+        )
     page_type = activation.normalized_page_type(state.page_type)
     governed = state.structurally_placed and type_basis.selects(
         page_type, note_types.governed_endpoint
@@ -1227,20 +1306,31 @@ def enrich_page_state(
     connectable = state.structurally_placed_connectable and type_basis.selects(
         page_type, note_types.connectable
     )
+    needed = governed or compiled or connectable
     classification = (
-        status_basis.classify(state.frontmatter.get("status"))
-        if governed or compiled or connectable
+        status_basis.classify(state.frontmatter.get("status"), path=state.path, frontmatter=state.frontmatter)
+        if needed
         else lifecycle_statuses.Classification(None)
     )
-    live = classification.live if governed or compiled or connectable else False
+    unavailable_status = needed and classification.lifecycle_class is None
+    if unavailable_status and require_status:
+        classification.require()
+    # An unavailable class is never "not live": the flag below keeps it unknown.
+    live = needed and not unavailable_status and classification.live
     return replace(
         state,
+        document=document,
+        language_registry_hash=language_hash,
+        relation_registry_hash=relation_hash,
+        definitions=definitions,
+        definitions_unavailable=unavailable,
         eligible_governed=governed and live,
         eligible_compiled=compiled and live,
         connectable_target=connectable and live,
         status_class=classification.lifecycle_class,
         status_unregistered=classification.unregistered,
         status_dependency=status_basis.dependency,
+        status_unavailable=unavailable_status,
         type_basis=type_basis,
     )
 
@@ -1273,8 +1363,10 @@ def _parse_page_state(
     # parsing, retaining positions and line numbers for the surrounding prose.
     for start, end in reversed(provenance.parse_owned_origin(body, owner_path=rel_path).spans):
         body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
+    candidates = semantic_units.scan_semantic_units(body, path=rel_path)
     document = semantic_units.parse_semantic_units(
         body,
+        candidates=candidates,
         path=rel_path,
         parent_ref=(memory_refs.memory_ref(normalized_id) if normalized_id is not None else None),
         validate=True,
@@ -1364,6 +1456,9 @@ def _parse_page_state(
             root, parsed, tiers=activation.CONNECTABLE_TIERS
         ),
         body_wikilinks=tuple(body_links),
+        body=body,
+        candidates=candidates,
+        neutral_document=document,
     )
 
 
@@ -1395,15 +1490,16 @@ _CORPUS_CONTEXT_EVENT_CHECKPOINTS: dict[
 _CORPUS_CONTEXT_LANGUAGE_HASHES: dict[tuple[str, str], str] = {}
 _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 # Enrichment for a caller who admits every page, per structural cache key:
-# (structural context, (status, note-type) dependencies consulted, enriched context,
-# enriched states). Bases that re-admit to the same dependencies reuse the whole context when the
-# structural object is unchanged, and otherwise reuses each page whose structural
-# state object is unchanged, so a write re-enriches only the pages it changed.
+# (structural context, (status, note-type, page-definition) dependencies consulted,
+# enriched context, enriched states). Bases that re-admit to the same dependencies,
+# under unchanged page definitions, reuse the whole context when the structural
+# object is unchanged, and otherwise reuse each page whose structural state object
+# is unchanged, so a write re-enriches only the pages it changed.
 _ENRICHED_CONTEXT_MEMO: dict[
     tuple[str, str],
     tuple[
         SemanticCorpusContext,
-        tuple[tuple[str, str], tuple[str, str]],
+        tuple[tuple[str, str], tuple[str, str], tuple],
         SemanticCorpusContext,
         dict[str, SemanticPageState],
     ],
@@ -1629,8 +1725,8 @@ def current_writer_resolver_entries(
 
     try:
         configuration = _config_census(root)
-        relation_definitions = relation_registry.load_registry(root)
-        language = semantic_language_registry.load_registry(root)
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
         membership = tuple(
             sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
         )
@@ -1851,10 +1947,8 @@ def _config_inputs(root: Path) -> tuple[Path, ...]:
     """The non-Markdown files whose bytes shape parsed corpus structure."""
     return (
         access.access_config_path(root),
-        relation_registry.extension_registry_path(root),
-        semantic_language_registry.registry_path(root),
         # Parsed structure records the owner's compiled eligibility.
-        note_types.registry_path(root),
+        note_types.overlay_path(root),
     )
 
 
@@ -1865,8 +1959,8 @@ def _corpus_census(root: Path) -> tuple | None:
     ``.md`` under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
     (the full vault minus skip dirs and sync-conflict copies) — and appends
     the non-Markdown inputs in ``_config_inputs``: ``_access.yaml`` (page
-    eligibility via ``access.access_tier``) and three ``_Schema`` registry
-    files. Returns
+    eligibility via ``access.access_tier``) and the selected note-type
+    overlay (the owner's compiled eligibility). Returns
     ``None`` when the tree cannot be fingerprinted safely; callers must then
     build uncached so the build path surfaces its own safety errors.
     """
@@ -2014,15 +2108,18 @@ def corpus_validity_token(
     *,
     corpus_census: tuple | None = None,
     status_dependencies: tuple[tuple[str, str], ...] | None = None,
+    definitions: tuple[instances.PageDefinitions, ...] = (),
 ) -> tuple | None:
     """Stable identity for narrow-boundary preflight reuse.
 
     Combines ``_corpus_census`` (every corpus/config input
     ``build_corpus_context`` reads) with ``_relation_review_census`` (the
     review-artifact and lifecycle-sidecar inputs the plain corpus census
-    does not cover). ``None`` means some input cannot be censused cheaply;
-    callers must then always revalidate rather than reuse a pre-boundary
-    result.
+    does not cover). ``definitions`` are the selected vocabulary witnesses
+    the verdict used; the boundary re-admits each one, as it does the
+    lifecycle status dependencies. ``None`` means some input cannot be
+    censused cheaply; callers must then always revalidate rather than reuse
+    a pre-boundary result.
 
     Pass ``corpus_census`` to reuse a census that was just walked (e.g. the
     one ``build_corpus_context`` validated its cache with) instead of paying
@@ -2036,6 +2133,8 @@ def corpus_validity_token(
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in status_dependencies):
         return None
+    if not all(witness.current(root) for witness in definitions):
+        return None
     corpus = (
         corpus_census
         if corpus_census is not None
@@ -2046,7 +2145,7 @@ def corpus_validity_token(
     review = _relation_review_census(root)
     if review is None:
         return None
-    return (corpus, review, status_dependencies)
+    return (corpus, review, status_dependencies, definitions)
 
 
 def cached_corpus_census(root: Path) -> tuple | None:
@@ -2062,6 +2161,11 @@ def cached_corpus_census(root: Path) -> tuple | None:
     with _CORPUS_CONTEXT_CACHE_LOCK:
         entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
     return entry[0] if entry is not None else None
+
+
+def page_definitions_witnesses(*states: Any) -> tuple[instances.PageDefinitions, ...]:
+    """The selected vocabulary definitions these page states were judged with."""
+    return tuple(state.definitions for state in states if state is not None and state.definitions is not None)
 
 
 def validity_stamp_current(
@@ -2083,12 +2187,15 @@ def validity_stamp_current(
     if stamp is None or commit_generation is None or egress.owner_only_aggregate(root) is not None:
         return False
     sc_token, captured_generation = stamp
-    if sc_token is None or len(sc_token) != 3 or captured_generation is None:
+    if sc_token is None or len(sc_token) != 4 or captured_generation is None:
         return False
     if commit_generation != captured_generation:
         return False
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in sc_token[2]):
+        return False
+    # A hand edit of an overlay or binding moves no commit generation.
+    if not all(witness.current(root) for witness in sc_token[3]):
         return False
     fresh_review = _relation_review_census(root)
     return fresh_review is not None and fresh_review == sc_token[1]
@@ -2149,17 +2256,10 @@ def _registries_match_disk(
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> bool:
-    """Whether the supplied registries are content-identical to the on-disk ones.
-
-    The cache stores contexts derived from on-disk registry state (the
-    registry files are census entries). A caller-supplied registry object is
-    only compatible with that stored state when its content fingerprint equals
-    a fresh disk load — synthetic/proposal registries fail this and bypass the
-    cache entirely.
-    """
+    """Whether supplied inputs match the shared core-only structural producer."""
     try:
-        disk_registry = relation_registry.load_registry(root)
-        disk_language = semantic_language_registry.load_registry(root)
+        disk_registry = relation_registry.core_registry()
+        disk_language = semantic_language_registry.core_registry()
     except Exception:  # noqa: BLE001 — unreadable registry state: never cache
         return False
     return (disk_registry.core_version, disk_registry.extension_hash) == (
@@ -2554,8 +2654,8 @@ def _patch_corpus_files_changed_locked(
     reconcile_paths = tuple(sorted(set(changed_paths) | set(deleted_paths)))
     if not reconcile_paths:
         return _CORPUS_PATCH_UNCHANGED
-    relation_definitions = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
+    relation_definitions = relation_registry.core_registry()
+    language = semantic_language_registry.core_registry()
     context = _reconcile_markdown_delta(
         root,
         entry[1],
@@ -2688,8 +2788,8 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
     from under -- but the caller has to tell a discard apart from a stamp to
     know whether retrying immediately would be productive.
     """
-    relation_definitions = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
+    relation_definitions = relation_registry.core_registry()
+    language = semantic_language_registry.core_registry()
     # L2/L3: the admission decision is made against this, captured before the
     # walk it has to vouch for.
     before = freshness.consumer_checkpoint(root, "vault")
@@ -2809,24 +2909,30 @@ def build_corpus_context_with_census(
     type_basis = type_basis or note_types.Basis(root)
     context, census = _build_corpus_context_with_census(
         root,
-        registry=registry,
-        language_registry=language_registry,
+        registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
     )
+    # Supplied registries replace the page's own definitions, so they bypass the memo.
     memo_key = (
         _corpus_cache_key(root)
-        if candidate is None and corpus_context_cache_enabled()
+        if candidate is None and registry is None and language_registry is None
+        and corpus_context_cache_enabled()
         else None
     )
+    writer_visibility = vault.writer_link_visibility(root)
+    definitions = None
     with egress.disclosure_boundary(root, "semantic_corpus_admission"):
         visible = egress.restricted_release_filter(root)
-        if visible is not None:
+        if visible is not None or writer_visibility is not None:
             memo_key = None
         memo = None
         if memo_key is not None:
+            definitions = instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 memo = _ENRICHED_CONTEXT_MEMO.get(memo_key)
             if memo is not None and not (
                 basis.matches(memo[1][0]) and type_basis.matches(memo[1][1])
+                and memo[1][2] == definitions
             ):
                 memo = None
             if memo is not None and memo[0] is context:
@@ -2837,7 +2943,8 @@ def build_corpus_context_with_census(
             path: (
                 reused[path]
                 if previous.get(path) is state
-                else enrich_page_state(root, state, basis, type_basis)
+                else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
+                                       language=language_registry, require_status=False)
                 if visible is None or visible(path)
                 else state
             )
@@ -2845,16 +2952,28 @@ def build_corpus_context_with_census(
         }
     # Candidate validation owns target admission and requires classification.
     if candidate is not None:
-        states[candidate.path] = enrich_page_state(root, candidate, basis, type_basis)
+        states[candidate.path] = enrich_page_state(
+            root, candidate, basis, type_basis,
+            relation_definitions=registry, language=language_registry,
+        )
     identity = (
         context.identity_census.with_page(candidate, casefold_paths=vault.vault_casefolds(root))
         if candidate is not None
         else context.identity_census
     )
-    enriched = (
-        _context_from_state_map(root, states, context.registry, identity)
-        if candidate is not None
-        else _context_with_enriched_pages(context, states)
+    corpus_registry = registry
+    if corpus_registry is None:
+        try:
+            unarmed = instances.configuration(root) is None
+        except ValueError:
+            unarmed = False
+        # Unarmed, the public overlay is every page's meaning. Armed, each visible
+        # page carries its own instance and every other page keeps core meaning.
+        corpus_registry = relation_registry.load_registry(root) if unarmed else context.registry
+    # Enrichment reparses units under each page's definitions, so relation facts
+    # and the resolver follow the enriched states, not the structural context.
+    enriched = _context_from_state_map(
+        root, states, corpus_registry, identity, writer_visibility=writer_visibility,
     )
     if memo_key is not None:
         with _CORPUS_CONTEXT_CACHE_LOCK:
@@ -2864,7 +2983,7 @@ def build_corpus_context_with_census(
                     context,
                     # The reused states keep this basis object, so record the
                     # dependency it will have once a later read loads it.
-                    (basis.dependency, type_basis.loaded_dependency()),
+                    (basis.dependency, type_basis.loaded_dependency(), definitions),
                     enriched,
                     states,
                 )
@@ -2894,8 +3013,8 @@ def _build_corpus_context_with_census(
     its own fresh walk — same as before this existed.
     """
     root = Path(vault_root)
-    relation_definitions = registry or relation_registry.load_registry(root)
-    language = language_registry or semantic_language_registry.load_registry(root)
+    relation_definitions = registry or relation_registry.core_registry()
+    language = language_registry or semantic_language_registry.core_registry()
 
     census: tuple | None = None
     cache_key: tuple[str, str] | None = None
@@ -3371,6 +3490,8 @@ def _context_from_state_map(
     states: Mapping[str, SemanticPageState],
     registry: relation_registry.RelationRegistry,
     identity_census: StableIdentityCensus,
+    *,
+    writer_visibility: Any = _DECIDE,
 ) -> SemanticCorpusContext:
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
@@ -3384,31 +3505,7 @@ def _context_from_state_map(
         entries=entries,
         resolver=resolver,
         facts=facts,
-    )
-
-
-def _context_with_enriched_pages(
-    context: SemanticCorpusContext,
-    states: Mapping[str, SemanticPageState],
-) -> SemanticCorpusContext:
-    """Swap one caller's lifecycle facts into a structural context of the same pages.
-
-    Relation facts, the resolver and the activation census never read lifecycle
-    facts, so they stay shared; only the eligibility path sets follow the caller.
-    """
-    ordered = {path: states[path] for path in context.pages}
-    return replace(
-        context,
-        pages=MappingProxyType(ordered),
-        eligible_governed_paths=frozenset(
-            path for path, state in ordered.items() if state.eligible_governed
-        ),
-        eligible_compiled_paths=frozenset(
-            path for path, state in ordered.items() if state.eligible_compiled
-        ),
-        connectable_target_paths=frozenset(
-            path for path, state in ordered.items() if state.connectable_target
-        ),
+        writer_visibility=writer_visibility,
     )
 
 
@@ -3437,6 +3534,7 @@ def _context_with_stable_topology_candidate(
         entries=context.resolver_entries,
         resolver=resolver,
         facts=facts,
+        writer_visibility=context.writer_visibility,
     )
 
 
@@ -3449,6 +3547,7 @@ def _context_from_resolved_state(
     entries: tuple[tuple[str, str], ...],
     resolver: vault.WikilinkResolver,
     facts: tuple[RelationFact, ...],
+    writer_visibility: Any = _DECIDE,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -3508,6 +3607,7 @@ def _context_from_resolved_state(
         activation_census=census,
         identity_census=identity_census,
         registry=registry,
+        writer_visibility=writer_visibility,
     )
 
 
@@ -3628,6 +3728,22 @@ def _fact_identity(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _authored_relations(
+    state: SemanticPageState | None, registry: relation_registry.RelationRegistry
+) -> relation_registry.RelationRegistry:
+    """The relation definitions one authored page is judged with.
+
+    An assigned instance supplies its own definitions. A page whose instance is
+    unavailable keeps core meaning only. Otherwise the vault is unarmed and the
+    corpus registry, which a caller may supply, is the public instance.
+    """
+    if state is not None and state.definitions is not None and state.definitions.binding_revision is not None:
+        return state.definitions.snapshots["relations"].typed
+    if state is not None and state.definitions_unavailable:
+        return relation_registry.core_registry()
+    return registry
+
+
 def _derive_relation_facts(
     root: Path,
     states: Mapping[str, SemanticPageState],
@@ -3717,6 +3833,7 @@ def _derive_relation_facts(
     facts: list[RelationFact] = []
     for raw in raw_facts:
         state = raw["authored"]
+        selected_registry = _authored_relations(state, registry)
         target_status, resolved_target, target_anchor, target_alias = _resolve_target(
             root,
             raw["raw_target"],
@@ -3729,7 +3846,7 @@ def _derive_relation_facts(
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
         resolution = _registry_resolution(
-            registry,
+            selected_registry,
             raw["raw_relation"],
             projects=state.projects,
             page_type=state.page_type,
@@ -3765,6 +3882,10 @@ def _derive_relation_facts(
             "reverse": raw["reverse"],
             "occurrence": occurrences[occurrence_key],
         }
+        registry_instance = "core"
+        if resolution.canonical not in selected_registry.core:
+            registry_instance = state.definitions.instance_id if state.definitions is not None else instances.PUBLIC_INSTANCE
+            identity_payload["registry_instance"] = registry_instance
         facts.append(
             RelationFact(
                 identity=_fact_identity(identity_payload),
@@ -3789,6 +3910,7 @@ def _derive_relation_facts(
                 authored=True,
                 reviewer_accepted=False,
                 target_status=target_status,
+                registry_instance=registry_instance,
             )
         )
     return tuple(sorted(facts, key=lambda item: item.identity))
@@ -3797,6 +3919,12 @@ def _derive_relation_facts(
 def _dependency_key(raw_target: str) -> str:
     path, _, _ = _target_parts(raw_target)
     return path.removesuffix(".md").strip("/").casefold()
+
+
+def require_page_status(page: SemanticPageState | None) -> None:
+    """Refuse a decision that needs the lifecycle class of an unclassifiable page."""
+    if page is not None and page.status_unavailable:
+        lifecycle_statuses.Classification(None).require()
 
 
 def _structural_relation_reasons(
@@ -3812,8 +3940,12 @@ def _structural_relation_reasons(
     unambiguously, originate from an eligible governed page, land on an allowed
     target, not point at itself, and carry an active in-scope registry entry.
     Only family and origin policy differ between the lanes, and each applies its
-    own on top of this.
+    own on top of this. Both endpoints' eligibility depends on their lifecycle
+    class, so an endpoint without one refuses the qualification.
     """
+    require_page_status(corpus.pages.get(fact.logical_source_path))
+    if fact.target_status == "resolved":
+        require_page_status(corpus.pages.get(fact.logical_target_path))
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
@@ -3952,10 +4084,10 @@ def _qualifying_body_wikilink_targets(
             continue
         path = normalized.split("#", 1)[0]
         resolved_path = path if path.lower().endswith(".md") else f"{path}.md"
-        if (
-            resolved_path != page.path
-            and resolved_path in corpus.connectable_target_paths
-        ):
+        if resolved_path == page.path:
+            continue
+        require_page_status(corpus.pages.get(resolved_path))
+        if resolved_path in corpus.connectable_target_paths:
             targets.append(resolved_path)
     return tuple(targets)
 
@@ -3994,9 +4126,6 @@ def is_relation_review_current(
     )
 
 
-_DECIDE = object()
-
-
 def writer_view_relations(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -4019,6 +4148,8 @@ def writer_view_relations(
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())
+    if visible is _DECIDE:
+        visible = corpus.writer_visibility
     if visible is _DECIDE:
         visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not callable(visible) or not visible(page.path):
@@ -4067,7 +4198,9 @@ def writer_authored_facts(
     judging a page it may see, the same facts with their targets resolved
     only over the pages that writer may see (see `writer_view_relations`).
     """
-    visible = vault.writer_link_visibility(corpus.vault_root)
+    visible = corpus.writer_visibility
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not visible(page.path):
         return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
     resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
@@ -4103,7 +4236,7 @@ def _relation_disposition(
     rejected: list[RejectedRelationFact] = []
     qualifying: list[tuple[str, RelationFact]] = []
     for direction, fact in sorted(directional, key=lambda item: (item[0], item[1].identity)):
-        result = qualify_relation(fact, registry=corpus.registry, corpus=corpus)
+        result = qualify_relation(fact, registry=corpus.registry_for(fact.authored_path), corpus=corpus)
         if result.qualifies:
             qualifying.append((direction, fact))
         else:
@@ -4111,8 +4244,18 @@ def _relation_disposition(
     review_is_current = review is not None and is_relation_review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
+    other_unknown = corpus.status_unavailable_paths - {page.path}
     if visible is not None:
         other_governed = frozenset(path for path in other_governed if visible(path))
+        other_unknown = frozenset(path for path in other_unknown if visible(path))
+
+    def _no_other_governed(governed: frozenset[str], unknown: frozenset[str]) -> bool:
+        # "No other governed page" is undecided while a page's class is unavailable.
+        if governed:
+            return False
+        if unknown:
+            lifecycle_statuses.Classification(None).require()
+        return True
 
     def _satisfied_actions() -> tuple[str, ...]:
         if stale_review:
@@ -4139,7 +4282,7 @@ def _relation_disposition(
     connectivity = [
         fact
         for fact in outbound
-        if qualify_connectivity(fact, registry=corpus.registry, corpus=corpus).qualifies
+        if qualify_connectivity(fact, registry=corpus.registry_for(fact.authored_path), corpus=corpus).qualifies
     ]
     if connectivity:
         return RelationDisposition(
@@ -4177,7 +4320,7 @@ def _relation_disposition(
         and review.kind == "reviewed_none"
         and not review_is_current
         and review_identity_is_current(review, page, corpus)
-        and not other_governed
+        and _no_other_governed(other_governed, other_unknown)
     ):
         # Renewable ONLY because the identity check above still holds: the review
         # provably describes this page, and the sole thing that drifted is its
@@ -4207,7 +4350,7 @@ def _relation_disposition(
         review_is_current
         and review is not None
         and review.kind == "bootstrap"
-        and not other_governed
+        and _no_other_governed(other_governed, other_unknown)
     ):
         return RelationDisposition(
             "bootstrap",
@@ -4219,18 +4362,23 @@ def _relation_disposition(
         )
     before_governed = before_corpus.eligible_governed_paths
     after_governed = corpus.eligible_governed_paths
+    before_unknown = before_corpus.status_unavailable_paths
+    after_unknown = corpus.status_unavailable_paths - {page.path}
     if visible is not None:
         # A writer that sees no governed page bootstraps its first one, as in
         # a vault without the pages withheld from it.
         before_governed = frozenset(path for path in before_governed if visible(path))
         after_governed = frozenset(path for path in after_governed if visible(path))
+        before_unknown = frozenset(path for path in before_unknown if visible(path))
+        after_unknown = frozenset(path for path in after_unknown if visible(path))
     automatic_bootstrap = (
         review is None
         and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
-        and not before_governed
         and after_governed == frozenset({page.path})
+        and _no_other_governed(before_governed, before_unknown)
+        and _no_other_governed(frozenset(), after_unknown)
     )
     if automatic_bootstrap:
         return RelationDisposition(
@@ -4342,7 +4490,7 @@ def _registry_findings(
     corpus: SemanticCorpusContext,
 ) -> list[ContractFinding]:
     findings: list[ContractFinding] = []
-    for registry_finding in corpus.registry.findings:
+    for registry_finding in corpus.registry_for(page.path).findings:
         raw = str(registry_finding.get("path", "registry"))
         relation = registry_finding.get("relation")
         if relation is not None:
@@ -4367,6 +4515,9 @@ def _registry_findings(
     for fact in writer_authored_facts(page, corpus):
         code: str | None = None
         detail: str | None = None
+        if fact.canonical_relation is None and page.definitions_unavailable:
+            findings.append(_definitions_unavailable_finding(page))
+            continue
         if fact.canonical_relation is None:
             code = "unregistered_relation"
             detail = f"relation {fact.raw_relation!r} is not registered"
@@ -4394,6 +4545,16 @@ def _registry_findings(
             )
         )
     return findings
+
+
+def _definitions_unavailable_finding(page: SemanticPageState) -> ContractFinding:
+    return ContractFinding(
+        code="REGISTRY_UNAVAILABLE", severity="error", path=page.path, span=None,
+        detail="The selected vocabulary definitions required by this page are unavailable.",
+        remediation="Restore admitted definitions or assign vocabulary during stopped maintenance.",
+        governed_element_identity=("registry", "instance"),
+        resolved_rule=("registry", "instance", "admission"),
+    )
 
 
 def _observed_namespaces(
@@ -4687,7 +4848,7 @@ def _raw_findings(
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:
-        findings.append(minimum_finding)
+        findings.append(_definitions_unavailable_finding(page) if page.definitions_unavailable else minimum_finding)
     owners = corpus.identity_census.paths_by_identity.get(page.identity)
     if page.identity_kind == "exomem_id" and not identity_owners_match(
         owners, page.path, folds=vault.vault_casefolds(corpus.vault_root)

@@ -755,6 +755,27 @@ report them under `anchors[]` at a distinct status meaning "named, not carried"
 the release plane as anchors do. A candidate
 the ranking scored at or below a declared sanity bound SHALL NOT be carried.
 
+Where neither the strict phrase path nor the title fallback names any page, and
+no other carry of the turn serves material, the turn SHALL abstain `unresolved`
+and SHALL list under `anchors[]`, at that same named-not-carried status, each
+current compiled page that the turn names by its title: a page among the ranked
+rows of the same bounded catalogue query, two distinct normalized token units
+of whose title contact two distinct turn units within the declared raw token
+window in one sentence, with no distinctiveness or function-word exclusion.
+An unspaced run SHALL match through a strict majority of its content bigrams
+and SHALL count once. Repeated normalized units SHALL NOT supply a second
+contact. A one-unit title SHALL never be named this
+way. At most three pages SHALL be listed, in rank order, counted after the
+pages the caller may not see are removed, so that a withheld page neither takes
+a place nor moves another and the listing equals that of a vault without it.
+Each entry SHALL carry the evidence `[lexical_overlap, retrieval]` and the
+project keys its own frontmatter declares as `projects`. Nothing SHALL be served
+for these pages: no unit, pointer or current-state entry or additional prose
+charge, and the continuity token SHALL NOT name them. Existing `recent_context`
+SHALL retain its own budget. The listing SHALL
+run only on a non-referential turn with no explicit anchor choice, and an agent
+that passes a listed page as `anchor` SHALL be served it as an agent-picked page.
+
 A carried packet SHALL report each carried page as its own anchor entry, of kind
 `page`, at status `retrieval_carried`, with `retrieval` as its only evidence, and SHALL
 mark itself `generation.carried_by = "retrieval"`. Its material SHALL come from
@@ -853,6 +874,51 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
   audience and the turn also reached a weaker candidate
 - **THEN** the packet abstains `withheld` with no anchors and no units
 - **AND** the weaker candidate is not carried in its place
+
+#### Scenario: An ordinary-word title is listed, not served
+
+- **WHEN** a turn that resolves no anchor says two words of a compiled note's
+  title side by side, and none of the turn's words is distinctive in the corpus
+- **THEN** the packet abstains `unresolved` and lists that note, alone, at the
+  named-not-carried status with evidence `[lexical_overlap, retrieval]` and the
+  project keys its frontmatter declares
+- **AND** the listed note adds no unit, pointer, current-state entry or prose
+  charge, and the continuity token does not name the note
+- **AND** a following call that passes the note as `anchor` is served its units
+
+#### Scenario: Title words said apart list nothing
+
+- **WHEN** a turn says two words of a compiled note's title further apart than
+  the declared window, or in two different sentences
+- **THEN** the note is not listed
+
+#### Scenario: Function words and unspaced runs keep title contact
+
+- **WHEN** a turn contacts two distinct title units, including function words
+  or separate unspaced runs, in one sentence within the declared window
+- **THEN** the bounded ranking can list the page without a rarity requirement
+- **AND** fragments or repeated bigrams of one run cannot supply two contacts
+
+#### Scenario: A title listing keeps prior context and its budget
+
+- **WHEN** a thread with existing recent context names a page that is only listed
+- **THEN** the packet keeps the prior context and its existing prose charge
+- **AND** the listed page adds no material or prose charge
+
+#### Scenario: A twin that shares one title word lists nothing
+
+- **WHEN** a turn shares exactly one word with a compiled note's title, however
+  ordinary the rest of its words are
+- **THEN** the note is not listed and the packet abstains `unresolved` with no
+  anchors
+
+#### Scenario: A withheld title-named page answers as an absent one
+
+- **WHEN** a caller other than the owner sends a turn that names, by their
+  titles, several pages it may see and one page withheld from it that the
+  ranking places first
+- **THEN** its packet, as returned over the MCP door, equals the packet it
+  receives from the same vault without the withheld page
 
 ### Requirement: An agent's own `anchor` choice MAY name an ordinary compiled page
 

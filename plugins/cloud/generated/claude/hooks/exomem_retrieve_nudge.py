@@ -188,7 +188,7 @@ _WORKING_SET_UNRESOLVED_LINE = (
 #: not retired), which is exactly what a `retrieval_named` entry is, so the
 #: SAME instruction the other two menus give now works here too.
 _WORKING_SET_NAMED_LINE = (
-    "The turn named more than one page, so none was carried. "
+    "The turn named these pages, but none was carried. "
     + _WORKING_SET_ANCHOR_INSTRUCTION
 )
 # Evidence kinds meaning the TURN'S OWN WORDS reached the anchor, as against
@@ -1814,8 +1814,10 @@ def _format_ambiguity_block(packet: dict, max_chars: int) -> str:
     return _menu_block(packet, lines, _WORKING_SET_AMBIGUITY_LINE, max_chars)
 
 
-#: The status a page carries when the turn's own words NAMED it but another
-#: page was named too, so nothing was carried. Rendered in the same menu as
+#: The status a page carries when the turn's own words NAMED it but nothing
+#: was carried: another page was named too, or the turn said the page's
+#: title in ordinary words, which lists a page and never serves one.
+#: Rendered in the same menu as
 #: a worded candidate, by its own branch rather than by adding `retrieval`
 #: to `_WORDED_CONTACT_KINDS`: the reason it belongs here is that the server
 #: already applied the naming test, not that retrieval is suddenly a worded
@@ -1834,10 +1836,10 @@ def _worded_candidates(packet: dict) -> list[dict]:
     business and a later resolver change must not silently empty this block.
 
     One status is admitted directly: `retrieval_named`, a page the server
-    already decided the turn NAMED (a distinctive phrase, in a corpus large
-    enough to measure that) but did not carry because another page was
-    named too. Those are the candidates the client most needs to see, since
-    naming one of them is all it takes to get a packet.
+    already decided the turn NAMED (a distinctive phrase another page also
+    answers to, or two words of the page's own title) but did not carry.
+    Those are the candidates the client most needs to see, since naming one
+    of them is all it takes to get a packet.
     """
     out: list[dict] = []
     for anchor in packet.get("anchors") or ():
@@ -1864,13 +1866,13 @@ def _format_unresolved_block(packet: dict, max_chars: int) -> str:
 
     The closing line's LEAD sentence still depends on what is being listed —
     a `partial` candidate is the turn's own words falling short of an anchor
-    of the activation index; a `retrieval_named` page is the turn naming TWO
-    pages, so neither was carried — but the REMEDY is now the same
+    of the activation index; a `retrieval_named` page is a page the turn
+    named that was not carried — but the REMEDY is now the same
     instruction either way: `anchor=` selects an index anchor, and it now
     also accepts an ordinary compiled page, which is exactly what a
-    `retrieval_named` entry is. A packet carries one kind or the other,
-    never both: the named list is built by the carry's own abstention,
-    which reports the pages it named and nothing else.
+    `retrieval_named` entry is. A menu of named pages alone gets the named
+    lead; a menu that also lists a `partial` candidate gets the ordinary
+    one.
     """
     candidates = _worded_candidates(packet)
     lines = [
