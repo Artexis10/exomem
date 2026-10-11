@@ -35,8 +35,9 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
-`proactive_capture`, affiliation relations require `link_acceptance`, a new Entity follows `proactive_capture`;
-merge or substantial curation requires confirmed `restructure_execution`.
+`proactive_capture`, a new Entity or an affiliation edge you author follows `proactive_capture`,
+accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
+confirmed `restructure_execution`.
 
 ## Planning
 

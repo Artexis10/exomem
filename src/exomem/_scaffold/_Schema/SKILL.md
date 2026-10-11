@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 99a40503825d8ff17b8b47a86d1731580a7e9c7b2382f9067c3f4401da4dce3d
+  skill_contract: 6e5f3f3a5251aa8a79e11d555b08faf538c89efc12b853242efda9d6110c55f9
   version: "0.32.0"
 ---
 
@@ -174,16 +174,17 @@ or explicitly overridden by the user.
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create |
-| `link_acceptance` | confirm | accepting a suggested relation |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, a typed edge you author, and the owner's type, category or relation save |
+| `link_acceptance` | confirm | accepting a relation that the relation queue suggested |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
-| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
 
 **The decider protocol**, for every action you are about to take:
 
-1. **Name the action class.** An action that fits none of them has no envelope
-   cell and therefore no authority — propose it instead.
+1. **Name the action class.** `engagement.envelope.promotion_classes` gives each
+   promotion's class for you. An action that fits no class has no envelope cell
+   and therefore no authority — propose it instead.
 2. **Check the ceiling.** An intent above it becomes a proposal, never an act.
 3. **Check the disposition.** `off`: do not initiate — an explicit request from
    the user is never blocked. `advisory`: surface it in the user's own language

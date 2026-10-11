@@ -255,7 +255,8 @@ def _envelope_digest(envelope: dict) -> dict:
     """
     digest = {key: value for key, value in envelope.items() if key != "protocol"}
     digest["protocol"] = (
-        "name the action class first; an unclassified action has no authority; "
+        "name the action class first, a promotion's from promotion_classes; an "
+        "unclassified action has no authority; "
         "intent above its ceiling is a proposal, never an act; honour the disposition; "
         "record the outcome through triage; more: section=envelope"
     )
