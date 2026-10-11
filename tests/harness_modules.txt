@@ -32,6 +32,7 @@ tests/test_epistemic_evidence.py
 tests/test_epistemic_lifecycle_replay.py
 tests/test_epistemic_no_nudge_families.py
 tests/test_epistemic_projector.py
+tests/test_epistemic_referent_capture.py
 tests/test_epistemic_registry.py
 tests/test_epistemic_report.py
 tests/test_epistemic_runner.py

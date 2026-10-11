@@ -317,3 +317,145 @@ def test_attach_is_a_cli_only_command(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.delenv("EXOMEM_LOCAL_TOKEN_FILE", raising=False)
     with pytest.raises(SystemExit):
         main(["attach", str(tmp_path / "missing.txt")])
+
+
+def _service_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str):
+    """The real service app in process; it authorizes the CLI's bearer as it would a local client token."""
+    from exomem import server, server_transfer
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+
+    async def inline_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", inline_threadpool)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "exo_s1.synthetic-local-token")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return server.build_server(require_auth=False).http_app()
+
+
+class _ServiceTransport(httpx.BaseTransport):
+    """The real service app behind the CLI's sync client; `cut` truncates one part.
+
+    A cut part delivers its first `cut` bytes to the service and then fails on
+    the client side, as a dropped connection does.
+    """
+
+    def __init__(self, app, *, cut: int | None = None) -> None:
+        self.app = app
+        self.cut = cut
+        self.parts: list[int] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        body = request.read()
+        dropped = request.method == "PATCH" and self.cut is not None
+        if dropped:
+            body, self.cut = body[: self.cut], None
+        if request.method == "PATCH":
+            self.parts.append(len(body))
+        headers = [(k, v) for k, v in request.headers.raw if k.lower() != b"content-length"]
+
+        async def forward() -> httpx.Response:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app)) as client:
+                return await client.request(request.method, str(request.url), headers=headers, content=body)
+
+        response = asyncio.run(forward())
+        if dropped:
+            raise httpx.WriteError("connection dropped", request=request)
+        return httpx.Response(response.status_code, headers=response.headers, content=response.content)
+
+
+def test_attach_resumes_an_interrupted_archive_upload_on_its_next_run(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import hashlib
+    import io
+    import zipfile
+
+    from exomem.state_paths import state_store_root
+
+    app = _service_app(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for day in range(1, 4):
+            archive.writestr(f"device_days/day-{day}.json", f'{{"heart_rate": [{day}, 60, 61]}}' * 50)
+    source = tmp_path / "export.zip"
+    source.write_bytes(buffer.getvalue())
+    argv = [str(source), "--scope", "Device", "--category", "Exports", "--archive", "members",
+            "--resumable", "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
+    records = state_store_root() / "attach-sessions"
+
+    interrupted = _ServiceTransport(app, cut=len(source.read_bytes()) // 2)
+    assert _attach_main(argv, transport=interrupted) == 1
+    assert "run the same command again" in capsys.readouterr().err
+    [record] = records.glob("*.json")
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600
+    assert "synthetic-local-token" not in record.read_text()
+
+    resumed = _ServiceTransport(app)
+    assert _attach_main(argv, transport=resumed) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert resumed.parts == [len(source.read_bytes()) - interrupted.parts[0]]
+    assert receipt["archive"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest = json.loads((vault / receipt["path"]).read_bytes())
+    assert manifest["archive"]["verified"] == "session"
+    assert [member["path"] for member in manifest["members"]] == [
+        f"device_days/day-{day}.json" for day in range(1, 4)
+    ]
+    assert list(records.glob("*.json")) == []
+
+
+def test_attach_sends_a_file_the_listener_refuses_as_too_large_through_a_session(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The service reads its cap from its own environment file, which the CLI never sees. A CLI
+    that trusts its own reading sends to `/upload`, gets 413 and exits."""
+    # The CLI's bearer reaches the public path in process, whose cap stands for the listener's.
+    app = _service_app(tmp_path, monkeypatch, EXOMEM_UPLOAD_MAX_BYTES="64")
+    source = tmp_path / "samples.json"
+    source.write_bytes(b'{"heart_rate": [61, 62, 63]}' * 20)
+    transport = _ServiceTransport(app)
+
+    code = _attach_main([str(source), "--scope", "Device", "--category", "Uploads",
+                         "--token-file", str(_token_file(tmp_path)), "--port", "8764"], transport=transport)
+
+    assert code == 0, capsys.readouterr().err
+    receipt = json.loads(capsys.readouterr().out)
+    assert (vault / receipt["path"]).read_bytes() == source.read_bytes()
+    assert transport.parts == [len(source.read_bytes())]
+
+
+def test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_on_the_next_run(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A commit failure that deletes the bytes makes the owner send them all again for a full
+    disk or a lease handoff, which nothing about the bytes caused."""
+    import errno
+
+    from exomem import preserve
+
+    app = _service_app(tmp_path, monkeypatch)
+    real, calls = preserve.preserve_stream, []
+
+    def full_disk_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "preserve_stream", full_disk_once)
+    source = tmp_path / "samples.json"
+    source.write_bytes(b'{"heart_rate": [61, 62, 63]}' * 20)
+    argv = [str(source), "--scope", "Device", "--category", "Uploads", "--resumable",
+            "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
+
+    assert _attach_main(argv, transport=_ServiceTransport(app)) == 1
+    assert "run the same command again" in capsys.readouterr().err
+    resumed = _ServiceTransport(app)
+    assert _attach_main(argv, transport=resumed) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert resumed.parts == []
+    assert (vault / receipt["path"]).read_bytes() == source.read_bytes()

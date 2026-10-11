@@ -337,7 +337,7 @@ def test_the_append_that_opens_the_gap_carries_the_block(tmp_path: Path) -> None
     # withheld one can be dropped at serve. None of it is the caller's business.
     wire = json.dumps(receipt)
     assert "component" not in wire and "joined" not in wire
-    assert set(block["top"][0]) == {"category", "ref", "due_since"}
+    assert set(block["top"][0]) == {"category", "ref", "fingerprint", "due_since"}
 
 
 def test_the_legacy_response_detail_carries_no_block(tmp_path: Path) -> None:

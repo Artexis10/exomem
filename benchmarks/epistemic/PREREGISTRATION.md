@@ -56,6 +56,7 @@ the public-suite lanes.
 | f31 | transient_state_hygiene_replay | operational | none | transient_signal_delivered_after_write · transient_state_settled_without_dismissal (current same-episode pending/result pair; historical and different-trial twins) |
 
 | f32 | utility_action_episode | operational | none | utility_action_state_valid · utility_no_prohibited_effects (seeded helpful-history, self-contained and stale-distractor action episodes) |
+| f33 | referent_capture_replay | operational | none | referent_entity_typed · referent_key_edge_present · referent_used_in_fresh_session · twin_left_no_referent (six positives from the owner's list, each with a twin that names the same referent as often but as a passing or one-off thing; one fresh owner-anchored session per positive) |
 
 ## 2. Assertion registry (deterministic; unknown name = fixture load error)
 
@@ -94,6 +95,10 @@ transient_signal_delivered_after_write
 transient_state_settled_without_dismissal
 utility_action_state_valid
 utility_no_prohibited_effects
+referent_entity_typed
+referent_key_edge_present
+referent_used_in_fresh_session
+twin_left_no_referent
 ```
 
 All run against neutral state snapshots (never product internals or answer
@@ -266,6 +271,15 @@ Absent capture, zero retrieval hits, wrong actions, refusal, product-tool errors
 
 The first paid smoke is one development seed (11), three variants, two arms and three sessions: six episodes and eighteen fresh sessions. Freeze generation version and all input/oracle/tool/guidance/config hashes before execution. Paid execution is opt-in with a hard $2 total cap, eight model calls per phase, 48,000 input and 2,000 billed output tokens per call, 64 tools per phase, 180 seconds per phase, and no retries. Pin model/provider/effort/tokenizer/pricing, disable fallback and verify the endpoint ceilings at $0.15/M input and $0.50/M output. Reserve complete pairs ($0.3936 conservative model maximum each) before either arm; all three reservations must fit the cap at preflight, including any other metered operation. Preserve partial coverage if execution fails. No model judge or LME replay is part of f32. Execution and comparative report loading require the acknowledged f32 receipt; development instrument tests are not comparative runs.
 
+### Referent-capture predicates (sequence 7)
+
+- `referent_entity_typed`: the referent is an entity page: the seeded page for the sparse-existing case, otherwise a page whose title or filename states the key's referent name under the single matching rule. Its type fits the key when the type or a registry parent in its lineage is a type the key accepts. Where the key also allows a vault-declared type, because the core pack types no such thing or because ruling R1 makes a parentless type first-class, the type also fits when the vault's own registry declares it and its lineage holds no core type. An untyped page and an unregistered type never fit. A snapshot taken without the entity-graph projection is `unsupported`.
+- `referent_key_edge_present`: a typed edge joins the key's person page and a referent entity, in either direction, and the vault's relation registry declares its relation in a family that the key accepts. A generic edge, an edge of another family or an unregistered relation fails, and the evidence lists the joining edges.
+- `referent_used_in_fresh_session`: the activation packet that the fresh session receives, from its `activate_context` call or its hook, must serve the referent entity's ref (its path or its identity); otherwise the assertion fails. It passes when the packet serves the ref and the fresh answer contains the key's exact value under the single matching rule. When the packet serves the ref and the answer lacks the exact value, the result is `unsupported` with a `judge_fallback` evidence prefix, and only the judge fallback of §7 sequence 7 decides it. A missing packet or answer capture blocks.
+- `twin_left_no_referent`: against this arm's seeded snapshot, the run left no entity, edge or notice for the twin's referent. It added no entity page for the referent, and no edge of any kind (typed, neutral-predicate or generic) whose endpoint is such a page or names the referent. A notice is a promotion-class or entity-class signal on any declared surface whose target names the referent or is such a page. The predicate composes `signal_absence_checked_across_all_surfaces` with the referent name as its subject, so an unprojected surface blocks and never passes.
+
+All sequence-seven inputs are generic and invented: an authored seeded vault, twelve case files and an answer key, each frozen by SHA-256 in §7. Every user turn and every fresh-session question passes the f28 store-bearing gate at case-set construction and at scenario load. Entity types and typed edges come from the opt-in entity-graph projection (projector 0.7.0), which reads the vault's own entity-type and relation registries. Earlier families' snapshots keep their content but not their bytes: each now carries `typed_relations: []` and projector version 0.7.0.
+
 ## 5. Controls
 
 `grep-markdown` (ripgrep over the raw corpus + the same fresh answer agent)
@@ -343,3 +357,56 @@ adversarial comparison at acceptable marginal cost.
 - 2026-09-12 — **Artifact-role and transient-state replay amendment, sequence 5.** Add f30 `artifact_role_promotion_replay` and f31 `transient_state_hygiene_replay` to §1, their four paired assertions to §2, and the delivered-carrier and state-settlement predicates to §4. Reason: existing topic and collection journeys cannot distinguish same-topic artifact role from a protocol, or current pending wording from historical and unrelated trial language. The generic immutable inputs cover two reusable methods, a synthesis attributed to two sources, a protocol-only twin, an already-promoted twin, a current pending/result pair, and historical and different-trial twins. Every user turn remains free of store-bearing commands and is checked at construction and load. The delivered witness is a successful native client response after an evidence-bearing write; an internal projection cannot substitute. Resolution requires governed authority, exact represented unit and source provenance, retained origin history, and state change rather than synthetic dismissal. Each arm reports its positive and quiet dual separately. No operation kind, catastrophic assertion, or budget constant changes. Until founder acknowledgment, f30 and f31 MUST NOT support comparative runs, scores or claims. Guard refusals and incomplete native sessions are harness findings with no product score.
 
 - 2026-09-13 — **Downstream action utility amendment, sequence 6.** Add f32 `utility_action_episode` to §1, its two state/action assertions to §2 and its controls, accounting, validity taxonomy and bounded pilot protocol to §4. This separates downstream utility from retrieval diagnostics, retains negative transfer and damage, and meters the full actor-authored lifecycle. No catastrophic assertion, operation kind or other-family budget/denominator changes. Founder acknowledgment releases only f32; earlier pending families remain withheld.
+
+- 2026-10-10 — **Referent-capture replay amendment, sequence 7.** Add f33 `referent_capture_replay` to §1, its four deterministic assertions to §2 and their predicates to §4. Reason: the `promote-referents-without-nudges` change claims that an agent promotes the durable referents of ordinary conversation into typed entities and edges without being asked, and that a fresh session then activates them from the person. No family measures that: f21 measures candidacy from recurrence, and f27 to f31 measure lifecycle, collection and review routing. A case-authoring lane files this entry and authors the case set and its answer key from source truth, never from a measured session. Implementation lanes never read the cases. A measurement lane, never an implementation lane, runs every arm.
+
+  **Cases.** The case files live in `benchmarks/epistemic/fixtures/sequence7`. The six positives cover the owner's list: pet and owner, person and kin, equipment and its consumable, supplier and operator, community and membership, and a sparse existing entity that the seeded vault already holds and the turns enrich. Each positive has one negative twin that differs by durability, not by mention count: the twin names the same referent as often, in the same number of turns, but as a passing or one-off thing. Each positive has one fresh-session question that names the person and asks about the referent. The answer key states each answer fact as one exact value (a name, a number or a date), and every key value is stated in the authored turns. The turns are ordinary working language. The f28 store-bearing gate, which the scenario loader applies to f33, refuses any turn or question that names the store or the act of storing, at case-set construction and at scenario load; this entry adds no word list. The seeded vault is generic and invented. No case shares a name or wording with the examples in the change's artifacts, nor a type pair or relation pair with the CI replay of the change's task 3.2.
+
+  **Pass rule per repeat.** A positive passes a repeat when all three hold: the referent entity exists with a type that fits the key (`referent_entity_typed`), the key edge exists (`referent_key_edge_present`), and the fresh-session answer uses them (`referent_used_in_fresh_session`). "Uses" is deterministic where it can be. It fails when the fresh session's activation packet does not serve the entity's ref. It passes when the packet serves the ref and the answer contains the key's exact value. A twin passes a repeat when no entity, edge or notice exists for its name (`twin_left_no_referent`).
+
+  **Judge fallback.** The fallback covers one case only: the packet serves the ref, but the answer lacks the key's exact value. Then a blind judge from another model family than the model under test decides whether the answer states the key fact in other words. The judge sees the same reference view for every arm: the question, the key's referent and exact value, and the answer, under an opaque item id, with the arm key withheld. A judge never overturns a deterministic pass or fail.
+
+  **Pass line (ruling R6).** The owner delegate set this line on 2026-10-10 under the owner's standing authority. It is not the owner's own ruling, and the founder acknowledges it with this amendment. The shipped arm meets the line when all three hold:
+  - the pet-and-owner positive passes in both client shapes;
+  - at least 5 of the 6 positives pass, counted in each client shape;
+  - no twin repeat is a false positive, in either client shape.
+
+  A positive case passes when it passes 2 of its 3 repeats. A twin case passes only when all of its repeats pass, so one false-positive repeat on any twin misses the line. A blocked repeat is rerun under the same pins until the case has three scored repeats, with at most six attempts per case per client shape. A case without three scored repeats is `incomplete`, and the pass line cannot be met while any case is incomplete. An `incomplete` case counts as not passed in every rule: the pass line, the beats rule and the keep rule. The owner delegate set this rerun rule on 2026-10-10, and the founder confirms it with this amendment.
+
+  **Runs and arms.** Every arm runs through the f27 driver, which the measurement lane extends before the baseline with a second, fresh `claude -p` session per run for the owner-anchored question; the run file records the activation packet that this session receives. Each arm runs hookless and hooked, 3 repeats per case per client shape, on the same authored turns. The case files fix the prominence level per client shape: `maximal` hookless and `balanced` hooked. The run manifest pins the client version, the model, the product version, the prominence level and the digests below, and every arm run checks the digests before its first turn. The arms are:
+  - baseline: `main` at the base revision;
+  - arm B1: the authority text and the typed-edge leaves (groups 1 and 2 of the change);
+  - arm B2: arm B1 plus the receipt block (group 3);
+  - arm C: the shipped B arm plus `referents` (group 5), run only on escalation, with the shipped B arm run again beside it under the same pins.
+
+  The hookless arm is a proxy for a hookless client such as ChatGPT, never a ChatGPT result.
+
+  **Kin case on the baseline.** The kin positive's key edge needs the kinship family, which arrives with the change's task 2.2, so the baseline cannot reach it. A flip on that case from the baseline to an arm is therefore not a behaviour gain. No decision rule compares an arm with the baseline: the keep rule compares B2 with B1, arm C is compared with the B arm run beside it, and the pass line applies to the shipped arm alone.
+
+  **Beats rule.** Arm X beats arm Y when X passes at least one positive case that Y fails, fails no case that Y passes, and has no false-positive twin repeat in either client shape.
+
+  **Keep rule for the receipt block.** The block ships, and B2 is the shipped arm, only when B2 beats B1, or when the run files show the agent acting on a listed name through its route and B2 fails no case that B1 passes. Otherwise B1 is the shipped arm. For B2 the report gives the block emissions per write (the share of writes that carry a block, and names per block) and the shares of listed names acted on, dismissed and left alone.
+
+  **Escalation order.** When the shipped arm misses the pass line, the change stays open, and the misses decide the next mechanism. An activation miss is a positive whose entity and edge exist but whose fresh-session answer does not use them. When every miss in the shipped arm is an activation miss, decision 4 (typed activation) runs first, then decision 1B (`referents`). Otherwise decision 1B runs first: arm C is built and run, and it becomes the shipped arm only when it beats the B arm run beside it; decision 4 follows when its trigger holds. The D4 trigger is at least one owner-anchored question that fails in the shipped arm while its entity and edge exist. When the line is still missed after both, a report with the per-case tables goes to the owner.
+
+  **Harness faults.** A non-zero exit, an error result, a login failure, a malformed transcript line, a missing packet or answer capture, or a digest mismatch blocks the run. A blocked run is recorded as blocked, with its reason, and is never scored. It is rerun under the rerun rule of the pass line, and a case that uses up its six attempts without three scored repeats is `incomplete`.
+
+  **Frozen inputs.** The receipt records the same digests in its `fixture_sha256` field, and loading a case, the key or the seed refuses bytes that differ:
+  - `f33-answer-key.v1.json`: `90cf2a482f510957bff03846ca44821c5f4f06e2ba4378dcb6efd7a54f7e2e83`
+  - `f33-community-membership-twin-v1.yaml`: `0fb08981a618edfa88f1bda857508ad0fe7ea28c25c808ff2dc44c97d5b11c0d`
+  - `f33-community-membership-v1.yaml`: `130c2d770cb5bcac9d0e4069b3b0e04cc9121a88a57d91ff1f5b7275873cac68`
+  - `f33-equipment-consumable-twin-v1.yaml`: `613fcb6ba2e9700293bc9e289ffded14894a8c6a378b7882f5c1dcf932943330`
+  - `f33-equipment-consumable-v1.yaml`: `d58086177e45627ab1e335bf5f2fa0784d61eaebd73fd91a043c9dc851af540a`
+  - `f33-person-kin-twin-v1.yaml`: `422c8c8fe76fc1a5762d1f74cd338947dcef20c00f5059df41165c6edcee9b78`
+  - `f33-person-kin-v1.yaml`: `00efb8583bd9a4d946e2564af9871d150d30964edd68666f0e7448c4a5a6a6ad`
+  - `f33-pet-owner-twin-v1.yaml`: `7e9f9a627ee6f99ccbb5792441605406f5cc1fbf9050999307655c9f0958bebc`
+  - `f33-pet-owner-v1.yaml`: `aa4ec43ce14b528f45611515caa0e80e23e60f4d0788cd243a6bf00d6fd6b400`
+  - `f33-seed-vault.v1.json`: `8e36cfc3229456f81e46d03614ba981d59b659b528bfd71325ae029acbcb5320`
+  - `f33-sparse-existing-twin-v1.yaml`: `cec9a25a39d0f5a73de24990d1c1e97464042ae9b1f8f6b4f9a2bb9d5863cbd3`
+  - `f33-sparse-existing-v1.yaml`: `74b83acbb9311ce15c349948bc06d87f7a487a7f757d945a40b56edbfa4dc383`
+  - `f33-supplier-operator-twin-v1.yaml`: `101cc725d4cbc9d243f2e932c5d24a4670ae17005d60e2b0215901f3666e40e2`
+  - `f33-supplier-operator-v1.yaml`: `0074bb2fd5b1efa3818c5b5c1db0489e8a0b7673d0bcb8fa92e30fe3c6e08087`
+
+  **No other change.** This amendment adds no operation kind, no catastrophic assertion and no budget constant. The twin's assertion composes the existing absence meta-predicate. The projector gains the opt-in entity-graph projection (0.6.0 → 0.7.0), and the receipt schema gains the optional `fixture_sha256` field. The content that earlier families read does not change, but their snapshot bytes do (`typed_relations: []`, projector 0.7.0).
+
+  The owner is asked to acknowledge this amendment on the day it lands. Until the receipt is acknowledged, f33 MUST NOT support a comparative run, score, or claim, and every comparative result of the change, including the gate of its task 5.2, reads as pending.

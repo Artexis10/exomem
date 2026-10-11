@@ -30,7 +30,11 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 SEQUENCE_THREE_FAMILIES = ("f27",)
 SEQUENCE_FOUR_FAMILIES = ("f28", "f29")
 SEQUENCE_FIVE_FAMILIES = ("f30", "f31")
+#: Sequence 7 (referent capture), pending founder acknowledgment.
+SEQUENCE_SEVEN_FAMILIES = ("f33",)
 SEQUENCE_SIX_ACKNOWLEDGED_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
+# The commit that recorded the founder acknowledgment of sequence 6 (#1232).
+SEQUENCE_SIX_RELEASE_REVISION = "3677c2e7cd6bf863f0a0149b21bc339adb35ad50"
 #: The squash commit on ``main`` carrying the sequence-3 amended document and its
 #: then-pending receipt (#762), pinned by the founder at acknowledgment.
 SEQUENCE_THREE_ACKNOWLEDGED_REVISION = "287b984418ff3a02b26e05aafeb3bcbae255b27b"
@@ -632,7 +636,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 6
+    assert len(identity.amendments) == 7
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -676,10 +680,18 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert acknowledged_six.contract.repository_revision == SEQUENCE_SIX_ACKNOWLEDGED_REVISION
     assert acknowledged_six.receipt.introduction_revision != SEQUENCE_SIX_ACKNOWLEDGED_REVISION
     assert acknowledged_six.introduced_family_ids == ("f32",)
-    assert identity.effective.sha256 == acknowledged_six.contract.sha256
-    assert identity.pending_amendments == (pending_two, pending_four, pending_five)
+    pending_seven = identity.amendments[6]
+    assert pending_seven.sequence == 7
+    assert pending_seven.acknowledgment_status == "pending"
+    assert pending_seven.introduced_family_ids == SEQUENCE_SEVEN_FAMILIES
+    assert pending_seven.contract.repository_revision == pending_seven.receipt.introduction_revision
+    assert identity.effective.sha256 == pending_seven.contract.sha256
+    assert identity.pending_amendments == (pending_two, pending_four, pending_five, pending_seven)
     assert identity.withheld_family_ids == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+        SEQUENCE_TWO_FAMILIES
+        + SEQUENCE_FOUR_FAMILIES
+        + SEQUENCE_FIVE_FAMILIES
+        + SEQUENCE_SEVEN_FAMILIES
     )
 
 
@@ -785,9 +797,14 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # which families backed this run and which were withheld from it without
     # reading any other artifact, which is the whole reason the field exists.
     # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
-    # Sequences 4 and 5 are pending alongside sequence 2.
+    # Sequences 4, 5 and 7 are pending alongside sequence 2.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        (*SEQUENCE_TWO_FAMILIES, *SEQUENCE_FOUR_FAMILIES, *SEQUENCE_FIVE_FAMILIES)
+        (
+            *SEQUENCE_TWO_FAMILIES,
+            *SEQUENCE_FOUR_FAMILIES,
+            *SEQUENCE_FIVE_FAMILIES,
+            *SEQUENCE_SEVEN_FAMILIES,
+        )
     )
     assert manifest.preregistration_lineage is not None
 
@@ -949,7 +966,10 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
 
     reset_cache()
     assert withheld_family_ids(ROOT) == frozenset(
-        SEQUENCE_TWO_FAMILIES + SEQUENCE_FOUR_FAMILIES + SEQUENCE_FIVE_FAMILIES
+        SEQUENCE_TWO_FAMILIES
+        + SEQUENCE_FOUR_FAMILIES
+        + SEQUENCE_FIVE_FAMILIES
+        + SEQUENCE_SEVEN_FAMILIES
     )
     for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
@@ -963,6 +983,12 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
         with pytest.raises(
             AmendmentAcknowledgmentPendingError,
             match=rf"amendment sequence 5 .*pending.*{family_id}",
+        ):
+            require_family_released(family_id, repo_root=ROOT)
+    for family_id in SEQUENCE_SEVEN_FAMILIES:
+        with pytest.raises(
+            AmendmentAcknowledgmentPendingError,
+            match=rf"amendment sequence 7 .*pending.*{family_id}",
         ):
             require_family_released(family_id, repo_root=ROOT)
 
@@ -1068,7 +1094,7 @@ def test_utility_acknowledgment_releases_both_gates_and_preserves_frozen_contrac
     assert receipt.acknowledged_on == "2026-09-13"
     assert receipt.repository_revision == SEQUENCE_SIX_ACKNOWLEDGED_REVISION
     before = derive_preregistration_identity(ROOT, contract_revision=SEQUENCE_SIX_ACKNOWLEDGED_REVISION)
-    after = derive_preregistration_identity(ROOT)
+    after = derive_preregistration_identity(ROOT, contract_revision=SEQUENCE_SIX_RELEASE_REVISION)
     assert before.amendments[5].acknowledgment_status == "pending"
     assert after.effective.sha256 == before.effective.sha256
     require_amended_families_released(after, ("f32",))

@@ -301,3 +301,25 @@ def test_noop_when_embeddings_disabled(
     )
     find_module.clear_cache()
     assert _run(vault) == []
+
+
+def test_a_remembered_sweep_is_dropped_when_the_vectors_change(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep is reused while the index serves the same matrix, and every
+    write makes the index serve a new one. Keyed on anything less, a page
+    rewritten into a near-duplicate kept reporting its old contradiction."""
+    planted = _install(vault, monkeypatch, [("Notes/Insights/memo-a.md", "Notes/Insights/memo-b.md", 0.8)])
+    pair = next(iter(planted))
+    keys = list(planted[pair])
+    assert pair in {_pair_key(f) for f in _pair_findings(_run(vault))}
+
+    # Rewritten into a near-duplicate: a new matrix, above the ceiling.
+    duplicate = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    monkeypatch.setattr(
+        embeddings.EmbeddingIndex,
+        "all_vectors",
+        lambda self: ([(key, 0) for key in keys], duplicate),
+    )
+
+    assert pair not in {_pair_key(f) for f in _pair_findings(_run(vault))}

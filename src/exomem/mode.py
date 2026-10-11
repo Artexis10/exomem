@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -345,6 +346,18 @@ def write_config(data: dict) -> Path:
 _watch_thread: threading.Thread | None = None
 _watch_stop = threading.Event()
 _applied_mode: str | None = None
+_config_listeners: list[Callable[[], None]] = []
+
+
+def add_config_listener(listener: Callable[[], None]) -> None:
+    """Run `listener` on every config-watch poll, after the mode check. Idempotent.
+
+    For another key of this shared file that the running process must apply
+    without a restart (the dreamer setting). A listener must be cheap and must
+    not block: it runs on the watch thread.
+    """
+    if listener not in _config_listeners:
+        _config_listeners.append(listener)
 
 
 def apply_live() -> dict:
@@ -422,6 +435,11 @@ def start_config_watch(interval: float = 10.0) -> threading.Thread | None:
                     apply_live()
             except Exception:  # noqa: BLE001 — the watch must never die on a bad tick
                 log.warning("mode-watch tick failed", exc_info=True)
+            for listener in tuple(_config_listeners):
+                try:
+                    listener()
+                except Exception:  # noqa: BLE001 — one listener must not stop the others
+                    log.warning("config listener failed", exc_info=True)
 
     t = threading.Thread(target=_run, name="exomem-mode-watch", daemon=True)
     _watch_thread = t
