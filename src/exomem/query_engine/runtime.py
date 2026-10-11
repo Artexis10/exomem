@@ -311,8 +311,11 @@ class ReadSession:
             try:
                 found = derived_rows.row_source(self.connection, collection_id, attached=self._attached)
             except derived_rows.Rebuilding as error:
-                raise QueryError("QUERY_REBUILDING", "this derived collection's rows are rebuilding from its import "
-                                 "log", progress=error.progress) from error
+                if not error.recorded:
+                    raise QueryError("QUERY_BUSY", "this derived collection's rows are settling; retry shortly") \
+                        from error
+                raise QueryError(derived_rows.QUERY_REBUILDING, "this derived collection's rows are rebuilding "
+                                 "from its import log", progress=error.progress) from error
             self._sources[collection_id] = found
         return found
 

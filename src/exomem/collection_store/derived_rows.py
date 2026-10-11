@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import threading
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
@@ -43,7 +42,7 @@ from typing import Any
 
 from .. import structured_collections as collections
 from ..reserved_paths import _SQLITE_SUFFIXES  # the SQLite file family, defined once there
-from . import connection, index_migrations, rollups, summary, typed_storage
+from . import index_migrations, rollups, summary, typed_storage
 from .query_indexes import ProjectionPlan
 
 FILENAME = "collections-derived.sqlite"
@@ -133,6 +132,31 @@ def conversion_refused(current: bool) -> collections.CollectionError:
         {"derived": current, "requested_derived": not current,
          "migration": (f"Create a NEW collection with derived: {str(not current).lower()} and import or copy "
                        "the rows into it. This collection, its import log and its sources stay as they are.")},
+    )
+
+
+def field_change_refused(current, proposed) -> collections.CollectionError | None:
+    """A field revise of a populated derived collection that its rebuild could not replay, or None.
+
+    The store checks a field change against the rows it holds; a derived collection's rows are in
+    its own file, and a rebuild replays the logged imports under the current fields. So every
+    existing field stays as it is, and a new field is optional.
+    """
+    old, new = current.schema.fields, proposed.schema.fields
+
+    def accepts(spec):  # what decides a row's acceptance; a classification only governs its release
+        return None if spec is None else replace(spec, classification=None)
+
+    changed = sorted(name for name in old if accepts(new.get(name)) != accepts(old[name]))
+    required = sorted(name for name in new.keys() - old.keys() if new[name].required)
+    if not changed and not required:
+        return None
+    return collections.CollectionError(
+        COLLECTION_DERIVED,
+        "a populated derived collection keeps its fields; it can only gain optional ones",
+        {"changed_fields": changed, "required_new_fields": required,
+         "migration": "Create a NEW derived collection with the new fields and import the export into it. "
+                      "This collection, its import log and its sources stay as they are."},
     )
 
 
@@ -230,14 +254,18 @@ class State:
                 "members_logged": self.logged, "stop": self.stop}
 
 
-# A paused job keeps its open member, as a running one does, so its continuation resumes it.
-_HOLDING = "state='running' OR (state='partial' AND reason IN ('authority_lost','time_cap'))"
-
-
 def _holds(main: sqlite3.Connection, record: dict[str, Any]) -> bool:
-    """Whether the progress record's job still holds its member: alive, and not checkpointed past it."""
-    row = main.execute(f"SELECT checkpoint_json FROM import_jobs WHERE job_id=? AND ({_HOLDING})",
-                       (record["job"],)).fetchone()
+    """Whether the progress record's job still holds its member: alive, and not checkpointed past it.
+
+    A paused job keeps its open member, as a running one does, so its continuation resumes it.
+    """
+    # The pause reasons a continuation resumes from: one list, the importer's.
+    from .importer import _RESUMABLE
+
+    marks = ",".join("?" * len(_RESUMABLE))
+    row = main.execute("SELECT checkpoint_json FROM import_jobs WHERE job_id=? AND "
+                       f"(state='running' OR (state='partial' AND reason IN ({marks})))",
+                       (record["job"], *_RESUMABLE)).fetchone()
     return row is not None and json.loads(row[0]).get("member", 0) <= record["member"]
 
 
@@ -281,10 +309,10 @@ def assess(main: sqlite3.Connection, derived: sqlite3.Connection | None, schema:
 class Store:
     """One writer handle's connection to the derived file; ``open_store`` opens and reconciles it."""
 
-    def __init__(self, store_path: Path) -> None:
-        self.path = path(store_path)
+    def __init__(self, root: Path, handle) -> None:
         # Opened on the writer handle's thread and closed with the handle (``WriterConnection.close``).
-        self.thread, self.closed = threading.get_ident(), False
+        # ``open_store`` rebinds ``handle`` to each checkout that uses it.
+        self.root, self.handle, self.path, self.closed = root, handle, path(handle.path), False
         self.conn = self._open()
         self.readers: dict[str, Any] = {}  # a rebuild's open member reader per collection
 
@@ -321,20 +349,21 @@ class Store:
 
     @contextmanager
     def transaction(self):
-        # This host's projection needs its writer handle's thread, not the vault's writer lease: a
-        # step counts only once the store's log agrees with it, so a stale write is replayed over.
-        if self.closed:
-            raise connection.CollectionStoreError("COLLECTION_STORE_WRITER_CLOSED", "the writer connection is closed")
-        if threading.get_ident() != self.thread:
-            raise connection.CollectionStoreError("COLLECTION_STORE_WRITER_THREAD",
-                                                  "the opening thread owns the writer connection")
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.conn
-            self.conn.execute("COMMIT")
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
+        from ..writer_lease import active_manager
+
+        # Inside the vault's mutation boundary with the store's own checks, as every store write is:
+        # a writer past a lost lease or a managed handoff must not change rows that the new holder's
+        # log counts are built on. The divergence fence guards the store's publication, which this
+        # file never reaches.
+        with active_manager().mutation_guard(self.root, operation="derived_rows"):
+            self.handle.require_write_authority(allow_diverged=True)
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.conn
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
 
     def state(self, main: sqlite3.Connection, collection_id: str) -> tuple[State, Target | None]:
         goal = target(main, collection_id)
@@ -484,7 +513,7 @@ class Store:
         with self.transaction():
             self.conn.execute("UPDATE derived_collections SET stop_json=? WHERE collection_id=?",
                               (_json(stop), collection_id))
-        return "stopped"
+        return "mismatched" if stop["code"] == REBUILD_MISMATCH else "stopped"
 
 
 def _cursor(main: sqlite3.Connection, collection_id: str, seq: int) -> dict[str, Any]:
@@ -498,13 +527,15 @@ def open_store(writer) -> Store:
     """This writer handle's derived file, opened and reconciled on the handle's first use."""
     handle = writer.handle
     if handle.derived is None:
-        store = Store(handle.path)
+        store = Store(writer.root, handle)
         try:
             store.reconcile(writer.connection)
         except BaseException:
             store.close()
             raise
         handle.derived = store
+    # Each use checks the writer's authority through the checkout it runs in; an ended one refuses.
+    handle.derived.handle = handle
     return handle.derived
 
 
@@ -603,6 +634,10 @@ class RowSource:
     items: str
     schema: str
     layout: typed_storage.Layout | None = None
+    #: A derived collection's own row position: the applied log position and the open member's
+    #: progress record, which every batch rewrites. A continuation binds it, because the store's
+    #: freshness basis moves only when a member ends. None for the store's own rows.
+    position: str | None = None
 
 
 STORE = RowSource("main.items", "main")
@@ -614,6 +649,9 @@ class Rebuilding(Exception):
     def __init__(self, state: State) -> None:
         super().__init__(QUERY_REBUILDING)
         self.progress = state.progress()
+        #: Whether the file itself records a running rebuild. Otherwise the store and the file
+        #: disagree, often only because a query read the two a moment apart.
+        self.recorded = state.action == "rebuilding"
 
 
 def attach(conn: sqlite3.Connection, store_path: Path) -> bool:
@@ -624,8 +662,13 @@ def attach(conn: sqlite3.Connection, store_path: Path) -> bool:
     try:
         conn.execute("ATTACH DATABASE ? AS derived", (f"{found.resolve().as_uri()}?mode=ro",))
         conn.execute("SELECT 1 FROM derived.derived_collections LIMIT 1")
+        owner = conn.execute("SELECT value FROM derived.derived_meta WHERE key='store_id'").fetchone()
+        if conn.execute("PRAGMA derived.user_version").fetchone()[0] != LAYOUT or owner is None or owner != \
+                conn.execute("SELECT value FROM main.store_meta WHERE key='store_id'").fetchone():
+            raise sqlite3.DatabaseError("the derived file has another layout or belongs to another store")
     except sqlite3.DatabaseError:
-        # An unreadable projection reads as absent; the writer's reconcile replaces it.
+        # An unreadable projection, or another layout's or store's, reads as absent; the writer's
+        # reconcile replaces it.
         if conn.execute("SELECT 1 FROM pragma_database_list WHERE name='derived'").fetchone() is not None:
             conn.execute("DETACH DATABASE derived")
         return False
@@ -644,7 +687,10 @@ def row_source(conn: sqlite3.Connection, collection_id: str, *, attached: bool) 
         return STORE
     if not state.serves or goal is None:
         raise Rebuilding(state)
-    return RowSource(f"derived.{goal.table}", "derived", goal.reads("derived"))
+    applied, progress = conn.execute(
+        "SELECT c.applied_seq,p.record_json FROM derived.derived_collections c LEFT JOIN derived.derived_progress p "
+        "ON p.collection_id=c.collection_id WHERE c.collection_id=?", (collection_id,)).fetchone()
+    return RowSource(f"derived.{goal.table}", "derived", goal.reads("derived"), _json([applied, progress]))
 
 
 def rebuilds_pending(store_path: Path) -> bool:
@@ -711,21 +757,22 @@ class _Missing(Exception):
 def step(root: Path, writer) -> str:
     """Advance one rebuilding derived collection by one bounded step on the store writer's thread.
 
-    Returns ``advanced``, ``done`` when a rebuild finished, ``stopped`` when every rebuild
-    waits on a missing source or a mismatch, or ``idle``.
+    Returns ``advanced``, ``done`` when a rebuild finished, ``stopped`` when every rebuild is
+    stopped and one waits on a missing source, ``mismatched`` when every one stopped on a
+    mismatch, which only a revise or an upgrade changes, or ``idle``.
     """
     store = open_store(writer)
     for cid in sorted({*store.rebuilding(), *(
             found for (found,) in writer.connection.execute("SELECT collection_id FROM collections WHERE derived=1")
             if not store.state(writer.connection, found)[0].at_rest)}):
         store.settle(writer.connection, cid)
-    stopped = False
+    waiting = set()
     for cid in store.rebuilding():
         outcome = _rebuild(Path(root), writer, store, cid)
-        if outcome != "stopped":
+        if outcome not in ("stopped", "mismatched"):
             return outcome
-        stopped = True
-    return "stopped" if stopped else "idle"
+        waiting.add(outcome)
+    return "stopped" if "stopped" in waiting else "mismatched" if waiting else "idle"
 
 
 def _bound_members(root: Path, job, manifest_sha256: str) -> tuple:
@@ -770,8 +817,10 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
         "SELECT cursor_json,stop_json FROM derived_collections WHERE collection_id=?", (collection_id,)).fetchone()
     cursor, stop = json.loads(cursor_json), None if stop_json is None else json.loads(stop_json)
     goal = target(main, collection_id)
-    if goal is None or (stop is not None and stop["code"] == REBUILD_MISMATCH):
+    if goal is None:
         return "stopped"
+    if stop is not None and stop["code"] == REBUILD_MISMATCH:
+        return "mismatched"
     if cursor["seq"] > logged(main, collection_id)[0]:
         return _finish(root, writer, store, goal)
     job_id, index, sha256, manifest_sha256, accepted, rejected, digest, rows_after, version, zone = main.execute(
@@ -779,10 +828,14 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
         "importer_version,zone_rules FROM import_members WHERE collection_id=? AND seq=?",
         (collection_id, cursor["seq"])).fetchone()
     named = {"seq": cursor["seq"], "index": index, "sha256": sha256}
-    job = importer._load(main, job_id)
-    manifest = writer._collection_manifest(writer._collection_row(collection_id))[0]
-    binding = job.binding
-    plan = importer.compile_mapping(binding["mapping"]["declared"], manifest, binding["mapping"]["format"])
+    try:
+        job = importer._load(main, job_id)
+        manifest = writer._collection_manifest(writer._collection_row(collection_id))[0]
+        binding = job.binding
+        plan = importer.compile_mapping(binding["mapping"]["declared"], manifest, binding["mapping"]["format"])
+    except collections.CollectionError as error:
+        # The logged import no longer applies to the collection as it stands; retrying cannot change that.
+        return store._stop(collection_id, {"code": REBUILD_MISMATCH, "member": named, "reason": error.code})
     position = {"row": 0, "byte": 0, "member": index, "member_row": cursor["member_row"]}
     reader = store.readers.get(collection_id)
     if reader is None or reader.marked != (cursor["seq"], cursor["member_row"]):

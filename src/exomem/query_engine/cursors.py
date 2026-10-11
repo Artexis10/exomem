@@ -75,6 +75,13 @@ def _codec(session):
         raise QueryError("QUERY_UNAVAILABLE") from error
 
 
+def with_rows(session, collection_id: str, visible: str) -> str:
+    """``visible`` also bound to a derived collection's row position, so a batch inside an open
+    member stales a continuation; the store's own rows keep their basis unchanged."""
+    position = session.row_source(collection_id).position
+    return visible if position is None else _hash([visible, position])
+
+
 def _visible(admitted, dependencies):
     plan = admitted.session._field_plans[admitted.query.source.ref]
     if admitted.uniform and dependencies - {"item_key"} <= plan.whole_fields:
@@ -151,7 +158,7 @@ def _binding(admitted: AdmittedQuery):
     admitted.check()
     dependencies = set(admitted.compiled.dependency_paths) | set(admitted.fields)
     return {**caller_binding(admitted.session, admitted.query), "schema": _hash(admitted.schema_identity),
-            "visible": _visible(admitted, dependencies)}
+            "visible": with_rows(admitted.session, admitted.query.source.ref, _visible(admitted, dependencies))}
 
 
 def _resume(admitted, payload):

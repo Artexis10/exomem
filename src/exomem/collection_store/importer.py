@@ -1999,6 +1999,10 @@ def _iso(timestamp: int) -> str:
 
 def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     progress, checkpoint = job.progress, job.checkpoint
+    if job.state == "running" and derived_rows.is_derived(writer.connection, job.collection_id):
+        record = derived_rows.open_store(writer).progress(job.collection_id)
+        if record is not None and record["job"] == job.id:
+            progress = _with_member(progress, record["counts"])
     rejections = [
         {"row": ordinal, "byte": offset, "code": code, "at": at}
         for ordinal, offset, code, at in writer.connection.execute(
@@ -2822,9 +2826,21 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     return _Applied(outcomes, entries, rejections, superseded)
 
 
+def _with_member(progress: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+    """A job's counters with a derived member's batches, which reach the job row only at the member's end."""
+    folded = dict(progress)
+    for name in ("inserted", "updated", "unchanged", "rejected", "duplicates", "batches"):
+        folded[name] += counts[name]
+    folded["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
+    folded["members"] = {"read": progress["members"]["read"] + counts["read"],
+                         "skipped": progress["members"]["skipped"] + counts["skipped"]}
+    return folded
+
+
 def _opened(job: _Job, index: int, rows: int) -> dict[str, Any]:
     """A derived collection's progress record for a member a job opens."""
-    counts = dict.fromkeys(("inserted", "updated", "unchanged", "rejected", "duplicates", "read", "skipped"), 0)
+    counts = dict.fromkeys(("inserted", "updated", "unchanged", "rejected", "duplicates", "read", "skipped",
+                            "batches"), 0)
     sha256 = job.binding["source"]["members"]["sha256"][index]
     return {"job": job.id, "member": index, "sha256": sha256, "tally": _tally(), "counts": counts,
             "rows": rows, "done": False, "eof": False, "checkpoint": None}
@@ -2885,6 +2901,7 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
         counts["duplicates"] += applied.superseded
         counts["read"] += len(read)
         counts["skipped"] += sum(event[0] == "skipped" for event in batch.members)
+        counts["batches"] += 1
         rows = record["rows"] + sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)
         done = {**record, "tally": tally, "counts": counts, "rows": rows, "done": bool(read),
                 "eof": batch.eof, "checkpoint": batch.checkpoint}
@@ -2906,15 +2923,7 @@ def _settle_member(root: Path, writer, job: _Job, manifest, store, goal, record,
         current = _load(writer.connection, job.id)
         if current is None or current.state != "running" or current.checkpoint["batch"] != job.checkpoint["batch"]:
             raise RuntimeError("import job changed under its batch")
-        progress, counts = dict(current.progress), record["counts"]
-        for name in ("inserted", "updated", "unchanged"):
-            progress[name] += counts[name]
-        progress["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
-        progress["rejected"] += counts["rejected"]
-        progress["duplicates"] += counts["duplicates"]
-        progress["batches"] += 1
-        progress["members"] = {"read": progress["members"]["read"] + counts["read"],
-                               "skipped": progress["members"]["skipped"] + counts["skipped"]}
+        progress = _with_member(current.progress, record["counts"])
         writer._execute(
             "INSERT INTO import_rejections(job_id,ordinal,byte_offset,code,at) VALUES (?,?,?,?,?)",
             [(job.id, *rejection) for rejection in store.rejections(cid)],
@@ -3143,8 +3152,6 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         }
     if plan.zoned:
         binding["mapping"]["zone_rules"] = import_time.version()
-    if manifest.derived:
-        binding["importer"] = __version__  # a rebuild names it when a member's digest differs
     streamed = _streamed(binding)
     start = {"row": 0, "byte": 0, "member": 0, "member_row": 0} if streamed else dict(_START)
     identity = _identity(binding)

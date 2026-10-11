@@ -2373,6 +2373,10 @@ class CollectionWriter:
             # before any manifest, mapping, file, guard or cursor work.
             if proposed.derived != current.derived:
                 raise derived_rows.conversion_refused(current.derived)
+            if current.derived and summary.populated(self.connection, current.collection_id):
+                refused = derived_rows.field_change_refused(current, proposed)
+                if refused is not None:
+                    raise refused
             mode_change = proposed.view_mode != current.view_mode
             if mode_change and summary.populated(self.connection, current.collection_id):
                 raise summary.mode_change_refused(current.view_mode, proposed.view_mode)

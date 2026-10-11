@@ -246,6 +246,42 @@ def derived(tmp_path, monkeypatch):
         writer.handle.close()
 
 
+def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):
+    """Each batch of a derived import commits only to the derived file, and the store's freshness
+    basis moves when a member ends. A continuation bound to the store's basis alone resumed after a
+    batch that added rows, so paging silently skipped rows the collection held."""
+    nine = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", *((f"{hour:02d}:00", hour)
+                                                                                for hour in range(9)))))}
+    writer, _ = derived("live", nine)
+
+    def page(**after):
+        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, writer.handle):
+            return commands.op_record_memory(writer.root, action="query", collection=DERIVED,
+                                             query={"version": 1, "page": {"limit": 2, **after}})
+
+    run_jobs(writer, max_batches=1)
+    first = page()
+    run_jobs(writer, max_batches=1)
+    logged = writer.connection.execute("SELECT count(*) FROM import_members WHERE collection_id=?",
+                                       (DERIVED,)).fetchone()[0]
+
+    assert first["has_more"] and logged == 0  # the member is still open
+    with pytest.raises(OpError) as stale:
+        page(after=first["next_cursor"])
+    assert stale.value.code == "QUERY_CURSOR_STALE"
+
+
+def test_a_writer_that_lost_the_lease_stages_no_derived_rows(derived):
+    """Defect: derived writes checked only the writer's thread. A worker past a lost lease or a managed
+    handoff still staged rows, and the new holder logged member counts built on them, for good."""
+    writer, _ = derived("stale")
+    writer.handle._lease_check = lambda: False
+    with contextlib.suppress(Exception):
+        run_jobs(writer, max_batches=1)
+
+    assert not derived_rows.path(writer.handle.path).exists() or _rows_file(derived_rows.path(writer.handle.path)) == []
+
+
 def _imported_state(writer):
     """What a finished import leaves: the derived rows, the import log and the store's rollup buckets."""
     log = writer.connection.execute(
@@ -347,6 +383,26 @@ def test_a_rebuild_refuses_an_export_manifest_that_lost_its_raw_protection_bindi
         stop = derived_rows.rebuild_status(handle.connection, path, DERIVED)["stop"]
     assert (stop["code"], stop["missing"], stop["reason"]) == (
         derived_rows.SOURCE_MISSING, "export manifest", "it lost its raw-protection binding")
+
+
+def test_a_populated_derived_collection_keeps_its_fields_and_may_only_gain_optional_ones(derived):
+    """Defect: the store checks a field revise against the rows it holds, and a derived collection holds
+    none there, so any field change was accepted. A rebuild then replays the logged imports under the new
+    fields, disagrees with the log and stops for good."""
+    writer, job = derived("fields")
+    assert finish(writer, job)["state"] == "complete"
+    value = "    value: {type: number}\n"
+    for revised in (TEXT.replace(value, "    value: {type: integer}\n"),
+                    TEXT.replace(value, value + "    unit: {type: string, required: true}\n"),
+                    TEXT.replace("    device: {type: string}\n", "")):
+        guards = writer.inspect_collection(DERIVED)["lifecycle_guards"]
+        with pytest.raises(Exception) as refused:
+            writer.revise_collection(DERIVED, manifest_text=revised, why="fields", **guards)
+        assert refused.value.code == derived_rows.COLLECTION_DERIVED
+
+    guards = writer.inspect_collection(DERIVED)["lifecycle_guards"]
+    writer.revise_collection(DERIVED, manifest_text=TEXT.replace(value, value + "    unit: {type: string}\n"),
+                             why="an optional field", **guards)
 
 
 def test_a_revise_cannot_convert_a_derived_collection_and_the_store_refuses_the_flag_change(derived):

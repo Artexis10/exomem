@@ -615,8 +615,7 @@ class CollectionStoreRuntime:
             # Every orderly boundary also leaves the store file alone holding this head. A
             # reader mid-transaction can hold that back; the replica already carries the head,
             # so the flush stands and the WAL keeps the commits.
-            wait = min(connection.BUSY_TIMEOUT_MS / 1000, max(0.0, deadline - time.monotonic()))
-            if not writer.checkpoint(timeout_seconds=wait):
+            if not writer.checkpoint():
                 logger.warning("collection store WAL checkpoint was held back by an open reader")
             return head
 
@@ -1191,7 +1190,9 @@ class StoreServer:
             return IMPORT_RETRY_SECONDS
         if outcome == "done":
             self._ticks["import"] = 0.0
-        return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
+        # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
+        return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
+                "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _views_tick(self):
         """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.

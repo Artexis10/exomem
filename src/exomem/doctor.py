@@ -971,9 +971,10 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
 def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
     """State the collection store's unsupported writer setup for a vault that has a store.
 
-    A vault without the store's routing marker has only file collections, so it gets no line.
+    A vault without the store's routing marker has only file collections, so it gets no line, and
+    a missing vault root is another check's finding.
     """
-    if vault_root is None:
+    if vault_root is None or not vault_root.is_dir():
         return None
     from . import held_fs
     from .collection_store import authority, connection

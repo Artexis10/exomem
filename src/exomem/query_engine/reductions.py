@@ -256,7 +256,8 @@ def _scan_sql(session, collection_id: str, layout, predicate: str, fields: tuple
     def decode(row):
         return session.selected_values(row[1], layout, fields, max_bytes=_MAX_DECODE_BYTES, check=session.check)
 
-    return (f"SELECT i.item_key,i.row_id FROM items i "  # noqa: S608 - internal membership predicate
+    items = "items" if layout is None else layout.items  # a derived collection's rows are in its file
+    return (f"SELECT i.item_key,i.row_id FROM {items} i "  # noqa: S608 - internal membership predicate
             f"WHERE i.collection_id=? AND {predicate}"), decode
 
 
@@ -335,9 +336,10 @@ def _from_rows(session, limits, collection_id: str, shape: _Shape, layout, predi
     return [(bucket, identity, *group) for (bucket, identity), group in ordered], flagged
 
 
-def _binding(session, query, collection_id: str, manifest, shape: _Shape, uniform: bool) -> dict:
+def _binding(session, query, collection_id: str, manifest, shape: _Shape, uniform: bool, strategy: str) -> dict:
     """What a group page's continuation binds: caller, manifest version and the collection's freshness
-    basis over the fields read, or a refusal where no such basis bounds the visible state."""
+    basis over the fields read, or a refusal where no such basis bounds the visible state. A base scan
+    also binds a derived collection's row position; a rollup page reads only the store's buckets."""
     read = {*shape.fields, *shape.others}
     if shape.basis is not None:
         read |= {name for name in (shape.basis.field, shape.basis.offset) if name is not None}
@@ -362,7 +364,8 @@ def _binding(session, query, collection_id: str, manifest, shape: _Shape, unifor
                 digest.update(cursors._json([key, values]).encode() + b"\n")
         visible = digest.hexdigest()
     return {**cursors.caller_binding(session, query), "schema": cursors._hash([collection_id,
-            manifest.manifest_version.hash]), "visible": visible}
+            manifest.manifest_version.hash]),
+            "visible": visible if strategy == "rollup" else cursors.with_rows(session, collection_id, visible)}
 
 
 def _assemble(session, query, shape: _Shape, ordered, envelope: dict, mint) -> dict:
@@ -424,7 +427,7 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
               "execution_profile": limits.profile, "bounds": limits.bounds(), "plan": plan.describe(shape)}
     binding = after = None
     if payload is not None:
-        binding = _binding(session, query, collection_id, manifest, shape, uniform)
+        binding = _binding(session, query, collection_id, manifest, shape, uniform, plan.strategy)
         codec.verify(payload, binding)
         after = payload["boundary"]
     if query.mode == "explain":
@@ -453,7 +456,7 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
     def mint(boundary: str) -> str:
         nonlocal binding, codec
         codec = codec or cursors._codec(session)
-        binding = binding or _binding(session, query, collection_id, manifest, shape, uniform)
+        binding = binding or _binding(session, query, collection_id, manifest, shape, uniform, plan.strategy)
         return codec.mint(binding, as_of=frozen, boundary=boundary)
 
     # Flagged rows have no local day, so they are counted over the released collection, not the window.
