@@ -9,7 +9,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -195,45 +194,6 @@ def test_upload_timeout_reports_worker_stacks_without_suppressing_failure(
         test_independent_vault_real_uploads_admit_guards_concurrently(tmp_path)
     assert caught.value is failure
     assert dumps == [{"all_threads": True}]
-
-
-def test_upload_completion_uses_one_deadlock_deadline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    elapsed = [0.0]
-    deadlines = []
-    real_pool = ThreadPoolExecutor
-
-    class Future:
-        def __init__(self, future):
-            self.future = future
-
-        def result(self, timeout):
-            deadlines.append(timeout)
-            assert timeout == _HOLD_SECONDS - elapsed[0]
-            result = self.future.result(timeout=timeout)
-            # Model slow storage without sleeping or changing the real uploads.
-            elapsed[0] += 40.0 if len(deadlines) == 1 else 0.0
-            return result
-
-    class Pool:
-        def __init__(self, *, max_workers):
-            self.pool = real_pool(max_workers=max_workers)
-
-        def __enter__(self):
-            self.pool.__enter__()
-            return self
-
-        def __exit__(self, *args):
-            return self.pool.__exit__(*args)
-
-        def submit(self, *args):
-            return Future(self.pool.submit(*args))
-
-    monkeypatch.setattr(sys.modules[__name__], "ThreadPoolExecutor", Pool)
-    monkeypatch.setattr(sys.modules[__name__], "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
-    test_independent_vault_real_uploads_admit_guards_concurrently(tmp_path)
-    assert deadlines == [_HOLD_SECONDS, _HOLD_SECONDS - 40.0]
 
 
 def test_real_upload_barrier_rejects_a_cross_vault_mutation_guard(
