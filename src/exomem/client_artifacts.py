@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
@@ -46,13 +46,21 @@ from .vault import (
 from .writer_lease import active_manager, active_mutation_request_id, mark_active_mutation_committed
 
 MAX_FILES = 8
+#: The per-file and per-call caps on a hosted or Cloud cell. The artifact broker's grants
+#: carry exactly this `max_bytes`, so raising it is a gateway change. A standalone server
+#: takes larger files: see `fetch_budget`.
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = MAX_FILE_BYTES
 MAX_REDIRECTS = 3
 _CHUNK_SIZE = 1024 * 1024
+#: The longest wait for one read: a pull that receives nothing for this long has stalled.
 _TIMEOUT_SECONDS = 20.0
+#: The fixed allowance of one file's pull, and of one call's pulls.
 _RETRIEVAL_DEADLINE_SECONDS = 20.0
 _BATCH_DEADLINE_SECONDS = 60.0
+#: The slowest average rate a standalone server's pull may keep beyond its fixed allowance:
+#: 2 Mbit/s, below any broadband link, so only a pull that trickles or stalls runs out.
+_MIN_BYTES_PER_SECOND = 256 * 1024
 _MAX_FILE_ID_CHARS = 256
 _MAX_CONTENT_TYPE_CHARS = 255
 _MAX_ADOPTION_KEY_CHARS = 512
@@ -76,6 +84,9 @@ class FetchBudget:
     max_file_bytes: int = MAX_FILE_BYTES
     max_total_bytes: int = MAX_TOTAL_BYTES
     total_bytes: int = 0
+    #: Each byte a pull receives moves its deadlines `1 / min_bytes_per_second` seconds
+    #: later. Zero keeps them fixed, as a cell and the artifact broker's own deadline expect.
+    min_bytes_per_second: int = 0
 
     def validate_content_length(self, length: int) -> None:
         if length < 0 or length > self.max_file_bytes or self.total_bytes + length > self.max_total_bytes:
@@ -84,6 +95,40 @@ class FetchBudget:
     def consume(self, size: int) -> None:
         self.validate_content_length(size)
         self.total_bytes += size
+
+    def extended(self, deadline: float, received: int) -> float:
+        """`deadline` once `received` bytes have arrived."""
+        if not self.min_bytes_per_second:
+            return deadline
+        return deadline + received / self.min_bytes_per_second
+
+
+def fetch_budget() -> FetchBudget:
+    """The limits of one call's pulls on this runtime.
+
+    A standalone server serves upload sessions, so it takes a file handle, and a
+    call's handles together, as large as a session may be. It bounds a pull by a
+    minimum rate rather than a fixed time: a fixed time either stops a healthy
+    multi-gigabyte pull or lets a trickle run as long. A hosted or Cloud cell keeps
+    the broker-bound cap and fixed deadlines.
+    """
+    from .cloud_cell import cloud_mode_enabled
+    from .hosted_runtime import hosted_mode_enabled
+
+    if cloud_mode_enabled() or hosted_mode_enabled():
+        return FetchBudget()
+    from .upload_sessions import max_bytes_from_env
+
+    cap = max_bytes_from_env()
+    return FetchBudget(
+        max_file_bytes=cap, max_total_bytes=cap, min_bytes_per_second=_MIN_BYTES_PER_SECOND
+    )
+
+
+def adoption_budget() -> FetchBudget:
+    """An adoption-keyed call's limits: this runtime's deadlines with the cell cap on every server,
+    because replaying the call re-verifies the stored file in memory."""
+    return replace(fetch_budget(), max_file_bytes=MAX_FILE_BYTES, max_total_bytes=MAX_TOTAL_BYTES)
 
 
 @dataclass(frozen=True)
@@ -446,7 +491,10 @@ def stage_direct_artifact(
     current_url = str(file.get("download_url") or "")
     redirects = 0
     destination: Path | None = None
-    deadline = min(_monotonic() + _RETRIEVAL_DEADLINE_SECONDS, batch_deadline or float("inf"))
+    file_deadline = _monotonic() + _RETRIEVAL_DEADLINE_SECONDS
+    call_deadline = batch_deadline or float("inf")
+    # The call keeps the time its earlier files earned.
+    deadline = min(file_deadline, budget.extended(call_deadline, budget.total_bytes))
     try:
         while True:
             if cancelled is not None and cancelled.is_set():
@@ -558,6 +606,10 @@ def stage_direct_artifact(
                             budget.validate_content_length(written)
                             digest.update(block)
                             output.write(block)
+                            deadline = min(
+                                budget.extended(file_deadline, written),
+                                budget.extended(call_deadline, budget.total_bytes + written),
+                            )
                 except SafeFetchError:
                     _cancel_connection(selected_connection)
                     raise
@@ -1152,7 +1204,7 @@ def _capture_source_adoption(
             _content_type(selected.get("mime_type"))
             artifact = stage_artifact(
                 selected,
-                FetchBudget(),
+                adoption_budget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
                 lane="source",
                 index=selected_index,
@@ -1280,9 +1332,10 @@ def _preserve_evidence_adoption(
             ].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(selected.get("mime_type"))
+            budget = adoption_budget()
             artifact = stage_artifact(
                 selected,
-                FetchBudget(),
+                budget,
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
                 lane="evidence",
                 index=selected_index,
@@ -1336,7 +1389,7 @@ def _preserve_evidence_adoption(
                             filename=artifact.filename,
                             stream=stream,
                             content_type=artifact.content_type,
-                            max_bytes=MAX_FILE_BYTES,
+                            max_bytes=budget.max_file_bytes,
                             adoption_seed=envelope.seed(
                                 lane="evidence", destination=destination
                             ),
@@ -1424,7 +1477,7 @@ def capture_source_artifacts(
             "summary": {"stored": 0, "failed": len(files)},
         }
 
-    budget = FetchBudget()
+    budget = fetch_budget()
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
@@ -1567,7 +1620,7 @@ def preserve_artifacts(
                 for file in files
             ]
         )
-    budget = FetchBudget()
+    budget = fetch_budget()
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
@@ -1657,7 +1710,7 @@ def preserve_artifacts(
                             filename=artifact.filename,
                             stream=stream,
                             content_type=artifact.content_type,
-                            max_bytes=MAX_FILE_BYTES,
+                            max_bytes=budget.max_file_bytes,
                             raw_protection=raw_protection,
                             **(
                                 {"text": transcription, "text_origin": "client"}

@@ -27,6 +27,7 @@ import httpx
 import pytest
 
 from exomem import server, upload_sessions
+from exomem.governance import principal as principal_module
 
 TUS = {"Tus-Resumable": "1.0.0", "Authorization": "Bearer sekret"}
 
@@ -88,6 +89,25 @@ def _listening(app):
         listener.should_exit = True
         thread.join(30)
         bound.close()
+
+
+def _cut_off_part(host: str, port: int, location: str, secret: str, offset: int, part: bytes, sent: int) -> None:
+    """PATCH `part` at `offset` over a connection that drops after `sent` bytes of the body.
+
+    Only a real listener reports a client that leaves mid-body.
+    """
+    with socket.create_connection((host, port), timeout=30) as raw:
+        raw.sendall(
+            f"PATCH {location} HTTP/1.1\r\nHost: {host}:{port}\r\nTus-Resumable: 1.0.0\r\n"
+            f"Exomem-Upload-Secret: {secret}\r\nUpload-Offset: {offset}\r\n"
+            f"Content-Type: application/offset+octet-stream\r\nContent-Length: {len(part)}\r\n"
+            "Expect: 100-continue\r\n\r\n".encode()
+        )
+        # Uvicorn answers 100 once the handler first reads the body, so the bytes below
+        # reach a reader that is already waiting for them.
+        assert raw.recv(64).startswith(b"HTTP/1.1 100 ")
+        raw.sendall(part[:sent])
+        time.sleep(0.5)  # let the reader take them before the connection goes
 
 
 def _create(client: _ASGIClient, data: bytes, *, sha256: str | None = None) -> tuple[str, str]:
@@ -273,18 +293,7 @@ def test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_re
     ) as client:
         location, secret = _create(client, data)
         assert _patch(client, location, secret, 0, data[:40]).status_code == 204
-        with socket.create_connection((host, port), timeout=30) as raw:
-            raw.sendall(
-                f"PATCH {location} HTTP/1.1\r\nHost: {host}:{port}\r\nTus-Resumable: 1.0.0\r\n"
-                f"Authorization: Bearer sekret\r\nExomem-Upload-Secret: {secret}\r\nUpload-Offset: 40\r\n"
-                f"Content-Type: application/offset+octet-stream\r\nContent-Length: {len(data) - 40}\r\n"
-                "Expect: 100-continue\r\n\r\n".encode()
-            )
-            # Uvicorn answers 100 once the handler first reads the body, so the bytes below
-            # reach a reader that is already waiting for them.
-            assert raw.recv(64).startswith(b"HTTP/1.1 100 ")
-            raw.sendall(data[40:70])
-            time.sleep(0.5)  # let the reader take them before the connection goes
+        _cut_off_part(host, port, location, secret, 40, data[40:], 30)
         held = client.request("HEAD", location, headers={**TUS, "Exomem-Upload-Secret": secret})
         [part] = _parts(vault)
 
@@ -294,6 +303,55 @@ def test_a_part_whose_client_drops_mid_body_keeps_what_arrived_and_the_upload_re
         state = _settled(client, location, secret)
         assert state["state"] == "committed", state
         assert state["receipt"]["hash"] == hashlib.sha256(data).hexdigest()
+
+
+def test_an_agent_uploads_through_the_transfer_handoff_and_resumes_a_dropped_part(
+    vault, monkeypatch
+) -> None:
+    """An agent with a shell gets a file past the proxy edge's one-request cap with nothing
+    but what `transfer_artifact` returns: the creation URL, the minted token, the metadata
+    keys and the header to resend. The handoff comes through the tool surface, as an agent
+    receives it, and the token opens the session through the route's own credential check."""
+    data = b'{"device_days": [{"samples": 1440, "heart_rate": 61}]}\n' * 8
+    values = {"filename": "device_days.json", "sha256": hashlib.sha256(data).hexdigest(),
+              "scope": "Device", "category": "Exports"}
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "sekret")
+    mcp = server.build_server(require_auth=False)
+    with _listening(mcp.http_app()) as (host, port), httpx.Client(
+        base_url=f"http://{host}:{port}", trust_env=False, timeout=30
+    ) as client:
+        monkeypatch.setenv("EXOMEM_BASE_URL", f"http://{host}:{port}")
+        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+            minted = asyncio.run(mcp.call_tool("transfer_artifact", {"operation": "upload"}, run_middleware=False))
+        handoff = minted.structured_content
+        resumable = handoff["resumable"]
+
+        created = client.post(
+            resumable["create_url"],
+            headers={
+                "Tus-Resumable": "1.0.0",
+                "Authorization": f"Bearer {handoff['token']}",
+                "Upload-Length": str(len(data)),
+                "Upload-Metadata": ",".join(
+                    f"{key} {base64.b64encode(values[key].encode()).decode()}" for key in resumable["metadata"]
+                ),
+            },
+        )
+        assert created.status_code == 201, created.text
+        location, secret = created.headers["location"], created.headers[resumable["resend_header"]]
+        tus = {"Tus-Resumable": "1.0.0", resumable["resend_header"]: secret}
+        part = {**tus, "Content-Type": "application/offset+octet-stream"}
+        first = client.patch(location, headers={**part, "Upload-Offset": "0"}, content=data[:100])
+        _cut_off_part(host, port, location, secret, 100, data[100:], 150)
+        offset = int(client.head(location, headers=tus).headers["upload-offset"])
+        rest = client.patch(location, headers={**part, "Upload-Offset": str(offset)}, content=data[offset:])
+        state = _settled(client, location, secret)
+
+    assert (first.status_code, rest.status_code) == (204, 204)
+    assert state["state"] == "committed", state
+    assert state["receipt"]["hash"] == values["sha256"]
+    assert (vault / state["receipt"]["path"]).read_bytes() == data
 
 
 #: One process of a given kind built against the test's vault and state, run to quiescence:

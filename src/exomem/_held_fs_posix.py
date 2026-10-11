@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .held_fs import (
     Capabilities,
+    Chunks,
     HeldDirectory,
     HeldFile,
     HeldFilesystem,
@@ -22,6 +23,7 @@ from .held_fs import (
     HeldResult,
     SagaRecord,
     StableIdentity,
+    write_parts,
 )
 
 # Bind the substrate's native operations once.  A number of higher-level tests
@@ -449,8 +451,8 @@ class PosixHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
-        if not isinstance(data, bytes):
+    def write(self, file: HeldFile, data: bytes | Chunks) -> HeldResult[None]:
+        if not isinstance(data, bytes | Chunks):
             return HeldResult(error=HeldFsError("INVALID_INPUT", "data must be bytes"))
         try:
             checked = self._check_file(file)
@@ -458,10 +460,11 @@ class PosixHeldFilesystem(HeldFilesystem):
                 return HeldResult(error=HeldFsError("INVALID_ACCESS", "held file is not writable"))
             _ftruncate(checked.descriptor, 0)
             _lseek(checked.descriptor, 0, os.SEEK_SET)
-            view = memoryview(data)
-            written = 0
-            while written < len(view):
-                written += _write(checked.descriptor, view[written:])
+            for part in write_parts(data):
+                view = memoryview(part)
+                written = 0
+                while written < len(view):
+                    written += _write(checked.descriptor, view[written:])
             _fsync(checked.descriptor)
             checked.identity = _identity(_fstat(checked.descriptor))
             return HeldResult(value=None)
