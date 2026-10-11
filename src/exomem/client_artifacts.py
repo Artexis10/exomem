@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
@@ -123,6 +123,12 @@ def fetch_budget() -> FetchBudget:
     return FetchBudget(
         max_file_bytes=cap, max_total_bytes=cap, min_bytes_per_second=_MIN_BYTES_PER_SECOND
     )
+
+
+def adoption_budget() -> FetchBudget:
+    """An adoption-keyed call's limits: this runtime's deadlines with the cell cap on every server,
+    because replaying the call re-verifies the stored file in memory."""
+    return replace(fetch_budget(), max_file_bytes=MAX_FILE_BYTES, max_total_bytes=MAX_TOTAL_BYTES)
 
 
 @dataclass(frozen=True)
@@ -1198,8 +1204,7 @@ def _capture_source_adoption(
             _content_type(selected.get("mime_type"))
             artifact = stage_artifact(
                 selected,
-                # An adoption replay re-verifies the stored file in memory, so adoption keeps the cell cap.
-                FetchBudget(),
+                adoption_budget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
                 lane="source",
                 index=selected_index,
@@ -1327,8 +1332,7 @@ def _preserve_evidence_adoption(
             ].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(selected.get("mime_type"))
-            # An adoption replay re-verifies the stored file in memory, so adoption keeps the cell cap.
-            budget = FetchBudget()
+            budget = adoption_budget()
             artifact = stage_artifact(
                 selected,
                 budget,

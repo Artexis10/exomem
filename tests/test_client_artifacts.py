@@ -2158,14 +2158,15 @@ def test_a_standalone_server_preserves_a_file_handle_over_the_cell_cap(
     assert (vault / outcome["stored_path"]).stat().st_size == size
 
 
+@pytest.mark.parametrize("budget", ["fetch_budget", "adoption_budget"])
 def test_a_slow_but_healthy_desktop_pull_earns_time_with_each_byte(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str
 ) -> None:
     """A fixed deadline stops any pull that takes longer, however healthy, so a
     multi-gigabyte pull never finished. Scaled down: a 1 s allowance for the file and
     for the call, a 1,000 B/s minimum rate, and reads of one 1,000-byte part, as a real
     pull reads 1 MiB at a time. Ten parts at 5,000 B/s take twice the allowance and
-    must finish."""
+    must finish. An adoption-keyed call keeps the cell cap but earns time the same way."""
     # `held_uploads` too: staging imports it, and a cold import would spend the allowance.
     from exomem import client_artifacts, held_uploads  # noqa: F401
 
@@ -2177,7 +2178,7 @@ def test_a_slow_but_healthy_desktop_pull_earns_time_with_each_byte(
 
     with _download_url(monkeypatch, _paced(10, 1000, 0.2)) as handle:
         staged = client_artifacts.stage_artifact(
-            handle, client_artifacts.fetch_budget(), batch_deadline=client_artifacts._monotonic() + 1.0
+            handle, getattr(client_artifacts, budget)(), batch_deadline=client_artifacts._monotonic() + 1.0
         )
 
     assert staged.size == 10 * 1000
