@@ -73,6 +73,7 @@ ACTIVATE_TOOL = "mcp__exomem__activate_context"
 PACKET_REF_KEYS = frozenset({"ref", "path", "anchor"})
 #: The CLI's own marker for a plugin it ships, as its `init` line writes it.
 BUILTIN_PLUGIN_PATH = "builtin"
+#: The client's documented hook event that adds context before the model answers.
 HOOK_PACKET_EVENT = "UserPromptSubmit"
 
 
@@ -634,11 +635,15 @@ def run_case_shape(
 
     runs: list[dict[str, Any]] = []
     outcomes: list[str] = []
+    clock = run_kwargs.get("clock", time.monotonic)
     for attempt in range(1, max_attempts + 1):
         if len(outcomes) >= repeats:
             break
         run_dir = out_dir / case.case_id / shape / f"attempt-{attempt:02d}"
+        started = clock()
         record = run_once(case, shape, run_dir=run_dir, attempt=attempt, **run_kwargs)
+        # The whole run: seeding, projections and every client invocation.
+        record["run_wall_s"] = round(clock() - started, 1)
         if record["status"] == "scored":
             outcomes.append(record["repeat_outcome"])
             record["repeat"] = len(outcomes)
@@ -665,7 +670,8 @@ def _table_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "fault_reason": record["fault_reason"],
         "assertions": {name: row["outcome"] for name, row in record["assertions"].items()},
         "repeat_outcome": record["repeat_outcome"],
-        "wall_s": round(sum(call["wall_s"] for call in invocations), 1),
+        "run_wall_s": record["run_wall_s"],
+        "client_wall_s": round(sum(call["wall_s"] for call in invocations), 1),
         "invocations": len(invocations),
         "agent_turns": sum(call["num_turns"] or 0 for call in invocations),
         "models": sorted({call["model"] for call in invocations if call["model"]}),
@@ -843,7 +849,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"{table['case_id']} {table['shape']} attempt {row['attempt']}: {row['status']} "
                 f"{row['repeat_outcome'] or row['fault_reason']} {row['assertions']} "
-                f"wall {row['wall_s']}s, {row['agent_turns']} agent turns"
+                f"wall {row['run_wall_s']}s, {row['agent_turns']} agent turns"
             )
         print(f"{table['case_id']} {table['shape']}: case {table['status']}")
     return 1 if any(row["status"] == "blocked" for t in result["cases"] for row in t["runs"]) else 0
