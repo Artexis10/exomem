@@ -126,6 +126,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
         deadline = time.monotonic() + 7200
         while True:
             item = await call("GET", endpoint)
+            # nosemgrep: ep-word-membership -- The Cloud import protocol fixes these terminal failure states.
             if item["observed_state"] in ("failed", "expired", "discarded"):
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
