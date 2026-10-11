@@ -64,10 +64,11 @@ CONVERSATION_PARAGRAPH_MAX_BYTES = 300
 
 
 def _conversation_paragraph(doc: str) -> str:
-    start = doc.index("also pass `conversation`")
-    start = doc.rindex("\n\n", 0, start) + 2
-    end = doc.index("\n\n", start)
-    return " ".join(doc[start:end].split())
+    return next(
+        " ".join(paragraph.split())
+        for paragraph in doc.split("\n\n")
+        if "`conversation`" in paragraph
+    )
 
 
 def test_the_tool_description_carries_a_short_conversation_pointer() -> None:

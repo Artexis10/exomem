@@ -6533,10 +6533,9 @@ def op_activate_context(
     Raise at most one relevant due item per maintained client conversation.
     Details: bootstrap(profile="full") reference index, references/recall.md.
 
-    Use `conversation` only for subject or attachment cues: `focus`, `refs`, `recent`.
-    Returned `origin` labels their contribution, not the user's words.
-    Activation reads no attachment. If a hook missed the subject, retry with
-    `conversation.focus`. See the engagement reference.
+    Use optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.
+    Returned `origin` labels cues, not the user's words. Activation reads no attachment.
+    For a missed subject, retry with `conversation.focus`; see the engagement reference.
 
     Args:
         turn: Current user message verbatim, not a rewritten query. Empty abstains.
