@@ -1811,6 +1811,16 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived))
 
 
+def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
+    """`content_permits` for each path of one walk.
+
+    Inside a request scope the connector snapshot is read once for the walk;
+    see `connector_boundary.permits_filter`.
+    """
+    boundary = connector_boundary.permits_filter(vault_root, who)
+    return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+
+
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
     from .. import held_fs
     from ..collection_store import authority
@@ -6423,11 +6433,12 @@ def release_walk_filter(
         who = principal if principal is not None else effective_principal()
         if unrestricted_content_access(vault_root, who):
             return None
-        return lambda path: content_permits(vault_root, path, who)
+        return content_permits_filter(vault_root, who)
 
     vault_root = Path(vault_root)
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
+    content_ok = content_permits_filter(vault_root, who)
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     verdicts: dict[tuple, bool] = {}
@@ -6438,7 +6449,7 @@ def release_walk_filter(
         if fail_closed:
             _record_blocked_outcome(who.audience_id)
             return False
-        if not content_permits(vault_root, rel_path, who):
+        if not content_ok(rel_path):
             return False
         boundary_key = connector_boundary.cache_identity(vault_root, who)
         cached = verdicts.get((rel_path, boundary_key))
@@ -6476,7 +6487,7 @@ def release_walk_filter(
         if unrestricted_content_access(vault_root, who):
             return lambda rel_path: keep(rel_path) if owned(rel_path) else True
         return lambda rel_path: (
-            keep(rel_path) if owned(rel_path) else content_permits(vault_root, rel_path, who)
+            keep(rel_path) if owned(rel_path) else content_ok(rel_path)
         )
     return keep
 

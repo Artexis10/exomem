@@ -161,6 +161,11 @@ def request_memo(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -
     return _memoized(name, parts, compute)
 
 
+def request_memo_active() -> bool:
+    """Whether a request scope pins `request_memo` answers for this context."""
+    return _RESOLUTION_MEMO.get() is not None
+
+
 def _placement_environment() -> tuple[str, ...]:
     """The environment values that can change where state is placed.
 

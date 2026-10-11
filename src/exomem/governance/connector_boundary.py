@@ -8,6 +8,7 @@ import os
 import stat
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -269,21 +270,58 @@ def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: pol
         return Decision(policy.DISCLOSURE_MIN)
 
 
+#: An admission that cannot be decided withholds the path.
+_ADMISSION_REFUSALS = (BoundaryUnavailable, membership.MembershipUnresolved, OSError,
+                       reserved_paths.ReservedPathLeafError)
+
+
 def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None) -> bool:
     """Admit a named file through the shared membership kernel before disclosure."""
     try:
         root = Path(root)
         current = snapshot(root)
         denied = current.denied_scopes(who) if current is not None else frozenset()
-        if not denied:
-            return True
-        if root / path == activation_manifest.manifest_path(root):
-            return False
-        compiled = policy.load(root)
-        return _permits_membership(root, path, denied, compiled, content=content, who=who)
-    except (BoundaryUnavailable, membership.MembershipUnresolved, OSError,
-            reserved_paths.ReservedPathLeafError):
+        return _permits_denied(root, path, denied, who, content=content)
+    except _ADMISSION_REFUSALS:
         return False
+
+
+def permits_filter(root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
+    """`permits` for each path of one walk.
+
+    Inside a request scope every snapshot read returns the request's pinned
+    answer (`state_paths.request_memo`), so the filter reads it once instead of
+    once per admitted path, a cost that grew with the corpus. Outside one, each
+    path reads the live host configuration, so an existing filter follows a change.
+    """
+    root = Path(root)
+    if not state_paths.request_memo_active():
+        return lambda path: permits(root, path, who)
+    try:
+        current = snapshot(root)
+        denied = current.denied_scopes(who) if current is not None else frozenset()
+    except _ADMISSION_REFUSALS:
+        return lambda path: False
+    if not denied:
+        return lambda path: True
+
+    def admit(path: str) -> bool:
+        try:
+            return _permits_denied(root, path, denied, who)
+        except _ADMISSION_REFUSALS:
+            return False
+
+    return admit
+
+
+def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
+                    *, content: bytes | None = None) -> bool:
+    if not denied:
+        return True
+    if root / path == activation_manifest.manifest_path(root):
+        return False
+    compiled = policy.load(root)
+    return _permits_membership(root, path, denied, compiled, content=content, who=who)
 
 
 def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled: policy.Policy,
