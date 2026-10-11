@@ -952,6 +952,8 @@ class CollectionManifest:
     claim_match: Mapping[str, tuple[str, ...]] | None = None
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
+    #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
+    derived: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1799,6 +1801,7 @@ def _manifest_from_frontmatter(
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
                                  presentation or item_filename or item_presentation, links)
+    derived = _parse_derived(frontmatter.get("derived", False), view_mode)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1823,7 +1826,23 @@ def _manifest_from_frontmatter(
         claims=claims,
         claim_match=claim_match,
         view_mode=view_mode,
+        derived=derived,
     )
+
+
+def _parse_derived(value: object, view_mode: str) -> bool:
+    """`derived: true` keeps a summary collection's rows outside the store, rebuilt from its imports."""
+    if type(value) is not bool:
+        raise CollectionError(
+            "INVALID_DERIVED_COLLECTION", "derived must be true or false",
+            {"field": "derived", "received": value, "allowed": [True, False], "example": "derived: true"},
+        )
+    if value and view_mode != "summary":
+        raise CollectionError(
+            "INVALID_DERIVED_COLLECTION", "a derived collection needs view_mode: summary",
+            {"field": "derived", "received": value, "example": "view_mode: summary"},
+        )
+    return value
 
 
 def _parse_view_mode(

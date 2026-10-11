@@ -206,6 +206,14 @@ def dispatch(
     args = {name: value for name, value in values.items() if value is not None}
     from . import authority
 
+    if action == "describe" and profile == "records":
+        from ..query_engine import route
+        from ..record_memory import parse_manifest_contract
+        from .importer import contract
+
+        writer._require_operation_context()
+        return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
+
     marker = authority.routing_marker(writer)
     if marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
@@ -223,14 +231,6 @@ def dispatch(
         # Only admission writes a production store's marker; a create cannot stand in for it.
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the store's authority marker is missing")
     if action == "describe":
-        if profile == "records":
-            from ..record_memory import parse_manifest_contract
-
-            writer._require_operation_context()
-            from ..query_engine import route
-            from .importer import contract
-
-            return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
         return False, None
     writer._require_operation_context()
     writer._facade_profile = profile
@@ -294,6 +294,12 @@ def dispatch(
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
+    if action == "history":
+        with writer.read_collection(collection, facade_profile=profile) as manifest:
+            if manifest.derived:
+                from .derived_rows import refused
+
+                raise refused("row history")
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )

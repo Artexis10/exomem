@@ -166,6 +166,7 @@ class LocalRuntimeActivation:
         self.serves_upload_sessions = False
         if not deferred:
             self._bind_graph_rebuild_lifetime()
+            self._commit_recall_reembed()
 
     def _bind_graph_rebuild_lifetime(self) -> None:
         from . import graph_sync
@@ -182,6 +183,7 @@ class LocalRuntimeActivation:
             was_deferred = self._deferred
             if was_deferred:
                 self._bind_graph_rebuild_lifetime()
+                self._commit_recall_reembed()
             self._deferred = False
         if was_deferred and warmup.warmup_enabled():
             readiness.manage_runtime()
@@ -429,6 +431,13 @@ class LocalRuntimeActivation:
         )
         thread.start()
         self.vocabulary_recovery = thread
+
+    def _commit_recall_reembed(self) -> None:
+        """The re-embed job starts last of the workers; until it plans, recall
+        on a vault no build has covered is marked warming."""
+        from . import recall_migration
+
+        recall_migration.will_start(self.vault_root)
 
     def _start_recall_reembed(self, vault_root: Path) -> None:
         """Bring the recall sidecar into the recall encoder's space, off-request.

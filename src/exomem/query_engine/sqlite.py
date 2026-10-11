@@ -119,7 +119,7 @@ def _matched(admitted, query):
             conn.execute("CREATE INDEX temp.exomem_legacy_sorted ON exomem_legacy_rows("
                          f"sort_key COLLATE exomem_legacy_order {direction}, {input_order})")
         cursor = conn.execute(
-            f"SELECT {admitted.values_sql}, i.row_id,i.created_txn,i.view_path FROM items i "
+            f"SELECT {admitted.values_sql}, i.row_id,i.created_txn,i.view_path FROM {admitted.items} i "
             f"WHERE i.collection_id=? AND {admitted.membership_sql} "
             f"AND exomem_legacy_matches({admitted.values_sql})", (admitted.collection_id,),
         )
