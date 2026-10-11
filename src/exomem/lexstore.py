@@ -1965,6 +1965,22 @@ _TERM_FREQUENCY_CACHE_MAX = 50_000
 _ADMITTED_STATISTICS_MAX = 4
 
 
+@dataclass
+class RequestQueryContext:
+    """Admission shared within one request, re-proved on each query snapshot.
+
+    It retains no readiness or hits. The reader and lifecycle basis belong
+    to this request; the catalogue generation decides whether paths can recur.
+    """
+
+    vault_root: Path
+    visible: Callable[[str], bool]
+    status_basis: Any
+    restricted: bool = True
+    generation: tuple | None = None
+    admitted_paths: set[str] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTermBudget:
     """How much of a long query a bounded BM25 caller lets reach the MATCH.
@@ -2144,6 +2160,7 @@ def search_bm25_result(
     freshness: tuple | None = None,
     allowed_paths: set[str] | None = None,
     admitted_paths: set[str] | None = None,
+    query_context: RequestQueryContext | None = None,
     allow_delta: bool = True,
     min_matched_terms: int = 1,
     corroboration_tokens: list[str] | None = None,
@@ -2197,6 +2214,7 @@ def search_bm25_result(
         freshness,
         allowed_paths,
         admitted_paths=admitted_paths,
+        query_context=query_context,
         allow_delta=allow_delta,
         min_matched_terms=min_matched_terms,
         corroboration_tokens=corroboration_tokens,
@@ -2220,6 +2238,7 @@ def carry_term_statistics(
     path_limit: Callable[[int], int],
     freshness: tuple | None = None,
     recall_checkpoint: Any | None = None,
+    query_context: RequestQueryContext | None = None,
 ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
     """Admitted carry counts and bounded discount paths from one SQL snapshot."""
     if not _usable():
@@ -2231,6 +2250,7 @@ def carry_term_statistics(
         path_limit=path_limit,
         freshness=freshness,
         recall_checkpoint=recall_checkpoint,
+        query_context=query_context,
     )
 
 
@@ -6862,6 +6882,7 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         admitted_paths: set[str] | None = None,
+        query_context: RequestQueryContext | None = None,
         allow_delta: bool = True,
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
@@ -6880,6 +6901,7 @@ class LexicalStore:
             lambda conn: self._bm25_query(
                 conn, stemmed_tokens, k, scope, allowed_paths,
                 admitted_paths=admitted_paths,
+                query_context=query_context,
                 min_matched_terms=min_matched_terms,
                 term_units=term_units,
                 corroboration_tokens=corroboration_tokens,
@@ -6904,18 +6926,13 @@ class LexicalStore:
         path_limit: Callable[[int], int],
         freshness: tuple | None,
         recall_checkpoint: Any | None,
+        query_context: RequestQueryContext | None = None,
     ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
         def query(conn: sqlite3.Connection):
-            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
-            # Read paths before admission. Hidden labels never reach classification;
-            # navigation and retired pages still belong in the admitted denominator.
-            admitted = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT p.path FROM pages p WHERE p.in_kb = 1" + raw_clause, raw_params
-                )
-                if visible(str(row[0]))
-            }
+            context = query_context or RequestQueryContext(self.vault_root, visible, status_basis)
+            if context.visible is not visible or context.status_basis is not status_basis:
+                raise ValueError("query context belongs to another reader or lifecycle basis")
+            admitted = self._request_admitted_paths(conn, context)
             pages = len(admitted)
             limit = path_limit(pages)
             excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
@@ -7164,7 +7181,7 @@ class LexicalStore:
             col = "in_vault" if scope == "vault" else "in_kb"
             statistics = bm25_module.CorpusStatistics.of({
                 path: stemmed.split() for path, stemmed in conn.execute(
-                    "SELECT p.path, fts.stemmed FROM pages p JOIN fts ON fts.rowid = p.rowid "
+                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
                     f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
                     (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
                 )
@@ -7177,6 +7194,28 @@ class LexicalStore:
         finally:
             if owns_snapshot:
                 conn.rollback()
+
+    def _request_admitted_paths(
+        self, conn: sqlite3.Connection, context: RequestQueryContext, scope: str = "kb"
+    ) -> set[str]:
+        if Path(context.vault_root).absolute() != self.vault_root.absolute():
+            raise ValueError("query context belongs to another vault")
+        generation = (
+            str(self.vault_root.absolute()), scope,
+            id(context.visible), id(context.status_basis), *self._snapshot_generation(conn)
+        )
+        if context.generation != generation or context.admitted_paths is None:
+            raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
+            col = "in_vault" if scope == "vault" else "in_kb"
+            # Hidden labels never reach classification; navigation and retired
+            # pages still belong in the admitted denominator.
+            context.admitted_paths = {
+                str(row[0]) for row in conn.execute(
+                    f"SELECT p.path FROM pages p WHERE p.{col} = 1" + raw_clause, raw_params
+                ) if context.visible(str(row[0]))
+            }
+            context.generation = generation
+        return context.admitted_paths
 
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:
@@ -7210,6 +7249,7 @@ class LexicalStore:
         allowed_paths: set[str] | None = None,
         *,
         admitted_paths: set[str] | None = None,
+        query_context: RequestQueryContext | None = None,
         min_matched_terms: int = 1,
         term_units: list[list[object]] | None = None,
         corroboration_tokens: list[str] | None = None,
@@ -7220,6 +7260,11 @@ class LexicalStore:
         query_units: list | None = None,
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
+        if query_context is not None:
+            current_paths = self._request_admitted_paths(conn, query_context, scope)
+            admitted_paths = (
+                current_paths if admitted_paths is not None or query_context.restricted else None
+            )
         admitted = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
@@ -7272,7 +7317,9 @@ class LexicalStore:
         corroboration_at = len(params)
         corroborated = ""
         groups = [group for group in (corroboration_groups or []) if group]
-        if min_matched_terms > 1 or groups:
+        if min_matched_terms > 1 and corroboration_tokens is None and term_units is None:
+            term_units = [[stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))]
+        if admitted is None and (min_matched_terms > 1 or groups):
             # Filter before LIMIT so one-unit hits cannot crowd out valid pages.
             clauses: list[str] = []
             if min_matched_terms > 1 and corroboration_tokens is None:
@@ -7342,15 +7389,27 @@ class LexicalStore:
                     "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
                     for group in groups
                 ) + ")"
+            # SQL admits before scoring or cap. The scorer then corroborates
+            # with the same Counter it needs for each document's score.
+            ranking_clause += (
+                " AND p.path IN (SELECT value FROM json_each(?))" + excluded_clause
+            )
+            ranking_params = [
+                params[0], *params[1:corroboration_at],
+                json.dumps(sorted(admitted_paths), ensure_ascii=False), *excluded_params,
+            ]
             candidates = {
                 path: stemmed.split() for path, stemmed in conn.execute(
                     f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
-                    f"WHERE fts MATCH ? AND p.{col} = 1" + allowed_clause,
-                    params,
+                    f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause,
+                    ranking_params,
                 )
-                if path in admitted_paths
             }
-            return admitted.score(candidates, tokens, k)
+            return admitted.score(
+                candidates, tokens, k, min_matched_terms=min_matched_terms,
+                term_units=term_units, corroboration_tokens=corroboration_tokens,
+                corroboration_groups=groups,
+            )
         if term_budget is not None and corroborated:
             # Bounded: rank every row the kept units match that passes the
             # scope, path and exclusion filters, then run the corroboration

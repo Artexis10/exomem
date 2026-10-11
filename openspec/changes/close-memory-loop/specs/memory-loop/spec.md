@@ -759,16 +759,20 @@ Where neither the strict phrase path nor the title fallback names any page, and
 no other carry of the turn serves material, the turn SHALL abstain `unresolved`
 and SHALL list under `anchors[]`, at that same named-not-carried status, each
 current compiled page that the turn names by its title: a page among the ranked
-rows of the same bounded catalogue query, two different words of whose title
-the turn says within the declared token window of each other in one sentence,
-with no distinctiveness required. A one-word title SHALL never be named this
+rows of the same bounded catalogue query, two distinct normalized token units
+of whose title contact two distinct turn units within the declared raw token
+window in one sentence, with no distinctiveness or function-word exclusion.
+An unspaced run SHALL match through a strict majority of its content bigrams
+and SHALL count once. Repeated normalized units SHALL NOT supply a second
+contact. A one-unit title SHALL never be named this
 way. At most three pages SHALL be listed, in rank order, counted after the
 pages the caller may not see are removed, so that a withheld page neither takes
 a place nor moves another and the listing equals that of a vault without it.
 Each entry SHALL carry the evidence `[lexical_overlap, retrieval]` and the
 project keys its own frontmatter declares as `projects`. Nothing SHALL be served
-for these pages: no unit, pointer or current-state entry, `budget.used_chars`
-SHALL stay 0, and the continuity token SHALL NOT name them. The listing SHALL
+for these pages: no unit, pointer or current-state entry or additional prose
+charge, and the continuity token SHALL NOT name them. Existing `recent_context`
+SHALL retain its own budget. The listing SHALL
 run only on a non-referential turn with no explicit anchor choice, and an agent
 that passes a listed page as `anchor` SHALL be served it as an agent-picked page.
 
@@ -878,8 +882,8 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **THEN** the packet abstains `unresolved` and lists that note, alone, at the
   named-not-carried status with evidence `[lexical_overlap, retrieval]` and the
   project keys its frontmatter declares
-- **AND** no unit, pointer or current-state entry is served, `budget.used_chars`
-  is 0, and the continuity token does not name the note
+- **AND** the listed note adds no unit, pointer, current-state entry or prose
+  charge, and the continuity token does not name the note
 - **AND** a following call that passes the note as `anchor` is served its units
 
 #### Scenario: Title words said apart list nothing
@@ -887,6 +891,19 @@ not see SHALL abstain `withheld` rather than substitute another candidate.
 - **WHEN** a turn says two words of a compiled note's title further apart than
   the declared window, or in two different sentences
 - **THEN** the note is not listed
+
+#### Scenario: Function words and unspaced runs keep title contact
+
+- **WHEN** a turn contacts two distinct title units, including function words
+  or separate unspaced runs, in one sentence within the declared window
+- **THEN** the bounded ranking can list the page without a rarity requirement
+- **AND** fragments or repeated bigrams of one run cannot supply two contacts
+
+#### Scenario: A title listing keeps prior context and its budget
+
+- **WHEN** a thread with existing recent context names a page that is only listed
+- **THEN** the packet keeps the prior context and its existing prose charge
+- **AND** the listed page adds no material or prose charge
 
 #### Scenario: A twin that shares one title word lists nothing
 

@@ -2296,6 +2296,7 @@ def _carry_groups_by_retrieval(
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    query_context=None,
 ) -> tuple[tuple[tuple[str, float], ...], ...]:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
@@ -2329,6 +2330,7 @@ def _carry_groups_by_retrieval(
             contacts=contacts,
             status_basis=status_basis,
             visible=visible,
+            query_context=query_context,
         )
     if state != "available":
         return ()
@@ -2461,6 +2463,7 @@ def _title_named_anchors(
     status_basis: lifecycle_statuses.Basis | None = None,
     index: working_set_index.WorkingSetIndex | None = None,
     exclude: frozenset[str] = frozenset(),
+    query_context=None,
 ) -> tuple[dict[str, Any], ...]:
     """The pages an unresolved turn names by their title in ordinary words,
     as `retrieval_named` anchor entries, for an abstention the carry named
@@ -2500,6 +2503,7 @@ def _title_named_anchors(
             recall_checkpoint=recall_checkpoint,
             visible=visible,
             status_basis=status_basis or lifecycle_statuses.Basis(vault_root),
+            query_context=query_context,
         )
     if state != "available":
         return ()
@@ -4027,7 +4031,16 @@ def _compile_packet(
     # Set when the carry below named no page at all, which is the one turn the
     # final abstention lists title-named pages for (`_title_named_anchors`).
     carry_named_nothing = False
+    query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
+        from . import lexstore
+        from .governance import egress
+
+        admitted = visible if visible is not None else egress.release_walk_filter(root)
+        query_context = lexstore.RequestQueryContext(
+            root, admitted if admitted is not None else lambda _path: True, status_basis,
+            restricted=visible is not None,
+        )
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,
@@ -4038,6 +4051,7 @@ def _compile_packet(
             contacts=contacts,
             visible=visible,
             status_basis=status_basis,
+            query_context=query_context,
         )
         carry_named_nothing = not groups
         domains, _contested = named_domains(groups)
@@ -4212,6 +4226,7 @@ def _compile_packet(
                 exclude=frozenset(
                     str(entry["path"]) for entry in _listed_anchors(listed) if entry.get("path")
                 ),
+                query_context=query_context,
             )
             if carry_named_nothing
             else ()

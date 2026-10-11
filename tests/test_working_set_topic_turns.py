@@ -238,6 +238,57 @@ def test_a_topic_turn_in_ordinary_words_lists_the_page_its_title_names(
     assert apart["abstained"] is True and apart["anchors"] == []
 
 
+@pytest.mark.parametrize(
+    ("title", "turn", "listed"),
+    [
+        ("On call", "The on call work again", True),
+        ("By design", "The by design work again", True),
+        ("On call", "The on work again. Call later.", False),
+        ("On call", "The call was done by Monday, and later in the week I will be on.", False),
+        ("蒸気 pressure", "The 蒸気 pressure works again", True),
+        ("蒸気 圧力", "The 蒸気 圧力 works again", True),
+        ("Rotation rotating", "The rotation rotating works again", False),
+        ("蒸気 圧力", "The 蒸気圧力 works again", False),
+        ("蒸気圧力 pressure", "The 蒸気 pressure works again", False),
+    ],
+)
+def test_title_choices_keep_function_words_and_distinct_run_contacts(
+    workshop_vault: Path, title: str, turn: str, listed: bool
+) -> None:
+    """A menu keeps two title units, but repetitions or fragments of one run
+    cannot supply the second contact."""
+    path = f"{WORKSHOP}/contact-note.md"
+    _note(workshop_vault, path, title, [("method", "The plan works again.")], type_="research-note")
+    _refresh(workshop_vault)
+
+    packet = _activate(workshop_vault, turn)
+
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert any(item["path"] == path for item in packet["anchors"]) is listed
+    assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
+    assert path not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
+
+
+def test_title_listing_preserves_the_budget_of_existing_recent_context(workshop_vault: Path) -> None:
+    """Listing a choice adds no material charge to the prior thread's context."""
+    first = _activate(
+        workshop_vault, "For the back rim, should I check the spoke tension on the truing stand?"
+    )
+    packet = _activate(
+        workshop_vault,
+        "The smooth chain cleaning works best with degreaser, I find.",
+        continuity=first["continuity"],
+    )
+
+    assert any(item["path"] == CLEANING for item in packet["anchors"])
+    assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
+    assert any(item["path"] == TRUING for item in packet["recent_context"])
+    assert packet["budget"]["used_chars"] == sum(
+        len(item["title"]) for item in packet["recent_context"]
+    )
+    assert CLEANING not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
+
+
 # --------------------------------------------------------------------------- #
 # A keyless conversation keeps what its first packet served
 # --------------------------------------------------------------------------- #

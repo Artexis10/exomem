@@ -106,8 +106,11 @@ def test_schema_creation_is_idempotent(tmp_path):
     assert _count(lexstore.lexical_path(tmp_path), "pages") == 1
 
 
-def test_bm25_corroboration_filters_before_limit_and_counts_distinct_stems(tmp_path):
+@pytest.mark.parametrize("restricted", [False, True])
+def test_bm25_corroboration_filters_before_limit_and_counts_distinct_stems(tmp_path, restricted):
     from test_latency_gate import _seed_freshness_live
+
+    from exomem import working_set_runtime
 
     for number in range(12):
         word = "sled" if number % 2 else "rated"
@@ -127,6 +130,9 @@ def test_bm25_corroboration_filters_before_limit_and_counts_distinct_stems(tmp_p
         1,
         min_matched_terms=2,
         allow_delta=False,
+        admitted_paths={f"Knowledge Base/one-{number}.md" for number in range(12)} | {wanted}
+        if restricted else None,
+        term_budget=working_set_runtime.lexical_term_budget(),
     )
     assert corroborated.readiness.complete
     assert [path for path, _ in corroborated.value] == [wanted]
@@ -136,6 +142,8 @@ def test_bm25_corroboration_filters_before_limit_and_counts_distinct_stems(tmp_p
         1,
         min_matched_terms=2,
         allow_delta=False,
+        admitted_paths={f"Knowledge Base/one-{number}.md" for number in range(12)} | {wanted}
+        if restricted else None,
     )
     assert repeated.readiness.complete
     assert repeated.value == []
@@ -1787,7 +1795,8 @@ def test_russian_inflections_match_through_the_catalogue(tmp_path):
     assert [path for path, _score in hits] == ["Knowledge Base/books.md"]
 
 
-def test_corroboration_counts_units_not_stems(tmp_path):
+@pytest.mark.parametrize("restricted", [False, True])
+def test_corroboration_counts_units_not_stems(tmp_path, restricted):
     """One accented word (surface plus fold) or one CJK run (many bigrams) is
     ONE unit of corroboration; English distinct stems count as before."""
     from test_latency_gate import _seed_freshness_live
@@ -1800,7 +1809,9 @@ def test_corroboration_counts_units_not_stems(tmp_path):
 
     def corroborated(query: str) -> list[str]:
         result = lexstore.search_bm25_result(
-            tmp_path, query, 5, min_matched_terms=2, allow_delta=False
+            tmp_path, query, 5, min_matched_terms=2, allow_delta=False,
+            admitted_paths={"Knowledge Base/tower.md", "Knowledge Base/name.md",
+                            "Knowledge Base/rotation.md"} if restricted else None,
         )
         assert result.readiness.complete
         return [path for path, _score in result.value]
@@ -1813,7 +1824,8 @@ def test_corroboration_counts_units_not_stems(tmp_path):
     assert corroborated("alpha beta") == ["Knowledge Base/tower.md"]
 
 
-def test_a_run_corroborates_only_through_most_of_its_content_bigrams(tmp_path):
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_run_corroborates_only_through_most_of_its_content_bigrams(tmp_path, restricted):
     """明日は and 散歩です share only the particle bigrams 日は and です with a
     page about today's weather: neither run is on that page, so it is not
     corroborated. Runs whose content bigrams are there still count."""
@@ -1826,7 +1838,9 @@ def test_a_run_corroborates_only_through_most_of_its_content_bigrams(tmp_path):
 
     def corroborated(query: str) -> list[str]:
         result = lexstore.search_bm25_result(
-            tmp_path, query, 5, min_matched_terms=2, allow_delta=False
+            tmp_path, query, 5, min_matched_terms=2, allow_delta=False,
+            admitted_paths={"Knowledge Base/weather.md", "Knowledge Base/meeting.md"}
+            if restricted else None,
         )
         assert result.readiness.complete
         return sorted(path for path, _score in result.value)
@@ -1966,3 +1980,72 @@ def test_a_restricted_ranking_never_reuses_a_wider_admissions_statistics(tmp_pat
 
     assert {path for path, _ in wider} > visible
     assert rank(visible) == alone
+
+
+def test_restricted_phrase_groups_remain_alternatives_to_the_term_count(tmp_path):
+    """A phrase alone qualifies without two counted stems; repeated one-word
+    decoys and a withheld exact match cannot consume the result cap."""
+    first = "Knowledge Base/Notes/first.md"
+    second = "Knowledge Base/Notes/second.md"
+    decoy = "Knowledge Base/Notes/decoy.md"
+    hidden = "Knowledge Base/Private/hidden.md"
+    _write_page(tmp_path, first, "alpha beta " + "filler " * 40)
+    _write_page(tmp_path, second, "gamma delta " + "filler " * 80)
+    _write_page(tmp_path, decoy, "alpha " * 30)
+    _write_page(tmp_path, hidden, "alpha beta gamma delta " * 30)
+    lexstore.ensure_fresh(tmp_path)
+
+    result = lexstore.search_bm25_result(
+        tmp_path, "alpha beta gamma delta", 2, allow_delta=False,
+        admitted_paths={first, second, decoy}, min_matched_terms=2,
+        corroboration_tokens=["alpha", "beta"], corroboration_groups=[["gamma", "delta"]],
+    )
+    group_only = lexstore.search_bm25_result(
+        tmp_path, "alpha beta gamma delta", 1, allow_delta=False,
+        admitted_paths={first, second, decoy}, corroboration_groups=[["gamma", "delta"]],
+    )
+
+    assert result.readiness.complete and group_only.readiness.complete
+    assert {path for path, _score in result.value} == {first, second}
+    assert [path for path, _score in group_only.value] == [second]
+
+
+def test_a_changed_catalogue_recomputes_request_admission_before_ranking(tmp_path):
+    """A later query in one request sees a newly published permitted page,
+    while a new withheld page cannot change its order or scores."""
+    from exomem import lifecycle_statuses
+
+    first = "Knowledge Base/Notes/first.md"
+    second = "Knowledge Base/Notes/second.md"
+    hidden = "Knowledge Base/Private/hidden.md"
+    _write_page(tmp_path, first, "alpha beta")
+    lexstore.ensure_fresh(tmp_path)
+
+    def visible(path):
+        return path.startswith("Knowledge Base/Notes/")
+
+    basis = lifecycle_statuses.Basis(tmp_path)
+    context = lexstore.RequestQueryContext(tmp_path, visible, basis)
+    counts = lexstore.carry_term_statistics(
+        tmp_path, [], visible=visible, status_basis=basis, path_limit=lambda pages: 0,
+        query_context=context,
+    )
+    before = lexstore.search_bm25_result(
+        tmp_path, "alpha beta", 2, allow_delta=False, query_context=context,
+    )
+    assert counts.readiness.complete and before.readiness.complete
+    assert [path for path, _score in before.value] == [first]
+
+    _write_page(tmp_path, second, "alpha beta " * 3)
+    _write_page(tmp_path, hidden, "alpha beta " * 30)
+    lexstore.ensure_fresh(tmp_path)
+    after = lexstore.search_bm25_result(
+        tmp_path, "alpha beta", 2, allow_delta=False, query_context=context,
+    )
+    independent = lexstore.search_bm25_result(
+        tmp_path, "alpha beta", 2, allow_delta=False, admitted_paths={first, second},
+    )
+
+    assert after.readiness.complete and independent.readiness.complete
+    assert {path for path, _score in after.value} == {first, second}
+    assert after.value == independent.value
