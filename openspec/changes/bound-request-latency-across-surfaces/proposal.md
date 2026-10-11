@@ -6,13 +6,15 @@ Existing latency checks measure different boundaries, populations and percentile
 
 ## What Changes
 
-- Define one machine-readable source for latency bars, their owning requirements, measurement boundaries, runtime profiles, populations, reference inputs and windows.
+- Define one machine-readable source for latency bars, their owning requirements, measurement boundaries, outcome inclusion, runtime profiles, populations, reference inputs and windows.
 - Extend `latency_watch` through existing MCP, REST and activation observations, with explicit coverage, errors, unknown readings and retention loss.
-- Add a live warm activation bar: p95 below 1,000 ms at the public activation leaf, with packet and CPU behavior preserved.
+- Add a live warm activation bar: p95 below 1,000 ms across all eligible terminal outcomes at the public activation leaf.
+- Preserve packet and CPU behavior; require budgeted read-only activation to return a packet or existing budget abstention within its absolute deadline.
 - Reuse the existing recall, conversation, foreground-operation and durable-acknowledgement contracts for their distinct bars.
 - Keep unmeasured read, browse, deep, cold and background-freshness thresholds pending until current measurements support a recorded engineering choice.
 - Require attribution before runtime fixes and compare installed before/after arms on the same inputs, with data, authorization and packet identity checks.
-- Preserve cooperative deadlines, canonical commit immunity, exact terminal custody and pending-read visibility. Optional heavy paths keep their existing default-off and soft-fail behavior.
+- Repair read-only deadline overruns through existing budget and deferral paths, including packet finalization; keep unsafe-to-bound repairs open.
+- Preserve canonical mutation immunity, exact terminal custody and pending-read visibility. Optional heavy paths keep their existing default-off and soft-fail behavior.
 
 ## Capabilities
 

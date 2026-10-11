@@ -9,8 +9,8 @@
 
 ## 2. Centralize bars and extend existing observations
 
-- [ ] 2.1 Add branch tests for pending bars, invalid readings, population mismatch and retention loss; verify realistic false passes fail first.
-- [ ] 2.2 Package `request_latency_contract.json` and load it in existing consumers; verify thresholds resolve once with owning requirements and provenance.
+- [ ] 2.1 Add branch tests for pending bars, invalid readings, population mismatch, retention loss and mixed outcomes. Verify false passes fail first. Include 90 fast successes and 10 errors above the p95 bar; verify the all-request result fails despite healthy success-only timings.
+- [ ] 2.2 Package `request_latency_contract.json` and load it in existing consumers. Verify thresholds and outcome-inclusion rules resolve once with owning requirements and provenance.
 - [ ] 2.3 Extend `latency_watch` counts and summaries; verify unknown, partial, insufficient and evicted observations cannot establish complete-population acceptance.
 - [ ] 2.4 Wire MCP middleware, REST facade and activation observations; verify one sample per boundary, including refusal/error and nested activation cases.
 - [ ] 2.5 Update existing operator documentation; verify bootstrap isolation, doctor coverage and structured log output through real isolated calls.
@@ -21,7 +21,7 @@
 - [ ] 3.2 Attribute remaining activation walks, matrix reloads, due-state and authorization costs; verify current spans and CPU support each proposed repair.
 - [ ] 3.3 Repair only attributed costs through existing incremental paths; verify unchanged results, packet content, authorization and pending-read visibility.
 - [ ] 3.4 Select residency from measured RSS and cold/warm costs; verify encoder output identity, CPU-cap compliance and documented rollback.
-- [ ] 3.5 Bound optional work through existing cooperative deadlines; verify overrun reporting, commit immunity and exact terminal/component custody.
+- [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
 
 ## 4. Verify installed behavior and deliver

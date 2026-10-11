@@ -40,7 +40,7 @@ The implementation must reconcile its final integrated source before changing pr
 
 ### 1. Package one bar source and load it in existing consumers
 
-Implement `src/exomem/request_latency_contract.json` as the single runtime representation. Use normal package-resource loading and the repository's existing structured validation approach. Each row carries the dimensions required by the spec, an owning OpenSpec requirement reference, and its establishment state. Thresholds use milliseconds; a pending threshold is null. The comparison operator preserves strict versus inclusive bounds.
+Implement `src/exomem/request_latency_contract.json` as the single runtime representation. Use normal package-resource loading and the repository's existing structured validation approach. Each row carries the dimensions required by the spec, its outcome-inclusion rule, an owning OpenSpec requirement reference, and its establishment state. Thresholds use milliseconds; a pending threshold is null. The comparison operator preserves strict versus inclusive bounds.
 
 Profiles and reference inputs are data, not customer categories fixed in Python. The schema fixes only protocol fields and measurement states. Each populated row cites its owning requirement and provenance; consumers import its value instead of reproducing constants. Existing numerical bars migrate unchanged from their current owner. References must follow an owner through archive to its canonical spec.
 
@@ -54,7 +54,7 @@ The closest maintained option is the existing `latency_watch` with its shared su
 | --- | --- | --- |
 | MCP dispatch | Middleware entry through its result or refusal/error result; excludes client transport | Existing MCP call middleware and ledger |
 | REST command | Existing command timer through the returned response object; excludes earlier ingress checks and response transmission | Existing REST command facade |
-| Public activation leaf | Public activation wrapper entry through returned packet; excludes outer dispatch and client transport | Existing activation log seam |
+| Public activation leaf | Public activation wrapper entry through finalized packet or refusal/error terminal; excludes outer dispatch and client transport | Existing activation log seam |
 | Public mutation leaf | Public product-leaf entry through returned acknowledgement | Existing durable-acknowledgement instrument |
 | Inner operation or stage | Named operation/span entry through its completion | Existing foreground and call-span instruments |
 | Post-canonical wait | Proven canonical commit through acknowledgement | Existing mutation instrument |
@@ -68,7 +68,9 @@ Use the existing request correlation context to distinguish intervals. MCP middl
 
 ### 3. Extend the watch with honest coverage
 
-Extend the existing bounded ring and summarizer. Add operation/profile/boundary identity, outcome and source coverage; keep content out. Count observed calls, eligible timings, refusals/errors, unknown timings, partial source reads and evictions over the declared window. Count failed observations separately when no complete sample can be emitted. Timing-known errors remain visible apart from successful-call percentiles.
+Extend the existing bounded ring and summarizer. Add operation/profile/boundary identity, outcome and source coverage; keep content out. Count observed calls, eligible timings, refusals/errors, abstentions, unknown timings, partial source reads and evictions over the declared window. Count failed observations separately when no complete sample can be emitted.
+
+Every eligible terminal with known timing contributes to its bar's declared population, including errors, refusals and abstentions, unless its owning contract explicitly excludes it. Store that inclusion rule in the bar metadata and report every exclusion with its owner. A success-only percentile labels its restriction and cannot establish an all-request bar; failure counts alone do not restore the missing slow timings. The new warm live activation bar includes all eligible terminal outcomes. Existing recall warming and contended-sample rules remain unchanged under their owning contract.
 
 The ring reports retained coverage and its oldest retained instant. It never promises a day-wide census merely because the requested window is one day. Doctor can read existing ledger/archive or activation sources off the hot path, but must report their coverage independently. Do not combine sources with different boundaries or missing identities into a seemingly complete population.
 
@@ -84,7 +86,9 @@ First prove provider/index rows and sampled identities, then public boundary cov
 
 ### 5. Preserve deadline and acknowledgement ownership
 
-Reuse `RequestBudget` and its absolute deadline. Optional stages yield before starting when their reserve cannot fit. Long work needs cooperative checks or an existing safely bounded worker seam; merely checking before a stage cannot interrupt it. Report unavoidable overruns and preserve current skip/truncation payloads.
+Budgeted read-only activation must return a finalized packet or its existing budget abstention within the existing absolute deadline. Packet finalization is inside that deadline. An overrun is a failed deadline observation and leaves the repair unresolved, even if the next stage yields. Canonical mutation immunity does not apply to read-only activation.
+
+First localize the overdue interval through a bounded isolated reproduction. Reuse `RequestBudget` checks within controllable loops and waits, and existing safely deferred paths. Managed index refresh already defers its rebuild in `working_set_runtime.refresh_index()`; retain that path. Preserve current skip/truncation and budget-abstention payloads. Do not add killable threads or a watchdog framework. If the responsible operation has no safe bound, keep the repair open while independent observation and bar-loading work continues.
 
 Canonical commits remain immune to cancellation. All existing terminal, idempotency, fencing and committed-uncertain contracts apply. Preserve exact affected paths, required component sets, derived batch custody and pending-visibility rows. This change does not choose another acknowledgement framework or bypass a fail-closed read when visibility cannot be proven.
 

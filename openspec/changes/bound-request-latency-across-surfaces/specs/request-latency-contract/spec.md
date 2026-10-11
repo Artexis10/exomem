@@ -8,7 +8,7 @@ Define comparable latency evidence across public requests, inner operations and 
 
 ### Requirement: Each latency bar has one machine-readable identity
 
-The system SHALL define every latency bar in one versioned machine-readable source. Each bar SHALL identify its surface, operation, profile, boundary, population, reference, percentile, comparison, threshold, window, minimum sample count, source coverage and owning requirement. Reports SHALL identify the contract revision. Existing numerical bars SHALL retain their owning requirements without independent copies in consumers.
+The system SHALL define every latency bar in one versioned machine-readable source. Each bar SHALL identify its surface, operation, profile, boundary, population, outcome-inclusion rule, reference, percentile, comparison, threshold, window, minimum sample count, source coverage and owning requirement. Reports SHALL identify the contract revision. Existing numerical bars SHALL retain their owning requirements without independent copies in consumers.
 
 #### Scenario: Existing instruments use the same bar
 
@@ -66,13 +66,23 @@ The system SHALL evaluate a bar only against its declared profile, population, r
 
 ### Requirement: Live warm activation has a public-leaf bar
 
-Live warm `activate_context` SHALL have p95 below 1,000 ms, measured from public activation-leaf entry through its returned packet. Its report SHALL bind the installed revision, served runtime profile, measured input population, reference state, observation window and coverage. MCP or REST dispatch and caller round trips SHALL appear separately. This bar SHALL preserve packet behavior and MUST NOT be met by increasing the CPU quota.
+Live warm `activate_context` SHALL have p95 below 1,000 ms, from public activation-leaf entry through its finalized terminal. Its population SHALL include every eligible terminal outcome with known timing. Reports SHALL bind the installed revision and the scope defined by the bar metadata. Dispatch and caller round trips SHALL appear separately. This bar SHALL preserve packet behavior and MUST NOT be met by increasing the CPU quota.
 
 #### Scenario: Live activation reaches its bar
 
 - **WHEN** an eligible live warm activation series is measured at the public activation leaf
 - **THEN** its p95 is below 1,000 ms and the report identifies its complete measurement scope
 - **AND** before/after checks show equivalent packet content and authorization behavior under the same CPU cap
+
+### Requirement: Known terminal outcomes remain in their declared population
+
+Every eligible terminal with known timing SHALL contribute to its declared population, including errors, refusals and abstentions, unless its owning contract explicitly excludes it. Reports SHALL identify outcome restrictions and their owner. A success-only percentile MUST NOT establish an all-request bar. Existing recall warming and contended-sample rules SHALL remain unchanged.
+
+#### Scenario: Slow errors occupy the tail
+
+- **WHEN** an all-request series contains 90 fast successes and 10 errors slower than its p95 threshold
+- **THEN** all 100 known timings contribute and the all-request p95 breaches its bar
+- **AND** a success-only percentile is labelled as restricted and cannot establish all-request acceptance
 
 ### Requirement: Each request boundary is observed once
 
@@ -92,7 +102,7 @@ Existing MCP, REST and activation observations SHALL feed the existing latency w
 
 ### Requirement: Coverage and outcome counts accompany percentiles
 
-Each report SHALL state its window, source, observed count, eligible known timings, errors or refusals, unknown timings, partial readings and retention loss. A bounded ring SHALL identify retained coverage and evictions. An incomplete source MUST NOT claim all requests in the window. Insufficient samples, unknown timing and failed reads SHALL remain visible and MUST NOT count as zero or establish a pass.
+Each report SHALL state its window, source, observed count, eligible known timings, outcome-inclusion rule, errors, refusals, abstentions, unknown timings, partial readings and retention loss. A bounded ring SHALL identify retained coverage and evictions. An incomplete source MUST NOT claim all requests in the window. Insufficient samples, unknown timing and failed reads SHALL remain visible and MUST NOT count as zero or establish a pass.
 
 #### Scenario: The ring evicts in-window calls
 
@@ -116,15 +126,24 @@ Latency observation SHALL reuse existing operator surfaces and preserve their ca
 - **THEN** the request returns its ordinary result
 - **AND** the operator report exposes observation failure without inventing a healthy sample
 
+### Requirement: Budgeted read-only activation completes within its deadline
+
+Budgeted read-only activation SHALL return a packet or its existing budget abstention within the existing absolute deadline, including packet finalization. Deadline handling SHALL reuse the existing budget and safe deferral paths. An overrun SHALL be a failed deadline observation and an unresolved repair. Canonical mutation immunity MUST NOT apply to read-only activation.
+
+#### Scenario: A read-only activation exhausts its budget
+
+- **WHEN** a read-only activation cannot afford its remaining work within the absolute deadline
+- **THEN** it returns its existing budget abstention, including finalization, within that deadline
+
+#### Scenario: A reproduction exceeds the deadline
+
+- **WHEN** a bounded isolated activation reproduction returns after its absolute deadline
+- **THEN** its deadline observation is failed and the repair remains open
+- **AND** merely reporting the overrun or skipping later work does not satisfy the deadline requirement
+
 ### Requirement: Deadline handling preserves canonical custody
 
-Deadline handling SHALL reuse `connector-request-budget` and the existing mutation terminal and durable-acknowledgement contracts. Optional work and waits SHALL honor the absolute deadline at cooperative boundaries and report skips, truncation or overruns. A running canonical commit MUST NOT be cancelled. Exact terminals, affected paths, component custody, derived batches, pending-read visibility and authorization scopes SHALL remain intact.
-
-#### Scenario: A running stage exceeds its reserve
-
-- **WHEN** a stage completes after the absolute deadline because it has no safe interruption boundary
-- **THEN** the report records the overrun and later optional work yields
-- **AND** the system does not claim its pre-stage reserve check imposed a hard interruption bound
+Canonical mutations SHALL retain `connector-request-budget` and the existing mutation terminal and durable-acknowledgement contracts. A running canonical commit MUST NOT be cancelled. Exact terminals, affected paths, component custody, derived batches, pending-read visibility and authorization scopes SHALL remain intact.
 
 #### Scenario: A write commits while the caller's budget expires
 
