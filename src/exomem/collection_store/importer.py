@@ -83,6 +83,8 @@ MAX_LISTED_MEMBERS = 256
 MAX_SAVED_IMPORTS = 16
 # nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
+# nosemgrep: ep-word-set -- JSON Schema fixes these kinds; number includes integer and finite float.
+JSON_TYPES = ("number", "string", "boolean", "null", "object", "array")
 _CHUNK = 1 << 16
 _LISTED = 20
 _PREVIEW_PATHS = 64
@@ -130,8 +132,10 @@ def contract() -> dict[str, Any]:
                 ),
                 "fields": (
                     f"1 to {MAX_MAPPED_FIELDS} declared target fields, each a dotted source path "
-                    "(a csv column name), {from, type?, scale?} or {const}; type converts csv text "
-                    f"only: {', '.join(CSV_TYPES)}; scale multiplies a number. In json-document a "
+                    "(a csv column name), {from, type?, scale?, source_type?} or {const}; type converts csv text "
+                    f"only: {', '.join(CSV_TYPES)}; source_type guards JSON by kind without conversion: "
+                    f"{', '.join(JSON_TYPES)}. Nonmatching targets stay absent; every present guarded "
+                    "path must match a declared kind or the row is rejected. Scale multiplies a number. In json-document a "
                     "path is relative to the row, $.a.b reads the document and $.a[].b the current "
                     "element of a[], before the rows; $index is the row's place in its array and "
                     "$value the row"
@@ -1220,6 +1224,7 @@ class _Field:
     kind: str | None
     source: _Path
     scale: int | float | None = None
+    source_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1358,6 +1363,7 @@ class Plan:
     natural_key: tuple[str, ...]
     canonical: dict[str, Any] = field(compare=False)
     rows: _Rows | None = None
+    source_types: dict[_Path, tuple[str, ...]] = field(default_factory=dict, compare=False)
 
     @property
     def zoned(self) -> bool:
@@ -1374,6 +1380,13 @@ class Plan:
             found = spec.source.read(value)
             if found is _ABSENT:
                 continue
+            if spec.source_type is not None:
+                kind = _json_type(found)
+                kind = "number" if kind == "integer" else kind
+                if kind not in self.source_types[spec.source] or (kind == "number" and not _finite(found)):
+                    return None, ("IMPORT_SOURCE_TYPE_UNMAPPED", f"mapping.fields.{spec.target}.source_type")
+                if kind != spec.source_type:
+                    continue
             if spec.kind is not None:
                 found = _coerce(found, spec.kind)
             if spec.scale is not None and found is not None and found is not _ABSENT:
@@ -1583,7 +1596,7 @@ def _target(raw: Any, at: str, declared: Mapping[str, Any], used: set[str]) -> s
 
 
 def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tuple[_Field, dict]:
-    """One field mapping: a source path, ``{from, type?, scale?}`` or ``{const}``."""
+    """One field mapping: a source path, ``{from, type?, scale?, source_type?}`` or ``{const}``."""
     if not isinstance(spec, Mapping):
         path = _path(spec, at, fmt)
         kind = "string" if fmt == "csv" else None
@@ -1592,8 +1605,8 @@ def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tup
         if set(spec) != {"const"}:
             _mapping_invalid(at, "a literal is {const} alone", allowed=["const"])
         return _Field(target, (), None, _Path(literal=spec["const"])), {"const": spec["const"]}
-    for key in sorted(set(spec) - {"from", "type", "scale"}):
-        _mapping_invalid(f"{at}.{key}", "unknown field mapping key", allowed=["const", "from", "scale", "type"])
+    for key in sorted(set(spec) - {"from", "type", "scale", "source_type"}):
+        _mapping_invalid(f"{at}.{key}", "unknown field mapping key", allowed=["const", "from", "scale", "source_type", "type"])
     kind = None
     if "type" in spec:
         if fmt != "csv":
@@ -1603,12 +1616,20 @@ def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tup
         kind = spec["type"]
     elif fmt == "csv":
         kind = "string"
+    source_type = spec.get("source_type")
+    if "source_type" in spec:
+        if fmt == "csv":
+            _mapping_invalid(f"{at}.source_type", "source_type guards JSON values only", expected=None)
+        if type(source_type) is not str or source_type not in JSON_TYPES:
+            _mapping_invalid(f"{at}.source_type", "unsupported JSON source type", allowed=list(JSON_TYPES))
     scale = spec.get("scale")
     if "scale" in spec and not _finite(scale):
         _mapping_invalid(f"{at}.scale", "scale is a finite number", expected="number")
     path = _path(spec.get("from"), f"{at}.from", fmt)
     canonical = {"from": list(path), "type": kind, **({"scale": scale} if "scale" in spec else {})}
-    return _Field(target, path, kind, _source(spec["from"], f"{at}.from", fmt, rows), scale), canonical
+    if source_type is not None:
+        canonical["source_type"] = source_type
+    return _Field(target, path, kind, _source(spec["from"], f"{at}.from", fmt, rows), scale, source_type), canonical
 
 
 def _basis(index: int, raw: Any, fmt: str, rows: _Rows | None) -> tuple[_Basis, dict]:
@@ -1771,6 +1792,10 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         "coverage": dict(coverage),
         **({"rows": rows.text} if rows is not None else {}),
     }
+    source_types: dict[_Path, tuple[str, ...]] = {}
+    for spec in fields:
+        if spec.source_type is not None:
+            source_types[spec.source] = (*source_types.get(spec.source, ()), spec.source_type)
     return Plan(
         tuple(fields),
         tuple(bases),
@@ -1781,6 +1806,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         tuple(manifest.schema.natural_key),
         canonical,
         rows,
+        source_types,
     )
 
 
@@ -3372,6 +3398,8 @@ class _Sample:
             else:
                 self.present.add(spec.target)
         values, error = self.plan.values(row.value)
+        if error is not None and len(self.errors) < _LISTED:
+            self.errors.append({"row": row.ordinal, "byte": row.start, "code": error[0], "at": error[1]})
         if self.plan.bases:
             times, flagged, basis = self.plan.time(row.value, order)
             if flagged is not None and len(self.flagged) < 2 * _LISTED:
