@@ -224,3 +224,21 @@ def test_an_archive_whose_manifest_the_importer_would_refuse_is_never_recorded(
     assert refused.value.code == archive_members.TOO_LARGE
     family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
     assert not list(family.glob("*.export.json*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_an_archive_through_a_linked_destination_folder_writes_nothing(vault: Path, tmp_path: Path) -> None:
+    """A linked folder carried the blobs to where it points before the manifest commit refused it."""
+    from exomem.preserve import PreserveError
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    device = vault / "Knowledge Base" / "Evidence" / "Device"
+    device.mkdir(parents=True)
+    os.symlink(elsewhere, device / "Exports", target_is_directory=True)
+
+    with pytest.raises(PreserveError) as refused:
+        _preserve(vault, _zip([("export/day-01.json", b"{}")]))
+
+    assert (refused.value.code, refused.value.reason) == ("WRITE_REFUSED", "target is unavailable")
+    assert list(elsewhere.rglob("*")) == []

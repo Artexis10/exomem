@@ -102,6 +102,22 @@ def test_live_configuration_change_restricts_an_existing_filter(configured_bound
     assert not keep(PRIVATE)
 
 
+def test_a_filter_built_in_a_request_scope_follows_a_change_after_the_scope_ends(configured_boundary, vault):
+    """A filter kept past its request must not answer from that request's pinned configuration."""
+    from exomem import state_paths
+    from exomem.governance import connector_boundary
+
+    config, authenticate = configured_boundary
+    who = authenticate("full")
+    with state_paths.resolution_scope():
+        keep = connector_boundary.permits_filter(vault, who)
+        assert keep(PRIVATE)
+    data = json.loads(config.read_text())
+    data["clients"][1]["denied_scope_ids"] = [SCOPE]
+    config.write_text(json.dumps(data))
+    assert not keep(PRIVATE)
+
+
 def test_unknown_scope_never_turns_configuration_into_unrestricted_access(configured_boundary, vault):
     config, authenticate = configured_boundary
     who = authenticate("full")
@@ -288,6 +304,81 @@ def test_a_restricted_archive_upload_writes_nothing_and_reveals_no_stored_archiv
         assert tree() == before
         outcomes.append((refused.value.code, refused.value.reason))
     assert outcomes == [("WRITE_REFUSED", "target is unavailable")] * 2
+
+
+def test_an_archive_kept_as_members_is_refused_in_a_capture_namespace_before_any_blob(configured_boundary, vault):
+    """A capture namespace cannot classify member blobs; refused after them, they broke re-arming."""
+    import contextlib
+    import io
+    import zipfile
+
+    from exomem import archive_members, state_migration
+    from exomem.governance import connector_boundary
+    from exomem.preserve import PreserveError
+
+    config, authenticate = configured_boundary
+    data = json.loads(config.read_text())
+    data["capture_paths"].append("Knowledge Base/Evidence/Device")
+    config.write_text(json.dumps(data))
+    authority = state_migration.assert_offline_migration_authority(source="isolated capture stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("export/day-01.json", b'{"heart_rate": 61}')
+
+    outcomes = []
+    for client, scope in (("full", "Device"), ("limited", "Device"), ("full", "device")):
+        with principal.request_scope(authenticate(client)), pytest.raises(PreserveError) as refused:
+            archive_members.preserve_members(
+                vault, guard=contextlib.nullcontext, scope=scope, category="Exports",
+                filename="export.zip", stream=io.BytesIO(buffer.getvalue()), max_bytes=1024 * 1024,
+                verified="upload",
+            )
+        outcomes.append((refused.value.code, refused.value.reason))
+
+    assert outcomes == [("WRITE_REFUSED", "archive members are unavailable in a capture namespace")] * 3
+    assert not [path for path in (vault / "Knowledge Base/Evidence").rglob("*") if path.is_file()]
+    connector_boundary.verify_capture_namespaces(vault, connector_boundary.snapshot(vault, maintenance=True))
+
+
+def test_an_upload_session_refuses_a_hidden_destination_alike_whether_or_not_it_holds_the_file(
+    configured_boundary, vault, tmp_path, monkeypatch
+):
+    """Session creation decides the destination first, so its answer reveals no stored file."""
+    import base64
+    import hashlib
+
+    from starlette.testclient import TestClient
+
+    from exomem import server, state_migration
+
+    authority = state_migration.assert_offline_migration_authority(source="isolated upload stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    folder = vault / "Knowledge Base/Evidence/Private/Uploads"
+    folder.mkdir(parents=True)
+    (folder / "stored.json").write_bytes(b"{}")
+    (folder / "stored.json.md").write_text("---\nproject: private-project\n---\nprotected canary\n", encoding="utf-8")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "temporary-boundary-upload-token")
+
+    def create(client, filename, **extra):
+        metadata = {"filename": filename, "scope": "Private", "category": "Uploads",
+                    "sha256": hashlib.sha256(b"{}").hexdigest(), **extra}
+        return client.post("/upload/sessions", headers={
+            "Tus-Resumable": "1.0.0", "Authorization": "Bearer temporary-boundary-upload-token",
+            "Upload-Length": "2",
+            "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}"
+                                        for key, value in metadata.items()),
+        })
+
+    with TestClient(server.build_server(require_auth=False).http_app()) as client:
+        answers = [create(client, "stored.json"), create(client, "absent.json"),
+                   create(client, "export.zip", archive="members")]
+
+    stored, absent, archive = ((answer.status_code, answer.text) for answer in answers)
+    assert stored == absent == archive
+    assert (answers[0].status_code, answers[0].json()["code"]) == (400, "WRITE_REFUSED")
 
 
 def test_capture_namespace_rejects_private_writes_even_from_unrestricted_owner(configured_boundary, vault):

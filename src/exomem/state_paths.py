@@ -161,9 +161,9 @@ def request_memo(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -
     return _memoized(name, parts, compute)
 
 
-def request_memo_active() -> bool:
-    """Whether a request scope pins `request_memo` answers for this context."""
-    return _RESOLUTION_MEMO.get() is not None
+def request_memo_scope() -> object | None:
+    """The request scope that pins `request_memo` answers here, or None; compare by identity only."""
+    return _RESOLUTION_MEMO.get()
 
 
 def _placement_environment() -> tuple[str, ...]:

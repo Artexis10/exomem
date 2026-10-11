@@ -291,21 +291,25 @@ def permits_filter(root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
 
     Inside a request scope every snapshot read returns the request's pinned
     answer (`state_paths.request_memo`), so the filter reads it once instead of
-    once per admitted path, a cost that grew with the corpus. Outside one, each
-    path reads the live host configuration, so an existing filter follows a change.
+    once per admitted path, a cost that grew with the corpus. Outside that scope,
+    including after it ends, each path reads the live host configuration, so an
+    existing filter follows a change.
     """
     root = Path(root)
-    if not state_paths.request_memo_active():
+    scope = state_paths.request_memo_scope()
+    if scope is None:
         return lambda path: permits(root, path, who)
     try:
         current = snapshot(root)
-        denied = current.denied_scopes(who) if current is not None else frozenset()
+        denied: frozenset[str] | None = current.denied_scopes(who) if current is not None else frozenset()
     except _ADMISSION_REFUSALS:
-        return lambda path: False
-    if not denied:
-        return lambda path: True
+        denied = None
 
     def admit(path: str) -> bool:
+        if state_paths.request_memo_scope() is not scope:
+            return permits(root, path, who)
+        if denied is None:
+            return False
         try:
             return _permits_denied(root, path, denied, who)
         except _ADMISSION_REFUSALS:
@@ -387,6 +391,12 @@ def require_create(root: Path, path: str, *, replace_existing: bool = False, dir
     # Mixed namespaces cannot support private-independent collisions. The caller
     # must select a configured capture destination; existing edits stay available.
     raise ValueError("WRITE_REFUSED: target is unavailable")
+
+
+def capture_namespace(root: Path, path: str) -> bool:
+    """Whether `path` lies in a configured capture namespace, under any spelling of it."""
+    current = snapshot(root)
+    return current is not None and _capture_destination(current, path) is not None
 
 
 def verify_capture_namespaces(root: Path, current: Snapshot) -> None:

@@ -758,6 +758,8 @@ def register_transfer_routes(
             return _tus_refusal("INVALID_UPLOAD", "; ".join(refusals), 400)
         try:
             if members:
+                folder = preserve_module.evidence_folder(vault_root, target["scope"], target["category"])
+                preserve_module.admit_destination(vault_root, folder, directory=True, members=True)
                 preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
             else:
                 # Before any byte is sent: a name the commit cannot store fails after the whole upload.
@@ -765,6 +767,8 @@ def register_transfer_routes(
                     vault_root, scope=target["scope"], category=target["category"],
                     filename=target["filename"], raw_protection=raw_protection,
                 )
+                # The destination decision comes before existence, which it never reveals.
+                preserve_module.admit_destination(vault_root, artifact)
                 if artifact.exists():
                     return _tus_refusal(
                         "ARTIFACT_EXISTS",
