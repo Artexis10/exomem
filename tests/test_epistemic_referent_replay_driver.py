@@ -233,7 +233,9 @@ class _Agent:
         return _Proc(_stream(*lines, _result(f"The answer is {key['answer_value']}.")))
 
 
-def _run(tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), parent_env=None, **kwargs):
+def _run(
+    tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), parent_env=None, model=MODEL, **kwargs
+):
     from epistemic.journeys import f27_replay as client
 
     return _driver().run_driver(
@@ -247,6 +249,7 @@ def _run(tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), paren
         parent_env=parent_env or {"PATH": "/usr/bin", "HOME": str(tmp_path)},
         runner=agent,
         prominence_writer=lambda _arm, _env: "set",
+        model=model,
         **kwargs,
     )
 
@@ -393,28 +396,34 @@ def test_a_harness_fault_is_never_scored_and_is_rerun_under_the_same_pins(
 
 
 @pytest.mark.parametrize(
-    ("init_for", "calls", "reason"),
+    ("init_for", "model", "repeats", "calls", "reason", "statuses"),
     [
-        (lambda call: {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, 1, "pinned profile"),
-        (lambda call: {"claude_code_version": "9.9.9"} if call == 2 else {}, 2, "'2.1.296' (first invocation) to '9.9.9'"),
+        (lambda call: {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, MODEL, 1, 1,
+         "pinned profile", ["aborted"]),
+        (lambda call: {}, "sonnet", 1, 1, "not an alias", ["aborted"]),
+        (lambda call: {"claude_code_version": "9.9.9"} if call == 4 else {}, MODEL, 2, 4,
+         "'9.9.9', but the run pins '2.1.296'", ["scored", "aborted"]),
     ],
-    ids=["wrong_profile", "client_version_drift"],
+    ids=["wrong_profile", "model_alias", "client_version_drift"],
 )
 def test_a_deterministic_fault_or_pin_drift_stops_the_whole_driver_run(
-    tmp_path, init_for, calls: int, reason: str
+    tmp_path, init_for, model: str, repeats: int, calls: int, reason: str, statuses: list[str]
 ) -> None:
-    """Fails when a fault no rerun can clear is rerun, or a changed pin keeps scoring."""
+    """Fails when a fault no rerun can clear is rerun, a changed pin or an alias keeps
+    scoring, or the report of a stopped run hides that it is partial."""
 
     agent = _Agent(PET_TWIN, _profile(tmp_path), init_for=init_for)
-    with pytest.raises(_driver().DriverAbort, match="attempt 1") as stopped:
-        _run(tmp_path, agent, case_ids=[PET_TWIN], shapes=("hookless", "hooked"), model="sonnet")
+    with pytest.raises(_driver().DriverAbort) as stopped:
+        _run(tmp_path, agent, case_ids=[PET_TWIN], shapes=("hookless", "hooked"), model=model,
+             repeats=repeats)
 
     assert reason in str(stopped.value)
     assert len(agent.calls) == calls
-    assert _run_file(tmp_path, PET_TWIN)["status"] == "aborted"
     manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert reason in manifest["aborted"]
-    assert (manifest["model_requested"], manifest["model"]) == ("sonnet", MODEL)
+    assert reason in manifest["aborted"] and manifest["model"] == model
+    report = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert report["partial"] is True and reason in report["aborted"]
+    assert [row["status"] for row in report["cases"][0]["runs"]] == statuses
 
 
 def test_the_child_cannot_update_itself_take_an_injected_packet_or_bill_a_key(tmp_path) -> None:
@@ -430,6 +439,86 @@ def test_the_child_cannot_update_itself_take_an_injected_packet_or_bill_a_key(tm
         assert env["DISABLE_AUTOUPDATER"] == "1"
         assert env["CLAUDE_CONFIG_DIR"] == str(agent.profile)
         assert not set(removed) & set(env)
+
+
+def test_an_anchor_only_the_recency_prior_supplied_does_not_serve(tmp_path) -> None:
+    """Fails when an ordinary packet's recency-only anchor serves, or a named anchor
+    beside it stops serving (ruling 1c)."""
+
+    from epistemic.journeys.referent_capture import seed_inputs
+    from epistemic.projectors.exomem_vault import VaultProjector
+
+    from exomem.memory_refs import memory_ref
+
+    vault = tmp_path / "vault"
+    seed_inputs(vault)
+    exomem_id = _write_referent(vault, PET)
+    snapshot = VaultProjector(vault).project(phase="hookless", taken_at="2026-10-11T00:00:00Z")
+    owner = _key(PET)["owner"]["ref"]
+    anchors = [
+        {"ref": memory_ref(exomem_id), "path": f"{_entity_id()}.md", "status": "resolved",
+         "evidence": ["recency"]},
+        {"ref": f"{owner}.md", "path": f"{owner}.md", "status": "resolved",
+         "evidence": ["recency", "exact_alias"]},
+    ]
+    packet = {"anchors": anchors, "units": [], "pointers": []}
+    rows = _driver().served_refs([{"readable": True, "packet": packet}], snapshot)
+    assert {(row["item_id"], row["serves"]) for row in rows} == {(_entity_id(), False), (owner, True)}
+
+
+def test_the_products_real_recency_carry_matches_the_driver_rule(tmp_path, monkeypatch) -> None:
+    """Fails when the product renames its recency carry or its recency evidence, which
+    would let a recency-carried packet serve without any driver test noticing.
+
+    Drives the real carry: one governed edit to one ordinary page, then a turn that
+    names nothing, from a fresh session key.
+    """
+
+    import os
+    import time
+    import uuid
+
+    from epistemic.journeys.referent_capture import seed_inputs
+    from epistemic.projectors.exomem_vault import VaultProjector
+
+    from exomem import commands, lexstore, writer_lease
+
+    vault = tmp_path / "vault"
+    for name, value in {
+        "EXOMEM_VAULT_PATH": vault, "EXOMEM_STATE_ROOT": tmp_path / "state",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": tmp_path / "leases", "EXOMEM_DISABLE_EMBEDDINGS": "1",
+    }.items():
+        monkeypatch.setenv(name, str(value))
+    seed_inputs(vault)
+    note = "Knowledge Base/Notes/Research/kiln-schedule-review.md"
+    target = sorted((vault / "Knowledge Base/Entities/Organizations").glob("*.md"))[0].stem
+    (vault / note).parent.mkdir(parents=True, exist_ok=True)
+    (vault / note).write_text(
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+        "# Kiln schedule review\n\n## Summary\n\nWhy the kiln schedule moved to nights.\n\n"
+        "- [decision] The kiln runs overnight so the day shift can glaze. ^k-decision\n\n"
+        f"## Relations\n\n- relates_to [[{target}]]\n",
+        encoding="utf-8",
+    )
+    old = time.time() - 30 * 86400
+    for page in (vault / "Knowledge Base").rglob("*.md"):
+        os.utime(page, (old, old))
+    lexstore.ensure_fresh(vault)
+    edit = next(command for command in commands.PRODUCT_COMMANDS if command.name == "edit_memory")
+    writer_lease.invoke_command(
+        edit, vault, path=note, why="make one page hot",
+        operation={"kind": "replace_string", "old_string": "to nights.", "new_string": "to nights in spring."},
+    )
+
+    packet = commands.op_activate_context(vault, turn="continue", session=f"fresh-{uuid.uuid4().hex}")
+
+    assert packet["generation"].get("carried_by") == _driver().RECENCY_CARRY, packet.get("abstention")
+    (anchor,) = packet["anchors"]
+    assert _driver()._recency_only(anchor)
+    snapshot = VaultProjector(vault).project(phase="hookless", taken_at="2026-10-11T00:00:00Z")
+    rows = _driver().served_refs([{"readable": True, "packet": packet}], snapshot)
+    assert note.removesuffix(".md") in {row["item_id"] for row in rows}
+    assert not any(row["serves"] for row in rows)
 
 
 def test_the_default_client_profile_is_refused(tmp_path) -> None:

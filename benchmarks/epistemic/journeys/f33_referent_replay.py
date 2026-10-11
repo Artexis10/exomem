@@ -30,8 +30,9 @@ under the same pins until the case has its scored repeats, at most
 ``MAX_ATTEMPTS`` times per case per client shape; a case without them is
 ``incomplete`` (PREREGISTRATION.md §7, sequence 7). A fault no rerun can clear
 aborts the whole driver run instead: the wrong profile, an API key, the wrong
-plugins, a hook in the hookless shape, or a model or client version that
-differs from the first invocation's.
+plugins, a hook in the hookless shape, a model other than the requested model
+id (so an alias aborts), or a client version other than the first invocation's.
+The report of a stopped run says it is partial.
 
 **Claims.** The manifest states the receipt's own acknowledgment status, read at
 write time. Until the founder acknowledges sequence 7, every result here is
@@ -105,6 +106,11 @@ USES_RULE = {
         "anchors, units or pointers. Edit time chose the whole packet. Packets that the "
         "turn, focus, conversation or continuity reached serve under the rule above."
     ),
+    "recency_only_anchor": (
+        "Ruling 1c: an anchor that only the recency prior supplied does not serve, even in "
+        "an ordinary packet (the resolver's fifth clause): it has recency evidence and no "
+        "naming, conversation or continuity evidence. Edit time chose it."
+    ),
     "no_activation": (
         "A complete fresh stream with no activate_context call received an empty packet, so "
         "'uses' fails rather than blocks. An errored call (is_error, or a success:false "
@@ -128,7 +134,14 @@ HOOK_PACKET_EVENT = "UserPromptSubmit"
 
 
 class DriverAbort(client.JourneySetupError):
-    """A deterministic setup fault or a pin drift. No rerun fixes one, so the driver stops."""
+    """A deterministic setup fault or a pin drift. No rerun fixes one, so the driver stops.
+
+    ``partial`` is the aborted case and shape, with every run it had attempted.
+    """
+
+    def __init__(self, message: str, partial: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.partial = partial
 
 
 class _Proc:
@@ -279,15 +292,20 @@ def surface_mismatch(
 
 
 def pin_drift(stdout: str, pins: dict[str, Any]) -> str | None:
-    """The first invocation's model and client version pin every later one."""
+    """Every invocation must report the pinned model and client version.
+
+    The run pins the requested model from the start, so an alias that the client
+    resolves to another id aborts on the first invocation. The first invocation
+    pins the client version.
+    """
 
     for init in _init_lines(stdout):
         seen = {"model": init.get("model"), "claude_code_version": init.get("claude_code_version")}
-        if not pins:
-            pins.update(seen)
         for key, value in seen.items():
-            if value != pins[key]:
-                return f"the {key} changed from {pins[key]!r} (first invocation) to {value!r}"
+            expected = pins.setdefault(key, value)
+            if value != expected:
+                hint = "; pass the exact model id the client reports, not an alias" if key == "model" else ""
+                return f"the {key} is {value!r}, but the run pins {expected!r}{hint}"
     return None
 
 
@@ -452,13 +470,30 @@ def served_refs(
         packet = capture["packet"]
         recency = (packet.get("generation") or {}).get("carried_by") == RECENCY_CARRY
         for section, value in packet.items():
-            for field, ref in _packet_refs(value):
-                serves = not recency and field in SERVING_FIELDS.get(section, ())
-                out.append(
-                    {"section": section, "field": field, "ref": ref, "item_id": item_for(ref),
-                     "serves": serves}
-                )
+            for entry in value if isinstance(value, list) else [value]:
+                prior_only = section == "anchors" and _recency_only(entry)
+                for field, ref in _packet_refs(entry):
+                    serves = not (recency or prior_only) and field in SERVING_FIELDS.get(section, ())
+                    out.append(
+                        {"section": section, "field": field, "ref": ref, "item_id": item_for(ref),
+                         "serves": serves}
+                    )
     return out
+
+
+def _recency_only(anchor: Any) -> bool:
+    """Ruling 1c: the recency prior alone supplied this anchor.
+
+    The product's own evidence sets decide it: a prior kind, and no naming kind
+    (worded or retrieved contact, or the agent's choice) and no named-before kind
+    (conversation or continuity). ``working_set_resolve.NAMING_KINDS`` calls such
+    an anchor "prior-only".
+    """
+
+    from exomem.working_set_resolve import NAMED_BEFORE_KINDS, NAMING_KINDS, PRIOR_CONTACT_KINDS
+
+    evidence = set(anchor.get("evidence") or ()) if isinstance(anchor, dict) else set()
+    return bool(evidence & PRIOR_CONTACT_KINDS) and not evidence & (NAMING_KINDS | NAMED_BEFORE_KINDS)
 
 
 # --------------------------------------------------------------------------
@@ -756,6 +791,17 @@ def run_case_shape(
     runs: list[dict[str, Any]] = []
     outcomes: list[str] = []
     clock = run_kwargs.get("clock", time.monotonic)
+
+    def result() -> dict[str, Any]:
+        return {
+            "case_id": case.case_id,
+            "polarity": case.polarity,
+            "category": case.category,
+            "shape": shape,
+            "status": case_status(case.polarity, outcomes, repeats),
+            "runs": runs,
+        }
+
     for attempt in range(1, max_attempts + 1):
         if len(outcomes) >= repeats:
             break
@@ -771,16 +817,10 @@ def run_case_shape(
         runs.append(record)
         if record["status"] == "aborted":
             raise DriverAbort(
-                f"{case.case_id} {shape} attempt {attempt}: {record['fault_reason']}"
+                f"{case.case_id} {shape} attempt {attempt}: {record['fault_reason']}",
+                partial={**result(), "status": "aborted"},
             )
-    return {
-        "case_id": case.case_id,
-        "polarity": case.polarity,
-        "category": case.category,
-        "shape": shape,
-        "status": case_status(case.polarity, outcomes, repeats),
-        "runs": runs,
-    }
+    return result()
 
 
 def _table_row(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -836,7 +876,7 @@ def run_driver(
     shapes: Sequence[str] = client.ARM_ORDER,
     repeats: int = REPEATS,
     max_attempts: int = MAX_ATTEMPTS,
-    model: str = "sonnet",
+    model: str,
     max_turns: int = client.DEFAULT_MAX_TURNS,
     envelope: client.AgentEnvelope | None = None,
     cases_root: Path = cases.REPO_ROOT,
@@ -868,7 +908,8 @@ def run_driver(
         raise client.JourneySetupError(f"{out_dir} exists; every driver run needs a fresh --out")
     floor, removed = client.environment_floor(parent)
     out_dir.mkdir(parents=True)
-    observed: dict[str, Any] = {}
+    # The model is pinned as requested; the first invocation adds the client version.
+    observed: dict[str, Any] = {"model": model}
 
     manifest = {
         "journey": JOURNEY,
@@ -876,7 +917,7 @@ def run_driver(
         "taken_at": taken_at,
         "cli_executable": str(envelope.executable),
         "cli_version": envelope.version,
-        "model_requested": model,
+        "model": model,
         "max_turns_per_invocation": max_turns,
         "product": product,
         "prominence": {shape: client.ARMS[shape].prominence for shape in shapes},
@@ -901,8 +942,7 @@ def run_driver(
     }
 
     def write_manifest() -> None:
-        # The pins the first invocation reported; null until a session has run.
-        manifest["model"] = observed.get("model")
+        # The client version the first invocation reported; null until a session has run.
         manifest["claude_code_version"] = observed.get("claude_code_version")
         (out_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -934,6 +974,9 @@ def run_driver(
                 write_report(out_dir, manifest, tables)
     except DriverAbort as error:
         manifest["aborted"] = str(error)
+        if error.partial is not None:
+            runs = [_table_row(run) for run in error.partial["runs"]]
+            tables.append({**error.partial, "runs": runs})
         write_manifest()
         write_report(out_dir, manifest, tables)
         raise
@@ -945,6 +988,9 @@ def write_report(out_dir: Path, manifest: Mapping[str, Any], tables: Sequence[Ma
 
     report = out_dir / "report.json"
     payload = {
+        # A stopped driver run is partial: these rows are all it scored.
+        "partial": "aborted" in manifest,
+        "aborted": manifest.get("aborted"),
         "claim_status": manifest["claim_status"],
         "hookless_label": manifest["hookless_label"],
         "cases": list(tables),
@@ -966,7 +1012,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--shape", choices=(*client.ARM_ORDER, "both"), default="both")
     parser.add_argument("--repeats", type=int, default=REPEATS)
     parser.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS)
-    parser.add_argument("--model", default="sonnet")
+    # No default: an alias floats as models change, and the run aborts on one.
+    parser.add_argument("--model", required=True)
     parser.add_argument("--max-turns", type=int, default=client.DEFAULT_MAX_TURNS)
     parser.add_argument("--claude-bin", type=Path, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
