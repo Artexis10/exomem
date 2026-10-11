@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.115.0](https://github.com/Artexis10/exomem/compare/v0.114.0...v0.115.0) (2026-10-11)
+
+
+### Features
+
+* **bench:** file the referent-capture family f33 as amendment sequence 7 ([#1674](https://github.com/Artexis10/exomem/issues/1674)) ([71d4889](https://github.com/Artexis10/exomem/commit/71d4889e8751d496fff909fdeb5a27dfb39ce8d2))
+* bring in large exports through resumable uploads, archive members and nested imports ([#1662](https://github.com/Artexis10/exomem/issues/1662)) ([07f2a2f](https://github.com/Artexis10/exomem/commit/07f2a2f7a452a111b0bfe3bd329c1be68e7b4282))
+* **collections:** add the read-only collections-store migration preflight ([#1644](https://github.com/Artexis10/exomem/issues/1644)) ([6eee39e](https://github.com/Artexis10/exomem/commit/6eee39e5d87b9574d9a78b9f1b25d07cdb955847))
+* **collections:** read sync-provider evidence from a registry ([#1651](https://github.com/Artexis10/exomem/issues/1651)) ([c91cae5](https://github.com/Artexis10/exomem/commit/c91cae5fe576db6a684c220361be0cb9b0d9f8df))
+* **infra:** add the Cloud restore drill and in-place restore ([#1641](https://github.com/Artexis10/exomem/issues/1641)) ([28d5f06](https://github.com/Artexis10/exomem/commit/28d5f0659a52af974c5c023161836ecc7b441525))
+* **ingress:** preserve a whole export owner-only over local ingress ([#1648](https://github.com/Artexis10/exomem/issues/1648)) ([754e910](https://github.com/Artexis10/exomem/commit/754e910062a53f2500c96c7d5c5ac1c43b292bcb))
+* **media:** process documents and OCR inside Cloud cells under memory brakes ([#1661](https://github.com/Artexis10/exomem/issues/1661)) ([18b2006](https://github.com/Artexis10/exomem/commit/18b2006a94e264c237b985aa5de9b4d607d427bc))
+* **planning:** read Planning values from a governed vocabulary registry ([#1640](https://github.com/Artexis10/exomem/issues/1640)) ([5c38c1f](https://github.com/Artexis10/exomem/commit/5c38c1f2bfa99b5b5cda7b20facee225100c5d1f))
+* **review:** make the Dreamer run and show each family's effect ([#1659](https://github.com/Artexis10/exomem/issues/1659)) ([66f6e91](https://github.com/Artexis10/exomem/commit/66f6e91f7778f7fcc9b7a843a08cd444765a0c14))
+* **vocabulary:** classify note types through a note-type registry ([#1647](https://github.com/Artexis10/exomem/issues/1647)) ([fb74f8c](https://github.com/Artexis10/exomem/commit/fb74f8c57fd808895183a1d7587f2ef7bbeb5de8))
+* **vocabulary:** classify page lifecycle through a status registry ([#1630](https://github.com/Artexis10/exomem/issues/1630)) ([7b242bf](https://github.com/Artexis10/exomem/commit/7b242bfa8499d59a130c00b333da12df022740ee))
+
+
+### Bug Fixes
+
+* **find:** admit each lane's candidates instead of sizing recall by the admitted corpus ([#1660](https://github.com/Artexis10/exomem/issues/1660)) ([6d0bc68](https://github.com/Artexis10/exomem/commit/6d0bc68395b6960542cb8f8b468d7033b4cc3563))
+* **recall:** build an imported vault even after an early live write ([#1677](https://github.com/Artexis10/exomem/issues/1677)) ([bce4521](https://github.com/Artexis10/exomem/commit/bce4521277c4fba6138bf95d75c987c63eb3ecfc))
+* **recall:** serve the building index during an initial build ([#1657](https://github.com/Artexis10/exomem/issues/1657)) ([70fe0a5](https://github.com/Artexis10/exomem/commit/70fe0a578326d1a53143c4b52d3d9d9123967993))
+* **semantic:** restore validate and carry latency after the status registry ([#1649](https://github.com/Artexis10/exomem/issues/1649)) ([be02a0e](https://github.com/Artexis10/exomem/commit/be02a0ee796b762aaa0661729f9db414f005f8d4))
+
+
+### Performance
+
+* **collections:** load store libraries only for summary creates ([#1642](https://github.com/Artexis10/exomem/issues/1642)) ([28bf8fc](https://github.com/Artexis10/exomem/commit/28bf8fc85b8950b7869d01051d2756bcc513c384))
+
 ## [0.114.0](https://github.com/Artexis10/exomem/compare/v0.113.0...v0.114.0) (2026-10-09)
 
 
