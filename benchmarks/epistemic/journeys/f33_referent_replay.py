@@ -107,9 +107,11 @@ USES_RULE = {
         "turn, focus, conversation or continuity reached serve under the rule above."
     ),
     "recency_only_anchor": (
-        "Ruling 1c: an anchor that only the recency prior supplied does not serve, even in "
-        "an ordinary packet (the resolver's fifth clause): it has recency evidence and no "
-        "naming, conversation or continuity evidence. Edit time chose it."
+        "Ruling 1c: nothing reached through an anchor that only the recency prior supplied "
+        "serves, even in an ordinary packet (the resolver's fifth clause): not the anchor, "
+        "not units whose provenance path or anchor is its page, not pointers to its page. "
+        "Such an anchor has recency evidence and no naming, conversation or continuity "
+        "evidence. Edit time chose it."
     ),
     "no_activation": (
         "A complete fresh stream with no activate_context call received an empty packet, so "
@@ -469,15 +471,25 @@ def served_refs(
             continue
         packet = capture["packet"]
         recency = (packet.get("generation") or {}).get("carried_by") == RECENCY_CARRY
+        # Ruling 1c: the pages that recency-only anchors reached serve through nothing.
+        suppressed = {
+            item_for(ref)
+            for anchor in packet.get("anchors") or ()
+            if _recency_only(anchor)
+            for _field, ref in _packet_refs(anchor)
+        } - {None}
         for section, value in packet.items():
-            for entry in value if isinstance(value, list) else [value]:
-                prior_only = section == "anchors" and _recency_only(entry)
-                for field, ref in _packet_refs(entry):
-                    serves = not (recency or prior_only) and field in SERVING_FIELDS.get(section, ())
-                    out.append(
-                        {"section": section, "field": field, "ref": ref, "item_id": item_for(ref),
-                         "serves": serves}
-                    )
+            for field, ref in _packet_refs(value):
+                item_id = item_for(ref)
+                serves = (
+                    not recency
+                    and item_id not in suppressed
+                    and field in SERVING_FIELDS.get(section, ())
+                )
+                out.append(
+                    {"section": section, "field": field, "ref": ref, "item_id": item_id,
+                     "serves": serves}
+                )
     return out
 
 
@@ -984,12 +996,18 @@ def run_driver(
 
 
 def write_report(out_dir: Path, manifest: Mapping[str, Any], tables: Sequence[Mapping]) -> Path:
-    """Per case, per shape, per attempt; no figure aggregates across cases, shapes or arms."""
+    """Per case, per shape, per attempt; no figure aggregates across cases, shapes or arms.
+
+    ``partial`` is derived from coverage, so a report read mid-run, or left by an
+    interrupted or stopped run, says it is partial: it is false only when every
+    requested case and shape has its finished rows.
+    """
 
     report = out_dir / "report.json"
+    finished = {(t["case_id"], t["shape"]) for t in tables if t["status"] != "aborted"}
+    requested = {(case_id, shape) for case_id in manifest["cases"] for shape in manifest["shapes"]}
     payload = {
-        # A stopped driver run is partial: these rows are all it scored.
-        "partial": "aborted" in manifest,
+        "partial": "aborted" in manifest or not requested <= finished,
         "aborted": manifest.get("aborted"),
         "claim_status": manifest["claim_status"],
         "hookless_label": manifest["hookless_label"],

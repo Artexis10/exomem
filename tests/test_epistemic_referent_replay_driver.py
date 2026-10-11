@@ -198,21 +198,24 @@ class _Agent:
 
     ``capture`` writes into the run's own vault, found through the environment the
     driver hands the child. ``faults`` makes the first N invocations exit non-zero.
-    ``results`` builds the fresh session's activate_context results, and ``init_for``
-    overrides the init line of a given call number.
+    ``results`` builds the fresh session's activate_context results, ``init_for``
+    overrides the init line of a given call number, and ``before`` runs first on
+    every call with its argv.
     """
 
     def __init__(
         self, case_id: str, profile: Path, *, capture: bool = False, faults: int = 0,
-        results=_turn_packet, init_for=None,
+        results=_turn_packet, init_for=None, before=None,
     ):
         self.case_id, self.profile, self.capture, self.faults = case_id, profile, capture, faults
         self.results, self.init_for = results, init_for or (lambda _call: {})
+        self.before = before or (lambda _argv: None)
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.exomem_id: str | None = None
 
     def __call__(self, argv, cwd, env):
+        self.before(argv)
         self.calls.append(list(argv))
         self.envs.append(dict(env))
         init = _init(self.profile, plugin=_plugin(argv), **self.init_for(len(self.calls)))
@@ -276,6 +279,7 @@ def test_the_fresh_session_packet_is_recorded_and_its_refs_map_to_snapshot_ids(t
     result = _run(tmp_path, agent, case_ids=[PET], repeats=1)
 
     assert result["manifest"]["claim_status"].startswith("pending acknowledgment")
+    assert json.loads((tmp_path / "out" / "report.json").read_text())["partial"] is False
     row = result["cases"][0]["runs"][0]
     assert (row["status"], row["repeat_outcome"]) == ("scored", "pass")
     run = _run_file(tmp_path, PET)
@@ -395,6 +399,30 @@ def test_a_harness_fault_is_never_scored_and_is_rerun_under_the_same_pins(
     assert pinned(agent.calls[0], 1) == pinned(agent.calls[1], 2)  # each attempt's first turn
 
 
+def test_a_report_read_mid_run_or_left_by_an_interrupted_run_says_partial(tmp_path) -> None:
+    """Fails when report.json claims a complete run while a requested case or shape has no rows."""
+
+    class Interrupted(Exception):
+        pass
+
+    report = tmp_path / "out" / "report.json"
+    seen: list[dict] = []
+
+    def before(argv: list[str]) -> None:
+        if _plugin(argv) is not None:  # the hooked shape starts after hookless finished
+            seen.append(json.loads(report.read_text()))
+            raise Interrupted
+
+    agent = _Agent(PET_TWIN, _profile(tmp_path), before=before)
+    with pytest.raises(Interrupted):
+        _run(tmp_path, agent, case_ids=[PET_TWIN], shapes=("hookless", "hooked"), repeats=1)
+
+    (in_progress,) = seen
+    left = json.loads(report.read_text())
+    assert [(row["shape"], len(row["runs"])) for row in left["cases"]] == [("hookless", 1)]
+    assert (in_progress["partial"], left["partial"]) == (True, True)
+
+
 @pytest.mark.parametrize(
     ("init_for", "model", "repeats", "calls", "reason", "statuses"),
     [
@@ -442,8 +470,9 @@ def test_the_child_cannot_update_itself_take_an_injected_packet_or_bill_a_key(tm
 
 
 def test_an_anchor_only_the_recency_prior_supplied_does_not_serve(tmp_path) -> None:
-    """Fails when an ordinary packet's recency-only anchor serves, or a named anchor
-    beside it stops serving (ruling 1c)."""
+    """Fails when anything reached through an ordinary packet's recency-only anchor serves
+    (the anchor, a unit of its page, a pointer to its page), or a named anchor beside it
+    stops serving (ruling 1c)."""
 
     from epistemic.journeys.referent_capture import seed_inputs
     from epistemic.projectors.exomem_vault import VaultProjector
@@ -461,17 +490,23 @@ def test_an_anchor_only_the_recency_prior_supplied_does_not_serve(tmp_path) -> N
         {"ref": f"{owner}.md", "path": f"{owner}.md", "status": "resolved",
          "evidence": ["recency", "exact_alias"]},
     ]
-    packet = {"anchors": anchors, "units": [], "pointers": []}
+    unit = {"ref": memory_ref(exomem_id), "provenance": {"path": f"{_entity_id()}.md", "anchor": memory_ref(exomem_id)}}
+    (pointer,) = _unit_pointer(memory_ref(exomem_id), f"{_entity_id()}.md")[0][0]["pointers"]
+    packet = {"anchors": anchors, "units": [unit], "pointers": [pointer]}
     rows = _driver().served_refs([{"readable": True, "packet": packet}], snapshot)
+    assert {row["section"] for row in rows if row["item_id"] == _entity_id()} == {"anchors", "units", "pointers"}
     assert {(row["item_id"], row["serves"]) for row in rows} == {(_entity_id(), False), (owner, True)}
 
 
-def test_the_products_real_recency_carry_matches_the_driver_rule(tmp_path, monkeypatch) -> None:
-    """Fails when the product renames its recency carry or its recency evidence, which
-    would let a recency-carried packet serve without any driver test noticing.
+@pytest.mark.parametrize("hot", ["ordinary_note", "entity_page"], ids=["recency_carry", "fifth_clause"])
+def test_the_products_real_recency_packets_serve_nothing(tmp_path, monkeypatch, hot: str) -> None:
+    """Fails when the product renames its recency carry or recency evidence, or when a
+    real recency packet still serves its page, through its anchor, units or pointers.
 
-    Drives the real carry: one governed edit to one ordinary page, then a turn that
-    names nothing, from a fresh session key.
+    Drives the product: one governed edit makes one page hot, then a turn that names
+    nothing asks from a fresh session key. A hot ordinary note is carried on recency
+    (ruling 1b); a hot entity page is an anchor row, which the resolver's fifth clause
+    resolves on recency alone inside an ordinary packet (ruling 1c).
     """
 
     import os
@@ -490,34 +525,43 @@ def test_the_products_real_recency_carry_matches_the_driver_rule(tmp_path, monke
     }.items():
         monkeypatch.setenv(name, str(value))
     seed_inputs(vault)
-    note = "Knowledge Base/Notes/Research/kiln-schedule-review.md"
-    target = sorted((vault / "Knowledge Base/Entities/Organizations").glob("*.md"))[0].stem
-    (vault / note).parent.mkdir(parents=True, exist_ok=True)
-    (vault / note).write_text(
-        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
-        "# Kiln schedule review\n\n## Summary\n\nWhy the kiln schedule moved to nights.\n\n"
-        "- [decision] The kiln runs overnight so the day shift can glaze. ^k-decision\n\n"
-        f"## Relations\n\n- relates_to [[{target}]]\n",
-        encoding="utf-8",
-    )
+    if hot == "ordinary_note":
+        page = "Knowledge Base/Notes/Research/kiln-schedule-review.md"
+        target = sorted((vault / "Knowledge Base/Entities/Organizations").glob("*.md"))[0].stem
+        (vault / page).parent.mkdir(parents=True, exist_ok=True)
+        (vault / page).write_text(
+            "---\ntype: research-note\nstatus: active\nupdated: 2026-09-10\n---\n\n"
+            "# Kiln schedule review\n\n## Summary\n\nWhy the kiln schedule moved to nights.\n\n"
+            "- [decision] The kiln runs overnight so the day shift can glaze. ^k-decision\n\n"
+            f"## Relations\n\n- relates_to [[{target}]]\n",
+            encoding="utf-8",
+        )
+        old_text, new_text = "to nights.", "to nights in spring."
+    else:
+        page = f"{_key(PET)['owner']['ref']}.md"
+        old_text = (vault / page).read_text(encoding="utf-8").strip().splitlines()[-1]
+        new_text = old_text + " Still on the team."
     old = time.time() - 30 * 86400
-    for page in (vault / "Knowledge Base").rglob("*.md"):
-        os.utime(page, (old, old))
+    for path in (vault / "Knowledge Base").rglob("*.md"):
+        os.utime(path, (old, old))
     lexstore.ensure_fresh(vault)
     edit = next(command for command in commands.PRODUCT_COMMANDS if command.name == "edit_memory")
     writer_lease.invoke_command(
-        edit, vault, path=note, why="make one page hot",
-        operation={"kind": "replace_string", "old_string": "to nights.", "new_string": "to nights in spring."},
+        edit, vault, path=page, why="make one page hot",
+        operation={"kind": "replace_string", "old_string": old_text, "new_string": new_text},
     )
 
     packet = commands.op_activate_context(vault, turn="continue", session=f"fresh-{uuid.uuid4().hex}")
 
-    assert packet["generation"].get("carried_by") == _driver().RECENCY_CARRY, packet.get("abstention")
+    carried = packet["generation"].get("carried_by") == _driver().RECENCY_CARRY
+    assert carried is (hot == "ordinary_note"), (packet["generation"], packet.get("abstention"))
     (anchor,) = packet["anchors"]
     assert _driver()._recency_only(anchor)
     snapshot = VaultProjector(vault).project(phase="hookless", taken_at="2026-10-11T00:00:00Z")
     rows = _driver().served_refs([{"readable": True, "packet": packet}], snapshot)
-    assert note.removesuffix(".md") in {row["item_id"] for row in rows}
+    # The fifth-clause packet also serves the page's units; offline, the carry's unit lanes fail.
+    reached = {row["section"] for row in rows if row["item_id"] == page.removesuffix(".md")}
+    assert {"anchors", *(("units",) if hot == "entity_page" else ())} <= reached
     assert not any(row["serves"] for row in rows)
 
 
