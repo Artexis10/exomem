@@ -1226,6 +1226,8 @@ def _neighbourhood_paths(
         mine = {path} if path else set()
         mine.update(str(item) for item in getattr(anchor, "neighbourhood", ()) or ())
         if depth >= 2:
+            if budget_exhausted("working_set.graph"):
+                raise BudgetExhausted("working_set.graph")
             mine.update(_graph_neighbours(vault_root, path, depth=depth))
         paths.update(mine)
         if material_scopes is not None:
@@ -1248,6 +1250,8 @@ def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[s
             max_nodes=GRAPH_MAX_NODES,
             max_edges=GRAPH_MAX_EDGES,
             traversal_profile=GRAPH_TRAVERSAL_PROFILE,
+            # Activation consumes nodes, never unavailable-graph diagnostics.
+            include_lag=False,
         )
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph expansion failed for %s", path, exc_info=True)
