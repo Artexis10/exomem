@@ -2686,10 +2686,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
             phase_started = None
         result = _run(command, **options)
         try:
-            phases.append({
-                "phase": phase,
-                "seconds": None if phase_started is None else time.monotonic() - phase_started,
-            })
+            observation: dict[str, object] = {"phase": phase, "seconds": None}
+            phases.append(observation)
+            if phase_started is not None:
+                observation["seconds"] = time.monotonic() - phase_started
         except Exception:  # noqa: BLE001 - retain the subprocess result unchanged
             pass
         return result
