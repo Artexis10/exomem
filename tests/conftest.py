@@ -302,10 +302,13 @@ def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
     return False
 
 
-# The call-phase report, and the tmp_path and state root `_isolate_state_root`
-# handed the test, so a failed test keeps its scratch and a passing one does not.
+# The call-phase report, so a failed test keeps its scratch and a passing one does not.
 _CALL_REPORT = pytest.StashKey[pytest.TestReport]()
-_SCRATCH_PATHS = pytest.StashKey[tuple[Path, Path]]()
+
+
+def _state_root_for(tmp_path: Path) -> Path:
+    """The state root `_isolate_state_root` injects for a test's tmp_path."""
+    return tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -317,13 +320,12 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ANN001, ANN201
     next same-prefix tmp_path from the directories that exist, and caches keyed
     by vault or state-root path must never see one reused.
     """
+    tmp_path = getattr(item, "funcargs", {}).get("tmp_path")
     yield
-    paths = item.stash.get(_SCRATCH_PATHS, None)
     report = item.stash.get(_CALL_REPORT, None)
-    if paths is None or (report is not None and not report.passed):
+    if tmp_path is None or (report is not None and not report.passed):
         return
-    tmp_path, state_root = paths
-    shutil.rmtree(state_root, ignore_errors=True)
+    shutil.rmtree(_state_root_for(tmp_path), ignore_errors=True)
     try:
         children = list(tmp_path.iterdir())
     except OSError:
@@ -786,7 +788,7 @@ def _isolate_state_root_for_session(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
+def _isolate_state_root(tmp_path: Path):
     """No test writes the real user state root (task 1.5 of
     relocate-machine-local-state, mirroring the EXOMEM_VAULT_PATH rule below).
 
@@ -805,8 +807,7 @@ def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
     platform root for the rest of the test.
     """
     private = pytest.MonkeyPatch()
-    state_root = tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
-    request.node.stash[_SCRATCH_PATHS] = (tmp_path, state_root)
+    state_root = _state_root_for(tmp_path)
     private.setenv("EXOMEM_STATE_ROOT", str(state_root))
     private.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR",
