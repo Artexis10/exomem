@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import context_pack, epistemic_graph, get_page, memory_refs, vault
 from . import find as find_module

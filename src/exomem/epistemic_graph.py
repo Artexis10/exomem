@@ -11370,9 +11370,9 @@ class GraphView:
                 if not _recall_path_allowed(self.vault_root, rel):
                     # Missing ordinary owner paths retain stale diagnostics;
                     # they never gain permission to read stored summaries.
-                    if not _placeholder_path_allowed(self.vault_root, rel) or not access.is_indexable(
+                    if not _placeholder_path_allowed(
                         self.vault_root, rel
-                    ):
+                    ) or not access.is_indexable(self.vault_root, rel):
                         continue
                     try:
                         vault_module.PathGuard.capture(self.vault_root, rel, leaf_policy="absent")
@@ -11669,6 +11669,8 @@ class GraphView:
         Such a link has a withheld candidate, so the pages that name a withheld
         page's path, stem or title hold every one of them.
         """
+        if self.keep is None:
+            return set()
         resolver = self._shared_resolver()
         withheld = {
             f"{path}.md" for path in resolver.full_paths if not self.keep(f"{path}.md")

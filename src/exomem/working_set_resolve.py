@@ -502,6 +502,9 @@ class CandidateFacts:
     #: Initial own-page retrieval reach keeps a lead in a competing menu.
     #: Private provenance, never independent resolving evidence.
     retrieval_reached: bool = False
+    #: Own authored partial-name terms, retained before any retrieval hit.
+    #: Private dependence facts for the shared retrieval-carry boundary.
+    partial_name_terms: frozenset[str] = frozenset()
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -1692,6 +1695,7 @@ def candidates_for(
                     and not name_contact & analysis.capitalised_anywhere
                 ),
                 retrieval_reached=bool(row.path and row.path in retrieval_paths),
+                partial_name_terms=shared_name if partial_name_contact else frozenset(),
             )
         )
     if dependent and retrieval_without is not None:

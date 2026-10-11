@@ -209,9 +209,29 @@ routing.
 - **WHEN** a turn asks what a partial surname said about one topic and its lexical hit
   depends on that surname, in any casing
 - **THEN** the person stays a visible `partial` lead with no served identity material
+- **AND** every retrieval-carry entrance enforces the same dependence before selecting
+  roles, reading current state or running material lanes
+- **AND** a rejected sole carry domain retains that canonical partial lead in the
+  unresolved choice menu
 - **AND** `activate_context(anchor=...)`, full-name `conversation.focus`, continuity or
   prior naming can resolve that lead through the existing rules
 - **AND** those routes admit no page withheld from the caller
+
+#### Scenario: A later carry hit cannot bypass an initial lexical miss
+- **WHEN** an authored partial-name contact reaches an anchor whose page is absent
+  from the initial lexical hit batch, and a later retrieval carry reaches its page
+- **THEN** the same independent-match check applies before any material is read
+- **AND** raw carry groups and namesake contests remain unchanged
+
+#### Scenario: Shared pages keep separate partial-name exclusions
+- **WHEN** several anchors on one page have different authored partial-name contacts
+- **THEN** that retrieval-carried page proves every applicable excluded-term set separately
+- **AND** one anchor's term can corroborate another anchor's page without a combined exclusion
+
+#### Scenario: Repeated carry entrances reuse the request's dependence checks
+- **WHEN** the resolver and later retrieval carries check the same page and excluded-term set
+- **THEN** they reuse one request-local result under the original lexical budget and snapshot
+- **AND** pages without partial-name dependence request no additional check
 
 #### Scenario: One common word is no contact
 - **WHEN** a turn shares exactly one term with an anchor and that term names more than

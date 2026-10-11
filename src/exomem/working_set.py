@@ -2736,6 +2736,7 @@ def _carried_packet(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     unresolved_anchors: Sequence[Mapping[str, Any]] = (),
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> dict[str, Any]:
     """One packet compiled from a single dominant page, marked as carried.
@@ -2810,6 +2811,7 @@ def _carried_packet(
         evidence=evidence,
         visible=visible,
         contacts=contacts,
+        retrieval_eligible=retrieval_eligible,
         status_basis=status_basis,
     )
     if carried_anchors:
@@ -2966,6 +2968,7 @@ def _carried_material(
     visible: Callable[[str], bool] | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     selected_roles: Sequence[Mapping[str, str]] = (),
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     tuple[working_set_resolve.ResolvedAnchor, ...],
@@ -2984,6 +2987,9 @@ def _carried_material(
     `_carried_packet` documents.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    if evidence == ("retrieval",) and retrieval_eligible is not None:
+        eligible = retrieval_eligible(frozenset(paths))
+        paths = tuple(path for path in paths if path in eligible)
     anchors: list[working_set_resolve.ResolvedAnchor] = []
     items: list[LaneItem] = []
     missing: list[dict[str, Any]] = []
@@ -3546,6 +3552,28 @@ def _compile_packet(
     index_token = index.token()
     conventions_registry = activation_conventions.load_conventions(root)
     conventions = conventions_registry.conventions
+    checked_without: dict[frozenset[str], dict[str, bool]] = {}
+    partial_pages: dict[frozenset[str], set[str]] = {}
+
+    def retrieval_without(pages: frozenset[str], words: frozenset[str]) -> frozenset[str]:
+        checked = checked_without.setdefault(words, {})
+        unchecked = pages - checked.keys()
+        if unchecked:
+            independent = _lexical_hits_without(
+                root, turn, frozenset(unchecked), words, freshness_snapshot=freshness_snapshot
+            )
+            checked.update((path, path in independent) for path in unchecked)
+        return frozenset(path for path in pages if checked[path])
+
+    def retrieval_eligible(pages: frozenset[str]) -> frozenset[str]:
+        eligible = set(pages)
+        # Shared pages must prove each owner's exclusion separately, never their union.
+        for words, owners in partial_pages.items():
+            affected = pages & owners
+            if affected:
+                eligible.difference_update(affected - retrieval_without(affected, words))
+        return frozenset(eligible)
+
     generation: dict[str, Any] = {
         "freshness_key": freshness_key,
         "index_generation": index_token[1],
@@ -3708,18 +3736,13 @@ def _compile_packet(
                         analysis, registry.roles.values()
                     ),
                     row_lexicons=row_lexicons,
-                    retrieval_without=(
-                        (
-                            lambda pages, words: _lexical_hits_without(
-                                root, turn, pages, words, freshness_snapshot=freshness_snapshot
-                            )
-                        )
-                        if retrieval_paths
-                        else None
-                    ),
+                    retrieval_without=retrieval_without if retrieval_paths else None,
                 )
 
             candidates = _candidates(rows)
+            for candidate in candidates:
+                if candidate.path and candidate.partial_name_terms:
+                    partial_pages.setdefault(candidate.partial_name_terms, set()).add(candidate.path)
 
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths
@@ -3982,6 +4005,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                retrieval_eligible=retrieval_eligible,
                 status_basis=status_basis,
             )
             if not packet["abstained"] and any(
@@ -4138,6 +4162,7 @@ def _compile_packet(
                 visible=visible,
                 contacts=contacts,
                 unresolved_anchors=tuple(item.as_dict() for item in resolution.anchors),
+                retrieval_eligible=retrieval_eligible,
                 status_basis=status_basis,
             )
             if packet is not None:
@@ -4381,6 +4406,7 @@ def _compile_packet(
             freshness_snapshot=freshness_snapshot,
             lexical_seconds=lexical_seconds,
             visible=visible,
+            retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
         )
         if beside_anchors:
@@ -4428,6 +4454,7 @@ def _named_beside(
     freshness_snapshot: Any,
     lexical_seconds: float,
     visible: Callable[[str], bool] | None = None,
+    retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> tuple[
     tuple[dict[str, Any], ...],
@@ -4489,6 +4516,7 @@ def _named_beside(
             freshness_snapshot=freshness_snapshot,
             visible=visible,
             contacts=contacts,
+            retrieval_eligible=retrieval_eligible,
             status_basis=status_basis,
         )
     except BudgetExhausted:

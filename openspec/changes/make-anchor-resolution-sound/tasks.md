@@ -21,8 +21,12 @@
       name unique / not unique / retired by a second page.
 - [x] 3.2 Index: title-and-alias term counts, derived names, schema version bump;
       rebuild-equals-incremental still holds.
-- [x] 3.3 Resolver: `rare_term` kind (added to `EVIDENCE_KINDS`, weak-worded family),
-      folded lexical comparison, and the three-clause resolution rule.
+- [ ] 3.3 Resolver: `rare_term` kind (added to `EVIDENCE_KINDS`, weak-worded family),
+      folded lexical comparison, and the three-clause resolution rule. Reopened:
+      retain partial-name dependence before initial retrieval and enforce it at
+      the common carry material boundary. Share the request memo, keep separate
+      exclusions for shared pages, and prove the three carry entrances without
+      changing raw contests or explicit naming. Await integrated review and delivery.
 
 ## 4. Proof
 

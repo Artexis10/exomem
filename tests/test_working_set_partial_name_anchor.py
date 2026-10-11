@@ -11,14 +11,24 @@ Invented names and a synthetic vault throughout.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import PRIVATE, configured_boundary as configured_boundary
 from test_governance_egress import _external, write_rule, write_scope
 from test_working_set_carry import seed_ordinary_notes
+from test_working_set_topic_turns import workshop_vault as workshop_vault
 
-from exomem import commands, lexstore, working_set_index, working_set_runtime
-from exomem.governance.principal import request_scope
+from exomem import (
+    commands,
+    lexstore,
+    working_set,
+    working_set_heat,
+    working_set_index,
+    working_set_runtime,
+)
+from exomem.governance.principal import owner_principal, request_scope
 
 KB = "Knowledge Base"
 PERSON = f"{KB}/Entities/People/Nora.md"
@@ -80,6 +90,220 @@ def garden_vault(vault: Path) -> Path:
 
 def _statuses(packet: dict, path: str) -> list[str]:
     return [entry["status"] for entry in packet.get("anchors") or () if entry["path"] == path]
+
+
+@pytest.mark.parametrize("surname", ["hedge", "Hedge", "HEDGE"])
+def test_retrieval_carry_cannot_serve_a_dependent_surname(
+    workshop_vault: Path, surname: str,
+) -> None:
+    """Rare surname and topic words can name a carry phrase without independent identity contact."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _reindex(workshop_vault)
+
+    packet = commands.op_activate_context(
+        workshop_vault, turn=f"What did {surname} say about payments?"
+    )
+
+    assert _statuses(packet, PERSON) == ["partial"], packet["anchors"]
+    assert packet["abstention"] == {"reason": "unresolved"}
+    assert packet["units"] == packet["pointers"] == packet["current_state"] == []
+    assert IDENTITY not in json.dumps(packet)
+
+
+@pytest.mark.parametrize("initial_hit", [False, True])
+def test_carry_only_surname_checks_independence_once_per_request(
+    workshop_vault: Path, monkeypatch: pytest.MonkeyPatch, initial_hit: bool,
+) -> None:
+    """An initial hit cap must not bypass dependence; repeated entrances must not repeat its query."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _reindex(workshop_vault)
+    lexical_evidence = working_set_runtime.lexical_evidence
+    checks: list[tuple[frozenset[str], frozenset[str]]] = []
+    independent = working_set_runtime.lexical_hits_without
+
+    def first_pass(*args, **kwargs):
+        hits, state = lexical_evidence(*args, **kwargs)
+        return [hit for hit in hits if initial_hit or hit.path != PERSON], state
+
+    def checked(root, turn, pages, words, **kwargs):
+        checks.append((pages, words))
+        return independent(root, turn, pages, words, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "lexical_evidence", first_pass)
+    monkeypatch.setattr(working_set_runtime, "lexical_hits_without", checked)
+
+    packet = commands.op_activate_context(workshop_vault, turn="What did hedge say about payments?")
+
+    assert _statuses(packet, PERSON) == ["partial"]
+    assert IDENTITY not in json.dumps(packet)
+    assert checks == [(frozenset({PERSON}), frozenset({"hedge"}))]
+
+
+def test_a_withheld_whole_name_leaves_the_dependent_surname_packet_identical(
+    workshop_vault: Path, configured_boundary, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hidden whole-name alias and a primed broader cache must look absent to the limited caller."""
+    _, authenticate = configured_boundary
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _entity(workshop_vault, PRIVATE, "Hedge", "Private canary: payments ledger", person=True)
+    private = workshop_vault / PRIVATE
+    private.write_text(
+        private.read_text().replace("type: entity\n", "type: entity\nproject: private-project\n"),
+        encoding="utf-8",
+    )
+    with request_scope(owner_principal(surface="library")):
+        _reindex(workshop_vault)
+    limited, full = authenticate("limited"), authenticate("full")
+    turn = "What did hedge say about payments?"
+    with request_scope(full):
+        commands.op_activate_context(workshop_vault, turn=turn, anchor=PRIVATE, client="full")
+    # Compare the same caller-visible activity: activation itself records later activity.
+    with request_scope(limited):
+        heat = working_set_heat.profile(workshop_vault)
+        released = working_set_runtime._heat_release_filter(workshop_vault, heat)
+        if released is not None:
+            heat = working_set_heat.released_view(heat, released)
+    monkeypatch.setattr(working_set_heat, "profile", lambda _root: heat)
+    with request_scope(limited):
+        present = commands.op_activate_context(workshop_vault, turn=turn, client="full")
+    with request_scope(owner_principal(surface="library")):
+        private.unlink()
+        _reindex(workshop_vault)
+    with request_scope(limited):
+        absent = commands.op_activate_context(workshop_vault, turn=turn, client="full")
+
+    present.pop("continuity", None)
+    absent.pop("continuity", None)
+    assert present == absent
+    assert _statuses(present, PERSON) == ["partial"]
+    assert IDENTITY not in json.dumps(present) and "Private canary" not in json.dumps(present)
+
+
+def test_shared_page_owners_check_their_partial_names_separately(
+    workshop_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unioning two owners' exclusions would withhold a page that independently matches each owner."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", "Thorn payments", person=True)
+    _reindex(workshop_vault)
+    index = working_set_index.WorkingSetIndex(workshop_vault)
+    rows = index.anchors()
+    person = next(row for row in rows if row.path == PERSON)
+    # Supply a second authored owner at the catalogue boundary, sharing the real page.
+    second = replace(person, anchor_id="shared-owner", title="Oskar Thorn", aliases=(), terms=("thorn",))
+    counts = index.term_anchor_counts()
+    monkeypatch.setattr(index, "anchors", lambda: (*rows, second))
+    monkeypatch.setattr(index, "term_anchor_counts", lambda: {**counts, "thorn": 1})
+    lexical_evidence = working_set_runtime.lexical_evidence
+    independent = working_set_runtime.lexical_hits_without
+    checks: list[frozenset[str]] = []
+
+    def first_pass(*args, **kwargs):
+        hits, state = lexical_evidence(*args, **kwargs)
+        return [hit for hit in hits if hit.path != PERSON], state
+
+    def checked(root, turn, pages, words, **kwargs):
+        checks.append(words)
+        return independent(root, turn, pages, words, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "lexical_evidence", first_pass)
+    monkeypatch.setattr(working_set_runtime, "lexical_hits_without", checked)
+
+    packet = working_set.compile_packet(
+        workshop_vault, turn="What did hedge say about thorn payments?", index=index,
+    )
+
+    assert set(checks) == {frozenset({"hedge"}), frozenset({"thorn"})}
+    assert len(checks) == 2
+    assert any("Thorn payments" in item["text"] for item in packet["units"])
+
+
+def test_a_resolved_context_cannot_carry_a_dependent_surname_beside_it(
+    workshop_vault: Path,
+) -> None:
+    """The additive carry must preserve a resolved context without appending another person's identity."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _entity(workshop_vault, PROJECT, "Kelvane Rollout", "The booking move uses two waves.")
+    _reindex(workshop_vault)
+
+    packet = commands.op_activate_context(
+        workshop_vault, turn="Check Kelvane Rollout. What did hedge say about payments?"
+    )
+
+    assert _statuses(packet, PROJECT) == ["resolved"]
+    assert _statuses(packet, PERSON) == ["partial"]
+    assert any("booking move" in item["text"] for item in packet["units"])
+    assert IDENTITY not in json.dumps(packet)
+
+
+def test_explicit_and_full_name_choices_still_serve_a_dependent_surname(
+    workshop_vault: Path,
+) -> None:
+    """The dependence boundary applies to retrieval carry, while authored naming still decides."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _reindex(workshop_vault)
+
+    chosen = commands.op_activate_context(
+        workshop_vault, turn="What did hedge say about payments?", anchor=PERSON,
+    )
+    named = commands.op_activate_context(workshop_vault, turn="What did Nora Hedge say about payments?")
+
+    for packet in (chosen, named):
+        assert _statuses(packet, PERSON) == ["resolved"]
+        assert IDENTITY in json.dumps(packet)
+
+
+def test_an_unavailable_dependence_check_withholds_only_the_affected_carry(
+    workshop_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed surname check must not suppress an unrelated independently named ordinary page."""
+    from test_working_set_topic_turns import TRUING
+
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _reindex(workshop_vault)
+    query = working_set_runtime._lexical_query
+
+    def unavailable(*args, **kwargs):
+        if kwargs.get("excluded_corroboration_stems"):
+            raise OSError("independence catalogue unavailable")
+        return query(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "_lexical_query", unavailable)
+    packet = commands.op_activate_context(
+        workshop_vault,
+        turn="What did hedge say about payments? Check the spoke tension on the truing stand.",
+    )
+
+    assert any(anchor["path"] == TRUING for anchor in packet["anchors"])
+    assert any("spoke tension" in item["text"] for item in packet["units"])
+    assert IDENTITY not in json.dumps(packet)
+
+
+def test_a_semantic_band_cannot_yield_to_a_dependent_surname_carry(
+    workshop_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejecting dependent rival material must preserve the band-resolved context and reuse its check."""
+    _entity(workshop_vault, PERSON, "Nora Hedge", IDENTITY, person=True)
+    _entity(workshop_vault, PROJECT, "Kelvane Rollout", "The rollout calendar uses two waves.")
+    _reindex(workshop_vault)
+    monkeypatch.setattr(working_set, "signature_evidence", lambda *_: ({PROJECT: True}, "ready"))
+    independent = working_set_runtime.lexical_hits_without
+    surname_checks: list[frozenset[str]] = []
+
+    def checked(root, turn, pages, words, **kwargs):
+        if words == frozenset({"hedge"}):
+            surname_checks.append(pages)
+        return independent(root, turn, pages, words, **kwargs)
+
+    monkeypatch.setattr(working_set_runtime, "lexical_hits_without", checked)
+    packet = commands.op_activate_context(
+        workshop_vault, turn="What did hedge say about payments for the rollout?"
+    )
+
+    assert _statuses(packet, PROJECT) == ["resolved"]
+    assert _statuses(packet, PERSON) == ["partial"]
+    assert any("rollout calendar" in item["text"] for item in packet["units"])
+    assert IDENTITY not in json.dumps(packet)
+    assert surname_checks == [frozenset({PERSON})]
 
 
 @pytest.mark.parametrize("word", ["hedge", "Hedge", "HEDGE"])
