@@ -71,8 +71,8 @@ def _cache_residency() -> dict[str, Any]:
         caches["vector_matrices"] = embeddings.index_cache_status()
     else:
         caches["vector_matrices"] = {
-            "embedding": {"loaded": 0, "indexes": 0, "rows": 0, "bytes": 0},
-            "clip": {"loaded": 0, "indexes": 0, "rows": 0, "bytes": 0},
+            "embedding": {"loaded": 0, "indexes": 0, "rows": 0, "unit_rows": 0, "bytes": 0},
+            "clip": {"loaded": 0, "indexes": 0, "rows": 0, "unit_rows": 0, "bytes": 0},
         }
 
     bm25 = sys.modules.get("exomem.bm25")

@@ -1642,6 +1642,7 @@ def _summarize_index_status(indexes: dict[str, object]) -> dict:
         "indexes": len(by_vault),
         "loaded": len(loaded),
         "rows": sum(int(s.get("rows") or 0) for s in loaded),
+        "unit_rows": sum(int(s.get("unit_rows") or 0) for s in loaded),
         "bytes": sum(int(s.get("bytes") or 0) for s in loaded),
         "by_vault": by_vault,
     }
