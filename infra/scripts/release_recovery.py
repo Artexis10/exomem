@@ -20,6 +20,7 @@ import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
 import hosted_image_candidate as candidate_tool
@@ -454,7 +455,8 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
     )
     for proof in candidate_tool._verified_statements(verified):
         candidate_tool._require_verified_subject(proof, repository, digest, label="release image")
-        invocation = urlsplit(proof["predicate"]["runDetails"]["metadata"]["invocationId"])
+        predicate = cast(dict, proof["predicate"])
+        invocation = urlsplit(predicate["runDetails"]["metadata"]["invocationId"])
         prefix = f"/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
         # The GitHub SLSA invocation URL is a fixed protocol, not a filename claim.
         if (
@@ -497,7 +499,11 @@ def recovered_image(
     if name == "hosted":
         for path in directory.glob("*.candidate-v1.json"):
             candidate = candidate_tool.load_candidate(path)
-            if candidate["source"]["commit"] != commit or candidate["release"]["tag"] != tag:
+            # load_candidate validates these string fields before returning the JSON object.
+            source = cast(dict[str, str], candidate["source"])
+            release = cast(dict[str, str], candidate["release"])
+            image = cast(dict[str, str], candidate["image"])
+            if source["commit"] != commit or release["tag"] != tag:
                 continue
             stem = path.name.removesuffix(".candidate-v1.json")
             bundle = directory / f"{stem}.sigstore.json"
@@ -511,8 +517,8 @@ def recovered_image(
                 ]
             )
             candidate_tool.verify_candidate(path, bundle=bundle, candidate_bundle=signature)
-            verify_build_target(candidate["image"]["reference"], name)
-            found[candidate["image"]["digest"]] = [path, bundle, signature]
+            verify_build_target(image["reference"], name)
+            found[image["digest"]] = [path, bundle, signature]
     else:
         for path in directory.glob(f"exomem-image-{name}-{commit}-*.sigstore.json"):
             digest = verify_image_bundle(path, tag, commit, repository, name)
@@ -560,7 +566,7 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
             requested = os.environ.get("RECORDS_TARGET")
             if name == "hosted" and requested:
                 candidate = candidate_tool.load_candidate(files[0])
-                claim = candidate.get("recordsCompatibility", {})
+                claim = cast(dict[str, object], candidate.get("recordsCompatibility", {}))
                 if claim.get("runtimeTarget") != json.loads(requested):
                     entry["state"] = "incomplete: requested rollback claim needs a new release"
                     entry["blocked"] = True
