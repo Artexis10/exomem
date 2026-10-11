@@ -14,8 +14,8 @@
       "reasons": [
         "padded-tree precision below the 0.8 floor"
       ],
-      "recall_base": 0.5,
-      "recall_padded": 0.5
+      "recall_base": 0.0,
+      "recall_padded": 0.0
     },
     "hedged_twins": {
       "count": 0,
@@ -60,11 +60,11 @@
         "case_id": "C2",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -287,11 +287,11 @@
         "case_id": "C9",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -333,8 +333,8 @@
       "reasons": [
         "padded-tree precision below the 0.8 floor"
       ],
-      "recall_base": 0.5,
-      "recall_padded": 0.5
+      "recall_base": 0.0,
+      "recall_padded": 0.0
     },
     "hedged_twins": {
       "count": 0,
@@ -379,11 +379,11 @@
         "case_id": "C2",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -606,11 +606,11 @@
         "case_id": "C9",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -652,8 +652,8 @@
       "reasons": [
         "padded-tree precision below the 0.8 floor"
       ],
-      "recall_base": 0.5,
-      "recall_padded": 0.5
+      "recall_base": 0.0,
+      "recall_padded": 0.0
     },
     "hedged_twins": {
       "count": 0,
@@ -697,11 +697,11 @@
         "case_id": "C2",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -920,11 +920,11 @@
         "case_id": "C9",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -967,8 +967,8 @@
       "reasons": [
         "padded-tree precision below the 0.8 floor"
       ],
-      "recall_base": 0.5,
-      "recall_padded": 0.5
+      "recall_base": 0.0,
+      "recall_padded": 0.0
     },
     "hedged_twins": {
       "count": 0,
@@ -1011,11 +1011,11 @@
       {
         "case_id": "C2",
         "failure_reasons": [
-          "A9: 1 gold page(s) not served under an honest label",
+          "A9: 2 gold page(s) not served under an honest label",
           "A9: gold fact(s) missing from served material: ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -1232,11 +1232,11 @@
       {
         "case_id": "C9",
         "failure_reasons": [
-          "A9: 1 gold page(s) not served under an honest label",
+          "A9: 2 gold page(s) not served under an honest label",
           "A9: gold fact(s) missing from served material: ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -1279,8 +1279,8 @@
       "reasons": [
         "padded-tree precision below the 0.8 floor"
       ],
-      "recall_base": 0.5,
-      "recall_padded": 0.5
+      "recall_base": 0.0,
+      "recall_padded": 0.0
     },
     "hedged_twins": {
       "count": 1,
@@ -1324,11 +1324,11 @@
         "case_id": "C2",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -1542,11 +1542,11 @@
         "case_id": "C9",
         "failure_reasons": [
           "expected status 'resolved', observed 'unresolved'",
-          "gold recall 0.50 below the 0.9 floor",
+          "gold recall 0.00 below the 0.9 floor",
           "missing required fact(s): ['grill', 'cooking method']"
         ],
         "gold": {
-          "hit": 1,
+          "hit": 0,
           "total": 2
         },
         "hedged": false,
@@ -1588,8 +1588,8 @@
     "reasons": [
       "padded-tree precision below the 0.8 floor"
     ],
-    "recall_base": 0.5,
-    "recall_padded": 0.5
+    "recall_base": 0.0,
+    "recall_padded": 0.0
   },
   "corpus_id": "context-activation-corpus-v5",
   "fixture_mechanisms": {
@@ -1805,7 +1805,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 1,
+            "hit": 0,
             "total": 1
           },
           "kind": "equipment",
@@ -1830,11 +1830,11 @@
       "expected_status": "resolved",
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
+        "gold recall 0.00 below the 0.9 floor",
         "missing required fact(s): ['grill', 'cooking method']"
       ],
       "gold": {
-        "hit": 1,
+        "hit": 0,
         "total": 2
       },
       "hedged": false,
@@ -1845,7 +1845,7 @@
         "cooking method"
       ],
       "observed_status": "unresolved",
-      "packet_chars": 20,
+      "packet_chars": 0,
       "passed": false,
       "poison": {
         "hit": 0,
@@ -2421,7 +2421,7 @@
       "by_anchor_kind": [
         {
           "gold": {
-            "hit": 1,
+            "hit": 0,
             "total": 1
           },
           "kind": "equipment",
@@ -2446,11 +2446,11 @@
       "expected_status": "resolved",
       "failure_reasons": [
         "expected status 'resolved', observed 'unresolved'",
-        "gold recall 0.50 below the 0.9 floor",
+        "gold recall 0.00 below the 0.9 floor",
         "missing required fact(s): ['grill', 'cooking method']"
       ],
       "gold": {
-        "hit": 1,
+        "hit": 0,
         "total": 2
       },
       "hedged": false,
@@ -2461,7 +2461,7 @@
         "cooking method"
       ],
       "observed_status": "unresolved",
-      "packet_chars": 20,
+      "packet_chars": 0,
       "passed": false,
       "poison": {
         "hit": 0,

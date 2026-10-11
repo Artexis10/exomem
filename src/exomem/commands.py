@@ -7193,7 +7193,21 @@ def _op_activate_context_body(
             attribution=attribution,
             ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
         )
-    if attribution is not None and attribution.session:
+    recording = attribution
+    if served and caller_thread is None and not (attribution is not None and attribution.session):
+        # A keyless caller's first served packet is recorded under the thread
+        # its token now names, exactly as each later packet of that thread is,
+        # so a follow-up that echoes the token can be carried on what this one
+        # served. Ranking above used no thread: this packet had none yet.
+        recording = working_set_heat_module.attribution_for(
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            salt=salt or None,
+            thread=thread,
+        )
+    if recording is not None and recording.session:
         # The session's last served thread (ruling S5-1): what its token names,
         # after the guard, so a compacted or resumed conversation that lost its
         # token still continues its own work. Never an event in the ring:
@@ -7201,9 +7215,9 @@ def _op_activate_context_body(
         working_set_heat_module.note_session(
             vault_root,
             working_set_heat_module.SessionMark(
-                session=attribution.session,
-                workspace=attribution.workspace,
-                client=attribution.client,
+                session=recording.session,
+                workspace=recording.workspace,
+                client=recording.client,
                 paths=tuple(
                     str(item.get("path") or "")
                     for item in (packet.get("anchors") or ())

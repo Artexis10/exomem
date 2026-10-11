@@ -1732,6 +1732,125 @@ def carry_candidates(
     return tuple(sorted(merged.items(), key=lambda item: (-item[1], item[0]))), state
 
 
+def title_named_pages(
+    vault_root: Path,
+    turn: str,
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+    visible: Callable[[str], bool] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> tuple[tuple[tuple[str, float], ...], str]:
+    """Current pages whose TITLE the turn names in ordinary words, in rank
+    order. Returns `(hits, readiness status)`.
+
+    For a turn the carry named nothing in: "the smooth chain cleaning" names
+    the page titled "Smooth chain cleaning", although none of those words is
+    distinctive and the carry rightly refuses to serve it. A page qualifies
+    when two different words of its title sit within
+    `RETRIEVAL_CARRY_RARE_WINDOW` tokens of each other in one sentence of the
+    turn, and it is among the ranked rows of the carry's own bounded query.
+    No rarity is asked for, because these pages are only listed for the
+    agent to pick (`RETRIEVAL_NAMED_STATUS`) and never served: the bar is
+    that the turn names the page, not that its words single it out. A
+    one-word title is never named, as it never is for the carry.
+
+    The query is the carry's: the maintained catalogue only, no foreground
+    delta, raw material and navigation excluded before the row limit,
+    `carry_fetch_size` rows. `visible` is the caller's reader view, `None`
+    for the owner. A restricted reader's rows are scored over the pages it
+    may see, so a withheld page neither takes a row nor moves another page's
+    rank. The corpus-size floor does not apply: it exists because rarity
+    cannot be measured in a small vault, and nothing here measures rarity.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    from . import lexstore
+    from .governance import egress
+
+    # The resolver's reading of the turn, as the carry reads it.
+    turn = working_set_index.subject_text(turn)
+    try:
+        stems = frozenset(pairable_stems(turn))
+        if len(stems) < 2:
+            return (), "available"
+        # The carry's admission (`rare_turn_terms`): asked of the walk owner
+        # when the caller passes no predicate. No stems are counted; this
+        # reads only the admitted pages and their number.
+        admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
+        corpus = lexstore.carry_term_statistics(
+            vault_root,
+            [],
+            visible=admitted if admitted is not None else lambda _path: True,
+            status_basis=status_basis,
+            path_limit=lambda pages: 0,
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+        )
+        if not corpus.readiness.complete:
+            return (), corpus.readiness.status
+        _frequencies, corpus_pages, _paths, admitted_paths = corpus.value
+        # Only a restricted reader (`visible`, its view) ranks over its
+        # admitted pages: the owner ranks over the catalogue's own statistics,
+        # which hide nothing from it, because scoring every admitted page in
+        # Python cost about three times the query (200 against 60 ms at 7,357
+        # pages). The egress guard still decides every page listed.
+        restricted = visible is not None
+        result = lexstore.search_bm25_result(
+            vault_root,
+            content_words(turn),
+            working_set.carry_fetch_size(corpus_pages),
+            scope="kb",
+            freshness=freshness,
+            allow_delta=False,
+            # Not a tuning value: the catalogue indexes a page's title with its
+            # body, so a page whose title the turn names matches two of the
+            # turn's words. Filtered before the row limit, so a row matching
+            # one word, which can never qualify, takes no row that could.
+            min_matched_terms=2,
+            recall_checkpoint=recall_checkpoint,
+            term_budget=lexical_term_budget(),
+            exclude_navigation=True,
+            exclude_raw_material=True,
+            admitted_paths=admitted_paths if restricted else None,
+        )
+        if not result.readiness.complete:
+            return (), result.readiness.status
+        sentences = _positioned_words(turn)
+        return (
+            tuple(
+                (str(path), float(score))
+                for path, score in (result.value or ())
+                if not _is_raw_material(str(path))
+                and not _is_navigation_page(str(path))
+                # Naming first: each test reads the page, and most rows are
+                # not named, so the lifecycle read is paid only by those that are.
+                and _names_title(sentences, stems, working_set._page_title(vault_root, str(path)))
+                and working_set._is_current_page(vault_root, str(path), status_basis=status_basis)
+            ),
+            "available",
+        )
+    except lifecycle_statuses.ClassificationUnavailable as error:
+        raise egress.ReaderViewUnavailable("status classification is unavailable") from error
+    except Exception:  # noqa: BLE001 - a listing is additive; it lists nothing, never raises
+        log.debug("activation title listing unavailable", exc_info=True)
+        return (), "unavailable"
+
+
+def _names_title(
+    sentences: Sequence[Sequence[tuple[int, tuple[str, ...]]]],
+    turn_stems: frozenset[str],
+    title: str,
+) -> bool:
+    """Does the turn say two different words of `title` as one phrase?
+
+    The carry's own pair test (`_pair_occurrences`) over the title words the
+    turn shares, every one of them admitted as a pair member: two words in
+    one sentence, within the window, never two stems of one word.
+    """
+    shared = sorted(frozenset(pairable_stems(title)) & turn_stems)
+    return len(shared) >= 2 and next(iter(_pair_occurrences(sentences, shared)), None) is not None
+
+
 def refresh_index(index: working_set_index.WorkingSetIndex, *, freshness_stamp: str = "") -> bool:
     """Bring a stale index up to the current vault state; False when it could not.
 
