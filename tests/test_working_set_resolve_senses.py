@@ -220,6 +220,109 @@ def test_an_uncased_shared_word_never_asks_between_non_people() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Reached partial alternatives beside independently resolved senses
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("turn", [
+    "Check Quillmere, the invoices or the night shift.",
+    "check quillmere, the invoices or the night shift.",
+    "Quillmere, the invoices or the night shift.",
+])
+def test_a_retrieved_partial_name_still_competes_with_a_resolved_sense(turn: str) -> None:
+    """Casing must not choose between two reached senses with unequal corroboration."""
+    rows = (
+        _row("hubs/quillmere-invoices.md", "Quillmere audit hub", kind="hub"),
+        _row("hubs/quillmere-shifts.md", "Quillmere depot hub", kind="hub"),
+    )
+    analysis = resolve_module.analyze_turn(turn)
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        term_anchor_counts={"quillmere": 2},
+        retrieval_paths=frozenset(row.path for row in rows),
+        retrieval_without=lambda pages, _words: pages & {rows[1].path},
+    )
+
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {row.path for row in rows}
+    partial = next(anchor for anchor in resolution.anchors if anchor.path == rows[0].path)
+    assert partial.status == "partial" and partial.evidence == ("rare_term",)
+
+
+def test_a_partial_name_without_lexical_reach_does_not_block_a_resolved_sense() -> None:
+    """Catalogue name contact alone must not obstruct an independently reached context."""
+    rows = (
+        _row("hubs/quillmere-invoices.md", "Quillmere audit hub", kind="hub"),
+        _row("hubs/quillmere-shifts.md", "Quillmere depot hub", kind="hub"),
+    )
+    analysis = resolve_module.analyze_turn("Check Quillmere, the night shift.")
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        term_anchor_counts={"quillmere": 2},
+        retrieval_paths=frozenset({rows[1].path}),
+        retrieval_without=lambda pages, _words: pages,
+    )
+
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert resolution.status == "resolved" and resolution.ambiguity == ()
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [rows[1].path]
+
+
+def test_an_ordinary_shared_word_keeps_both_reached_alternatives_without_promotion() -> None:
+    """Ordinary-topic overlaps pay for factual menus with extra ambiguity, not inferred intent."""
+    rows = (
+        _row("hubs/orchard-pruning.md", "Orchard pruning hub", kind="hub"),
+        _row("hubs/orchard-irrigation.md", "Orchard irrigation hub", kind="hub"),
+    )
+    analysis = resolve_module.analyze_turn("Check the orchard pump schedule.")
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        term_anchor_counts={"orchard": 2},
+        retrieval_paths=frozenset(row.path for row in rows),
+        retrieval_without=lambda pages, _words: pages & {rows[1].path},
+    )
+
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {row.path for row in rows}
+    assert [anchor.path for anchor in resolution.resolved_anchors] == [rows[1].path]
+    partial = next(anchor for anchor in resolution.anchors if anchor.path == rows[0].path)
+    assert partial.status == "partial" and partial.evidence == ("rare_term",)
+
+
+def test_a_partial_bridge_cannot_hide_a_resolved_competition() -> None:
+    """Adding a partial graph bridge must not erase an existing disconnected resolved group."""
+    rows = (
+        _row("hubs/quillmere-invoices.md", "Quillmere audit hub", kind="hub"),
+        _row("hubs/quillmere-shifts.md", "Quillmere depot hub", kind="hub"),
+        _row(
+            "hubs/quillmere-archive.md", "Quillmere archive hub", kind="hub",
+            neighbourhood=("hubs/quillmere-invoices.md", "hubs/quillmere-shifts.md"),
+        ),
+    )
+    analysis = resolve_module.analyze_turn("Check Quillmere, the invoices or the night shift.")
+    candidates = resolve_module.candidates_for(
+        analysis,
+        rows,
+        term_anchor_counts={"quillmere": 3},
+        retrieval_paths=frozenset(row.path for row in rows),
+        retrieval_without=lambda pages, _words: pages & {rows[0].path, rows[1].path},
+    )
+
+    resolution = resolve_module.resolve(candidates, turn_tokens=analysis.tokens)
+
+    assert resolution.status == "ambiguous"
+    assert {item["ref"] for item in resolution.ambiguity} == {rows[0].path, rows[1].path}
+
+
+# --------------------------------------------------------------------------- #
 # A qualifier narrows competing senses
 # --------------------------------------------------------------------------- #
 

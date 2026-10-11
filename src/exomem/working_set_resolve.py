@@ -498,6 +498,9 @@ class CandidateFacts:
     #: Did a turn whose casing says something write the shared name word
     #: without a capital anywhere (`TurnAnalysis.capitalised_anywhere`)?
     name_lower_case: bool = False
+    #: Initial own-page retrieval reach keeps a lead in a competing menu.
+    #: Private provenance, never independent resolving evidence.
+    retrieval_reached: bool = False
 
     @property
     def deciding_kinds(self) -> frozenset[str]:
@@ -1687,6 +1690,7 @@ def candidates_for(
                     and all(_is_cased(term) for term in name_contact)
                     and not name_contact & analysis.capitalised_anywhere
                 ),
+                retrieval_reached=bool(row.path and row.path in retrieval_paths),
             )
         )
     if dependent and retrieval_without is not None:
@@ -2669,10 +2673,13 @@ def resolve(
     )
     ordered = sorted(candidates, key=_candidate_order)
     anchors: list[ResolvedAnchor] = []
+    retrieved_partial_ids: set[str] = set()
     for candidate in ordered:
         status = _status_for(candidate, recency_resolves=recency_resolves)
         if status == "unresolved":
             continue
+        if status == "partial" and candidate.retrieval_reached:
+            retrieved_partial_ids.add(candidate.anchor_id)
         anchors.append(
             ResolvedAnchor(
                 anchor_id=candidate.anchor_id,
@@ -2715,6 +2722,34 @@ def resolve(
     # anywhere, behaviour is unchanged (the agent may still be asked to
     # choose between two weak senses, exactly as today).
     has_named_anchor = any(DECIDING_ALONE_KINDS & set(anchor.evidence) for anchor in resolved)
+    if not has_named_anchor:
+        leads: list[ResolvedAnchor] = []
+        for anchor in anchors:
+            if (
+                anchor.status != "partial"
+                or anchor.anchor_id not in retrieved_partial_ids
+                or set(anchor.evidence) & CONTACT_KINDS != {"rare_term"}
+                or len(anchor.name_contact) != 1
+                or anchor.name_span_segment != "turn"
+                or anchor.name_span is None
+                or anchor.name_span[0] >= anchor.name_span[1]
+            ):
+                continue
+            if any(
+                peer.kind == anchor.kind
+                and peer.name_contact == anchor.name_contact
+                and peer.name_span_segment == anchor.name_span_segment
+                and peer.name_span == anchor.name_span
+                for peer in resolved
+            ):
+                leads.append(anchor)
+        original = dict(groups)
+        expanded = dict(_competing_groups((*resolved, *leads)))
+        # A partial bridge cannot erase competition between resolved components.
+        groups = tuple(
+            (kind, expanded[kind] if kind in expanded else original[kind])
+            for kind in sorted(original.keys() | expanded.keys())
+        )
     ambiguity: list[dict[str, Any]] = []
     demoted_refs: set[str] = set()
     disambiguated_by = ""
