@@ -660,7 +660,7 @@ def route(command, vault_root, arguments):
     """The store thread a request must run on, or None when file collections answer it.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create
-    and the Records inventory run on the store thread of the service serving this vault;
+    and Records discovery run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
@@ -687,7 +687,7 @@ def route(command, vault_root, arguments):
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
-    elif command == "record_memory" and arguments.get("action") == "inspect" and selector is None:
+    elif command == "record_memory" and arguments.get("action") in {"describe", "inspect"} and selector is None:
         server = None if raw is None else _server(root)
         return server if server is not None and server.runtime is not None else None
     elif selector is None or raw is None or (authority.selected_entry(
