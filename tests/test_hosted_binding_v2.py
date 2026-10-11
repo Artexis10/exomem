@@ -57,7 +57,7 @@ def test_target_image_init_job_holds_lifetime_then_state_migration_lock(
     monkeypatch.setattr(
         state_migration,
         "migrate_vault_state_offline",
-        lambda root, *, authority: events.append(
+        lambda root, *, authority, protection_recovery=None: events.append(
             ("state-migration-lock", Path(root), authority)
         ),
     )
@@ -127,7 +127,9 @@ def test_real_hosted_lifetime_holder_excludes_target_image_state_migration(
     monkeypatch.setattr(
         state_migration,
         "migrate_vault_state_offline",
-        lambda vault, *, authority: calls.append((Path(vault), authority)),
+        lambda vault, *, authority, protection_recovery=None: calls.append(
+            (Path(vault), authority)
+        ),
     )
     genesis: list[Path] = []
     monkeypatch.setattr(
@@ -786,7 +788,7 @@ def test_restore_state_migration_never_creates_a_genesis_governance_store(
     monkeypatch.setattr(
         state_migration,
         "migrate_vault_state_offline",
-        lambda _vault, *, authority: None,
+        lambda _vault, *, authority, protection_recovery=None: None,
     )
     monkeypatch.setattr(
         hosted_runtime,

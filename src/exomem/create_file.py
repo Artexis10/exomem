@@ -120,6 +120,13 @@ def create_file(
     except VaultPathError as e:
         raise CreateFileError(code=e.code, reason=e.reason) from e
 
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(vault_root, rel_path, replace_existing=overwrite)
+    except ValueError as error:
+        raise CreateFileError(code="WRITE_REFUSED", reason="target is unavailable") from error
+
     try:
         inspect_generic_path(vault_root, rel_path)
     except ReservedPathLeafError as error:

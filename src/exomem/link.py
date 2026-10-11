@@ -604,6 +604,7 @@ def link(
     aliases: list[str] | None = None,
     today: dt.date | None = None,
     validate_only: bool = False,
+    registry_scope: str | None = None,
 ) -> LinkResult | IdentityPreparation:
     """Create an entity through detached structural preflight.
 
@@ -612,7 +613,13 @@ def link(
     or ENTITY_AMBIGUOUS. Either commits only with an explicit `distinct`
     `identity_decision` bound to the current candidate fingerprint.
     """
-    registry = load_entity_types(vault_root)
+    from .vocabulary import instances
+
+    authored = {"type": "entity", "project": project, "tags": _clean_tags(tags)}
+    selected_scope = instances.page_scope(
+        vault_root, "", authored, registry_scope=registry_scope, prospective=True
+    )
+    registry = load_entity_types(vault_root, registry_scope=selected_scope)
     definition = registry.resolve(entity_type)
     if definition is None:
         raise LinkError(
@@ -629,6 +636,15 @@ def link(
             filename_slug, slug_warnings = resolve_filename_slug(name, slug)
         except InvalidSlugError as error:
             raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    folder = kb_root(vault_root) / "Entities" / definition.folder
+    entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
+    from .governance import connector_boundary
+
+    prospective_path = entity_path.relative_to(vault_root).as_posix()
+    connector_boundary.require_create(vault_root, prospective_path)
+    rel_entity = canonical_vault_rel(vault_root, prospective_path)
+    if instances.page_scope(vault_root, rel_entity, authored) != selected_scope:
+        raise LinkError("REGISTRY_UNAVAILABLE", [], "destination uses a different registry instance")
     origin_block = None
     if isinstance(summary, str):
         try:
@@ -745,15 +761,6 @@ def link(
             [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
             fingerprint,
         )
-    folder = kb_root(vault_root) / "Entities" / definition.folder
-    entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
-    # Re-spell the destination to the real on-disk casing *before* it is bound
-    # into the draft token: creating into an existing but differently-cased
-    # entity folder would otherwise record the minted spelling as the page's
-    # identity path.
-    rel_entity = canonical_vault_rel(
-        vault_root, entity_path.relative_to(vault_root).as_posix()
-    )
     if entity_path.exists():
         reason = _entity_exists_reason(vault_root, rel_entity)
         if accepted_decision is not None:
@@ -815,6 +822,11 @@ def link(
         aliases=aliases_clean,
         origin_metadata=origin_block,
     )
+    from .vault import parse_frontmatter
+
+    written_metadata, _body, _marker = parse_frontmatter(source)
+    if instances.page_scope(vault_root, rel_entity, written_metadata) != selected_scope:
+        raise LinkError("REGISTRY_UNAVAILABLE", [], "authored page uses a different registry instance")
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
         for item in key_plan.introductions

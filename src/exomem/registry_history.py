@@ -40,7 +40,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +105,8 @@ def commit(
     previous: str | None,
     guard: vault_module.PathGuard | None = None,
     added: Mapping[str, Iterable[str]] | None = None,
+    private: bool = False,
+    validate_bindings: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Write `rendered` to `path` with its snapshot and log entry in one batch.
 
@@ -136,13 +138,13 @@ def commit(
         previous = _NO_ROLES_OVERRIDE if path.name == "context-roles.yaml" else NO_OVERRIDE
     moment = dt.datetime.now(dt.UTC)
     version = version_id(moment, before_hash)
-    reason = _one_line(why) if why else ""
+    reason = (why if private else _one_line(why)) if why else ""
     header = json.dumps(
         {
             "operation": operation,
             "why": reason,
-            "before": before_hash[:8],
-            "after": after_hash[:8],
+            "before": before_hash if private else before_hash[:8],
+            "after": after_hash if private else after_hash[:8],
             "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
             **_principal_fields(),
             **_added_field(added),
@@ -163,19 +165,22 @@ def commit(
     )
     writes = [override_write, snapshot_write]
     warning = None
-    log_plan = vault_module.plan_log_entry(
-        root,
-        date_iso=moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        op="schema",
-        rel_path_no_ext=path.relative_to(root).as_posix(),
-        body=(
-            f"schema_memory {operation}: {reason or 'no reason recorded'} "
-            f"({before_hash[:8]} -> {after_hash[:8]})"
-        ),
-    )
-    if log_plan.warning is not None:
+    log_writes = ()
+    # Private history must not affect shared log content, observations or rotation.
+    if not private:
+        log_plan = vault_module.plan_log_entry(
+            root,
+            date_iso=moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            op="schema",
+            rel_path_no_ext=path.relative_to(root).as_posix(),
+            body=(
+                f"schema_memory {operation}: {reason or 'no reason recorded'} "
+                f"({before_hash[:8]} -> {after_hash[:8]})"
+            ),
+        )
         warning = log_plan.warning
-    writes.extend(log_plan.writes)
+        log_writes = tuple(log_plan.writes)
+    writes.extend(log_writes)
     from . import vocabulary_auxiliaries
 
     manifest = vocabulary_auxiliaries.seal(
@@ -183,10 +188,13 @@ def commit(
         primary=override_write,
         derived=(
             ("registry-history", snapshot_write),
-            *(("operation-log", write) for write in log_plan.writes),
+            *(("operation-log", write) for write in log_writes),
         ),
     )
-    vault_module.batch_atomic_write(writes, vault_root=root, _vocabulary_auxiliaries=manifest)
+    vault_module.batch_atomic_write(
+        writes, vault_root=root, _vocabulary_auxiliaries=manifest,
+        _validate_prepared_bindings=validate_bindings,
+    )
     _prune(root, stem)
     out: dict[str, Any] = {
         "version": version,
@@ -421,7 +429,7 @@ def versions(vault_root: Path, *, stem: str) -> list[dict[str, Any]]:
     return out
 
 
-def history_view(vault_root: Path, *, stem: str) -> dict[str, Any]:
+def history_view(vault_root: Path, *, stem: str, instance_admitted: bool = False) -> dict[str, Any]:
     """Project admitted history metadata with private fields for the bound owner only."""
     from .governance import egress
     from .governance.principal import effective_principal
@@ -429,7 +437,7 @@ def history_view(vault_root: Path, *, stem: str) -> dict[str, Any]:
 
     items = versions(vault_root, stem=stem)
     refusal = egress.owner_only_aggregate(vault_root)
-    if is_owner(effective_principal()) and refusal is None:
+    if is_owner(effective_principal()) and (instance_admitted or refusal is None):
         return {"versions": items}
     # These history protocol fields belong only to the explicitly bound owner.
     owner_fields = ("why", "principal", "principal_kind")

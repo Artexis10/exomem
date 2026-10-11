@@ -20,6 +20,12 @@ granted only when the anchor's own page is among the recall hits for the turn in
 own right; a page that recall admitted only by graph expansion from another hit, and a
 recall hit elsewhere in the anchor's link neighbourhood, SHALL NOT be contact. A
 project-key anchor has no page and SHALL never carry `retrieval`.
+A singleton partial-name contact and a lexical hit that needs that term SHALL count
+as one contact. When the term is no complete registered title, alias or file name of
+any visible anchor, the hit SHALL require two distinct remaining content units after
+excluding every counted unit that contains a stem of that term. The check SHALL retain
+the lexical budget, ranking query and strict-majority matching for unspaced runs.
+Casing SHALL NOT determine whether this dependence check applies.
 `graph_corroboration` SHALL be granted to a candidate only when it is typed-linked to
 another candidate that carries a worded contact, and SHALL count such an edge even when
 both candidates already appear in ordinary recall. The turn SHALL be
@@ -33,7 +39,9 @@ have no page, so they can neither bridge two anchors nor be anyone's neighbour, 
 resolved project anchors are therefore trivially competing); otherwise,
 when no anchor is `resolved`, the turn SHALL be `unresolved` and the operation SHALL
 abstain with an empty packet that still lists its `partial` candidates and their
-evidence. A term SHALL be a maximal run of letters, digits and combining marks in any
+evidence, except a candidate whose only contact is retrieved, which is not listed
+(close-memory-loop: a packet lists a `partial` anchor only when worded contact or the
+conversation reached it). A term SHALL be a maximal run of letters, digits and combining marks in any
 script, which may contain an apostrophe or a hyphen after its first character, taken
 after compatibility normalisation and case folding, with a typographic apostrophe read
 as the plain one, a typographic or non-breaking hyphen read as the plain hyphen, and a
@@ -150,8 +158,80 @@ routing.
 - **THEN** it is `partial`
 
 #### Scenario: A rare word and the anchor's own page in recall resolve
-- **WHEN** an anchor carries `rare_term` and its own page is among the recall hits
+- **WHEN** an anchor carries `rare_term`, its own page is among the recall hits, and
+  the shared word is a complete registered title, alias or file name of a visible anchor
 - **THEN** it resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: A partial name and a hit that needs it stay one contact
+- **WHEN** a turn shares one rare term with an anchor's name, the term is no complete
+  registered title, alias or file name of any visible anchor, and its own lexical hit
+  lacks two matched units after excluding every unit that contains that term's stems
+- **THEN** the anchor carries `rare_term` without `retrieval` and stays `partial`,
+  regardless of casing, because that recall hit counts the same contact
+
+#### Scenario: A page that still matches the turn without the shared word keeps its hit
+- **WHEN** such an anchor's own page matches two distinct remaining content units under
+  the same lexical budget after excluding units containing stems of the shared term
+- **THEN** the anchor keeps `retrieval` and resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: Unspaced runs preserve independent corroboration
+- **WHEN** the remaining matches are two Japanese runs, or one Japanese run and one
+  spaced word, and each run matches a strict majority of its content stems
+- **THEN** the anchor keeps `retrieval`
+- **AND** one run alone counts only once, however many of its stems match
+
+#### Scenario: Repetitions and inflections cannot restore the excluded contact
+- **WHEN** the turn repeats or inflects the shared partial-name term beside one matched
+  content unit
+- **THEN** none of those forms supplies a second remaining unit and the anchor stays `partial`
+
+#### Scenario: Hyphenated content retains its lexical units
+- **WHEN** a turn says "kitchen-renovation budget" and the budget term is a singleton
+  partial-name contact, while the page also matches kitchen and renovation
+- **THEN** the two remaining lexical units preserve `retrieval`
+
+#### Scenario: Budget-dropped words cannot restore a dependent hit
+- **WHEN** a long turn reaches an anchor by one partial-name term and one other selected
+  unit, while another matching unit falls outside the lexical budget
+- **THEN** that dropped unit cannot corroborate and the anchor stays `partial`
+
+#### Scenario: Each anchor excludes only its own partial-name term
+- **WHEN** two anchors share different partial-name terms with the same turn
+- **THEN** each dependence check excludes only its own term's units
+- **AND** one anchor's term can still corroborate the other anchor's page
+
+#### Scenario: A first name that two people share stays a question
+- **WHEN** two people share a first name, one of them is stored under that name, and a
+  turn writes that name
+- **THEN** both people retain their name contact and the turn is `ambiguous`
+
+#### Scenario: A surname lead remains available to the conversation agent
+- **WHEN** a turn asks what a partial surname said about one topic and its lexical hit
+  depends on that surname, in any casing
+- **THEN** the person stays a visible `partial` lead with no served identity material
+- **AND** every retrieval-carry entrance enforces the same dependence before selecting
+  roles, reading current state or running material lanes
+- **AND** a rejected sole carry domain retains that canonical partial lead in the
+  unresolved choice menu
+- **AND** `activate_context(anchor=...)`, full-name `conversation.focus`, continuity or
+  prior naming can resolve that lead through the existing rules
+- **AND** those routes admit no page withheld from the caller
+
+#### Scenario: A later carry hit cannot bypass an initial lexical miss
+- **WHEN** an authored partial-name contact reaches an anchor whose page is absent
+  from the initial lexical hit batch, and a later retrieval carry reaches its page
+- **THEN** the same independent-match check applies before any material is read
+- **AND** raw carry groups and namesake contests remain unchanged
+
+#### Scenario: Shared pages keep separate partial-name exclusions
+- **WHEN** several anchors on one page have different authored partial-name contacts
+- **THEN** that retrieval-carried page proves every applicable excluded-term set separately
+- **AND** one anchor's term can corroborate another anchor's page without a combined exclusion
+
+#### Scenario: Repeated carry entrances reuse the request's dependence checks
+- **WHEN** the resolver and later retrieval carries check the same page and excluded-term set
+- **THEN** they reuse one request-local result under the original lexical budget and snapshot
+- **AND** pages without partial-name dependence request no additional check
 
 #### Scenario: One common word is no contact
 - **WHEN** a turn shares exactly one term with an anchor and that term names more than
@@ -170,9 +250,10 @@ routing.
   leading name is added, neither carries `exact_alias` from the short name
 
 #### Scenario: An unresolved turn hands its candidates to the agent
-- **WHEN** a turn reaches anchors by retrieved contact only
+- **WHEN** a turn reaches anchors by worded contact that resolves none of them
 - **THEN** the packet abstains as `unresolved`, serves no units or pointers, and lists
   those anchors as `partial` with their evidence kinds
+- **AND** an anchor the turn reached by retrieved contact only is not listed
 
 #### Scenario: A shared topic prefix is nobody's name
 - **WHEN** one anchor is titled with a leading word, a dash and a subtopic, and that
@@ -264,7 +345,8 @@ linked to the anchor, entity or profile page facets, `graph_context` under a
 traversal profile from resolved anchors at depth at most 2, and evidence pointers. No
 lane SHALL run for a `partial` anchor and nothing of a `partial` anchor's page or
 neighbourhood SHALL enter `units`, `pointers` or `current_state`: a `partial` anchor is
-listed in `anchors[]` with its status and evidence so the agent can choose it, and is
+listed in `anchors[]` with its status and evidence so the agent can choose it, unless
+its only contact is retrieved, in which case it is not listed at all, and is
 served only after it resolves or is chosen. The packet SHALL contain `anchors[]` (ref, title,
 kind, status, evidence), `roles[]`, `units[]` (ref, role, text of at most 360
 characters cut only at a boundary that leaves no unclosed wikilink, lifecycle,
@@ -331,10 +413,10 @@ remains the only `due_state` carrier.
 - **THEN** `missing[]` carries no `withheld` marker for it, and a packet whose every
   anchor was removed abstains with `abstention.reason = "unresolved"`
 
-#### Scenario: A partial anchor beside a resolved one is listed, not served
+#### Scenario: A retrieved-only candidate beside a resolved anchor is neither listed nor served
 - **WHEN** a turn resolves one anchor and reaches a second anchor by retrieved contact
   only
-- **THEN** the second anchor appears in `anchors[]` as `partial`, and no unit, pointer
+- **THEN** the second anchor does not appear in `anchors[]`, and no unit, pointer
   or current-state entry in the packet comes from its page or its neighbourhood
 
 #### Scenario: One authored word and one tag word do not resolve

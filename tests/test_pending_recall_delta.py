@@ -37,6 +37,7 @@ from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.derived_receipts import DerivedBatchPath, DerivedComponent
 from exomem.find_types import FindTimings
+from exomem.governance.principal import library_scope
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="SQLite build lacks FTS5"
@@ -1244,6 +1245,7 @@ def test_vector_and_graph_pending_coverage_is_disclosed(tmp_path: Path) -> None:
     assert any("pending" in component for component in degraded), degraded
 
 
+@library_scope()
 def test_no_pending_fast_path_preserves_existing_recall_behavior(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

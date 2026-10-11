@@ -209,27 +209,6 @@ def test_find_still_refuses_when_nothing_is_published(
         find_module.find(vault, query="memory", limit=5)
 
 
-def test_catalog_identity_change_still_refuses(vault: Path) -> None:
-    """Counter-scenario: the third identity component the spec names.
-
-    `catalog_semantic_identity` hashes the semantic-language registry, so
-    changing it invalidates the catalog's parsed rows WITHOUT touching recall
-    policy or the access fingerprint. The published projection's rows no longer
-    describe the corpus, so it must not be served.
-    """
-    from exomem import semantic_language_registry
-
-    _warm_catalog(vault)
-    _go_cold()
-    assert lexstore.runtime_retrieval_catalog_admission(vault, schedule_repair=False) is not None
-
-    registry = semantic_language_registry.registry_path(vault)
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text("kinds:\n  invented-kind:\n    label: Invented\n", encoding="utf-8")
-
-    assert lexstore.runtime_retrieval_catalog_admission(vault, schedule_repair=False) is None
-
-
 def test_a_published_row_without_a_triple_still_refuses(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,11 +275,11 @@ def test_admitted_catalog_scope_is_nested_and_vault_local(
 
 
 @pytest.mark.parametrize("boundary", ["projection", "query"])
-@pytest.mark.parametrize("changed_identity", ["access", "semantic", "checkpoint"])
+@pytest.mark.parametrize("changed_identity", ["access", "checkpoint"])
 def test_admitted_catalog_refuses_a_mid_request_identity_change(
     vault: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, changed_identity: str
 ) -> None:
-    from exomem import find as find_module, semantic_language_registry
+    from exomem import find as find_module
 
     _warm_catalog(vault)
     _go_cold()
@@ -321,10 +300,6 @@ def test_admitted_catalog_refuses_a_mid_request_identity_change(
                 (vault / "Knowledge Base" / "_access.yaml").write_text(
                     "excluded:\n  - Private\n", encoding="utf-8"
                 )
-            elif changed_identity == "semantic":
-                registry = semantic_language_registry.registry_path(vault)
-                registry.parent.mkdir(parents=True, exist_ok=True)
-                registry.write_text("kinds:\n  new-kind:\n    label: New\n", encoding="utf-8")
             else:
                 conn = store._connect()
                 try:

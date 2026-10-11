@@ -1144,11 +1144,11 @@ def test_preserve_artifacts_reports_one_terminal_state_per_file(
 @pytest.mark.parametrize(
     ("scope", "category", "field", "needle"),
     (
-        ("food/caviarhouse-group-order", "roe-tasting", "scope", "/"),
-        ("food", "roe:tasting", "category", ":"),
-        ("food", "roe\x01tasting", "category", "control character"),
-        ("  food  ", "roe-tasting", "scope", "whitespace"),
-        ("food", "roe-tasting ", "category", "whitespace"),
+        ("work/studio-equipment-orders", "lens-quotes", "scope", "/"),
+        ("work", "lens:quotes", "category", ":"),
+        ("work", "lens\x01quotes", "category", "control character"),
+        ("  work  ", "lens-quotes", "scope", "whitespace"),
+        ("work", "lens-quotes ", "category", "whitespace"),
     ),
 )
 def test_destination_segments_are_refused_never_normalised(
@@ -1161,11 +1161,10 @@ def test_destination_segments_are_refused_never_normalised(
 ) -> None:
     """A malformed destination is refused before a single byte moves.
 
-    The live vault holds one logical case split across
-    `Evidence/food/caviarhouse-group-order/` and
-    `Evidence/foodcaviarhouse-group-order/` because the separator was deleted
-    instead of refused. Silent normalisation forks the tree; a named refusal
-    costs the caller one corrected call.
+    A deleted separator splits one logical case across two trees: a scope
+    `work/orders` would land in `Evidence/workorders/` beside
+    `Evidence/work/orders/`. Silent normalisation forks the tree; a named
+    refusal costs the caller one corrected call.
     """
     from exomem import client_artifacts
     from exomem.cli_ops import OpError
@@ -1189,8 +1188,8 @@ def test_destination_segments_are_refused_never_normalised(
     assert needle in refused.value.details["reason"]
     assert "one path segment" in refused.value.details["accepted_form"]
     evidence = vault / "Knowledge Base" / "Evidence"
-    assert not (evidence / "foodcaviarhouse-group-order").exists()
-    assert not (evidence / "food").exists()
+    assert not (evidence / "workstudio-equipment-orders").exists()
+    assert not (evidence / "work").exists()
 
 
 def test_preserve_evidence_refuses_a_reserved_character_in_category(vault: Path) -> None:
@@ -1228,14 +1227,14 @@ def test_valid_destination_segments_are_used_byte_for_byte(
 
     result = client_artifacts.preserve_artifacts(
         vault,
-        scope="caviarhouse-group-order",
-        category="roe-tasting-and-butter-mayo",
+        scope="studio-equipment-orders",
+        category="lens-and-tripod-quotes-2026",
         files=[{"download_url": "https://files.example/a", "file_id": "file-one"}],
     )
 
     assert result["files"][0]["path"] == (
-        "Knowledge Base/Evidence/caviarhouse-group-order/"
-        "roe-tasting-and-butter-mayo/clean.bin"
+        "Knowledge Base/Evidence/studio-equipment-orders/"
+        "lens-and-tripod-quotes-2026/clean.bin"
     )
 
 
@@ -1503,7 +1502,7 @@ def test_an_empty_batch_still_refuses_a_malformed_destination(vault: Path) -> No
     from exomem.client_artifacts import preserve_artifacts
 
     with pytest.raises(OpError) as refused:
-        preserve_artifacts(vault, scope="food/caviar", category="raw", files=[])
+        preserve_artifacts(vault, scope="work/studio", category="raw", files=[])
 
     assert refused.value.details["field"] == "scope"
 
@@ -1595,7 +1594,7 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     """
     from exomem import client_artifacts
 
-    payload = b"caviarhouse-invoice-bytes"
+    payload = b"studio-invoice-bytes"
     plan = {
         "file-first": ("invoice.bin", payload),
         "file-retry": ("invoice-retry.bin", payload),
@@ -1614,8 +1613,8 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
 
     first = client_artifacts.preserve_artifacts(
         vault,
-        scope="food",
-        category="caviar",
+        scope="work",
+        category="studio",
         files=[{"download_url": "https://files.example/a", "file_id": "file-first"}],
     )
     row = first["files"][0]
@@ -1624,13 +1623,13 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     stored_ref = row["ref"]
     assert commits == ["commit"]
 
-    evidence = vault / "Knowledge Base" / "Evidence" / "food" / "caviar"
+    evidence = vault / "Knowledge Base" / "Evidence" / "work" / "studio"
     before = sorted(item.name for item in evidence.iterdir())
 
     retry = client_artifacts.preserve_artifacts(
         vault,
-        scope="food",
-        category="caviar",
+        scope="work",
+        category="studio",
         files=[{"download_url": "https://files.example/b", "file_id": "file-retry"}],
     )
     duplicate = retry["files"][0]
@@ -1648,8 +1647,8 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
 
     other_family = client_artifacts.preserve_artifacts(
         vault,
-        scope="food",
-        category="butter-mayo",
+        scope="work",
+        category="tripod",
         files=[{"download_url": "https://files.example/c", "file_id": "file-retry"}],
     )
     assert other_family["files"][0]["state"] == "stored"

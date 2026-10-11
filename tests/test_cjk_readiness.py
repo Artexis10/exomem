@@ -45,7 +45,7 @@ from exomem import (
     working_set_runtime,
     writer_lease,
 )
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.vault import content_hash
 from exomem.vocabulary_fold import fold_term
 
@@ -1150,7 +1150,8 @@ def test_a_withheld_claimant_is_left_out_of_a_restricted_callers_fingerprint(
     assert again and again.group(1) == found.group(1)
 
     _reset_caches()
-    owner_now = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
+    with request_scope(owner_principal(surface="library")):
+        owner_now = _alias_refusal(ja_vault, "Corvane Motors", "ハヤブサ号")
     assert owner_now != found.group(1)
 
 
