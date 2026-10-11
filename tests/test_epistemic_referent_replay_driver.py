@@ -3,17 +3,19 @@
 Every stream here is FABRICATED, shaped after streams recorded from
 ``claude 2.1.296 -p --output-format stream-json --verbose --include-hook-events``
 on 2026-10-11: the init line's ``memory_paths``, ``apiKeySource``,
-``mcp_servers`` and ``plugins``, an ``activate_context`` call answered by a
-JSON-text ``tool_result``, a ``UserPromptSubmit`` ``hook_response`` whose
-``output`` carries ``hookSpecificOutput.additionalContext``, and the result
-line's ``permission_denials``. No test pins stream bytes, and names and values
-come from the digest-verified answer key, never restated here.
+``mcp_servers``, ``plugins``, ``model`` and ``claude_code_version``, an
+``activate_context`` call answered by a JSON-text ``tool_result``, a
+``UserPromptSubmit`` ``hook_response`` whose ``output`` carries
+``hookSpecificOutput.additionalContext``, and the result line's
+``permission_denials``. No test pins stream bytes, and names and values come
+from the digest-verified answer key, never restated here.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PET = "f33-pet-owner-v1"
 PET_TWIN = "f33-pet-owner-twin-v1"
 VERSION = "2.1.296"
+MODEL = "claude-sonnet-5-5"
+ACTIVATE = "mcp__exomem__activate_context"
 
 
 def _driver():
@@ -34,6 +38,12 @@ def _key(case_id: str) -> dict:
     from epistemic.journeys.referent_capture import case_key
 
     return case_key(case_id)
+
+
+def _case(case_id: str):
+    from epistemic.journeys.referent_capture import build_case_set
+
+    return next(case for case in build_case_set() if case.case_id == case_id)
 
 
 class _Proc:
@@ -49,7 +59,7 @@ def _init(profile: Path, *, plugin: Path | None = None, **overrides) -> dict:
         "type": "system",
         "subtype": "init",
         "session_id": "s",
-        "model": "claude-sonnet-5-5",
+        "model": MODEL,
         "claude_code_version": VERSION,
         "apiKeySource": "none",
         "mcp_servers": [{"name": "exomem", "status": "connected", "source": "dynamic"}],
@@ -137,26 +147,66 @@ def _write_referent(vault: Path, case_id: str) -> str:
     return exomem_id
 
 
+# The fresh session's activate_context results, built from the entity's memory ref
+# and path: a list of (tool result content, is_error flag).
+
+
+def _turn_packet(ref: str, path: str) -> list:
+    anchor = {"ref": ref, "path": path, "status": "resolved", "origin": "turn"}
+    unit = {"ref": ref, "provenance": {"path": path, "anchor": ref}}
+    return [({"anchors": [anchor], "units": [unit], "pointers": []}, None)]
+
+
+def _recent_only(ref: str, path: str) -> list:
+    recent = {"ref": ref, "path": path, "why": "edited"}
+    return [({"recent_context": [recent], "anchors": [], "units": [], "pointers": []}, None)]
+
+
+def _recency_carried(ref: str, path: str) -> list:
+    anchor = {"ref": ref, "path": path, "status": "resolved", "evidence": ["recency"], "origin": "turn"}
+    packet = {"anchors": [anchor], "units": [], "pointers": [], "generation": {"carried_by": "recency"}}
+    return [(packet, None)]
+
+
+def _unit_pointer(ref: str, path: str) -> list:
+    """A pointer to a semantic unit of the entity page, in the product's own ref shape."""
+
+    from exomem.semantic_units import parse_semantic_units
+
+    (unit,) = parse_semantic_units("- [fact] A durable fact ^fact-1\n", path=path, parent_ref=ref).units
+    pointer = {"ref": unit.unit_ref, "title": "fact", "why": "identity lane", "reason": "budget"}
+    return [({"anchors": [], "units": [], "pointers": [pointer]}, None)]
+
+
+def _error_envelope() -> dict:
+    from exomem import cli_ops
+
+    return cli_ops.envelope(False, error={"code": "OP_ERROR", "message": "lane failed"})
+
+
 class _Agent:
     """An offline client: capture turns succeed, and a positive's fresh session activates.
 
     ``capture`` writes into the run's own vault, found through the environment the
     driver hands the child. ``faults`` makes the first N invocations exit non-zero.
-    ``recent_only`` names the referent only in the packet's ``recent_context``.
+    ``results`` builds the fresh session's activate_context results, and ``init_for``
+    overrides the init line of a given call number.
     """
 
     def __init__(
         self, case_id: str, profile: Path, *, capture: bool = False, faults: int = 0,
-        recent_only: bool = False,
+        results=_turn_packet, init_for=None,
     ):
         self.case_id, self.profile, self.capture, self.faults = case_id, profile, capture, faults
-        self.recent_only = recent_only
+        self.results, self.init_for = results, init_for or (lambda _call: {})
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
         self.exomem_id: str | None = None
 
     def __call__(self, argv, cwd, env):
         self.calls.append(list(argv))
-        init = _init(self.profile, plugin=_plugin(argv))
+        self.envs.append(dict(env))
+        init = _init(self.profile, plugin=_plugin(argv), **self.init_for(len(self.calls)))
         if len(self.calls) <= self.faults:
             return _Proc(_stream(init, _result("boom", subtype="error_during_execution")), 1)
         key = _key(self.case_id)
@@ -167,31 +217,14 @@ class _Agent:
         from exomem.memory_refs import memory_ref
 
         entity = f"Knowledge Base/Entities/Companions/{key['referent']['name']}.md"
-        packet = {
-            "anchors": [{"ref": memory_ref(self.exomem_id), "path": entity, "status": "resolved"}],
-            "units": [{"ref": memory_ref(self.exomem_id), "provenance": {"path": entity}}],
-            "pointers": [],
-        }
-        if self.recent_only:
-            served = {"ref": memory_ref(self.exomem_id), "path": entity, "why": "edited"}
-            packet = {"recent_context": [served], "anchors": [], "units": [], "pointers": []}
-        return _Proc(
-            _stream(
-                init,
-                _call("toolu_1", "mcp__exomem__activate_context", {"turn": _prompt(argv)}),
-                _reply("toolu_1", json.dumps(packet)),
-                _result(f"The answer is {key['answer_value']}."),
-            )
-        )
+        lines = [init]
+        for n, (content, is_error) in enumerate(self.results(memory_ref(self.exomem_id), entity), 1):
+            text = content if isinstance(content, str) else json.dumps(content)
+            lines += [_call(f"toolu_{n}", ACTIVATE, {"turn": _prompt(argv)}), _reply(f"toolu_{n}", text, is_error=is_error)]
+        return _Proc(_stream(*lines, _result(f"The answer is {key['answer_value']}.")))
 
 
-def _case(case_id: str):
-    from epistemic.journeys.referent_capture import build_case_set
-
-    return next(case for case in build_case_set() if case.case_id == case_id)
-
-
-def _run(tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), **kwargs):
+def _run(tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), parent_env=None, **kwargs):
     from epistemic.journeys import f27_replay as client
 
     return _driver().run_driver(
@@ -202,7 +235,7 @@ def _run(tmp_path: Path, agent: _Agent, *, case_ids, shapes=("hookless",), **kwa
         shapes=shapes,
         envelope=client.AgentEnvelope(executable=Path("/opt/agent/claude"), version=f"{VERSION} (x)"),
         product={"head": "0" * 40},
-        parent_env={"PATH": "/usr/bin", "HOME": str(tmp_path)},
+        parent_env=parent_env or {"PATH": "/usr/bin", "HOME": str(tmp_path)},
         runner=agent,
         prominence_writer=lambda _arm, _env: "set",
         **kwargs,
@@ -215,6 +248,15 @@ def _profile(tmp_path: Path) -> Path:
     return profile
 
 
+def _run_file(tmp_path: Path, case_id: str, shape: str = "hookless", attempt: int = 1) -> dict:
+    path = tmp_path / "out" / case_id / shape / f"attempt-{attempt:02d}" / "run.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _entity_id() -> str:
+    return f"Knowledge Base/Entities/Companions/{_key(PET)['referent']['name']}"
+
+
 def test_the_fresh_session_packet_is_recorded_and_its_refs_map_to_snapshot_ids(tmp_path) -> None:
     """Fails when the fresh session, its packet or the ref mapping is lost from the run file."""
 
@@ -224,39 +266,76 @@ def test_the_fresh_session_packet_is_recorded_and_its_refs_map_to_snapshot_ids(t
     assert result["manifest"]["claim_status"].startswith("pending acknowledgment")
     row = result["cases"][0]["runs"][0]
     assert (row["status"], row["repeat_outcome"]) == ("scored", "pass")
-    run = json.loads((tmp_path / "out" / PET / "hookless" / "attempt-01" / "run.json").read_text())
+    run = _run_file(tmp_path, PET)
     capture, fresh = run["sessions"]["capture"], run["sessions"]["fresh"]
     assert [call["label"] for call in capture["invocations"]] == [t for t, _ in _case(PET).turns]
     assert all(call["stream"] for call in (*capture["invocations"], *fresh["invocations"]))
     assert capture["session_id"] != fresh["session_id"]
     assert "--resume" not in fresh["invocations"][0]["argv"]
-    assert run["packet"]["captures"][0]["source"] == "activate_context"
-    entity_id = f"Knowledge Base/Entities/Companions/{_key(PET)['referent']['name']}"
-    assert {ref["item_id"] for ref in run["packet"]["refs"]} == {entity_id}
+    assert run["packet"]["captures"][0]["readable"] is True
+    assert {ref["item_id"] for ref in run["packet"]["refs"]} == {_entity_id()}
     assert {name: row["outcome"] for name, row in run["assertions"].items()} == {
         "referent_entity_typed": "pass",
         "referent_key_edge_present": "pass",
         "referent_used_in_fresh_session": "pass",
     }
-    assert [call["name"] for call in run["tool_calls"]] == ["mcp__exomem__activate_context"]
+    assert [call["name"] for call in run["tool_calls"]] == [ACTIVATE]
 
 
-def test_a_referent_named_only_in_recent_context_is_not_served(tmp_path) -> None:
-    """Fails when recent_context alone counts as serving the referent (ruling of 2026-10-11).
+@pytest.mark.parametrize("results", [_recent_only, _recency_carried], ids=["recent_context", "recency_carry"])
+def test_a_ref_the_question_did_not_choose_is_not_served(tmp_path, results) -> None:
+    """Fails when recent work or a recency-carried anchor counts as serving (rulings 1 and 1b).
 
-    A capture session edits the referent's page, so recent work names it whatever
-    the question was; the answer here states the key value, and "uses" must still fail.
+    A capture session edits the referent's page, so edit time names it whatever the
+    question was; the answer here states the key value, and "uses" must still fail.
     """
 
-    agent = _Agent(PET, _profile(tmp_path), capture=True, recent_only=True)
+    agent = _Agent(PET, _profile(tmp_path), capture=True, results=results)
     result = _run(tmp_path, agent, case_ids=[PET], repeats=1)
 
-    assert result["manifest"]["uses_rule"]["fixed_before_any_baseline"] is True
-    run = json.loads((tmp_path / "out" / PET / "hookless" / "attempt-01" / "run.json").read_text())
-    entity_id = f"Knowledge Base/Entities/Companions/{_key(PET)['referent']['name']}"
-    assert {(ref["item_id"], ref["serves"]) for ref in run["packet"]["refs"]} == {(entity_id, False)}
+    rule = result["manifest"]["uses_rule"]
+    assert rule["fixed_before_any_baseline"] is True and "recency_anchors" in rule
+    run = _run_file(tmp_path, PET)
+    assert {(ref["item_id"], ref["serves"]) for ref in run["packet"]["refs"]} == {(_entity_id(), False)}
     uses = run["assertions"]["referent_used_in_fresh_session"]
     assert (uses["outcome"], "does not serve" in uses["evidence"]) == ("fail", True)
+
+
+def test_a_semantic_unit_ref_serves_its_page(tmp_path) -> None:
+    """Fails when a unit ref (`<memory ref>#<anchor>`) is left unmapped, so a pointer serves nothing."""
+
+    agent = _Agent(PET, _profile(tmp_path), capture=True, results=_unit_pointer)
+    _run(tmp_path, agent, case_ids=[PET], repeats=1)
+
+    run = _run_file(tmp_path, PET)
+    (ref,) = run["packet"]["refs"]
+    assert ("#" in ref["ref"], ref["item_id"], ref["serves"]) == (True, _entity_id(), True)
+    assert run["assertions"]["referent_used_in_fresh_session"]["outcome"] == "pass"
+
+
+@pytest.mark.parametrize(
+    ("results", "status", "uses"),
+    [
+        (lambda ref, path: [], "scored", "fail"),
+        (lambda ref, path: [(_error_envelope(), None)], "blocked", None),
+        (lambda ref, path: [("server error", True)], "blocked", None),
+        (lambda ref, path: [(_error_envelope(), None), *_turn_packet(ref, path)], "scored", "pass"),
+    ],
+    ids=["no_call", "envelope_only", "is_error_only", "envelope_then_packet"],
+)
+def test_errored_activations_are_skipped_and_block_only_when_none_is_readable(
+    tmp_path, results, status: str, uses: str | None
+) -> None:
+    """Fails when an error envelope scores as an empty packet, or blocks beside a readable one."""
+
+    agent = _Agent(PET, _profile(tmp_path), capture=True, results=results)
+    result = _run(tmp_path, agent, case_ids=[PET], repeats=1, max_attempts=1)
+
+    row = result["cases"][0]["runs"][0]
+    assert row["status"] == status
+    assert row["assertions"].get("referent_used_in_fresh_session") == uses
+    if status == "blocked":
+        assert "readable packet" in row["fault_reason"]
 
 
 def test_a_quiet_twin_is_scored_on_the_runtime_projection_rather_than_blocked(tmp_path) -> None:
@@ -269,9 +348,7 @@ def test_a_quiet_twin_is_scored_on_the_runtime_projection_rather_than_blocked(tm
 
     row = result["cases"][0]["runs"][0]
     assert (row["status"], row["assertions"]) == ("scored", {"twin_left_no_referent": "pass"})
-    assert "fresh" not in json.loads(
-        (tmp_path / "out" / PET_TWIN / "hooked" / "attempt-01" / "run.json").read_text()
-    )["sessions"]
+    assert "fresh" not in _run_file(tmp_path, PET_TWIN, "hooked")["sessions"]
     snapshot = json.loads(
         (tmp_path / "out" / PET_TWIN / "hooked" / "attempt-01" / "end-snapshot.json").read_text()
     )
@@ -279,7 +356,10 @@ def test_a_quiet_twin_is_scored_on_the_runtime_projection_rather_than_blocked(tm
     assert set(ENTITY_GRAPH_ENDPOINTS) | set(RUNTIME_ENDPOINTS) <= endpoints
 
 
-@pytest.mark.parametrize(("faults", "statuses", "case"), [(1, ["blocked", "scored"], "pass"), (2, ["blocked", "blocked"], "incomplete")])
+@pytest.mark.parametrize(
+    ("faults", "statuses", "case"),
+    [(1, ["blocked", "scored"], "pass"), (2, ["blocked", "blocked"], "incomplete")],
+)
 def test_a_harness_fault_is_never_scored_and_is_rerun_under_the_same_pins(
     tmp_path, faults: int, statuses: list[str], case: str
 ) -> None:
@@ -292,12 +372,127 @@ def test_a_harness_fault_is_never_scored_and_is_rerun_under_the_same_pins(
     assert [row["status"] for row in rows] == statuses
     assert result["cases"][0]["status"] == case
     assert rows[0]["assertions"] == {} and "exit code 1" in rows[0]["fault_reason"]
+
     # Same pins: the argv differs only in its own attempt directory and session id.
     def pinned(argv: list[str], attempt: int) -> list[str]:
         session = argv.index("--session-id") + 1
         return [a.replace(f"attempt-{attempt:02d}", "attempt") for a in argv[:session] + argv[session + 1 :]]
 
     assert pinned(agent.calls[0], 1) == pinned(agent.calls[1], 2)  # each attempt's first turn
+
+
+@pytest.mark.parametrize(
+    ("init_for", "calls", "reason"),
+    [
+        (lambda call: {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, 1, "pinned profile"),
+        (lambda call: {"claude_code_version": "9.9.9"} if call == 2 else {}, 2, "'2.1.296' (first invocation) to '9.9.9'"),
+    ],
+    ids=["wrong_profile", "client_version_drift"],
+)
+def test_a_deterministic_fault_or_pin_drift_stops_the_whole_driver_run(
+    tmp_path, init_for, calls: int, reason: str
+) -> None:
+    """Fails when a fault no rerun can clear is rerun, or a changed pin keeps scoring."""
+
+    agent = _Agent(PET_TWIN, _profile(tmp_path), init_for=init_for)
+    with pytest.raises(_driver().DriverAbort, match="attempt 1") as stopped:
+        _run(tmp_path, agent, case_ids=[PET_TWIN], shapes=("hookless", "hooked"), model="sonnet")
+
+    assert reason in str(stopped.value)
+    assert len(agent.calls) == calls
+    assert _run_file(tmp_path, PET_TWIN)["status"] == "aborted"
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert reason in manifest["aborted"]
+    assert (manifest["model_requested"], manifest["model"]) == ("sonnet", MODEL)
+
+
+def test_the_child_cannot_update_itself_take_an_injected_packet_or_bill_a_key(tmp_path) -> None:
+    """Fails when the client may auto-update mid-baseline, a hook may inject a packet,
+    or an inherited API credential replaces the profile's login."""
+
+    removed = ("EXOMEM_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    agent = _Agent(PET_TWIN, _profile(tmp_path))
+    parent = {"PATH": "/usr/bin", "HOME": str(tmp_path), **{name: "set" for name in removed}}
+    _run(tmp_path, agent, case_ids=[PET_TWIN], repeats=1, parent_env=parent)
+
+    for env in agent.envs:
+        assert env["DISABLE_AUTOUPDATER"] == "1"
+        assert env["CLAUDE_CONFIG_DIR"] == str(agent.profile)
+        assert not set(removed) & set(env)
+
+
+def test_the_default_client_profile_is_refused(tmp_path) -> None:
+    """Fails when a run could spend turns on the default profile."""
+
+    from epistemic.journeys import f27_replay as client
+
+    default = tmp_path / ".claude"
+    default.mkdir()
+    agent = _Agent(PET_TWIN, default)
+    with pytest.raises(client.JourneySetupError, match="default client profile"):
+        _run(tmp_path, agent, case_ids=[PET_TWIN], repeats=1)
+    assert agent.calls == []
+
+
+@pytest.mark.parametrize(
+    ("check", "shape", "init", "plugin", "extra", "reason"),
+    [
+        ("abort", "hookless", {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, False, None, "pinned profile"),
+        ("abort", "hookless", {"apiKeySource": "ANTHROPIC_API_KEY"}, False, None, "API key"),
+        ("abort", "hookless", {}, True, None, "loaded plugins"),
+        ("abort", "hooked", {}, False, None, "loaded plugins"),
+        ("abort", "hookless", {}, False, "hook", "hookless shape"),
+        ("block", "hookless", {"mcp_servers": [{"name": "exomem", "status": "failed"}]}, False, None, "not connected"),
+        ("block", "hookless", {}, False, "denial", "denied"),
+        ("block", "hooked", {}, True, "packet", "injected retrieved memory"),
+    ],
+)
+def test_a_session_off_the_pinned_account_or_surface_is_a_fault(
+    tmp_path, check: str, shape: str, init: dict, plugin: bool, extra: str | None, reason: str
+) -> None:
+    """Fails when a session on another profile, a key, the wrong shape, a dead server,
+    a denial or a hook-injected packet scores, or a setup fault is rerun as a blocked run."""
+
+    from epistemic.journeys import f27_replay as client
+
+    from exomem._hooks.exomem_retrieve_nudge import _bounded_block, _packet_lines
+
+    profile = _profile(tmp_path)
+    lines = [_init(profile, plugin=client.PLUGIN_DIR if plugin else None, **init)]
+    if extra == "hook":
+        lines.append(_hook("UserPromptSubmit", "reminder"))
+    if extra == "packet":
+        packet = {"units": [{"ref": "exomem://memory/00000000-0000-0000-0000-000000000001", "text": "x"}]}
+        lines.append(_hook("UserPromptSubmit", _bounded_block(_packet_lines(packet), 4000)))
+    lines.append(_result(denials=[{"tool_name": "Bash"}] if extra == "denial" else ()))
+    stdout, arm = _stream(*lines), client.ARMS[shape]
+    abort = _driver().surface_mismatch(stdout, arm=arm, plugin_dir=client.PLUGIN_DIR, profile=profile)
+    block = _driver().session_fault(stdout)
+    fault = abort if check == "abort" else block
+    assert fault is not None and reason in fault
+    assert (abort is None) is (check == "block")
+
+
+def test_a_dirty_benchmarks_tree_refuses_the_product_pin(tmp_path) -> None:
+    """Fails when an uncommitted change to the driver or assertions runs under a clean-looking SHA."""
+
+    from epistemic.journeys import f27_replay as client
+
+    repo = tmp_path / "repo"
+    for part in ("src", "plugins", "benchmarks"):
+        (repo / part).mkdir(parents=True)
+        (repo / part / "file.txt").write_text("one\n", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "seed")
+    assert _driver().product_identity(repo)["benchmarks_tree"]
+    (repo / "benchmarks" / "file.txt").write_text("two\n", encoding="utf-8")
+    with pytest.raises(client.JourneySetupError, match="benchmarks/"):
+        _driver().product_identity(repo)
 
 
 def test_a_digest_mismatch_refuses_the_whole_run_before_any_turn(tmp_path) -> None:
@@ -327,80 +522,6 @@ def test_a_digest_mismatch_refuses_the_whole_run_before_any_turn(tmp_path) -> No
     reset_cache()
     assert agent.calls == []
     assert not (tmp_path / "out").exists()
-
-
-@pytest.mark.parametrize(
-    ("shape", "init", "plugin", "extra", "reason"),
-    [
-        ("hookless", {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, False, None, "pinned profile"),
-        ("hookless", {"apiKeySource": "ANTHROPIC_API_KEY"}, False, None, "API key"),
-        ("hookless", {"mcp_servers": [{"name": "exomem", "status": "failed"}]}, False, None, "not connected"),
-        ("hookless", {}, True, None, "loaded plugins"),
-        ("hooked", {}, False, None, "loaded plugins"),
-        ("hookless", {}, False, "hook", "hookless shape"),
-        ("hookless", {}, False, "denial", "denied"),
-    ],
-)
-def test_a_session_off_the_pinned_account_or_surface_is_a_fault(
-    tmp_path, shape: str, init: dict, plugin: bool, extra: str | None, reason: str
-) -> None:
-    """Fails when a session on another profile, a key, a dead server or the wrong shape scores."""
-
-    from epistemic.journeys import f27_replay as client
-
-    profile = _profile(tmp_path)
-    lines = [_init(profile, plugin=client.PLUGIN_DIR if plugin else None, **init)]
-    if extra == "hook":
-        lines.append(_hook("UserPromptSubmit", "reminder"))
-    lines.append(_result(denials=[{"tool_name": "Bash"}] if extra == "denial" else ()))
-    fault = _driver().session_fault(
-        _stream(*lines), arm=client.ARMS[shape], plugin_dir=client.PLUGIN_DIR, profile=profile
-    )
-    assert fault is not None and reason in fault
-    clean = _stream(_init(profile, plugin=client.PLUGIN_DIR if shape == "hooked" else None), _result())
-    assert _driver().session_fault(
-        clean, arm=client.ARMS[shape], plugin_dir=client.PLUGIN_DIR, profile=profile
-    ) is None
-
-
-@pytest.mark.parametrize("activation", ["none", "errored"])
-def test_no_activation_serves_nothing_and_an_unreadable_packet_blocks(tmp_path, activation) -> None:
-    """Fails when a session that never activated blocks, or an errored activation is scored."""
-
-    blocks = activation == "errored"
-    lines = [_init(tmp_path)]
-    if blocks:
-        lines += [
-            _call("toolu_9", "mcp__exomem__activate_context", {"turn": "q"}),
-            # Parseable on purpose: an error envelope is JSON too, and only is_error tells.
-            _reply("toolu_9", json.dumps({"error": "lane failed"}), is_error=True),
-        ]
-    captures, missing = _driver().packet_captures(_stream(*lines, _result()))
-    assert captures == []
-    assert (missing is not None) is blocks
-
-
-def test_a_packet_the_hook_delivers_serves_its_refs(tmp_path) -> None:
-    """Fails when a hooked session that got its packet from the hook reads as unserved."""
-
-    from epistemic.journeys.referent_capture import seed_inputs
-    from epistemic.projectors.exomem_vault import VaultProjector
-
-    from exomem._hooks.exomem_retrieve_nudge import _bounded_block, _packet_lines
-    from exomem.memory_refs import memory_ref
-
-    seed_inputs(tmp_path / "vault")
-    snapshot = VaultProjector(tmp_path / "vault").project(phase="hooked", taken_at="2026-10-11T00:00:00Z")
-    owner = _key(PET)["owner"]["ref"]
-    ref = memory_ref(snapshot.item(owner).raw["exomem_id"])
-    rendered = _bounded_block(
-        _packet_lines({"units": [{"ref": ref, "text": "a seeded fact"}]}), 4000
-    )
-    captures, missing = _driver().packet_captures(
-        _stream(_init(tmp_path), _hook("UserPromptSubmit", rendered), _result())
-    )
-    assert missing is None
-    assert {row["item_id"] for row in _driver().served_refs(captures, snapshot)} == {owner}
 
 
 @pytest.mark.parametrize(

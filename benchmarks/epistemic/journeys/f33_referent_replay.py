@@ -10,23 +10,28 @@ client sessions:
    turn resumes it. The vault is projected before the first turn and after the
    last one.
 2. **Fresh.** A positive case then opens a second, new session with its
-   owner-anchored question. The run file records the activation packet this
-   session received, from its ``activate_context`` calls or its
-   ``UserPromptSubmit`` hook, and maps the packet's refs to snapshot item ids
-   for the "uses" test. A twin asks no question.
+   owner-anchored question. The run file records every ``activate_context``
+   result this session received, and maps the packet refs to snapshot item ids
+   for the "uses" test under the rulings in :data:`USES_RULE`. The hook's
+   inject switches are removed from the child, so a packet arrives only through
+   ``activate_context``; a hook that still injects memory blocks the run. A twin
+   asks no question.
 
 **Account.** Every child runs on the profile named by ``--claude-config-dir``
-(``CLAUDE_CONFIG_DIR``). ``HOME`` stays the real home, and the f27 environment
-floor strips the variables that mark a nested session. Each session's ``init``
-line must show that profile, a subscription login, a connected exomem server
-and the client shape's plugins, or the run is blocked.
+(``CLAUDE_CONFIG_DIR``), never the default profile. ``HOME`` stays the real
+home; the f27 environment floor strips the variables that mark a nested session,
+and :data:`CHILD_ENV_REMOVED` strips API credentials.
 
 **Faults.** A harness fault blocks the run and is never scored: a non-zero exit,
-an error or non-success result, a login failure, a malformed line, a wrong
-surface, a missing packet or answer capture, or a blocked assertion. A blocked
-run is rerun under the same pins until the case has its scored repeats, at most
+an error or non-success result, a login failure, a malformed line, a server
+that did not connect, a permission denial, a hook that injected memory, a
+missing packet or answer capture, or a blocked assertion. A blocked run is rerun
+under the same pins until the case has its scored repeats, at most
 ``MAX_ATTEMPTS`` times per case per client shape; a case without them is
-``incomplete`` (PREREGISTRATION.md §7, sequence 7).
+``incomplete`` (PREREGISTRATION.md §7, sequence 7). A fault no rerun can clear
+aborts the whole driver run instead: the wrong profile, an API key, the wrong
+plugins, a hook in the hookless shape, or a model or client version that
+differs from the first invocation's.
 
 **Claims.** The manifest states the receipt's own acknowledgment status, read at
 write time. Until the founder acknowledges sequence 7, every result here is
@@ -82,28 +87,47 @@ SERVING_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         "pointers": frozenset({"ref"}),
     }
 )
-#: The same ruling for a hook-delivered packet, by the line labels the hook gives
-#: those sections (`exomem_retrieve_nudge._packet_lines`); `recent`, `session`,
-#: `state` and `upkeep` lines never serve.
-SERVING_HOOK_LABELS = frozenset({"referent", "unit", "carried", "history", "carried history", "pointer"})
+#: Ruling 1b of 2026-10-11: the anchors of a packet that the edit-time prior
+#: carried do not serve, for the same reason. The product marks that packet with
+#: this `generation.carried_by` value (`exomem.working_set`, the recency carry).
+RECENCY_CARRY = "recency"
 USES_RULE = {
     "fixed_on": "2026-10-11",
     "fixed_before_any_baseline": True,
+    "authority": "the operator's rulings, pending founder acknowledgment of sequence 7",
     "served": (
         "A ref is served when it is a packet anchor, the provenance (path or anchor) of a "
-        "served unit, or a pointer. recent_context never serves: edit time, not the "
-        "question, chooses it."
+        "served unit, or a pointer, resolved by its part before '#'. recent_context never "
+        "serves: edit time, not the question, chooses it."
+    ),
+    "recency_anchors": (
+        "The anchors of a packet whose generation.carried_by is 'recency' do not serve, for "
+        "the same reason. Anchors from the turn, focus, conversation or continuity serve."
     ),
     "no_activation": (
-        "A complete fresh stream with no activate_context call and no hook packet received "
-        "an empty packet, so 'uses' fails rather than blocks. An errored or unreadable "
-        "activation blocks."
+        "A complete fresh stream with no activate_context call received an empty packet, so "
+        "'uses' fails rather than blocks. An errored call (is_error, or a success:false "
+        "envelope) is not a packet: 'uses' is scored on the readable packets, and the run "
+        "blocks only when calls were made and none is readable."
     ),
 }
+#: Removed from every child: the hook's inject switches (current and legacy name),
+#: so a packet arrives only through activate_context, and API credentials, so the
+#: child runs on the profile's login.
+CHILD_ENV_REMOVED: tuple[str, ...] = (
+    "EXOMEM_RETRIEVE_INJECT",
+    "KB_RETRIEVE_INJECT",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
 #: The CLI's own marker for a plugin it ships, as its `init` line writes it.
 BUILTIN_PLUGIN_PATH = "builtin"
 #: The client's documented hook event that adds context before the model answers.
 HOOK_PACKET_EVENT = "UserPromptSubmit"
+
+
+class DriverAbort(client.JourneySetupError):
+    """A deterministic setup fault or a pin drift. No rerun fixes one, so the driver stops."""
 
 
 class _Proc:
@@ -153,8 +177,9 @@ def product_identity(product_root: Path) -> dict[str, Any]:
     """The git SHA of the product under test, and whether its code is dirty.
 
     The product is ``src/`` and ``plugins/``: the server, the hooks and the
-    plugin the two client shapes load. A dirty product has no SHA that names
-    it, so the driver refuses one rather than pinning a version it is not.
+    plugin the two client shapes load. ``benchmarks/`` holds the driver, the
+    projector and the assertions. A dirty tree has no SHA that names it, so the
+    driver refuses one rather than pinning a version it is not.
     """
 
     def git(*args: str) -> str:
@@ -167,17 +192,18 @@ def product_identity(product_root: Path) -> dict[str, Any]:
             )
         return completed.stdout.strip()
 
-    dirty = git("status", "--porcelain", "--", "src", "plugins")
+    dirty = git("status", "--porcelain", "--", "src", "plugins", "benchmarks")
     if dirty:
         raise client.JourneySetupError(
-            f"the product under test at {product_root} has uncommitted changes in src/ or "
-            f"plugins/, so no SHA pins it: {dirty.splitlines()[:5]}"
+            f"the checkout at {product_root} has uncommitted changes in src/, plugins/ or "
+            f"benchmarks/, so no SHA pins it: {dirty.splitlines()[:5]}"
         )
     return {
         "root": str(product_root),
         "head": git("rev-parse", "HEAD"),
         "src_tree": git("rev-parse", "HEAD:src"),
         "plugins_tree": git("rev-parse", "HEAD:plugins"),
+        "benchmarks_tree": git("rev-parse", "HEAD:benchmarks"),
     }
 
 
@@ -222,29 +248,19 @@ def _result_line(stdout: str) -> dict[str, Any]:
     return results[-1] if results else {}
 
 
-def session_fault(
+def surface_mismatch(
     stdout: str, *, arm: client.Arm, plugin_dir: Path, profile: Path
 ) -> str | None:
-    """Why this session did not run on the surface and account the run pins, or ``None``.
+    """A deterministic setup fault: the wrong profile, an API key, the wrong plugins
+    or a hook in the hookless shape. The same setup gives the same fault, so it
+    aborts the driver run instead of spending reruns on it."""
 
-    Checked after :func:`f27_replay.fault_reason`, which owns exit codes, login
-    failures, error results and malformed lines.
-    """
-
-    if client.result_subtype(stdout) != "success":
-        return "the client stream has no successful terminal result"
-    inits = _init_lines(stdout)
-    if not inits:
-        return "the client stream has no init line, so its account and surface are unknown"
-    for init in inits:
+    for init in _init_lines(stdout):
         auto = str((init.get("memory_paths") or {}).get("auto") or "")
         if not auto or not Path(auto).is_relative_to(profile):
             return f"the session ran outside the pinned profile {profile}: memory path {auto!r}"
         if init.get("apiKeySource") != "none":
             return f"the session used API key source {init.get('apiKeySource')!r}, not the login"
-        servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or ()}
-        if servers.get("exomem") != "connected":
-            return f"the exomem server is not connected: {servers.get('exomem')!r}"
         loaded = {
             str(p.get("path"))
             for p in init.get("plugins") or ()
@@ -258,6 +274,46 @@ def session_fault(
         for p in _lines(stdout)
     ):
         return "a hook ran in the hookless shape, so the profile's own hooks reached it"
+    return None
+
+
+def pin_drift(stdout: str, pins: dict[str, Any]) -> str | None:
+    """The first invocation's model and client version pin every later one."""
+
+    for init in _init_lines(stdout):
+        seen = {"model": init.get("model"), "claude_code_version": init.get("claude_code_version")}
+        if not pins:
+            pins.update(seen)
+        for key, value in seen.items():
+            if value != pins[key]:
+                return f"the {key} changed from {pins[key]!r} (first invocation) to {value!r}"
+    return None
+
+
+def session_fault(stdout: str) -> str | None:
+    """Why this session cannot be scored, though a rerun may serve, or ``None``.
+
+    Checked after :func:`f27_replay.fault_reason`, which owns exit codes, login
+    failures, error results and malformed lines.
+    """
+
+    from exomem._hooks.exomem_retrieve_nudge import _STUB_HEADER, _WORKING_SET_HEADER
+
+    if client.result_subtype(stdout) != "success":
+        return "the client stream has no successful terminal result"
+    inits = _init_lines(stdout)
+    if not inits:
+        return "the client stream has no init line, so its account and surface are unknown"
+    for init in inits:
+        servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or ()}
+        if servers.get("exomem") != "connected":
+            return f"the exomem server is not connected: {servers.get('exomem')!r}"
+    if any(
+        header in context
+        for context in _hook_contexts(stdout)
+        for header in (_WORKING_SET_HEADER, _STUB_HEADER)
+    ):
+        return "a hook injected retrieved memory; packets must come only from activate_context"
     denials = _result_line(stdout).get("permission_denials") or []
     if denials:
         return f"the client denied {len(denials)} tool call(s), so the surface differs from the shape"
@@ -314,26 +370,34 @@ def _hook_contexts(stdout: str) -> list[str]:
 
 
 def packet_captures(stdout: str) -> tuple[list[dict[str, Any]], str | None]:
-    """The packets the fresh session received, and why a capture is missing, if one is.
+    """Every ``activate_context`` result of the fresh session, and why none is readable.
 
-    A complete stream with no ``activate_context`` call and no hook context
-    received no packet: that is an empty capture, which serves nothing, not a
-    missing one. A call whose result never came back, came back as an error or
-    does not parse as a packet is a missing capture, and blocks the run.
+    No call at all is an empty packet that serves nothing (ruling 2). An errored
+    call, flagged ``is_error`` or answered with the product's ``success: false``
+    envelope, is recorded and not scored. "Uses" is scored on the readable
+    packets, and the run blocks only when calls were made and none is readable.
     """
 
     captured: list[dict[str, Any]] = []
     for call in tool_calls(stdout):
         if call["name"] != ACTIVATE_TOOL:
             continue
-        packet = _tool_payload(call["result"]) if call["result"] is not None else None
-        if call["is_error"] or packet is None:
-            return captured, (
-                f"the fresh session's activate_context call {call['id']} returned no "
-                "packet the driver could read"
-            )
-        captured.append({"source": "activate_context", "tool_use_id": call["id"], "packet": packet})
-    captured.extend({"source": "hook", "text": text} for text in _hook_contexts(stdout))
+        payload = _tool_payload(call["result"]) if call["result"] is not None else None
+        # Every packet carries `anchors` (`working_set.build_packet`); an error envelope does not.
+        readable = not call["is_error"] and isinstance(payload, dict) and "anchors" in payload
+        captured.append(
+            {
+                "tool_use_id": call["id"],
+                "readable": readable,
+                "packet": payload if readable else None,
+                "error": None if readable else (payload or call["result"]),
+            }
+        )
+    if captured and not any(capture["readable"] for capture in captured):
+        return captured, (
+            f"none of the fresh session's {len(captured)} activate_context call(s) "
+            "returned a readable packet"
+        )
     return captured, None
 
 
@@ -349,18 +413,6 @@ def _packet_refs(value: Any, path: tuple[str, ...] = ()) -> Iterable[tuple[str, 
     elif isinstance(value, list):
         for child in value:
             yield from _packet_refs(child, path)
-
-
-def _hook_lines(text: str) -> Iterable[tuple[str, str]]:
-    """``(label, ref)`` per rendered packet line, ``- label: text [ref]``.
-
-    The hook's own line format (``exomem_retrieve_nudge._packet_line``); a line
-    without a trailing ref carries nothing to serve.
-    """
-
-    for line in text.splitlines():
-        if line.startswith("- ") and line.endswith("]") and "[" in line:
-            yield line[2:].split(":", 1)[0], line.rsplit("[", 1)[1][:-1]
 
 
 def served_refs(
@@ -385,22 +437,28 @@ def served_refs(
     by_path = {item.locator: item.id for item in snapshot.items if item.locator}
     by_path.update({item.id: item.id for item in snapshot.items})
 
-    def row(source: str, section: str, field: str, ref: str, serves: bool) -> dict[str, Any]:
-        memory_id = parse_memory_ref(ref)
-        item_id = by_id.get(memory_id) if memory_id else by_path.get(ref)
-        return {"source": source, "section": section, "field": field, "ref": ref,
-                "item_id": item_id, "serves": serves}
+    def item_for(ref: str) -> str | None:
+        # A unit ref (`<memory ref>#<anchor>`) and a state ref (`<anchor>#current`)
+        # name a part of the page that comes before '#'.
+        page = ref.split("#", 1)[0]
+        memory_id = parse_memory_ref(page)
+        return by_id.get(memory_id) if memory_id else by_path.get(page)
 
     out: list[dict[str, Any]] = []
     for capture in captures:
-        if capture["source"] == "activate_context":
-            for section, value in capture["packet"].items():
-                for field, ref in _packet_refs(value):
-                    serves = field in SERVING_FIELDS.get(section, ())
-                    out.append(row("activate_context", section, field, ref, serves))
-        else:
-            for label, ref in _hook_lines(capture["text"]):
-                out.append(row("hook", label, "line", ref, label in SERVING_HOOK_LABELS))
+        if not capture["readable"]:
+            continue
+        packet = capture["packet"]
+        recency = (packet.get("generation") or {}).get("carried_by") == RECENCY_CARRY
+        for section, value in packet.items():
+            for field, ref in _packet_refs(value):
+                serves = field in SERVING_FIELDS.get(section, ()) and not (
+                    recency and section == "anchors"
+                )
+                out.append(
+                    {"section": section, "field": field, "ref": ref, "item_id": item_for(ref),
+                     "serves": serves}
+                )
     return out
 
 
@@ -467,11 +525,21 @@ def _call_rows(session: str, turn: str, stdout: str) -> list[dict[str, Any]]:
     ]
 
 
-def _fault(proc: Any, *, arm: client.Arm, profile: Path) -> str | None:
-    transcript = parse_stream_json_transcript((proc.stdout or "").splitlines())
-    return client.fault_reason(proc, transcript) or session_fault(
-        proc.stdout or "", arm=arm, plugin_dir=client.PLUGIN_DIR, profile=profile
+def _verdict(
+    proc: Any, *, arm: client.Arm, profile: Path, observed: dict[str, Any]
+) -> tuple[str, str] | None:
+    """``("aborted", why)`` for a deterministic fault or a pin drift, ``("blocked", why)``
+    for a fault a rerun may clear, or ``None``."""
+
+    stdout = proc.stdout or ""
+    abort = pin_drift(stdout, observed) or surface_mismatch(
+        stdout, arm=arm, plugin_dir=client.PLUGIN_DIR, profile=profile
     )
+    if abort is not None:
+        return "aborted", abort
+    transcript = parse_stream_json_transcript(stdout.splitlines())
+    fault = client.fault_reason(proc, transcript) or session_fault(stdout)
+    return ("blocked", fault) if fault is not None else None
 
 
 def repeat_outcome(polarity: str, assertions: Mapping[str, Mapping[str, str]]) -> str:
@@ -503,6 +571,7 @@ def run_once(
     profile: Path,
     cases_root: Path,
     floor: Mapping[str, str],
+    observed: dict[str, Any],
     runner: Runner = _subprocess_runner,
     prominence_writer: client.ProminenceWriter = client._write_prominence,
     clock: Callable[[], float] = time.monotonic,
@@ -519,17 +588,21 @@ def run_once(
     pythonpath = os.pathsep.join(
         filter(None, [str(client.REPO_ROOT / "src"), floor.get("PYTHONPATH", "")])
     )
-    pins = {
+    server_pins = {
         "EXOMEM_STATE_ROOT": str(run_dir / "state"),
         "XDG_STATE_HOME": str(run_dir / "xdg-state"),
         "PYTHONPATH": pythonpath,
     }
+    for name in CHILD_ENV_REMOVED:
+        env.pop(name, None)
     env.update(
         {
-            **pins,
+            **server_pins,
             "KB_MCP_DISABLE_MEDIA_EXTRACTION": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "CLAUDE_CONFIG_DIR": str(profile),
+            # The client version is a pin; an update mid-baseline would change it.
+            "DISABLE_AUTOUPDATER": "1",
         }
     )
     record: dict[str, Any] = {
@@ -549,8 +622,8 @@ def run_once(
         "repeat_outcome": None,
     }
 
-    def blocked(reason: str) -> dict[str, Any]:
-        record.update(status="blocked", fault_reason=reason)
+    def blocked(reason: str, status: str = "blocked") -> dict[str, Any]:
+        record.update(status=status, fault_reason=reason)
         return record
 
     for cwd in (capture_cwd, fresh_cwd):
@@ -561,7 +634,7 @@ def run_once(
             seed = _projector(vault).project(phase=shape, taken_at=taken_at)
         write_mcp_config(config, vault=vault, workdir=run_dir, python_executable=sys.executable)
         payload = json.loads(config.read_text(encoding="utf-8"))
-        payload["mcpServers"]["exomem"]["env"].update(pins)
+        payload["mcpServers"]["exomem"]["env"].update(server_pins)
         config.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         if block is not None:
             block.write_text(client.custom_instructions_block(arm.prominence)[0], encoding="utf-8")
@@ -592,9 +665,9 @@ def run_once(
         proc, wall_s = _invoke(runner, argv, capture_cwd, env, clock)
         _record_invocation(capture, turn_id, argv, proc, wall_s)
         record["tool_calls"].extend(_call_rows("capture", turn_id, proc.stdout or ""))
-        reason = _fault(proc, arm=arm, profile=profile)
-        if reason is not None:
-            return blocked(f"capture turn {turn_id}: {reason}")
+        verdict = _verdict(proc, arm=arm, profile=profile, observed=observed)
+        if verdict is not None:
+            return blocked(f"capture turn {turn_id}: {verdict[1]}", verdict[0])
 
     try:
         with _environment(env):
@@ -612,9 +685,9 @@ def run_once(
         proc, wall_s = _invoke(runner, argv, fresh_cwd, env, clock)
         _record_invocation(fresh, case.key["question_ref"], argv, proc, wall_s)
         record["tool_calls"].extend(_call_rows("fresh", case.key["question_ref"], proc.stdout or ""))
-        reason = _fault(proc, arm=arm, profile=profile)
-        if reason is not None:
-            return blocked(f"fresh session: {reason}")
+        verdict = _verdict(proc, arm=arm, profile=profile, observed=observed)
+        if verdict is not None:
+            return blocked(f"fresh session: {verdict[1]}", verdict[0])
         captures, missing = packet_captures(proc.stdout or "")
         refs = served_refs(captures, end)
         record["packet"] = {"captures": captures, "refs": refs}
@@ -697,6 +770,10 @@ def run_case_shape(
             record["repeat"] = len(outcomes)
         _write_run(run_dir, record)
         runs.append(record)
+        if record["status"] == "aborted":
+            raise DriverAbort(
+                f"{case.case_id} {shape} attempt {attempt}: {record['fault_reason']}"
+            )
     return {
         "case_id": case.case_id,
         "polarity": case.polarity,
@@ -775,17 +852,24 @@ def run_driver(
     unknown = [case_id for case_id in case_ids if case_id not in case_set]
     if unknown or not set(shapes) <= set(client.ARMS):
         raise client.JourneySetupError(f"unknown case(s) {unknown} or shape(s) {list(shapes)}")
+    parent = dict(os.environ if parent_env is None else parent_env)
     if not Path(profile).is_dir():
         raise client.JourneySetupError(f"the client profile {profile} is not a directory")
+    default_profile = Path(parent.get("HOME") or Path.home()) / ".claude"
+    if Path(profile).resolve() == default_profile.resolve():
+        raise client.JourneySetupError(
+            f"{profile} is the default client profile, which f33 runs must not use; "
+            "pass the profile reserved for these runs"
+        )
     product = dict(product) if product is not None else product_identity(client.REPO_ROOT)
     _require_in_process_product(client.REPO_ROOT)
     envelope = envelope or client.discover_agent_envelope()
     out_dir = client.refuse_unsafe_out_dir(out_dir)
     if out_dir.exists():
         raise client.JourneySetupError(f"{out_dir} exists; every driver run needs a fresh --out")
-    parent = dict(os.environ if parent_env is None else parent_env)
     floor, removed = client.environment_floor(parent)
     out_dir.mkdir(parents=True)
+    observed: dict[str, Any] = {}
 
     manifest = {
         "journey": JOURNEY,
@@ -793,7 +877,7 @@ def run_driver(
         "taken_at": taken_at,
         "cli_executable": str(envelope.executable),
         "cli_version": envelope.version,
-        "model": model,
+        "model_requested": model,
         "max_turns_per_invocation": max_turns,
         "product": product,
         "prominence": {shape: client.ARMS[shape].prominence for shape in shapes},
@@ -816,28 +900,44 @@ def run_driver(
         "client_state_written": str(Path(profile) / "projects"),
         **amendment_status(cases_root, repeats=repeats, max_attempts=max_attempts),
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
+    def write_manifest() -> None:
+        # The pins the first invocation reported; null until a session has run.
+        manifest["model"] = observed.get("model")
+        manifest["claude_code_version"] = observed.get("claude_code_version")
+        (out_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+    write_manifest()
     tables: list[dict[str, Any]] = []
-    for case_id in case_ids or sorted(case_set):
-        for shape in shapes:
-            result = run_case_shape(
-                case_set[case_id],
-                shape,
-                out_dir=out_dir,
-                repeats=repeats,
-                max_attempts=max_attempts,
-                taken_at=taken_at,
-                envelope=envelope,
-                model=model,
-                max_turns=max_turns,
-                profile=Path(profile),
-                cases_root=cases_root,
-                floor=floor,
-                **run_kwargs,
-            )
-            tables.append({**result, "runs": [_table_row(run) for run in result["runs"]]})
-            write_report(out_dir, manifest, tables)
+    try:
+        for case_id in case_ids or sorted(case_set):
+            for shape in shapes:
+                result = run_case_shape(
+                    case_set[case_id],
+                    shape,
+                    out_dir=out_dir,
+                    repeats=repeats,
+                    max_attempts=max_attempts,
+                    taken_at=taken_at,
+                    envelope=envelope,
+                    model=model,
+                    max_turns=max_turns,
+                    profile=Path(profile),
+                    cases_root=cases_root,
+                    floor=floor,
+                    observed=observed,
+                    **run_kwargs,
+                )
+                tables.append({**result, "runs": [_table_row(run) for run in result["runs"]]})
+                write_manifest()
+                write_report(out_dir, manifest, tables)
+    except DriverAbort as error:
+        manifest["aborted"] = str(error)
+        write_manifest()
+        write_report(out_dir, manifest, tables)
+        raise
     return {"manifest": manifest, "cases": tables}
 
 
@@ -890,7 +990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             envelope=envelope,
         )
     except (client.AgentEnvelopeNotDiscovered, client.JourneySetupError, cases.ReferentCaseError) as error:
-        print(f"f33 driver refused: {error}", file=sys.stderr)
+        print(f"f33 driver refused or stopped: {error}", file=sys.stderr)
         return 2
     print(result["manifest"]["claim_status"])
     for table in result["cases"]:
