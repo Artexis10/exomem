@@ -1907,9 +1907,9 @@ def op_bootstrap(
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
                     if profile == "compact" and not frozen_profile
-                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
                 ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
@@ -2992,6 +2992,7 @@ def op_find(
                         purpose=purpose,
                         cue=referent_cue,
                         expected_recall_checkpoints=catalog_proof or None,
+                        keep=admit_path,
                     )
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
@@ -5192,26 +5193,13 @@ def op_preserve(
         mark_active_mutation_committed()
         # Nothing is handed to the ledger: this call committed nothing, and the
         # path it resolved to was recorded by the call that did.
-        return {
-            "path": duplicate.path,
-            "stored_path": duplicate.path,
-            "sidecar_path": duplicate.sidecar_path,
-            "ref": duplicate.ref,
-            "state": "already_stored",
-            "outcome": "stored",
-            "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
-            "warnings": [],
-            "size": len(content.encode("utf-8")) if isinstance(content, str) else None,
-            "hash": digest or None,
-            "hash_algorithm": "sha256",
-            "media_id": f"sha256:{digest}" if digest else None,
+        return duplicate.receipt(
+            size=len(content.encode("utf-8")) if isinstance(content, str) else None,
             # The same derivation the stored branch uses, from the sanitized
             # filename: a name whose sanitized form has a different extension
             # must not yield two content types for one set of bytes.
-            "content_type": mimetypes.guess_type(
-                preserve_module._sanitize_filename(filename)
-            )[0],
-        }
+            content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
+        )
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -9213,11 +9201,14 @@ def _dispositions_view(vault_root: Path) -> dict:
     half the story: "you quieted this family, and you had put down N of its
     items by hand before you did" is what makes the decision legible later.
     """
+    from .governance import egress
+
     store = review_state_module.ReviewStateStore(vault_root)
     payload = store.load()
     dispositions = payload.get("dispositions") or {}
-    keys_by_family = _review_keys_by_family(vault_root)
-    counts = review_state_module.manual_dismissals_by_family(payload, keys_by_family)
+    # Both counts reduce every decision record, withheld pages' included, so they
+    # are the owner's aggregate: another audience gets the refusal, not a number.
+    refusal = egress.owner_only_aggregate(Path(vault_root))
     rows = []
     for family in sorted(dispositions):
         record = dispositions[family]
@@ -9239,13 +9230,18 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "why": record.get("why"),
                 "updated_at": record.get("updated_at"),
                 "origin": record.get("origin"),
-                "manual_dismissals": counts.get(family, 0),
+                "manual_dismissals": (
+                    refusal
+                    if refusal is not None
+                    else review_state_module.manual_dismissal_events(payload, family)
+                ),
             }
         )
     from . import envelope as envelope_module
 
     return {
         "dispositions": rows,
+        "effect": refusal if refusal is not None else _effect_block(vault_root, payload),
         "registered_families": sorted(review_state_module.registered_families()),
         "reason_codes": list(review_state_module.REASON_CODES),
         "note": (
@@ -9271,58 +9267,88 @@ def _dispositions_view(vault_root: Path) -> dict:
     }
 
 
-def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
-    """``family -> the record keys its current signals occupy``.
+def _effect_block(vault_root: Path, payload: dict) -> dict:
+    """Per-family effect over the last week, from records that already exist.
 
-    Composed from the live surface rather than stored, because the store keys on
-    `review_id:fingerprint` and deliberately knows nothing about which queue
-    produced a signal. Read over the all-states view of the triageable
-    categories, so a dismissed item still counts — it is precisely the thing
-    being counted.
-
-    `record_surfacing=False`: this is a COUNT, not a surface. It runs the whole
-    fusion to read one number out of it and shows nobody anything, so stamping
-    the ledger here would record a first surfacing for every item in the vault
-    every time somebody asked which families are quiet.
-
-    Attribution is by COMPONENT fingerprint, not by the item's fused one. A page
-    flagged by two families carries one fused key that `apply_for_item` records
-    against, and counting that key under both families would report one
-    dismissal twice. The component fingerprint is the per-finding identity
-    `apply_for_item` also records, so each family is charged for its own signal
-    and for nothing else.
+    The current set comes from the stored due-state projection and the
+    dreamer's sidecar, never from an audit: a family neither holds reports
+    `cleared` and `open` as unknown. When the sidecar cannot be read, every
+    upkeep family is listed with the counts it holds as unknown, and the block
+    says why: an absent family would read as one that surfaced nothing.
     """
-    out: dict[str, list[str]] = {}
-    try:
-        report = attention_module.attention(
-            vault_root,
-            categories=list(attention_module._TRIAGEABLE_CATEGORIES),
-            limit=0,
-            state="all",
-            record_surfacing=False,
-        )
-    except Exception:  # noqa: BLE001 — a count never breaks the view
-        log.debug("dispositions view could not read the review surface", exc_info=True)
-        return out
-    items = [item for item in report.items if item.item_id]
-    # ONE ref resolution for the whole view. `refs_for_paths` opens a database
-    # connection, and asking it per item made a 103-item vault open 103 of them
-    # to answer a question about four families.
-    paths: list[str] = []
-    for item in items:
-        paths.extend(review_state_module.component_paths(item))
-    refs = review_state_module.refs_for_paths(vault_root, paths) if paths else {}
-    for item in items:
-        for category, value in review_state_module.component_fingerprints(
-            vault_root, item, with_category=True, refs=refs
-        ):
-            if not category:
-                continue
-            key = f"{item.item_id}:{value}"
-            keys = out.setdefault(category, [])
-            if key not in keys:
-                keys.append(key)
-    return out
+    import datetime as dt
+
+    from . import dreamer_families, dreamer_store, due_state
+
+    since, until, window = review_state_module.effect_window()
+    current: dict[str, set[str]] = {}
+    projection = due_state.load(vault_root)
+    for category, pages in ((projection or {}).get("categories") or {}).items():
+        if isinstance(pages, dict):
+            current[str(category)] = {
+                due_state._ref_id(str(entry.get("ref") or ""))
+                for entries in pages.values()
+                for entry in due_state._unbucket(entries)
+            }
+    extra: list[tuple[str, str, str, dt.datetime]] = []
+    unknown: dict[str, str] = {}
+    view, refusal = dreamer_store.read_view_or_refusal(vault_root)
+    sidecar = refusal or "readable"
+    if view is None:
+        unknown = {family: sidecar for family in dreamer_families.family_names()}
+    else:
+        family_of = {str(row["id"]): str(row.get("family") or "") for row in view.candidates}
+        for row in view.candidates:
+            if row.get("state") == "open":
+                current.setdefault(family_of[str(row["id"])], set()).add(str(row["id"]))
+        first: dict[str, tuple[str, float]] = {}
+        for cid, fingerprint, _caller, delivered_at in view.deliveries:
+            held = first.get(cid)
+            if held is None or delivered_at < held[1]:
+                first[cid] = (fingerprint, delivered_at)
+        for cid, (fingerprint, delivered_at) in first.items():
+            family = family_of.get(cid) or ""
+            if family:
+                current.setdefault(family, set())
+                stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
+                extra.append((family, cid, fingerprint, stamp))
+    counts = review_state_module.effect_counts(
+        payload,
+        since=since,
+        until=until,
+        current={family: frozenset(ids) for family, ids in current.items()},
+        extra_surfaced=extra,
+        unknown=unknown,
+    )
+    return {
+        "dreamer_sidecar": sidecar,
+        "window": window,
+        "sources": {
+            "surfaced": (
+                "identities first stamped on the first-surfaced ledger in the window; "
+                "for upkeep families, first deliveries recorded in the dreamer's sidecar"
+            ),
+            "dismissed": "manual dismiss decisions updated in the window, counted by item",
+            "snoozed": "manual snooze decisions updated in the window, counted by item",
+            "cleared": (
+                "surfaced in the window, no decision recorded, and no longer in the "
+                "family's current set (the stored due-state projection, or the "
+                "dreamer's open candidates); unknown where only an audit could list it"
+            ),
+            "open": "surfaced in the window, no decision recorded, still in the current set",
+        },
+        "note": (
+            "The window is whole UTC days, today included: events count from `since` "
+            "00:00Z through the time of this read. "
+            "Cleared is not acted: deleting or withholding a page clears an item too. "
+            "Only surfaces that stamp the first-surfaced ledger or record a dreamer "
+            "delivery are counted, and a family absent here surfaced nothing recorded "
+            "in the window. When the dreamer's sidecar is not readable, every upkeep "
+            "family is listed with what it holds as unknown and an unknown_reason. "
+            "Rows written before families were stamped are unattributed."
+        ),
+        **counts,
+    }
 
 
 def op_triage_memory(

@@ -1386,7 +1386,14 @@ def _absence_claim_contexts() -> dict[str, AssertionContext]:
         "restructure_signal_cleared_by_state_change": AssertionContext(
             snapshot=corpus.f25_corpus(), subject="f25-subject"
         ),
+        "twin_left_no_referent": _f33_twin_context(),
     }
+
+
+def _f33_twin_context() -> AssertionContext:
+    from test_epistemic_referent_capture import twin_context
+
+    return twin_context()
 
 
 def test_the_new_operations_are_accepted_and_existing_families_are_unaffected(

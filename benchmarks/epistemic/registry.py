@@ -1,7 +1,7 @@
 """The frozen assertion registry.
 
 The assertion and family names below mirror PREREGISTRATION.md through the
-sequence-six downstream action utility amendment. Unknown names fail at
+sequence-seven referent-capture amendment. Unknown names fail at
 fixture load; assertions cannot be added after seeing a result.
 
 Registration is not release. Each family's amendment receipt controls its
@@ -87,6 +87,11 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     # Sequence 6: downstream action utility.
     "utility_action_state_valid",
     "utility_no_prohibited_effects",
+    # Sequence 7: referent capture, pending founder acknowledgment.
+    "referent_entity_typed",
+    "referent_key_edge_present",
+    "referent_used_in_fresh_session",
+    "twin_left_no_referent",
 )
 
 #: Quiet assertions: every one composes
@@ -107,6 +112,7 @@ COMPOSES_ABSENCE_META: frozenset[str] = frozenset(
         "dismissal_respected_across_passes",
         "restructure_signal_cleared_by_state_change",
         "collection_candidate_surfaced_within_budget",
+        "twin_left_no_referent",
     }
 )
 
@@ -150,6 +156,7 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f30", "artifact_role_promotion_replay"),
     ("f31", "transient_state_hygiene_replay"),
     ("f32", "utility_action_episode"),
+    ("f33", "referent_capture_replay"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -196,6 +203,7 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f30": 5,
         "f31": 5,
         "f32": 6,
+        "f33": 7,
     }
 )
 
@@ -228,6 +236,11 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
         "role_state_settled_with_provenance",
         "transient_signal_delivered_after_write",
         "transient_state_settled_without_dismissal",
+        # f33 reads its answer-key entry by the case id the subject names.
+        "referent_entity_typed",
+        "referent_key_edge_present",
+        "referent_used_in_fresh_session",
+        "twin_left_no_referent",
         # f27's pair reads its expectation out of the corpus the subject names.
         # Subject-less both block with the reason, but blocking at evaluation is
         # late: the mistake is visible at load, and a scenario that forgot the
@@ -251,6 +264,8 @@ REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
         "ledger_state_matches_expectation",
         "role_state_settled_with_provenance",
         "transient_state_settled_without_dismissal",
+        # f33's twin counts only what the run added to this arm's seeded vault.
+        "twin_left_no_referent",
         # f27's false-write dual diffs pages against the seeded vault, so the
         # trajectory owes a snapshot taken before the first agent turn. Without
         # it a scaffold page the harness itself laid would be scored as a page

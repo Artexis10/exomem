@@ -108,6 +108,25 @@ class AmendmentReceipt(_StrictModel):
     ratifier: str | None = Field(default=None, min_length=1)
     acknowledged_on: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     catastrophic_set_decision: Literal["accept", "strike"] | None = None
+    #: Repository-relative fixture path -> SHA-256 of its bytes, for an amendment
+    #: whose cases and answer key are frozen with it. Optional and absent from
+    #: every receipt before sequence 7; a loader that finds a digest here refuses
+    #: fixture bytes that differ from it.
+    fixture_sha256: dict[str, str] | None = None
+
+    @field_validator("fixture_sha256")
+    @classmethod
+    def _fixture_digests_are_sha256(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("fixture digests, when present, must name at least one file")
+        for path, digest in value.items():
+            if not path.strip() or path.startswith("/") or re.fullmatch(_SHA256, digest) is None:
+                raise ValueError(f"fixture digest entry is invalid: {path!r}")
+        return value
 
     @field_validator("affected_sections")
     @classmethod

@@ -434,19 +434,7 @@ def attention(
     # only by a quiet family would still occupy a row with no reason on it, and
     # a doubly-flagged item would keep a rank it earned from a signal the user
     # asked not to hear about.
-    findings = [
-        finding
-        for finding in report.findings
-        if finding.category not in excluded
-        and (
-            finding.category != "unreflected_observations"
-            or (
-                (due_at := _observation_due_at(finding)) is not None
-                and due_at <= effective_now
-            )
-        )
-    ]
-    findings = _decided_findings(vault_root, findings)
+    findings = _reviewable(vault_root, report.findings, excluded=excluded, now=effective_now)
     ranked = _rank(findings, categories=resolved, limit=0)
     if (report.metadata or {}).get("coverage") is not None:
         ranked.meta = {"coverage": report.metadata["coverage"]}
@@ -460,6 +448,27 @@ def attention(
         annotations=annotations,
         record_surfacing=record_surfacing,
     )
+
+
+def _reviewable(
+    vault_root: Path,
+    findings: list[AuditFinding],
+    *,
+    excluded: frozenset[str],
+    now: dt.datetime,
+) -> list[AuditFinding]:
+    """The findings a review may rank: no excluded family, observations past their
+    grace, and only what this audience may see."""
+    kept = [
+        finding
+        for finding in findings
+        if finding.category not in excluded
+        and (
+            finding.category != "unreflected_observations"
+            or ((due_at := _observation_due_at(finding)) is not None and due_at <= now)
+        )
+    ]
+    return _decided_findings(vault_root, kept)
 
 
 def _decided_findings(vault_root: Path, findings: list[AuditFinding]) -> list[AuditFinding]:
@@ -672,6 +681,55 @@ def _item_by_ref_fallback(
     return None
 
 
+def _item_from_projection(
+    vault_root: Path, wanted: str, expected_fingerprint: str, *, today=None
+) -> AttentionItem | None:
+    """The due signal a due-state row published, from its stored entry and its page.
+
+    Separate and named so it is a mechanism a test can remove. A caller that
+    round-trips the fingerprint a due-state row published asks for that one
+    signal, which the whole-vault path also answers (`item_by_ref` narrows to
+    the matching component), but only after attention, activation and a wider
+    attention pass: whole-vault audits for one item, so no agent could act on a
+    due item before its client timed out.
+
+    It answers only when the expected fingerprint is the stored entry's and the
+    page's own re-check reproduces that entry exactly: the same id, one
+    category, the same fingerprint. Anything else returns None, and the caller
+    takes the whole-vault path.
+    """
+    from . import due_state
+
+    stored = due_state.stored_identity(vault_root, wanted)
+    if stored is None or stored[0] != expected_fingerprint:
+        return None
+    fingerprint, category, rel_path = stored
+    now = dt.datetime.now(dt.UTC)
+    today = today or now.date()
+    findings = due_state.recheck_page(vault_root, category, rel_path, today=today, now=now)
+    if not findings:
+        return None
+    payload = _review_state_payload(vault_root)
+    # Named, as the wider lookup names every triageable queue: a quiet or off
+    # family's item stays reachable for a decision.
+    excluded, annotations = _excluded_families(payload, requested={category}, state="all")
+    findings = _reviewable(vault_root, findings, excluded=excluded, now=now)
+    report = _apply_review_state(
+        vault_root,
+        _rank(findings, categories={category}, limit=0),
+        state="all",
+        limit=0,
+        today=today,
+        payload=payload,
+        annotations=annotations,
+        record_surfacing=False,
+    )
+    for item in report.items:
+        if item.item_id == wanted and item.categories == [category]:
+            return item if item.fingerprint == fingerprint else None
+    return None
+
+
 def entity_candidate_by_ref(
     vault_root: Path,
     reference: str,
@@ -725,8 +783,20 @@ def item_by_ref(
     item was reachable by no path at all — read on every carrier, impossible to
     dismiss. Widening the search only after a miss buys that without moving a
     single existing item's identity.
+
+    A caller holding the fingerprint a due-state row published gets that signal
+    from its stored entry first (`_item_from_projection`): the same item the
+    component narrowing below returns, without the whole-vault passes.
     """
     wanted = review_state_module.parse_review_ref(reference)
+    if expected_fingerprint:
+        # Only a due row's own fingerprint selects the due signal alone; a bare
+        # ref keeps resolving the item the review surface lists, fused or not.
+        bounded = _item_from_projection(
+            vault_root, wanted, expected_fingerprint, today=today
+        )
+        if bounded is not None:
+            return bounded
     found: AttentionItem | None = None
     for resolver in (attention, activation):
         # A scan to resolve ONE reference. Stamping it would record a first
@@ -871,8 +941,14 @@ def _stamp_first_surfaced(
             item.first_surfaced_at = value
 
 
-def _recordable(vault_root: Path, items: list[AttentionItem]) -> list[tuple[str, str]]:
-    """The `(item_id, fingerprint)` pairs this audience may have a ledger row for.
+def _recordable(
+    vault_root: Path, items: list[AttentionItem]
+) -> list[tuple[str, str, str | None]]:
+    """The `(item_id, fingerprint, family)` rows this audience may have a ledger row for.
+
+    The family is the item's one category. A fused item two families flag has
+    none, as in `review_state.apply_for_item`: charging either family would
+    count a surfacing the other one made.
 
     The egress consult runs inside its OWN disclosure boundary, mirroring
     `due_state.block_for_write` and for the same reason: `release_walk_filter`
@@ -887,7 +963,11 @@ def _recordable(vault_root: Path, items: list[AttentionItem]) -> list[tuple[str,
     with egress_module.disclosure_boundary(Path(vault_root), "review_ledger"):
         keep = _egress_keep(vault_root)
         return [
-            (item.item_id, item.fingerprint)
+            (
+                item.item_id,
+                item.fingerprint,
+                item.categories[0] if len(item.categories) == 1 else None,
+            )
             for item in items
             if item.item_id
             and item.fingerprint

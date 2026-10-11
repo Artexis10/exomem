@@ -31,9 +31,16 @@ Controls. `EXOMEM_DREAMER` (a kill switch that overrides the file), else the
 config key `dreamer` in the per-machine config file: `off` (default: no thread,
 no sidecar), `on`, or `paused` (the thread lives, runs no tick and keeps its
 checkpoint). The worker re-reads the setting once per poll, so pause and resume
-take effect without a restart. There is deliberately no out-of-process run:
-a second process driving the pass against a live service is exactly what the
-live-cell rules forbid.
+take effect without a restart. A serving process started with the dreamer off
+starts the worker when the setting turns on, from the compute-mode config poll
+(`reconcile_setting`). There is deliberately no out-of-process run: a second
+process driving the pass against a live service is exactly what the live-cell
+rules forbid.
+
+Visibility. Health is recorded in the sidecar at the end of a tick, and also
+within one poll of the gate holding the worker for a new reason, so a process
+without the worker (the CLI, an upkeep review elsewhere) can say why no tick
+has run.
 """
 
 from __future__ import annotations
@@ -129,10 +136,17 @@ class _State:
     vault_generation: int | None = None
     vault_changed_at: float = field(default_factory=_time.monotonic)
     ledger: CpuLedger = field(default_factory=CpuLedger)
+    #: The waiting reason last written to the sidecar, and when (monotonic).
+    recorded_reason: str | None = None
+    recorded_mono: float | None = None
 
 
 _LOCK = threading.Lock()
 _thread: threading.Thread | None = None
+#: The vault this process hosts the worker for. `start` sets it whatever the
+#: setting, and only the serving runtime calls `start`, so a process without it
+#: (the CLI) has no worker state of its own to report.
+_host: Path | None = None
 #: The running worker's stop signal. Each start makes a new one, so a worker
 #: stopped mid-tick past the join timeout still exits after that tick.
 _stop = threading.Event()
@@ -202,34 +216,59 @@ def reset_for_tests() -> None:
 
 
 def start(vault_root: Path) -> threading.Thread | None:
-    """Start the worker when enabled. Idempotent; off creates nothing at all."""
-    global _thread, _stop
+    """Start the worker when enabled. Idempotent; off creates nothing at all.
+
+    Off still makes this process the worker's host, so `reconcile_setting`
+    starts the worker once the setting turns on: the managed service is
+    upgraded in place and rarely restarted, so "on at the next restart" could
+    mean never.
+    """
+    global _host
+    from . import mode
+
+    mode.add_config_listener(reconcile_setting)
     current = setting()
-    if current == "off":
-        return None
+    # Hosting and the start share one `_LOCK` hold, as in `reconcile_setting`: a
+    # `stop()` lands before it (this start then hosts and runs) or after it (it
+    # stops the new worker), never between, which launched a worker after `stop()`.
     with _LOCK:
-        if _thread is not None and _thread.is_alive():
-            return _thread
-        stop_event = threading.Event()
-        _stop = stop_event
-        _STATE.setting = current
-        _STATE.phase = current
-        _STATE.vault_changed_at = _time.monotonic()
-        thread = threading.Thread(
-            target=_run, args=(Path(vault_root), stop_event), name=THREAD_NAME, daemon=True
-        )
-        _thread = thread
-        thread.start()
-    log.info("dreamer started (%s)", current)
+        _host = Path(vault_root)
+        if current == "off":
+            return None
+        thread, started = _launch_locked(_host, current)
+    if started:
+        log.info("dreamer started (%s)", current)
     return thread
 
 
+def _launch_locked(vault_root: Path, current: str) -> tuple[threading.Thread, bool]:
+    """The worker thread, started unless one runs, and whether it was. Holds `_LOCK`."""
+    global _thread, _stop
+    if _thread is not None and _thread.is_alive():
+        return _thread, False
+    stop_event = threading.Event()
+    _stop = stop_event
+    _STATE.setting = current
+    _STATE.phase = current
+    _STATE.vault_changed_at = _time.monotonic()
+    thread = threading.Thread(
+        target=_run, args=(vault_root, stop_event), name=THREAD_NAME, daemon=True
+    )
+    _thread = thread
+    thread.start()
+    return thread, True
+
+
 def stop(timeout: float = 2.0) -> None:
-    """Stop the worker and wait briefly. Safe to call twice or when never started."""
-    global _thread
+    """Stop the worker and wait briefly. Safe to call twice or when never started.
+
+    The process stops hosting too, so a later setting change starts nothing.
+    """
+    global _thread, _host
     with _LOCK:
         thread = _thread
         _thread = None
+        _host = None
         stop_event = _stop
     stop_event.set()
     if thread is not None and thread is not threading.current_thread():
@@ -240,6 +279,40 @@ def stop(timeout: float = 2.0) -> None:
 def running() -> bool:
     with _LOCK:
         return _thread is not None and _thread.is_alive()
+
+
+def hosting() -> bool:
+    """True in the serving process that owns the worker, running or not."""
+    with _LOCK:
+        return _host is not None
+
+
+def reconcile_setting() -> None:
+    """Start the hosted worker once the setting leaves `off`. Never raises.
+
+    Called on every compute-mode config poll. Cheap when nothing changed: one
+    lock and, while no worker runs, one config read.
+    """
+    with _LOCK:
+        if _host is None or (_thread is not None and _thread.is_alive()):
+            return
+    try:
+        current = setting()
+        if current == "off":
+            return
+        # The host check and the start share one `_LOCK` hold, and this path
+        # never assigns `_host`: a `stop()` lands either before the hold (no host,
+        # nothing starts) or after the start (it stops the new worker), so a
+        # config poll racing shutdown cannot leave a worker running. No test
+        # forces that interleaving without pinning where this reads the setting.
+        with _LOCK:
+            if _host is None:
+                return
+            started = _launch_locked(_host, current)[1]
+        if started:
+            log.info("dreamer started (%s) after a setting change", current)
+    except Exception:  # noqa: BLE001 - upkeep must never break the config poll
+        log.warning("dreamer: start after a setting change failed", exc_info=True)
 
 
 def delivering() -> bool:
@@ -324,6 +397,9 @@ def _loop_once(vault_root: Path, clock: Clock, stop_event: threading.Event | Non
     sensor_worker.supervise(vault_root, gate_run=decision.run, gate_reason=decision.reason)
     if not decision.run:
         _note_waiting(decision.reason, clock)
+        if signals.setting == "on" and not signals.standby:
+            # Off and paused create no sidecar, and a standby owns no state.
+            _record_waiting(vault_root, clock)
         # No tick will record the carrier's deliveries (paused delivers too).
         _flush_deliveries(vault_root)
         sleep = decision.sleep_s
@@ -355,6 +431,45 @@ def _note_waiting(reason: str, clock: Clock) -> None:
             _STATE.phase = "failed"
         else:
             _STATE.phase = "waiting"
+
+
+def _record_waiting(vault_root: Path, clock: Clock) -> None:
+    """Write the current wait into the sidecar's health. Never raises.
+
+    Health is otherwise written only at the end of a tick, so a worker the gate
+    held from boot left nothing another process could read. It is written when
+    the reason differs from the one on record, at most once per poll, merged
+    over the last tick's fields: a gate that flips between reasons on every
+    request costs one small write per poll, and a lasting reason is on record
+    within one poll.
+    """
+    now = clock.monotonic()
+    with _LOCK:
+        if _STATE.waiting_reason == _STATE.recorded_reason:
+            return
+        if _STATE.recorded_mono is not None and now - _STATE.recorded_mono < policy.POLL_SECONDS:
+            return
+        waiting = {
+            "state": _STATE.phase,
+            "waiting_reason": _STATE.waiting_reason,
+            "waiting_since": _STATE.waiting_since,
+            "recorded_at": clock.time(),
+        }
+    store = dreamer_store.DreamerStore(vault_root)
+    conn = None
+    try:
+        conn = store.connect()
+        with store.write(conn):
+            store.set_health(conn, {**store.health(conn), **waiting})
+    except Exception:  # noqa: BLE001 - the next poll retries
+        log.debug("dreamer: waiting reason not recorded", exc_info=True)
+        return
+    finally:
+        if conn is not None:
+            store.close(conn)
+    with _LOCK:
+        _STATE.recorded_reason = waiting["waiting_reason"]
+        _STATE.recorded_mono = now
 
 
 def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickSignals:
@@ -711,9 +826,13 @@ def _record_tick(
         else:
             state.phase = "idle" if state.waiting_reason is None else "waiting"
         health = _health_locked(now_mono)
-    if conn is None or stop == "idle":
+    if conn is None:
         return
     try:
+        if stop == "idle" and store.health(conn).get("last_tick_at") is not None:
+            # An idle poll writes nothing once a tick is on record. The first
+            # one still writes, or an empty vault would read as never ticked.
+            return
         pending = store.pending_count(conn)
         # The flag outlives the drain until the next delta is queued: a reseed
         # with nothing pending has drained.
@@ -730,10 +849,15 @@ def _record_tick(
             family.name: not (family.global_counts and partial)
             for family in dreamer_families.REGISTRY
         }
+        health["recorded_at"] = clock.time()
         with store.write(conn):
             store.set_health(conn, health)
     except Exception:  # noqa: BLE001 - health is best effort; the tick is recorded
         log.debug("dreamer: health not recorded", exc_info=True)
+        return
+    with _LOCK:
+        _STATE.recorded_reason = health["waiting_reason"]
+        _STATE.recorded_mono = now_mono
 
 
 def _health_locked(now_mono: float) -> dict[str, Any]:

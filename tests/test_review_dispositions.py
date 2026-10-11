@@ -515,16 +515,12 @@ def test_manual_dismissals_are_attributed_by_component_not_by_the_fused_key(
 ) -> None:
     """The count follows the per-finding identity, so it survives recomposition.
 
-    Keyed on the FUSED fingerprint the count is charged to whichever families
-    the item happens to be flagged by at read time, and it disappears entirely
-    the moment the item's composition moves — because the fused key the view
-    looks up is then a key nothing was ever recorded against. Here the page is
-    dismissed while `prediction_window` is its only flag and then loses its
-    relations, which earns it `relation_debt` and changes the fused fingerprint.
-
-    The component fingerprint is the one `apply_for_item` fanned the decision
-    out to, so `prediction_window` keeps its one dismissal and `relation_debt`
-    — whose signal nobody put down — correctly has none.
+    Here the page is dismissed while `prediction_window` is its only flag and
+    then loses its relations, which earns it `relation_debt` and changes the
+    fused fingerprint. The decision records carry the family of the component
+    `apply_for_item` fanned the decision out to, so `prediction_window` keeps
+    its one dismissal and `relation_debt`, whose signal nobody put down, has
+    none.
     """
     overdue_prediction(vault, "nag-evolving")
     scratch_page(vault)
@@ -544,27 +540,9 @@ def test_manual_dismissals_are_attributed_by_component_not_by_the_fused_key(
     )
     find_module.clear_cache()
 
-    keys = commands._review_keys_by_family(vault)
     payload = review_state.ReviewStateStore(vault).load()
-    counts = review_state.manual_dismissals_by_family(payload, keys)
-    assert counts[FAMILY] == 1
-    assert counts["relation_debt"] == 0
-
-    # The fused key the item now reports is not the one the decision was
-    # recorded against — which is exactly why attributing by it loses the count.
-    recomposed = [
-        entry
-        for entry in commands.op_attention(vault, limit=0, state="all")["items"]
-        if "nag-evolving" in entry["path"]
-    ][0]
-    fused = {
-        category: [f"{recomposed['item_id']}:{recomposed['fingerprint']}"]
-        for category in recomposed["categories"]
-    }
-    assert review_state.manual_dismissals_by_family(payload, fused) == {
-        FAMILY: 0,
-        "relation_debt": 0,
-    }
+    assert review_state.manual_dismissal_events(payload, FAMILY) == 1
+    assert review_state.manual_dismissal_events(payload, "relation_debt") == 0
 
 
 # ==========================================================================
@@ -804,116 +782,225 @@ def test_compact_bootstrap_says_a_quiet_family_is_not_a_clean_one(vault: Path) -
 
 
 # ==========================================================================
-# the count is composed by the SHARED composer, and resolves refs once
+# the effect block: what each family surfaced, and what became of it
 # ==========================================================================
 
 
-def test_the_count_follows_the_shared_composer_rather_than_a_local_copy(
+def test_the_effect_block_counts_what_each_family_surfaced_and_what_became_of_it(
+    vault: Path,
+) -> None:
+    """Nothing recorded per family what it surfaced or what came of it, so the
+    owner could not tell whether sensing had any effect at all. The carriers
+    stamped no family, and a family only an audit can list must say `unknown`
+    rather than a `cleared` of 0 that reads as "nothing happened"."""
+    from exomem import due_state
+
+    for slug in ("nag-open", "nag-dismissed", "nag-deleted"):
+        overdue_prediction(vault, slug)
+    scratch_page(vault)
+    due_state.reset_emission_state()
+    block = due_state.served(vault)
+    assert due_state.should_emit(block, vault_root=vault)  # delivered, so stamped
+    refs = {
+        item["path"].rsplit("/", 1)[-1]: item["ref"]
+        for item in commands.op_attention(vault, categories=[FAMILY], limit=0)["items"]
+    }
+    commands.op_triage_memory(
+        vault, ref=refs["nag-dismissed.md"], action="dismiss", why="handled: done"
+    )
+    (vault / "Knowledge Base/Notes/Insights/nag-deleted.md").unlink()
+    find_module.clear_cache()
+    due_state.reconcile(vault)
+    # A row stamped before families were, and one of a family no stored set lists.
+    review_state.record_surfaced(vault, [("0" * 24, "f" * 24)], surface="review")
+    review_state.record_surfaced(vault, [("1" * 24, "e" * 24, "relation_debt")], surface="review")
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
+    assert set(effect["sources"]) == {"surfaced", "dismissed", "snoozed", "cleared", "open"}
+    assert effect["families"][FAMILY] == {
+        "surfaced": 3,
+        "dismissed": 1,
+        "snoozed": 0,
+        "cleared": 1,
+        "open": 1,
+    }
+    assert effect["families"]["relation_debt"]["cleared"] == "unknown"
+    assert effect["families"]["relation_debt"]["open"] == "unknown"
+    assert effect["unattributed"]["surfaced"] == 1
+
+
+def test_a_due_state_delivery_is_charged_to_its_family(vault: Path) -> None:
+    """The carrier stamped no family, so a family that reached the agent only on
+    a due-state block showed no effect at all."""
+    from exomem import due_state
+
+    overdue_prediction(vault, "nag-carried")
+    scratch_page(vault)
+    due_state.reset_emission_state()
+    assert due_state.should_emit(due_state.served(vault), vault_root=vault)
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+    assert effect["unattributed"]["surfaced"] == 0
+
+
+def test_an_attention_surfacing_is_charged_to_its_family(vault: Path) -> None:
+    """The attention surface stamped no family, so a family the owner reviewed
+    only there showed no effect at all."""
+    overdue_prediction(vault, "nag-listed")
+    scratch_page(vault)
+    assert commands.op_attention(vault, categories=[FAMILY], limit=0)["items"]
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+    assert effect["unattributed"]["surfaced"] == 0
+
+
+def test_two_reads_a_second_apart_with_no_event_between_them_are_identical(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stub the one composer; the dispositions count must move with it.
+    """The window was stated to the second, so the block's bytes changed every
+    second with no event behind the change, and a carrier compared across two
+    reads differed by the clock alone."""
+    import datetime as dt
+    import types
 
-    The S1 blocker was a second hand-rolled derivation of the component
-    fingerprint drifting from the one `apply_for_item` records against, which
-    under-counts silently. A local copy passes every test written against real
-    fingerprints, because both derivations agree until one of them changes — so
-    the only test that can catch it stubs the canonical implementation and
-    asserts the caller returns the stub.
-    """
-    doubly_flagged(vault, "nag-shared")
+    class _Clock(dt.datetime):
+        at = dt.datetime(2026, 10, 3, 12, 10, 55, tzinfo=dt.UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.at if tz is None else cls.at.astimezone(tz)
+
+    frozen = types.SimpleNamespace(**{**vars(dt), "datetime": _Clock})
+    monkeypatch.setattr(review_state, "dt", frozen)
+    review_state.record_surfaced(vault, [("3" * 24, "c" * 16, FAMILY)], surface="review")
+
+    first = commands.op_review_memory(vault, mode="dispositions")["effect"]
+    _Clock.at += dt.timedelta(seconds=1)
+    second = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert first["families"][FAMILY]["surfaced"] == 1
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    assert first["window"] == {"days": 7, "since": "2026-09-27", "through": "2026-10-03"}
+
+
+def test_a_fingerprint_change_inside_the_window_is_one_surfacing(vault: Path) -> None:
+    """The ledger keys a row by item and fingerprint, so an item whose signal
+    changed inside the window counted as two surfacings."""
+    review_state.record_surfaced(vault, [("2" * 24, "a" * 16, FAMILY)], surface="review")
+    review_state.record_surfaced(vault, [("2" * 24, "b" * 16, FAMILY)], surface="review")
+
+    effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+
+    assert effect["families"][FAMILY]["surfaced"] == 1
+
+
+@pytest.mark.parametrize("state", ["unreadable", "locked"])
+def test_an_unreadable_dreamer_sidecar_leaves_every_upkeep_family_unknown(
+    vault: Path, state: str
+) -> None:
+    """A failed sidecar read dropped every upkeep family from the block, and the
+    note said an absent family surfaced nothing: a failed read shown as a
+    complete one. A lock is named apart from damage, so nobody deletes a
+    healthy sidecar that a write was holding."""
+    import sqlite3
+
+    from exomem import dreamer_families, dreamer_store
+
+    sidecar = dreamer_store.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    holder = None
+    if state == "locked":
+        holder = sqlite3.connect(sidecar)
+        holder.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        holder.execute("INSERT INTO meta VALUES ('schema', ?)", (str(dreamer_store.SCHEMA_VERSION),))
+        holder.commit()
+        holder.execute("BEGIN EXCLUSIVE")
+    else:
+        sidecar.write_bytes(b"not a database file " * 64)
+    try:
+        effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
+    finally:
+        if holder is not None:
+            holder.rollback()
+            holder.close()
+
+    assert effect["dreamer_sidecar"] == state
+    for family in dreamer_families.family_names():
+        assert effect["families"][family] == {
+            "surfaced": "unknown",
+            "dismissed": 0,
+            "snoozed": 0,
+            "cleared": "unknown",
+            "open": "unknown",
+            "unknown_reason": state,
+        }
+
+
+def test_the_dismissal_and_effect_counts_are_served_to_the_owner_only(vault: Path) -> None:
+    """Both counts reduce every decision record, withheld pages' included, so a
+    count served to another audience moves with pages it may not see."""
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+
+    overdue_prediction(vault)
     scratch_page(vault)
-
-    monkeypatch.setattr(
-        review_state,
-        "component_fingerprints",
-        lambda _vault, _item, **_kwargs: [("prediction_window", "stubbed-value")],
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "withheld.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Withheld\n"
+        'paths: ["Notes/Withheld/**"]\n',
+        encoding="utf-8",
     )
-    keys = commands._review_keys_by_family(vault)
+    (governance / "rules" / "withheld-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        f"audience: external\nceiling: {egress.LEVEL_NONE}\n",
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    find_module.clear_cache()
 
-    assert list(keys) == ["prediction_window"]
-    assert all(key.endswith(":stubbed-value") for key in keys["prediction_window"]), keys
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        restricted = commands.op_review_memory(vault, mode="dispositions")
+    with request_scope(owner_principal(surface="mcp")):
+        owner = commands.op_review_memory(vault, mode="dispositions")
+
+    refusal = {"available": False, "reason": "audience_restricted"}
+    assert restricted["effect"] == refusal
+    assert [row["manual_dismissals"] for row in restricted["dispositions"]] == [refusal]
+    assert owner["effect"]["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
+    assert [row["manual_dismissals"] for row in owner["dispositions"]] == [0]
 
 
-def test_the_counts_ref_lookups_do_not_scale_with_the_vault(
+def test_the_dispositions_view_counts_dismissals_without_an_audit(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One `refs_for_paths` for the whole view, however many items it counts.
+    """It ran the whole attention pass to count dismissals, and timed out after
+    five minutes on the owner's vault. The records already carry the family."""
+    from exomem import audit as audit_module
 
-    `refs_for_paths` opens a database connection. Asking it per item made the
-    cost of "which families are quiet" scale with the vault rather than with the
-    number of families, which is the wrong axis entirely for a view that returns
-    four rows.
-
-    Asserted as INVARIANCE across vault size rather than as an absolute count,
-    because the attention scan underneath does its own single resolution and
-    this test is not about that one. A per-item lookup shows up here as a count
-    that tracks the item count; a hoisted one does not move at all.
-
-    The second half bounds the SQL underneath, which the invariance above cannot
-    see. `refs_for_paths` is now chunked, so the honest expectation is
-    `ceil(paths / REFS_QUERY_CHUNK)` batches — a function of the chunk, never of
-    the item count. Pinned with a deliberately tiny chunk so the ceiling
-    arithmetic is exercised rather than trivially satisfied by one batch.
-    """
-    import math
-
-    from exomem import memory_refs
-
-    def lookups(count: int) -> tuple[int, int, list[int]]:
-        for index in range(count):
-            overdue_prediction(vault, f"nag-many-{index}")
-        find_module.clear_cache()
-        calls: list[int] = []
-        real = review_state.refs_for_paths
-
-        def counting(vault_root, paths):
-            calls.append(len(paths))
-            return real(vault_root, paths)
-
-        monkeypatch.setattr(review_state, "refs_for_paths", counting)
-        keys = commands._review_keys_by_family(vault)
-        monkeypatch.setattr(review_state, "refs_for_paths", real)
-        return len(calls), len(keys.get(FAMILY, [])), calls
-
+    overdue_prediction(vault)
     scratch_page(vault)
-    few_calls, few_items, _ = lookups(2)
-    many_calls, many_items, many_lengths = lookups(12)
-
-    assert (few_items, many_items) == (2, 12), (few_items, many_items)
-    assert few_calls == many_calls, (
-        f"{few_calls} ref lookups for {few_items} items but {many_calls} for "
-        f"{many_items}: the view is resolving refs per item"
-    )
-
-    # The chunk bound, measured on the view's own (largest) resolution.
-    resolved = max(many_lengths)
-    assert resolved >= many_items, many_lengths
-    chunk = 4
-    batches: list[int] = []
-    real_batch = memory_refs.ReferenceIndex._refs_for_paths_batch
-
-    def counting_batch(self, wanted, *, recall_reader=False):
-        batches.append(len(wanted))
-        return real_batch(self, wanted, recall_reader=recall_reader)
-
-    monkeypatch.setattr(memory_refs, "REFS_QUERY_CHUNK", chunk)
+    commands.op_triage_memory(vault, ref=FAMILY_REF, action="quiet", why=WHY)
+    item = commands.op_attention(vault, categories=[FAMILY], limit=0)["items"][0]
+    commands.op_triage_memory(vault, ref=item["ref"], action="dismiss", why="handled: done")
+    audits: list[object] = []
+    real = audit_module.audit
     monkeypatch.setattr(
-        memory_refs.ReferenceIndex, "_refs_for_paths_batch", counting_batch
+        audit_module, "audit", lambda *a, **k: (audits.append(a), real(*a, **k))[1]
     )
-    view_paths: list[str] = []
-    report = attention_module.attention(
-        vault,
-        categories=list(attention_module._TRIAGEABLE_CATEGORIES),
-        limit=0,
-        state="all",
-        record_surfacing=False,
-    )
-    for item in report.items:
-        view_paths.extend(review_state.component_paths(item))
-    batches.clear()
-    review_state.refs_for_paths(vault, view_paths)
 
-    unique = len(dict.fromkeys(p.replace("\\", "/").lstrip("/") for p in view_paths if p))
-    assert unique > chunk, unique
-    assert len(batches) == math.ceil(unique / chunk), (unique, chunk, batches)
-    assert max(batches) <= chunk, batches
+    view = commands.op_review_memory(vault, mode="dispositions")
+
+    assert audits == []
+    assert {row["family"]: row for row in view["dispositions"]}[FAMILY]["manual_dismissals"] == 1

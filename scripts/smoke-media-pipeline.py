@@ -20,9 +20,13 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scratch_root  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 TOKEN = "smoke-token"
@@ -38,7 +42,7 @@ def _wait(predicate, *, timeout=120.0, what="condition"):
 
 
 def _missing_dependencies() -> list[str]:
-    modules = ("PIL", "fitz", "pytesseract", "faster_whisper", "sentence_transformers", "av")
+    modules = ("PIL", "fitz", "faster_whisper", "sentence_transformers", "av")
     missing = [name for name in modules if importlib.util.find_spec(name) is None]
     missing.extend(name for name in ("tesseract", "espeak", "ffmpeg") if not shutil.which(name))
     return missing
@@ -68,7 +72,11 @@ def main() -> int:
     os.environ.setdefault("EXOMEM_EMBED_DEVICE", "cpu")
     os.environ.setdefault("EXOMEM_CLIP_DEVICE", "cpu")
     os.environ.setdefault("EXOMEM_ASR_DEVICE", "cpu")
-    vault = Path(tempfile.mkdtemp()) / "vault"
+    with scratch_root.scratch_root("exomem-media-smoke-") as root:
+        return _smoke(root / "vault")
+
+
+def _smoke(vault: Path) -> int:
     shutil.copytree(REPO / "tests" / "fixtures", vault)
     os.environ["EXOMEM_VAULT_PATH"] = str(vault)
     os.environ["EXOMEM_UPLOAD_TOKEN"] = TOKEN

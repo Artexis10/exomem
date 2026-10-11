@@ -1,0 +1,34 @@
+{
+  "corpus_id": "f33-referent-capture-v1",
+  "pages": [
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Lotte Brandvold\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a01\n---\n\n# Lotte Brandvold\n\n## Summary\n\nA colleague on the design team.\n",
+      "path": "Knowledge Base/Entities/People/Lotte Brandvold.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Casimir Oduya\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a02\n---\n\n# Casimir Oduya\n\n## Summary\n\nA neighbour who helps with the weekend volunteer team.\n",
+      "path": "Knowledge Base/Entities/People/Casimir Oduya.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Henrike Abernathy\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a03\n---\n\n# Henrike Abernathy\n\n## Summary\n\nThe office manager at the studio.\n",
+      "path": "Knowledge Base/Entities/People/Henrike Abernathy.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Wendell Marsh\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a04\n---\n\n# Wendell Marsh\n\n## Summary\n\nA baker I know from the weekend market.\n",
+      "path": "Knowledge Base/Entities/People/Wendell Marsh.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Rosalind Quaye\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a05\n---\n\n# Rosalind Quaye\n\n## Summary\n\nA friend from the evening language course.\n",
+      "path": "Knowledge Base/Entities/People/Rosalind Quaye.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: person\ntitle: Tobias Hallworth\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [people]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a06\n---\n\n# Tobias Hallworth\n\n## Summary\n\nAn illustrator I work with on book covers.\n",
+      "path": "Knowledge Base/Entities/People/Tobias Hallworth.md"
+    },
+    {
+      "body": "---\ntype: entity\nentity_type: organization\ntitle: Quillfeather Bindery\nstatus: active\ncreated: 2026-09-01\nupdated: 2026-09-01\ntags: [organizations]\nexomem_id: 6b1f3c52-0d4e-4f7a-9a61-2c8e5d7f1a07\n---\n\n# Quillfeather Bindery\n\n## Summary\n\nA small bookbinding workshop.\n",
+      "path": "Knowledge Base/Entities/Organizations/Quillfeather Bindery.md"
+    }
+  ],
+  "schema_version": 1
+}

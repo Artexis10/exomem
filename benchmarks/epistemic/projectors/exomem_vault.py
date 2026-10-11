@@ -48,6 +48,7 @@ from ..snapshot import (
     ProjectorMeta,
     Relation,
     StateItem,
+    TypedRelation,
 )
 from .base import Projector, module_code_line_count, module_line_count
 
@@ -283,6 +284,15 @@ RUNTIME_ENDPOINTS: tuple[str, ...] = (
 #: runtime detector or a claim that any subject has reusable facets.
 DECLARED_ENTITY_SUBJECT_COUNTS_ENDPOINT = "benchmark:declared_entity_subject_counts(vault)"
 
+#: Opt-in provenance for the f33 entity-graph projection: the vault's own entity
+#: type and relation registries, read through the product's registry loaders so
+#: a vault extension resolves exactly as the product resolves it.
+ENTITY_GRAPH_ENDPOINTS: tuple[str, ...] = (
+    "exomem.entity_types.load_entity_types(vault)",
+    "exomem.relation_registry.load_registry(vault)",
+    "exomem.markdown_relations.parse_markdown_relations(page)",
+)
+
 #: Why the due-state counters surface reports nothing on a vault that has none.
 NO_DUE_STATE_LEDGER = (
     f"{DUE_STATE_FILE} carries no emission ledger; nothing has been counted or emitted"
@@ -354,6 +364,58 @@ def _normalize_link(raw: str) -> str:
     if value.lower().endswith(".md"):
         value = value[: -len(".md")]
     return value
+
+
+def _typed_relations(item_id: str, body: str, registry: Any) -> tuple[TypedRelation, ...]:
+    """Canonical `## Relations` bullets whose key the neutral set does not map.
+
+    The neutral predicates keep their meaning in ``relations``; only the bullets
+    that projection skipped are added here, each with the family the vault's own
+    relation registry declares, or empty when the key is unregistered.
+    """
+
+    from exomem.markdown_relations import parse_markdown_relations
+
+    document = parse_markdown_relations(
+        body, relation_types=registry.keys, retain_unknown=True
+    )
+    found: list[TypedRelation] = []
+    for relation in document.canonical_relations:
+        if relation.kind in RELATION_TO_PREDICATE:
+            continue
+        target = _normalize_link(relation.target)
+        if not target:
+            continue
+        definition = registry.definition(relation.kind)
+        found.append(
+            TypedRelation(
+                subject=item_id,
+                relation=relation.kind,
+                object=target,
+                family=definition.family if definition is not None else "",
+            )
+        )
+    return tuple(found)
+
+
+def _entity_type_lineage(entity_type: str, registry: Any) -> dict[str, str]:
+    """The type, then each registry parent, and which of them the core pack ships.
+
+    An untyped or unregistered page has an empty lineage: the registry is the authority on
+    what a type is, so the projector does not guess one for it.
+    """
+
+    definitions = {**registry.core, **registry.extensions}
+    lineage: list[str] = []
+    core: list[str] = []
+    key: str | None = entity_type
+    while key is not None and key in definitions and key not in lineage:
+        definition = definitions[key]
+        lineage.append(key)
+        if definition.core:
+            core.append(key)
+        key = definition.parent
+    return {"entity_type_lineage": ",".join(lineage), "entity_type_core": ",".join(core)}
 
 
 def _links(value: Any) -> tuple[str, ...]:
@@ -630,7 +692,9 @@ class VaultProjector(Projector):
     #: and surface items the file-only build cannot produce at all. 0.5.0 adds
     #: opt-in declared-subject measurements before those runtime signals gate.
     #: 0.6.0 adds claims/values/locators, candidate subjects and exact artifact evidence.
-    version = "0.6.0"
+    #: 0.7.0 adds the opt-in `entity_graph` projection for f33: typed relations
+    #: outside the neutral predicate set and each entity's registry type lineage.
+    version = "0.7.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
@@ -640,8 +704,14 @@ class VaultProjector(Projector):
         *,
         runtime_surfaces: bool = False,
         declared_entity_subjects: Iterable[str] = (),
+        entity_graph: bool = False,
     ) -> None:
         self.vault_root = Path(vault_root)
+        #: Project provider-typed edges and entity type lineage (f33). Off by
+        #: default so every earlier family's snapshot is unchanged.
+        self.entity_graph = entity_graph
+        if entity_graph:
+            self.endpoints_used = (*self.endpoints_used, *ENTITY_GRAPH_ENDPOINTS)
         #: Read the four absence surfaces through the product's documented read
         #: paths instead of from files. Off by default, and the default is the
         #: fair-comparison build: from files alone three of the four surfaces
@@ -674,7 +744,9 @@ class VaultProjector(Projector):
         pages = self._pages()
         items: dict[str, StateItem] = {}
         relations: list[Relation] = []
+        typed_relations: list[TypedRelation] = []
         successor_of: dict[str, str] = {}
+        graph = self._entity_graph_registries() if self.entity_graph else None
 
         for relative, frontmatter, body in pages:
             item_id = relative[: -len(".md")] if relative.endswith(".md") else relative
@@ -756,6 +828,11 @@ class VaultProjector(Projector):
                 if frontmatter.get(key) is not None
             }
             kind = _kind_for(page_type, entity_type, relative)
+            if graph is not None:
+                typed_relations.extend(_typed_relations(item_id, body, graph[1]))
+                if page_type.casefold() == "entity":
+                    # An untyped page gets an empty lineage: a product miss, not a gap.
+                    raw.update(_entity_type_lineage(entity_type.strip(), graph[0]))
             if kind in {"evidence", "raw_source"}:
                 # StateItem.text is normalized display text. Keep exact source
                 # body and independently observed artifact identity alongside it.
@@ -824,6 +901,7 @@ class VaultProjector(Projector):
             relations=_dedupe(relations),
             declarations=FIELD_DECLARATIONS,
             collections=collections,
+            typed_relations=tuple(dict.fromkeys(typed_relations)),
             projector=ProjectorMeta(
                 name=self.name,
                 version=self.version,
@@ -833,6 +911,14 @@ class VaultProjector(Projector):
                 loc_code=module_code_line_count(VaultProjector),
             ),
             completeness_notes=COMPLETENESS_NOTES,
+        )
+
+    def _entity_graph_registries(self) -> tuple[Any, Any]:
+        from exomem import entity_types, relation_registry
+
+        return (
+            entity_types.load_entity_types(self.vault_root),
+            relation_registry.load_registry(self.vault_root),
         )
 
     def _artifact_digest(self, relative: str) -> str | None:

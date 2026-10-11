@@ -2625,3 +2625,165 @@ The suggestion SHALL reach the caller through the committed-mutation response, a
 - **WHEN** a resolved hosted caller captures a source in a vault that holds classification debt
 - **THEN** the capture follows its ordinary authorization rules
 - **AND** the result omits the classification-debt advisory unless that caller is the verified owner
+
+### Requirement: The upkeep review states why it is unavailable
+
+When `review_memory(mode="upkeep")` answers `status: "unavailable"`, the response SHALL carry a `reason` drawn from exactly `worker_not_running`, `no_tick_yet`, `schema_mismatch`, `locked` and `unreadable`. The sidecar states SHALL carry the same names as the effect block's `dreamer_sidecar`. A `no_tick_yet` response SHALL carry a `waiting` object with the gate's reason code, the UTC time it began, and a `source` of `worker` (the serving process's live state) or `sidecar` (the state the worker last recorded). A `sidecar` wait SHALL also carry `recorded_at`, the UTC time the worker wrote it, so a stopped worker's last record never reads as a live wait. The reason SHALL come from the worker's live state in the process that hosts the worker, and otherwise from what the worker recorded in its own sidecar, never from the empty state of a process that runs no worker. The worker SHALL record its health at the end of a tick and, within one poll, whenever its gate holds it for a reason other than the one on record, writing at most once per poll, so a process without the worker can read why no tick has run. A sidecar that no tick has written SHALL report `no_tick_yet`, not `available`. Off, paused and standby workers SHALL create no sidecar for this record.
+
+#### Scenario: A worker held by its gate says why to another process
+
+- **WHEN** the worker is running and its gate holds it before any tick, and a process without the worker reviews upkeep
+- **THEN** the response is `unavailable` with `reason: "no_tick_yet"`
+- **AND** `waiting` names the gate's reason, when it began, `source: "sidecar"`, and when the worker recorded it
+
+#### Scenario: No worker has run against this state root
+
+- **WHEN** no sidecar exists and no worker runs in the reviewing process
+- **THEN** the response is `unavailable` with `reason: "worker_not_running"`
+
+#### Scenario: A sidecar the reviewer cannot read names itself
+
+- **WHEN** the sidecar exists with an older schema, is held by another writer's lock, or cannot be read
+- **THEN** the reason is `schema_mismatch`, `locked` or `unreadable` respectively
+
+### Requirement: The dispositions view reports each family's effect
+
+The dispositions view SHALL carry an `effect` block computed from existing records only, without an audit. It SHALL state its window as whole UTC days (`days`, fixed at seven with today included, and `since` and `through` as UTC dates), the source of each count, and per family the counts `surfaced`, `dismissed`, `snoozed`, `cleared` and `open`:
+
+- `surfaced`: identities first stamped on the first-surfaced ledger in the window, and for upkeep families the first deliveries the Dreamer recorded in the window. An identity is one family's item, so an item whose fingerprint changed in the window counts once;
+- `dismissed` and `snoozed`: items with a manual decision of that action and family updated in the window;
+- `cleared`: items surfaced in the window with no decision recorded and absent from the family's current set;
+- `open`: items surfaced in the window with no decision recorded and still in the current set.
+
+Events SHALL count from `since` 00:00Z through the time of the read. The stated window SHALL carry no time of day, so the block changes only when a count changes or at a UTC midnight.
+
+The current set SHALL come from the stored due-state projection and the Dreamer's open candidates. A family whose current set only an audit can enumerate SHALL report `cleared` and `open` as `unknown`, never 0. The block SHALL state the Dreamer sidecar's state as `dreamer_sidecar`: `readable`, `missing`, `schema_mismatch`, `unreadable` or `locked`. When it is not `readable`, every upkeep family SHALL be listed, never omitted, with `surfaced`, `cleared` and `open` as `unknown` and an `unknown_reason` that names that state. The count SHALL be named `cleared`, never `acted`. The due-state carrier and the attention surface SHALL stamp the family on the ledger; a row that carries no family SHALL be counted under `unattributed` and never assigned a guessed family. The manual dismissal counts SHALL be counted from the decision records without an audit. Both counts and the effect block SHALL be served to the owner only; another bound audience SHALL receive the owner-only aggregate refusal.
+
+#### Scenario: A family's surfacings are accounted for
+
+- **WHEN** a due-state family surfaced three items in the window, one was dismissed, one page was deleted and one is untouched
+- **THEN** the family reports `surfaced: 3`, `dismissed: 1`, `cleared: 1` and `open: 1`
+
+#### Scenario: Two reads with no event between them are identical
+
+- **WHEN** the dispositions view is read twice, a second apart in one UTC day, with no event between the reads
+- **THEN** both effect blocks are identical
+
+#### Scenario: An audit-only family does not claim zero
+
+- **WHEN** a family surfaced an item but neither the projection nor the Dreamer lists its current set
+- **THEN** its `cleared` and `open` are `unknown`
+
+#### Scenario: An unreadable Dreamer sidecar is not read as nothing surfaced
+
+- **WHEN** the Dreamer's sidecar exists but cannot be read
+- **THEN** the block reports `dreamer_sidecar: "unreadable"`
+- **AND** every upkeep family is listed with `surfaced`, `cleared` and `open` as `unknown` and `unknown_reason: "unreadable"`
+
+#### Scenario: A row stamped before families were is not guessed
+
+- **WHEN** a ledger row carries no family
+- **THEN** it is counted under `unattributed`
+
+#### Scenario: The view runs no audit
+
+- **WHEN** the dispositions view is requested
+- **THEN** no audit runs, and the manual dismissal counts come from the decision records
+
+### Requirement: Existing Edit Remediation Matches Its Public Schema
+
+An `edit_memory` relation-disposition remediation SHALL reference only parameters exposed by the selected edit kind and SHALL identify `relation_review_hash` as the exact validation response value to send back. Creation-only draft parameters MUST NOT appear in existing-edit remediation.
+
+#### Scenario: Edit remediation is checked against discovery
+- **WHEN** a blocking relation-disposition finding is rendered for `edit_memory`
+- **THEN** every named call parameter exists in that kind's public discovery schema
+- **AND** the text describes the validate-then-commit call sequence
+
+### Requirement: Edit Memory Documents Typed Relation Authoring
+
+The `edit_memory` description SHALL include a copy-pasteable note-level typed-relation example using a bullet under `## Relations`, and SHALL state that Dataview inline-field syntax is not parsed as a typed relation.
+
+#### Scenario: Generic client reads edit discovery
+- **WHEN** a generic MCP client inspects `edit_memory`
+- **THEN** it can author `- supports [[Knowledge Base/Notes/Research/example-target]]` under `## Relations`
+- **AND** it is not led to use `supports:: [[...]]`
+
+### Requirement: Semantic Errors Do Not Claim Arguments Are Missing
+
+The edit adapter SHALL append a `(missing: [...])` suffix only when argument validation identified actual missing or invalid fields. Semantic governance and transition errors MUST preserve their code and reason without the suffix.
+
+#### Scenario: Transition token mismatches
+- **WHEN** an edit fails with `LIFECYCLE_TRANSITION_MISMATCH`
+- **THEN** the error does not contain a `missing` suffix
+
+### Requirement: Persisted Configuration Failures Are Loud
+
+A command that persists configuration SHALL NOT report or imply success unless the persisted
+state changed. When the write fails, the command SHALL exit non-zero, SHALL report one
+operator-readable line naming the configuration path and the remediation, and SHALL NOT
+leave a temporary artifact behind.
+
+This applies to `exomem mode`, whose configuration file is written by the service account on
+a service-managed install and is therefore not always writable by the invoking user.
+
+#### Scenario: Unwritable config fails visibly
+
+- **WHEN** `exomem mode <target>` is run and the configuration file cannot be replaced
+- **THEN** the command exits non-zero
+- **AND** the output names the configuration path and how to remediate the permission
+- **AND** the output is not a bare interpreter traceback
+
+#### Scenario: A failed write leaves no orphaned temporary
+
+- **WHEN** persisting the mode fails after a temporary file was created
+- **THEN** that temporary file is removed
+- **AND** a later successful run is not blocked by residue from the failed one
+
+#### Scenario: Reported mode reflects persisted state
+
+- **WHEN** `exomem mode` reports the mode after a set operation
+- **THEN** the reported value is read back from the persisted configuration
+- **AND** it is never an echo of the requested value that was not written
+
+#### Scenario: Status reflects the effective mode
+
+- **WHEN** a mode change did not persist
+- **THEN** no surface reports the requested mode as active
+
+### Requirement: The MCP tool surface has a size budget
+
+The generated MCP tool surface SHALL stay within a committed byte budget so that clients which resend every tool schema each turn do not pay for prose an agent does not need. The budget SHALL be measured as the compact UTF-8 JSON size of each registered tool's complete wire object (name, title, description, input schema, output schema, annotations and metadata) and SHALL apply to the total and to each tool. A tool description SHALL keep every refusal code, guard flag and destructive-operation requirement that the tool's callers depend on; long reference material SHALL be reachable from the skill references or an on-demand bootstrap profile rather than repeated in schemas. A contract that is shared by several tools SHALL be projected once per tool that needs it and SHALL NOT be repeated in parameter descriptions.
+
+#### Scenario: The surface regrows past the budget
+
+- **WHEN** a change adds description or parameter prose that takes the total, or any one tool, over its committed budget
+- **THEN** the budget test fails and names the tool and the excess
+
+#### Scenario: Shrinking preserves published behaviour
+
+- **WHEN** the tool descriptions are shortened
+- **THEN** no tool, parameter, enum value or refusal code is removed, and the tool-surface fingerprint and schema-fidelity baseline are regenerated together in one change
+
+#### Scenario: Frozen hosted profiles are unaffected
+
+- **WHEN** the live tool surface is shortened
+- **THEN** hosted candidates v1 to v4 and the command-binding candidate resolve their pinned legacy schemas and stay byte-identical
+
+#### Scenario: Optional parameters accept an explicit null the schema no longer advertises
+
+- **WHEN** a client sends an explicit null for a nullable optional parameter of any tool
+- **THEN** argument validation accepts it, because validation is built from the function signature and the published schema omits the null arm and the null default
+
+### Requirement: Compact tools remain usable through the public interface
+
+The compact surface SHALL preserve enough public guidance to choose an operation and construct a legal call without a provider-specific skill or private harness instruction. Current-turn activation and targeted retrieval SHALL have distinct descriptions consistent with saved engagement. Action-dependent Planning arguments SHALL explain the returned identity/version guards and the inspect/query-to-update/triage sequence. Runtime concurrency, authorization, source preservation and confirmation rules SHALL remain unchanged. This delivery SHALL retain existing tool names; shortening schemas SHALL NOT by itself establish a claim of improved agent performance.
+
+#### Scenario: An unfamiliar agent updates a plan
+
+- **WHEN** an agent uses the published tool/schema guidance to inspect a plan and update or transition it
+- **THEN** it can identify and supply the returned guards, and a stale guard still refuses without overwriting newer state
+
+#### Scenario: Interface and compiler failures are distinguished
+
+- **WHEN** an ordinary-agent workflow selects activation or retrieval and receives a result
+- **THEN** acceptance retains the actual invocation, result and subsequent answer, distinguishing wrong selection or arguments from wrong compiled context and never treating a forced call as proof of spontaneous initiation

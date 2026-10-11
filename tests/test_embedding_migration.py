@@ -375,6 +375,45 @@ def test_initial_build_resumes_after_a_live_write_and_restart(preseeded_world, m
     assert _vector_lane(vault)["status"] == "participated"
 
 
+def test_a_live_write_before_the_first_plan_does_not_hide_the_imported_vault(
+    preseeded_world, monkeypatch
+) -> None:
+    # A save before the job plans gives the serving sidecar the build's space
+    # with one page in it. The job read that as built and never embedded the
+    # import, while recall served the one page as if it were the vault.
+    vault, log, _loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    added = vault / kb_dirname() / "Notes/live-write.md"
+    added.write_text(
+        "# Live write\n\nA page written before the build job planned.\n", encoding="utf-8"
+    )
+    assert embeddings.upsert_after_write_status(vault, [added]).status == "completed"
+    live = _passages_by(log, NEW)
+    assert live and index_paths.active_sidecar_name(vault) is None
+    warming: list[dict | None] = []
+    note_progress = recall_migration._note_progress
+
+    def recall_after_the_first_batch(*args, **kwargs):
+        note_progress(*args, **kwargs)
+        if not warming:
+            warming.append(_recall(vault, "retry backoff").get("warming"))
+
+    monkeypatch.setattr(recall_migration, "_note_progress", recall_after_the_first_batch)
+
+    assert recall_migration.run(vault, threading.Event()) == "current"
+
+    active = embeddings.get_embedding_index(vault)
+    assert set(active.file_mtimes()) == {
+        f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
+    }
+    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    assert index_paths.active_sidecar_name(vault) == active.path.name
+    encoded = _passages_by(log, NEW)
+    assert all(encoded.count(text) == 1 for text in live)
+    assert len(encoded) == len(set(encoded))
+    assert warming == [{"components": ["embeddings"], "since_s": None}]
+
+
 def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
     preseeded_world, monkeypatch
 ) -> None:
@@ -610,41 +649,38 @@ def test_a_query_finds_the_loaded_encoder_while_a_build_passage_holds_the_model_
         builder.join(5)
 
 
-def test_healthy_legacy_sidecar_with_drift_does_not_plan_a_build(
-    preseeded_world, monkeypatch
-) -> None:
-    from exomem import semantic_index
-
-    vault, _log, _loads = preseeded_world
+def test_a_legacy_sidecar_with_one_stale_page_encodes_only_that_page(preseeded_world) -> None:
+    # The sidecar covers the vault in the recall encoder's space, but one page
+    # changed while the service was down: new text, and its one observation
+    # gone. Encoding the vault again for it would cost a personal server its
+    # whole corpus.
+    vault, log, _loads = preseeded_world
     embeddings.index_incremental(vault, log_fn=lambda _message: None)
-    active = embeddings.get_embedding_index(vault)
-    target = recall_migration._target_identity()
-    assert active.identity.accepts(target.model, target.fingerprint)
     assert index_paths.active_sidecar_name(vault) is None
-    shadow = active.path.parent / index_paths.space_sidecar_name(target.fingerprint)
-    assert not shadow.exists()
     edited = vault / kb_dirname() / list(_PAGES)[-1]
-    edited.write_text(edited.read_text(encoding="utf-8") + "\nAn offline edit.\n", encoding="utf-8")
-    mtime = active.file_mtimes()[edited.relative_to(vault).as_posix()] + 5
+    kept = edited.read_text(encoding="utf-8").split("## Observations")[0]
+    edited.write_text(kept + "An offline edit.\n", encoding="utf-8")
+    mtime = edited.stat().st_mtime + 5
     os.utime(edited, (mtime, mtime))
     find_module.clear_cache()
-    calls = {"pages": 0, "units": 0}
-    eligible = recall_migration._eligible_pages
-    parent_state = semantic_index.build_parent_index_state
+    page = find_module._CACHE.get(edited, vault)
+    page_chunks = embeddings._chunks_for_page(vault, page)
+    unchanged = f"{kb_dirname()}/{list(_PAGES)[0]}"
+    legacy_vectors = embeddings._stored_text_vectors(embeddings.get_embedding_index(vault), unchanged)[0]
+    log.clear()
 
-    def pages(root):
-        calls["pages"] += 1
-        return eligible(root)
+    assert recall_migration.run(vault, threading.Event()) == "current"
 
-    def units(*args, **kwargs):
-        calls["units"] += 1
-        return parent_state(*args, **kwargs)
-
-    monkeypatch.setattr(recall_migration, "_eligible_pages", pages)
-    monkeypatch.setattr(semantic_index, "build_parent_index_state", units)
-    assert recall_migration.plan(vault) is None
-    assert calls == {"pages": 0, "units": 0}
-    assert not shadow.exists()
+    encoded = _passages_by(log, NEW)
+    assert any("offline edit" in text for text in encoded)
+    assert set(encoded) <= set(page_chunks)
+    copied = embeddings._stored_text_vectors(embeddings.get_embedding_index(vault), unchanged)[0]
+    assert copied.keys() == legacy_vectors.keys()
+    assert all(np.array_equal(copied[text], legacy_vectors[text]) for text in copied)
+    active = embeddings.get_embedding_index(vault)
+    assert active.stored_chunks_for(page.rel_path) == (page_chunks, page.mtime)
+    units = active.semantic_unit_parent_states()
+    assert page.rel_path not in units and len(units) == len(_PAGES) - 1
 
 
 def test_published_current_sidecar_plans_without_enumerating_pages(
@@ -1250,3 +1286,23 @@ def test_doctor_reports_a_cells_refused_sidecar_as_dense_recall_off(world, monke
     assert check.status == "warn"
     assert "EXOMEM_RECALL_REEMBED=off keeps it off" in check.message
 
+
+def test_a_page_that_loses_every_unit_mid_build_does_not_stall_the_build(preseeded_world, monkeypatch) -> None:
+    # A batch made only of a page with no units left once raised from
+    # np.vstack([]), and every later start failed at the same batch.
+    vault, _log, _loads = preseeded_world
+    monkeypatch.setattr(recall_space, "cell_mode", lambda env=None: True)
+    plan = recall_migration.plan(vault)
+    assert plan is not None and plan.serving is None
+    assert recall_migration.build(vault, plan) is True
+    edited = vault / kb_dirname() / list(_PAGES)[0]
+    edited.write_text(edited.read_text(encoding="utf-8").split("## Observations")[0] + "Edited.\n", encoding="utf-8")
+    assert embeddings.upsert_after_write_status(vault, [edited]).status == "completed"
+    assert index_paths.active_sidecar_name(vault) is None
+    embeddings.unload_model()
+    embeddings.clear_embedding_indexes()
+    recall_migration.reset_for_tests()
+    find_module.clear_cache()
+
+    assert recall_migration.run(vault, threading.Event()) == "current"
+    assert index_paths.active_sidecar_name(vault) is not None
