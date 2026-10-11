@@ -107,7 +107,7 @@ def _seed(vault: Path) -> None:
     )
     _write(
         kb / "Notes" / "Journal" / "monday.md",
-        "---\ntype: journal\nproject: orchard\n---\n\n# Monday\n\nPruned the rows.\n",
+        "---\ntype: journal\nproject: orchard\ntags: [dispatch-review]\n---\n\n# Monday\n\nPruned the rows.\n",
     )
     _write(
         kb / "Sources" / "clipping.md",
@@ -135,11 +135,21 @@ def test_an_update_after_any_change_leaves_the_rows_a_first_build_leaves(
         path = kb / rel
         path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
 
+    def rewrite_with_preserved_mtime() -> None:
+        path = kb / "Entities" / "Places" / "Kiruna Depot.md"
+        before = path.stat()
+        edit("Entities/Places/Kiruna Depot.md", "Kiruna Depot", "Abisko Depot")
+        assert path.stat().st_size == before.st_size
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
     steps = [
         ("a note gains a link", lambda: edit(
             "Products/Cargo Sled.md", "[[Kiruna Depot]]", "[[Kiruna Depot]] and [[Ada]]")),
         ("prose changes, nothing derived does", lambda: edit(
             "Notes/Journal/monday.md", "Pruned the rows.", "Pruned the last rows today.")),
+        ("conventions make an unchanged tagged note a hub", lambda: _write(
+            kb / "_Schema" / "activation-conventions.yaml",
+            "schema_version: 1\nanchors:\n  hub:\n    add_tags: [dispatch-review]\n")),
         ("a second page derives the same short name", lambda: _write(
             kb / "Entities" / "Organisations" / "Norrland Freight (Road).md",
             "---\ntype: entity\nentity_type: organisation\ntitle: Norrland Freight (Road)\n---\n\n"
@@ -158,6 +168,9 @@ def test_an_update_after_any_change_leaves_the_rows_a_first_build_leaves(
         ("a page leaves its project", lambda: edit(
             "Notes/Research/harbor-method-v2.md", "project: harbor\n", "")),
     ]
+    # Windows ctime is creation time; this probe checks POSIX change-time invalidation.
+    if os.name != "nt":
+        steps.insert(2, ("a same-size rewrite preserves its mtime", rewrite_with_preserved_mtime))
     before = _rows(vault)
     for number, (label, change) in enumerate(steps):
         generation = index.generation()
@@ -165,9 +178,9 @@ def test_an_update_after_any_change_leaves_the_rows_a_first_build_leaves(
         report = index.update()
         after = _rows(vault)
         assert after == _from_nothing(vault, tmp_path / f"step-{number}"), label
-        # A generation moves exactly when the rows do, as a full write's does.
+        # A conventions change can wipe and write; both advance the token.
         assert report.get("unchanged", False) is (after == before), label
-        assert index.generation() == generation + (0 if after == before else 1), label
+        assert (index.generation() > generation) is (after != before), label
         before = after
 
 
