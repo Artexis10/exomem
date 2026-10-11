@@ -12,7 +12,7 @@
 - [x] 3.1 Add the export hold, the export Job, completion against the report, links, expiry, supersede and deletion. Verify: decision tests for a stopped cell, a running cell, the deadline, Job error codes, cell deletion and another hold; reconcile tests against real Postgres roles for the round trip, a stopped cell, a substituted part, deletion and per-cell key isolation.
 - [x] 3.2 Prove the transport against a real S3-compatible store. Verify: encryption at rest, a version-pinned link refused after it expires, a substituted part refused, and every version removed.
 - [x] 3.3 Add the TTL and deadline as chart values. Verify: the chart round-trip test.
-- [ ] 3.4 Run an export of a running cell and of a stopped cell on the live K3s suite with the source-built Cloud image, through the real admission policies and job egress. Verify: the downloaded archive verifies, and the stopped cell's StatefulSet stays at zero replicas.
+- [x] 3.4 Run an export of a running cell and of a stopped cell on the live K3s suite with the source-built Cloud image, through the real admission policies and job egress. Verify: the downloaded archive verifies, and the stopped cell's StatefulSet stays at zero replicas.
 
 ## 4. Rollout
 
