@@ -101,103 +101,96 @@ def test_release_workflow_publishes_cuda_tags() -> None:
 
     assert "target: cuda" in text
     assert "platforms: linux/amd64" in text
-    assert "ghcr.io/artexis10/exomem:cuda" in text
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda" in text
+    assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda"' in text
 
 
 def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> None:
     text = _read(".github/workflows/release-please.yml")
 
-    assert text.count("target: hosted") == 2
-    # Two hosted builds (release and manual republish) plus the release's cloud build.
-    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 3
-    assert text.count(
-        "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted"
-    ) == 2
-    assert "ghcr.io/artexis10/exomem:hosted" in text
-    assert text.count('build_time=$(git show -s --format=%cI "$TAG")') == 2
+    assert text.count("target: hosted") == 1
+    # The hosted build and the cloud build both carry the tag commit's time.
+    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
+    assert '"hosted ghcr.io/artexis10/exomem:$version-hosted hosted"' in text
+    assert text.count("build_time=$(git show -s --format=%cI HEAD)") == 1
 
 
 def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
-    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+    job = _workflow_job(text, "publish-image")
 
-    for job, image_attestations in ((automatic, 4), (manual, 2)):
-        proof_step = job.split(
-            "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
-        )[1].split("\n      - name:", 1)[0]
-        assert "contents: write" in job
-        assert "packages: write" in job
-        assert "id-token: write" in job
-        assert "attestations: write" in job
-        assert "id: hosted-build" in job
-        assert "steps.hosted-build.outputs.digest" in job
-        assert (
-            "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-hosted"
-            in job
-        )
-        assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-        # The hosted image and its candidate bundle, plus the cloud and cellctl
-        # images on release.
-        assert job.count(ATTEST_ACTION) == image_attestations
-        assert "subject-name: ghcr.io/artexis10/exomem" in job
-        assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
-        assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
-        assert "push-to-registry: true" in job
-        assert job.count("create-storage-record: false") == image_attestations
-        assert "infra/scripts/hosted_image_candidate.py record" in job
-        assert "infra/scripts/hosted_image_candidate.py verify" in job
-        assert "GH_TOKEN: ${{ github.token }}" in proof_step
-        assert "--candidate-bundle" in job
-        assert "candidate.sigstore.json" in job
-        assert "--attestation-id" not in job
-        assert "--attestation-url" not in job
-        assert 'docker run --rm --network=none "$IMMUTABLE_IMAGE" --version' in job
-        assert 'test "$observed_version" = "exomem ${VERSION}"' in job
-        assert 'test "$observed_revision" = "$SOURCE_COMMIT"' in job
-        assert '--source-repository "$GITHUB_REPOSITORY"' in job
-        assert (
-            '--producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml"'
-            in job
-        )
-        assert '--release "$VERSION"' in job
-        assert "--storage-kind github-release" in job
-        assert "--producer-oidc-source-ref" in job
-        assert "--source-ref" in job
-        assert "GITHUB_RUN_ID" in job and "GITHUB_RUN_ATTEMPT" in job
-        assert "gh release upload" in job
-        assert '"$CANDIDATE_BUNDLE"' in job
-        assert "--clobber" not in job
-        assert "exomem-hosted-release-v1.json" not in job
-        assert "substrate-gateway-contract-selection" not in job
+    proof_step = job.split(
+        "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "contents: write" in job
+    assert "packages: write" in job
+    assert "id-token: write" in job
+    assert "attestations: write" in job
+    assert "id: hosted-build" in job
+    assert "steps.hosted-build.outputs.digest" in job
+    assert 'discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"' in job
+    assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
+    # Each image and the hosted candidate file retain original attestations.
+    assert job.count(ATTEST_ACTION) == 7
+    assert "subject-name: ghcr.io/artexis10/exomem" in job
+    assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
+    assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
+    assert "push-to-registry: true" in job
+    assert job.count("create-storage-record: false") == 7
+    assert "infra/scripts/hosted_image_candidate.py record" in job
+    assert "infra/scripts/hosted_image_candidate.py verify" in job
+    assert "GH_TOKEN: ${{ github.token }}" in proof_step
+    assert "--candidate-bundle" in job
+    assert "candidate.sigstore.json" in job
+    assert "--attestation-id" not in job
+    assert "--attestation-url" not in job
+    assert 'docker run --rm --network=none "$IMMUTABLE_IMAGE" --version' in job
+    assert 'test "$observed_version" = "exomem ${VERSION}"' in job
+    assert 'test "$observed_revision" = "$SOURCE_COMMIT"' in job
+    assert '--source-repository "$GITHUB_REPOSITORY"' in job
+    assert (
+        '--producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml"'
+        in job
+    )
+    assert '--release "$VERSION"' in job
+    assert "--storage-kind github-release" in job
+    assert "--producer-oidc-source-ref" in job
+    assert "--source-ref" in job
+    assert "GITHUB_RUN_ID" in job and "GITHUB_RUN_ATTEMPT" in job
+    assert "release_recovery.py finish-images" in job
+    assert '"$CANDIDATE_BUNDLE"' in job
+    assert "--clobber" not in job
+    assert "exomem-hosted-release-v1.json" not in job
+    assert "substrate-gateway-contract-selection" not in job
 
 
 def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    automatic = _workflow_job(text, "publish-image")
     cloud = automatic.split("\n      - name: Build and push Exomem Cloud cell image", 1)[1]
 
     assert text.count("target: cloud") == 1
     assert "id: cloud-build" in cloud
     assert "EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}" in cloud
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cloud" in cloud
-    assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.source_commit }}-cloud" in cloud
     assert "subject-digest: ${{ steps.cloud-build.outputs.digest }}" in cloud
-    assert 'cloud_image="ghcr.io/artexis10/exomem@${CLOUD_DIGEST}"' in cloud
-    assert "gh release edit" in cloud
+    assert "push-by-digest=true" in cloud
+    assert "release-image-evidence-cloud" in cloud
+    assert "release_recovery.py finish-images" in cloud
 
 
 def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
-    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+    plan = _workflow_job(text, "plan", "build-artifacts")
+    manual = _workflow_job(text, "publish-image")
 
-    assert "records_rollback_runtime_target_json" not in automatic
     assert "records_rollback_runtime_target_json:" in text
     assert "required: false" in text.split(
         "records_rollback_runtime_target_json:", 1
-    )[1].split("publish_pypi:", 1)[0]
+    )[1].split("\njobs:", 1)[0]
+    # A push has no dispatch inputs, so only an explicit request signs the claim, and
+    # a hand-off carries that request to the run on the tag.
+    assert text.count("${{ inputs.records_rollback_runtime_target_json }}") == 3
+    assert "RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}" in plan
+    assert "records_rollback_runtime_target_json: $records" in plan
     assert (
         "RECORDS_RUNTIME_TARGET_JSON: "
         "${{ inputs.records_rollback_runtime_target_json }}"
@@ -215,35 +208,38 @@ def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -
     assert '"${records_compatibility_args[@]}"' in manual
 
 
-def test_release_workflow_binds_automatic_and_manual_builds_to_the_tag_commit() -> None:
+def test_release_publish_runs_only_on_the_tag_commit() -> None:
+    """Attestations name the run's ref and commit, so only a run on the release tag,
+    at the tag's commit, may publish; every other run hands the publish to one."""
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
-    manual = _workflow_job(text, "publish-existing-image", "publish-existing-pypi")
+    plan = _workflow_job(text, "plan", "build-artifacts")
+    images = _workflow_job(text, "publish-image")
 
-    for job in (automatic, manual):
-        assert '[[ "$TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+' in job
-        assert 'source_commit=$(git rev-parse "$TAG^{commit}")' in job
-        assert 'test "$(git rev-parse HEAD)" = "$source_commit"' in job
-        assert 'test "$GITHUB_SHA" = "$source_commit"' in job
-        assert 'echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"' in job
-
-    assert 'test "$GITHUB_REF" = "refs/heads/main"' in automatic
-    assert 'expected_ref="refs/tags/$TAG"' in manual
-    assert 'test "$GITHUB_REF" = "$expected_ref"' in manual
-    assert 'gh release view "$TAG" --json tagName --jq .tagName' in manual
+    assert '[[ ! "$tag" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+' in plan
+    assert '"$api/releases/tags/$tag"' in plan
+    assert 'source_commit=$(git rev-parse "refs/tags/$tag^{commit}")' in plan
+    assert 'elif [[ "$GITHUB_REF" == "refs/tags/$tag" ]]; then' in plan
+    assert 'if [[ "$GITHUB_SHA" != "$source_commit" ]]; then' in plan
+    assert '"$api/actions/workflows/$workflow/dispatches"' in plan
+    assert 'test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"' in images
+    assert 'test "$GITHUB_REF" = "refs/tags/$TAG"' in images
+    assert 'test "$GITHUB_SHA" = "$SOURCE_COMMIT"' in images
 
 
 def test_release_publication_jobs_checkout_the_created_tag() -> None:
     text = _read(".github/workflows/release-please.yml")
     jobs = (
-        _workflow_job(text, "build-artifacts", "sync-hosted-artifacts"),
-        _workflow_job(text, "publish-pypi", "publish-mcp-registry"),
+        _workflow_job(text, "build-artifacts", "publish-pypi"),
         _workflow_job(text, "publish-mcp-registry", "publish-image"),
+        _workflow_job(text, "publish-image"),
     )
 
     for job in jobs:
-        assert "ref: ${{ needs.release-please.outputs.tag_name }}" in job
+        assert "ref: refs/tags/${{ needs.plan.outputs.tag }}" in job
+        assert 'test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"' in job
         assert "ref: main" not in job
+    # PyPI receives the wheel and sdist that build-artifacts built from the tag.
+    assert "name: python-distributions" in _workflow_job(text, "publish-pypi", "publish-mcp-registry")
 
 
 V2_OPENAI_APP = "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json"
@@ -289,7 +285,7 @@ def _assert_baseline_candidate_derivation(flow: str, command: str) -> None:
 
 def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
-    sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
+    sync = _workflow_job(text, "sync-hosted-artifacts", "plan")
     render = sync.split("\n      - name: Regenerate hosted plugin artifacts\n", 1)[1].split(
         "\n      - name: Verify the regenerated artifacts are current\n", 1
     )[0]
@@ -470,18 +466,17 @@ def test_release_workflow_publishes_attested_cellctl_image_by_digest() -> None:
     # The platform chart consumes cellctl by digest (cellctl.image), on the
     # same release trigger as the Cloud cell image.
     text = _read(".github/workflows/release-please.yml")
-    automatic = _workflow_job(text, "publish-image", "publish-existing-image")
+    automatic = _workflow_job(text, "publish-image")
     cellctl = automatic.split("\n      - name: Build and push Exomem Cloud cellctl image", 1)[1]
 
     assert "id: cellctl-build" in cellctl
     assert "context: infra/cellctl" in cellctl
     assert "file: infra/cellctl/Dockerfile" in cellctl
-    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.version }}" in cellctl
-    assert "ghcr.io/artexis10/exomem-cellctl:${{ steps.meta.outputs.source_commit }}" in cellctl
     assert "subject-name: ghcr.io/artexis10/exomem-cellctl" in cellctl
     assert "subject-digest: ${{ steps.cellctl-build.outputs.digest }}" in cellctl
-    assert 'cellctl_image="ghcr.io/artexis10/exomem-cellctl@${CELLCTL_DIGEST}"' in cellctl
-    assert "gh release edit" in cellctl
+    assert "push-by-digest=true" in cellctl
+    assert "release-image-evidence-cellctl" in cellctl
+    assert "release_recovery.py finish-images" in cellctl
 
 
 def test_cellctl_dockerfile_is_digest_pinned_nonroot_and_frozen() -> None:
