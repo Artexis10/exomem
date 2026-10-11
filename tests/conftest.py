@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -800,12 +801,19 @@ def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
         if writer_lease_module is not None:
             writer_lease_module.reset_managers_for_tests()
         private.undo()
-        # The sibling is outside tmp_path, so pytest's retention never reaches it:
-        # apply the same rule here, keeping it only when the test failed.
-        if request.config.getini("tmp_path_retention_policy") == "failed":
-            report = request.node.stash.get(_CALL_REPORT, None)
-            if report is None or report.passed:
-                shutil.rmtree(state_root, ignore_errors=True)
+        # A passing test's vault copy and state root are ~200 files kept forever,
+        # so drop them; a failed test keeps both. tmp_path is emptied, not removed:
+        # pytest numbers the next same-prefix tmp_path from the dirs that exist,
+        # and caches keyed by vault or state-root path must never see one reused.
+        report = request.node.stash.get(_CALL_REPORT, None)
+        if report is None or report.passed:
+            shutil.rmtree(state_root, ignore_errors=True)
+            for child in tmp_path.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    with contextlib.suppress(OSError):
+                        child.unlink()
 
 
 @pytest.fixture(autouse=True)

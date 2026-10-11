@@ -248,8 +248,6 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-# A passing test's tmp_path holds a vault copy; keeping every one left ~400k files per full run.
-tmp_path_retention_policy = "failed"
 timeout = 60
 timeout_method = "thread"
 markers = [
