@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from . import relation_registry
@@ -124,6 +125,40 @@ class SemanticRelation:
             "raw": self.raw,
             "line": self.line,
         }
+
+
+@dataclass(frozen=True)
+class SemanticRelationCandidate:
+    """One metadata operand before vocabulary recognition."""
+
+    raw_kind: str
+    kind: str
+    target: str
+    raw: str
+    line: int
+    has_colon: bool
+
+    @property
+    def grammar_valid(self) -> bool:
+        return self.has_colon and bool(self.target)
+
+
+@dataclass(frozen=True)
+class SemanticBlockCandidate:
+    """A heading section; its line identity never grants a semantic-unit ref."""
+
+    title: str
+    level: int
+    line: int
+    end_line: int
+    ancestor_line: int | None
+    body: str
+    metadata: dict[str, str]
+    relations: tuple[SemanticRelationCandidate, ...]
+    substantive_body: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 @dataclass(frozen=True)
@@ -282,97 +317,99 @@ def parse_semantic_blocks(
     headings remain part of the block body. Leading metadata bullets are
     removed from the block body.
     """
+    return interpret_semantic_blocks(
+        scan_semantic_blocks(markdown), validate=validate, registry=registry,
+        kind_resolver=kind_resolver,
+    )
+
+
+def scan_semantic_blocks(markdown: str) -> tuple[SemanticBlockCandidate, ...]:
+    """Retain every non-fenced heading before selecting any vocabulary."""
     lines = (markdown or "").splitlines()
-    blocks: list[SemanticBlock] = []
-    errors: list[SemanticBlockValidationError] = []
-    warnings: list[SemanticBlockValidationError] = []
-    current: tuple[str, str, int, int, list[tuple[int, str]]] | None = None
+    headings: list[tuple[str, int, int, int | None]] = []
+    ends: dict[int, int] = {}
+    ancestors: list[tuple[int, int]] = []
     fence_char: str | None = None
     fence_length = 0
-
-    def flush(end_line: int) -> None:
-        nonlocal current
-        if current is None:
-            return
-        block_type, title, level, start_line, body_lines = current
-        block, block_errors = _build_block(
-            block_type=block_type,
-            title=title,
-            level=level,
-            start_line=start_line,
-            end_line=max(start_line, end_line),
-            lines=body_lines,
-            registry=registry or relation_registry.core_registry(),
-        )
-        if _has_substantive_body(block.body):
-            blocks.append(block)
-        elif validate:
-            errors.append(
-                SemanticBlockValidationError(
-                    code="empty_rich_unit",
-                    message="rich semantic-unit body is empty",
-                    line=start_line,
-                    block_id=block.id,
-                )
-            )
-        if validate:
-            errors.extend(block_errors)
-        current = None
-
     for line_number, line in enumerate(lines, start=1):
         fence = _FENCE_RE.match(line)
         if fence_char is not None:
-            if current is not None:
-                current[4].append((line_number, line))
             if _closes_fence(line, fence_char, fence_length):
                 fence_char = None
                 fence_length = 0
             continue
         if fence is not None:
-            if current is not None:
-                current[4].append((line_number, line))
             marker = fence.group("fence")
             fence_char = marker[0]
             fence_length = len(marker)
             continue
-
         heading = _HEADING_RE.match(line)
-        if heading:
-            level = len(heading.group(1))
-            if current is not None and level > current[2]:
-                current[4].append((line_number, line))
-                continue
-            flush(line_number - 1)
-            title = heading.group(2).strip()
-            if level <= _TITLE_HEADING_LEVEL:
-                # A level-1 heading is the page title, never a block. It still
-                # closes an open block above — that is the `flush` already done
-                # — but typing it would open a block with no closing heading,
-                # which then absorbs every `##` block in the file. A page titled
-                # `Source`, `Decision` or `Open Question` lost all of its real
-                # blocks that way, silently and with no finding.
-                continue
-            block_type, kind_findings = _resolve_block_type(
-                title, resolver=kind_resolver
-            )
-            if validate:
-                warnings.extend(
-                    SemanticBlockValidationError(
-                        code=finding.code,
-                        message=finding.message,
-                        line=line_number,
-                    )
-                    for finding in kind_findings
-            )
-            if block_type is not None:
-                current = (block_type, title, level, line_number, [])
+        if heading is None:
             continue
+        level = len(heading.group(1))
+        while ancestors and ancestors[-1][0] >= level:
+            _, previous = ancestors.pop()
+            ends[previous] = line_number - 1
+        parent = ancestors[-1][1] if ancestors else None
+        headings.append((heading.group(2).strip(), level, line_number, parent))
+        ancestors.append((level, line_number))
+    ends.update((line, len(lines)) for _, line in ancestors)
+    candidates: list[SemanticBlockCandidate] = []
+    for title, level, line, ancestor in headings:
+        end = ends[line]
+        metadata, values, body_lines = _split_metadata(
+            list(enumerate(lines[line:end], start=line + 1))
+        )
+        body = "\n".join(body_lines).strip()
+        candidates.append(SemanticBlockCandidate(
+            title=title, level=level, line=line, end_line=end, ancestor_line=ancestor,
+            body=body, metadata=metadata, relations=_relation_candidates(values),
+            substantive_body=_has_substantive_body(body),
+        ))
+    return tuple(candidates)
 
-        if current is not None:
-            current[4].append((line_number, line))
 
-    flush(len(lines))
-
+def interpret_semantic_blocks(
+    candidates: tuple[SemanticBlockCandidate, ...],
+    *,
+    validate: bool = True,
+    registry: relation_registry.RelationRegistry | None = None,
+    kind_resolver: Callable[[str], str | SemanticBlockKindResolution | None] | None = None,
+) -> SemanticBlockDocument:
+    """Recognize one selected vocabulary without rescanning heading structure."""
+    blocks: list[SemanticBlock] = []
+    errors: list[SemanticBlockValidationError] = []
+    warnings: list[SemanticBlockValidationError] = []
+    suppressed_through = 0
+    for candidate in candidates:
+        if candidate.line <= suppressed_through or candidate.level <= _TITLE_HEADING_LEVEL:
+            continue
+        block_type, findings = _resolve_block_type(candidate.title, resolver=kind_resolver)
+        if validate:
+            warnings.extend(SemanticBlockValidationError(
+                code=finding.code, message=finding.message, line=candidate.line,
+            ) for finding in findings)
+        if block_type is None:
+            continue
+        # Recognition suppresses descendants even when an empty block emits no range.
+        suppressed_through = candidate.end_line
+        relations, block_errors = _parse_relations(
+            candidate.relations, registry or relation_registry.core_registry()
+        )
+        block = SemanticBlock(
+            type=block_type, title=candidate.title, level=candidate.level,
+            line=candidate.line, end_line=candidate.end_line, body=candidate.body,
+            metadata=dict(candidate.metadata), relations=relations,
+        )
+        if candidate.substantive_body:
+            blocks.append(block)
+        elif validate:
+            errors.append(SemanticBlockValidationError(
+                code="empty_rich_unit", message="rich semantic-unit body is empty",
+                line=candidate.line, block_id=block.id,
+            ))
+        if validate:
+            errors.extend(block_errors)
     if validate:
         warnings.extend(_duplicate_id_warnings(blocks))
     return SemanticBlockDocument(blocks=blocks, errors=errors, warnings=warnings)
@@ -435,32 +472,6 @@ def first_block_body(markdown: str, block_type: str) -> str | None:
     return None
 
 
-def _build_block(
-    *,
-    block_type: str,
-    title: str,
-    level: int,
-    start_line: int,
-    end_line: int,
-    lines: list[tuple[int, str]],
-    registry: relation_registry.RelationRegistry,
-) -> tuple[SemanticBlock, list[SemanticBlockValidationError]]:
-    metadata, relation_values, body_lines = _split_metadata(lines)
-    relations, errors = _parse_relations(relation_values, registry)
-    body = "\n".join(body_lines).strip()
-    block = SemanticBlock(
-        type=block_type,
-        title=title,
-        level=level,
-        line=start_line,
-        end_line=end_line,
-        body=body,
-        metadata=metadata,
-        relations=relations,
-    )
-    return block, errors
-
-
 def _split_metadata(
     lines: list[tuple[int, str]],
 ) -> tuple[dict[str, str], list[tuple[str, int]], list[str]]:
@@ -489,59 +500,48 @@ def _split_metadata(
     return metadata, relation_values, [line for _, line in lines[i:]]
 
 
+def _relation_candidates(values: list[tuple[str, int]]) -> tuple[SemanticRelationCandidate, ...]:
+    candidates: list[SemanticRelationCandidate] = []
+    for value, line in values:
+        for entry in _split_relation_entries(value) or [""]:
+            raw_kind, colon, target = entry.partition(":")
+            candidates.append(SemanticRelationCandidate(
+                raw_kind=raw_kind.strip(), kind=normalize_label(raw_kind),
+                target=target.strip(), raw=entry, line=line, has_colon=bool(colon),
+            ))
+    return tuple(candidates)
+
+
 def _parse_relations(
-    values: list[tuple[str, int]],
+    candidates: tuple[SemanticRelationCandidate, ...],
     registry: relation_registry.RelationRegistry,
 ) -> tuple[list[SemanticRelation], list[SemanticBlockValidationError]]:
     relations: list[SemanticRelation] = []
     errors: list[SemanticBlockValidationError] = []
-
-    for value, line_number in values:
-        entries = _split_relation_entries(value)
-        if not entries:
-            errors.append(
-                SemanticBlockValidationError(
-                    code="malformed_relation",
-                    message="relations metadata must contain relation: target entries",
-                    line=line_number,
-                )
-            )
+    for candidate in candidates:
+        if not candidate.has_colon:
+            errors.append(SemanticBlockValidationError(
+                code="malformed_relation",
+                message=(f"malformed relation entry: {candidate.raw}" if candidate.raw
+                         else "relations metadata must contain relation: target entries"),
+                line=candidate.line,
+            ))
             continue
-        for entry in entries:
-            if ":" not in entry:
-                errors.append(
-                    SemanticBlockValidationError(
-                        code="malformed_relation",
-                        message=f"malformed relation entry: {entry}",
-                        line=line_number,
-                    )
-                )
-                continue
-            raw_kind, raw_target = entry.split(":", 1)
-            kind = normalize_label(raw_kind)
-            target = raw_target.strip()
-            resolution = registry.resolve(kind, origin="semantic_relation")
-            if resolution.canonical is None:
-                errors.append(
-                    SemanticBlockValidationError(
-                        code="unsupported_relation",
-                        message=f"unsupported relation: {raw_kind.strip()}",
-                        line=line_number,
-                    )
-                )
-            if not target:
-                errors.append(
-                    SemanticBlockValidationError(
-                        code="malformed_relation",
-                        message=f"relation {kind} is missing a target",
-                        line=line_number,
-                    )
-                )
-                continue
-            relations.append(
-                SemanticRelation(kind=kind, target=target, raw=entry, line=line_number)
-            )
-
+        resolution = registry.resolve(candidate.kind, origin="semantic_relation")
+        if resolution.canonical is None:
+            errors.append(SemanticBlockValidationError(
+                code="unsupported_relation", message=f"unsupported relation: {candidate.raw_kind}",
+                line=candidate.line,
+            ))
+        if not candidate.target:
+            errors.append(SemanticBlockValidationError(
+                code="malformed_relation", message=f"relation {candidate.kind} is missing a target",
+                line=candidate.line,
+            ))
+            continue
+        relations.append(SemanticRelation(
+            kind=candidate.kind, target=candidate.target, raw=candidate.raw, line=candidate.line,
+        ))
     return relations, errors
 
 

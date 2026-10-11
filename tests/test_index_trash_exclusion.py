@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, find_corpus, index_paths, index_sync
+from exomem import deferred_index, find_corpus, index_sync
 from exomem.vault import in_excluded_scan_dir, walk_vault_md
 
 
@@ -277,23 +277,28 @@ def test_bulk_defer_skips_only_proven_current_without_clearing_existing_receipt(
     stale = root / "stale.md"
     for path in (current, current_with_receipt, stale):
         path.write_text("# note\n", encoding="utf-8")
-    sidecar = index_paths.sidecar_path(vault)
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(sidecar)
-    try:
-        conn.execute(
-            "CREATE TABLE chunks (file_path TEXT, chunk_idx INTEGER, file_mtime REAL)"
+    # Proven current means both publications: the page's chunks and its
+    # occurrence coverage record, written by their real owners.
+    import numpy as np
+
+    from exomem import embedding_index, semantic_index
+
+    index = embedding_index.EmbeddingIndex(vault)
+    for path in (current, current_with_receipt):
+        rel = path.relative_to(vault).as_posix()
+        index.upsert_file(
+            rel, ["# note"], np.zeros((1, embedding_index.VECTOR_DIM), np.float32),
+            path.stat().st_mtime,
         )
-        conn.executemany(
-            "INSERT INTO chunks VALUES (?, 0, ?)",
-            [
-                (path.relative_to(vault).as_posix(), path.stat().st_mtime)
-                for path in (current, current_with_receipt)
-            ],
+        state = semantic_index.build_parent_index_state(vault, path)
+        index.upsert_semantic_units(
+            state,
+            np.zeros(
+                (len(embedding_index.occurrence_rows(state)), embedding_index.VECTOR_DIM),
+                np.float32,
+            ),
+            path.stat().st_mtime,
         )
-        conn.commit()
-    finally:
-        conn.close()
     receipt_rel = current_with_receipt.relative_to(vault).as_posix()
     [existing] = deferred_index.add_receipts(vault, [receipt_rel])
 

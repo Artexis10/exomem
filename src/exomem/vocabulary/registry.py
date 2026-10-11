@@ -44,6 +44,8 @@ from typing import Any, Protocol
 import yaml
 
 PACK_SCHEMA_VERSION = 1
+# The instance-selector protocol reserves this token for the public instance.
+PUBLIC_INSTANCE = "public"
 NO_OVERLAY_HASH = "none"
 #: The generic entry fields a delta may name. A spec narrows them.
 ENTRY_FIELDS = frozenset(
@@ -102,6 +104,7 @@ class Snapshot:
     content_hash: str
     effective_digest: str
     overlay_text: str | None
+    instance_id: str = PUBLIC_INSTANCE
 
     @property
     def active(self) -> tuple[Entry, ...]:
@@ -161,6 +164,8 @@ class RegistrySpec:
     #: Whether the bootstrap vocabulary section lists this registry's keys. Some
     #: registries' keys are listed elsewhere or are too many for the compact payload.
     summarize_keys: bool = True
+    instance_id: str = PUBLIC_INSTANCE
+    binding_revision: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -329,12 +334,13 @@ class _Cached:
     snapshot: Snapshot
 
 
-_CACHE: dict[tuple[str, str], _Cached] = {}
+_CACHE: dict[tuple[str, str, str, str, str], _Cached] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str]:
-    return (os.path.abspath(vault_root), spec.name)
+def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str, str, str, str]:
+    return (os.path.abspath(vault_root), spec.name, spec.instance_id,
+            os.path.abspath(spec.overlay(Path(vault_root))), spec.stem)
 
 
 def _stat_key(path: Path) -> tuple[int, ...] | None:
@@ -355,8 +361,11 @@ def _build(spec: RegistrySpec, text: str | None) -> Snapshot:
         entries=entries,
         findings=tuple(spec.adapter.findings(typed)),
         content_hash=digest,
-        effective_digest=effective_digest(spec.name, entries),
+        effective_digest=effective_digest(
+            spec.name if spec.instance_id == PUBLIC_INSTANCE else f"{spec.name}:{spec.instance_id}", entries
+        ),
         overlay_text=text,
+        instance_id=spec.instance_id,
     )
 
 
@@ -364,6 +373,12 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     """The current snapshot of one registry for one vault (pack only without a vault)."""
     if vault_root is None:
         return _pack_only(spec)
+    from . import instances
+
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(Path(vault_root), spec)
+    if spec.binding_revision is not None:
+        instances.recheck(Path(vault_root), spec)
     path = spec.overlay(Path(vault_root))
     key = _cache_key(vault_root, spec)
     stat = _stat_key(path)
@@ -393,18 +408,25 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
 
 def cached(spec: RegistrySpec, vault_root: Path) -> Snapshot | None:
     """The snapshot cached for one vault's registry, without loading; None if absent."""
+    from . import instances
+
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(vault_root, spec)
+    if spec.binding_revision is not None:
+        instances.recheck(vault_root, spec)
     with _CACHE_LOCK:
         entry = _CACHE.get(_cache_key(vault_root, spec))
     return None if entry is None else entry.snapshot
 
 
-_PACK_ONLY: dict[str, Snapshot] = {}
+_PACK_ONLY: dict[tuple[str, str], Snapshot] = {}
 
 
 def _pack_only(spec: RegistrySpec) -> Snapshot:
-    snapshot = _PACK_ONLY.get(spec.name)
+    identity = (spec.name, spec.instance_id)
+    snapshot = _PACK_ONLY.get(identity)
     if snapshot is None:
-        snapshot = _PACK_ONLY[spec.name] = _build(spec, None)
+        snapshot = _PACK_ONLY[identity] = _build(spec, None)
     return snapshot
 
 
@@ -419,8 +441,7 @@ def invalidate(vault_root: Path | None = None, *, path: Path | str | None = None
             if path is None:
                 _CACHE.pop(cache_key, None)
                 continue
-            spec = _specs().get(cache_key[1])
-            if spec is None or os.path.abspath(spec.overlay(Path(root))) == os.path.abspath(
+            if cache_key[3] == os.path.abspath(
                 Path(root) / path if not Path(path).is_absolute() else path
             ):
                 _CACHE.pop(cache_key, None)
@@ -436,12 +457,6 @@ def invalidate_registry(name: str) -> None:
     with _CACHE_LOCK:
         for cache_key in [key for key in _CACHE if key[1] == name]:
             _CACHE.pop(cache_key, None)
-
-
-def _specs() -> Mapping[str, RegistrySpec]:
-    from . import registry_specs
-
-    return registry_specs()
 
 
 # --------------------------------------------------------------------------- #
@@ -725,8 +740,11 @@ def commit(
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
     from .. import registry_history
+    from . import instances
 
     root = Path(vault_root)
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(root, spec, authoring=True)
     path = spec.overlay(root)
     try:
         history = registry_history.commit(
@@ -740,6 +758,9 @@ def commit(
             previous=previous,
             after_hash=content_hash(rendered),
             added={spec.name: added},
+            private=spec.instance_id != PUBLIC_INSTANCE,
+            validate_bindings=(lambda: instances.recheck(root, spec))
+            if spec.binding_revision is not None else None,
         )
     finally:
         invalidate(root, path=path)

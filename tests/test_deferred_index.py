@@ -6,11 +6,30 @@ import subprocess
 import sys
 from pathlib import Path
 
-from exomem import deferred_index, index_paths
+from exomem import deferred_index, embedding_index, index_paths, semantic_index
 
 
 def _embedding_sidecar(vault: Path) -> Path:
     return index_paths.sidecar_path(vault)
+
+
+def _seed_coverage(conn: sqlite3.Connection, vault: Path, rels: list[str]) -> None:
+    """Each seeded page has no occurrence; its coverage record proves that."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS semantic_unit_vectors "
+        "(parent_path TEXT, parent_generation TEXT, unit_key TEXT)"
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        [
+            (
+                embedding_index.COVERAGE_PREFIX + rel,
+                embedding_index.coverage_record(semantic_index.build_parent_index_state(vault, rel)),
+            )
+            for rel in rels
+        ],
+    )
 
 
 def _seed_embedding_rows(vault: Path, rows: list[tuple[str, float]]) -> None:
@@ -28,6 +47,7 @@ def _seed_embedding_rows(vault: Path, rows: list[tuple[str, float]]) -> None:
             "VALUES (?, 0, ?)",
             rows,
         )
+        _seed_coverage(conn, vault, [rel for rel, _mtime in rows])
         conn.commit()
     finally:
         conn.close()
@@ -120,6 +140,7 @@ def test_embedding_freshness_uses_percent_safe_uri_and_live_wal_without_changes(
             "INSERT INTO chunks(file_path, chunk_idx, file_mtime) VALUES (?, 0, ?)",
             (rel, note.stat().st_mtime),
         )
+        _seed_coverage(writer, vault, [rel])
         writer.commit()
         companions = [sidecar, Path(f"{sidecar}-wal"), Path(f"{sidecar}-shm")]
         assert all(path.exists() for path in companions)

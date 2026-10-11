@@ -194,6 +194,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
+    from exomem.governance import connector_boundary
     from exomem.governance import policy as governance_policy
 
     expected = {
@@ -206,6 +207,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "collection-publication",
         "collection-snapshot",
         "collection-audit-spool",
+        "connector-boundary",
         "consolidation-tree",
         "deferred-index-store",
         "due-state",
@@ -244,6 +246,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     token32 = "1" * 32
     claims_from_owners = [
         (governance_policy.governance_root(root), "governance-tree"),
+        (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
         (index_paths.sidecar_path(root), "embeddings-store"),
         (index_paths.clip_sidecar_path(root), "clip-store"),

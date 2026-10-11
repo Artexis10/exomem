@@ -738,7 +738,7 @@ def indexed_relation_observations(
     five distinct examples per returned group. ``None`` means a current
     projection was unavailable.
     """
-    from .epistemic_graph import EpistemicGraphIndex
+    from .epistemic_graph import CANDIDATE_STATUS, EpistemicGraphIndex, GraphView, edge_columns
 
     relation_vocabulary.validate_candidate_limit(limit)
     if type(offset) is not int or offset < 0:
@@ -778,7 +778,9 @@ def indexed_relation_observations(
             normalized_relation_sql = (
                 f"exomem_normalize_relation(raw_relation, {authored_line_sql})"
             )
-            predicate = "registry_status = 'unregistered'"
+            # Shared rows type only core meanings: a candidate row is unregistered
+            # when its authoring page's selected registry does not define it.
+            predicate = f"registry_status IN ('unregistered', '{CANDIDATE_STATUS}')"
             parameters: tuple[Any, ...] = ()
             if raw_relations is not None:
                 if not requested:
@@ -809,6 +811,15 @@ def indexed_relation_observations(
                     "AND source.origin_date <= ?)"
                 )
                 parameters = (*parameters, end.isoformat())
+            if has_authored_provenance:
+                GraphView(vault_root, snapshot).register_relation_functions()
+                columns = edge_columns("")
+                predicate += (
+                    " AND (registry_status = 'unregistered' "
+                    f"OR exomem_edge_status({columns}) = 'unregistered')"
+                )
+            else:
+                predicate += " AND registry_status = 'unregistered'"
             total_row = snapshot.execute(
                 f"""
                 SELECT COUNT(*)
@@ -2398,7 +2409,7 @@ def contract_path(vault_root: Path, name: str) -> Path:
 
 
 def _select_pages(vault_root: Path, scope: ContractScope):
-    from .governance import raw_protection
+    from .governance import egress
     from .governance.principal import effective_principal
 
     who = effective_principal()
@@ -2407,7 +2418,7 @@ def _select_pages(vault_root: Path, scope: ContractScope):
         return []
     pages = []
     for path in find_module._walk_md(kb):
-        if not raw_protection.permits(vault_root, path.relative_to(vault_root).as_posix(), who):
+        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
             continue
         page = find_module._CACHE.get(path, vault_root)
         if page is None:

@@ -1,37 +1,43 @@
 ## Why
 
-Exomem can adopt legacy material and govern an existing vault, but it cannot reconcile two already-managed Exomems into one policy-bound destination through a single previewable, resumable workflow. The missing product path blocks a safe move from temporary physical isolation to one owner-controlled vault with deterministic delegated disclosure.
+One owner can use several connectors with different content permissions. Owner identity currently risks bypassing that separation, which prevents safe consolidation of managed vaults.
+
+This change keeps one governed destination useful while preventing a connector's hidden corpus from influencing its observations. The durable decision is a host-configured connector ceiling, followed by private vocabulary domains and an offline import path.
 
 ## What Changes
 
-- Add a first-class natural-language-facing `consolidate_memory` product command across MCP, REST, Hosted, CLI, OpenAPI, and capability documentation.
-- Intake a quiesced, content-addressed source export only when its source identity and authenticity are bound by an authenticated transport receipt or signed attestation.
-- Inventory source and destination without mutation, reconcile identities and paths deterministically, and surface every non-byte-identical conflict for owner review.
-- Produce one exact joint content-plus-policy plan with representative principal-by-purpose disclosure results and a single-use approval bound to both vault snapshots, principal attestations, conflict decisions, preimage, expiry, and planned writes.
-- Execute an in-place destination-sealed saga: stage outside recall, seal ordinary reads, activate restrictive policy first, publish journaled content batches, rebuild derived indexes, verify positive and negative access, then unseal.
-- Preserve a content-addressed destination preimage and distinguish pre-publication abort, post-publication rollback, and separately approved source retirement.
-- Store durable owner-only run control state and plaintext-free receipts while keeping inventories, paths, conflicts, and previews invisible to ordinary knowledge surfaces.
-- Preserve Sources, Evidence, Records, media, semantic units, identities, history, relations, citations, review state, and provenance without transplanting source audience hashes or live policy as destination authority.
+- Delivery A adds non-bypassable content ceilings for authenticated connectors without removing owner identity or legitimate allowed-target write authority.
+- Host configuration maps verified issuer/client bindings to denied canonical Scope IDs and defines a restrictive default for unknown clients.
+- Admission precedes decoding, candidate selection, ranking, graph assembly, aggregation, response construction, and target mutation.
+- Configured capture namespaces preserve public visibility across all writers and restores. Creation eligibility precedes existence and collision observations; admitted existing edits continue elsewhere.
+- Durable arming survives supported downgrade, backup, export, and restore. Armed archives use manifest version 2 with canonical protective selectors; unarmed archives retain version 1.
+- Delivery B adds private vocabulary domains after the vocabulary registry foundation. Public definitions remain explicit; private definitions never become a public union.
+- Delivery C adds offline managed-vault inventory, reconciliation, import, recovery, and rollback using existing mutation and restore owners.
+- Real import, connector cutover, and source retirement remain separately authorized operations. Capability shipment does not perform them.
+- **BREAKING when armed:** missing or incompatible host configuration prevents serving; unknown connectors receive the restricted default, including shared-cell bearers.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `vault-consolidation`: Authenticated two-vault inventory, deterministic reconciliation, exact joint review, destination-sealed application, verification, recovery, rollback, and source-retirement gating.
+- `vault-consolidation`: Connector-separated managed vaults, private vocabulary domains, and lossless offline reconciliation and import.
 
 ### Modified Capabilities
 
-- `command-surface`: Expose one multiplexed `consolidate_memory` command with action-aware read/write classification and surface parity.
-- `hosted-vault-portability`: Bind exports to source identity/authenticity and make verified archives reusable as bounded consolidation intake without permitting active-root overlay restore.
-- `hosted-mutation-safety`: Add destination sealing, exclusive consolidation authority, journaled publication, preimage restoration, and crash/retry admission rules.
-- `release-gate`: Enforce a destination-wide content-free seal for ordinary principals throughout policy/content publication and recovery.
-- `disclosure-evidence`: Record plaintext-free consolidation intents, phase transitions, verification outcomes, aborts, rollbacks, and retirement approvals without making receipts policy input.
-- `product-e2e`: Prove the installed multi-surface consolidation lifecycle, restart recovery, and negative-disclosure behavior.
+- `command-surface`: Preserve verified connector and originating authentication context across existing surfaces and delegated transfers.
+- `release-gate`: Apply connector ceilings before owner shortcuts and before hidden contributors can affect observations.
+- `hosted-mutation-safety`: Preserve allowed owner writes, prevent self-widening, and arm only under stopped maintenance authority.
+- `governance-kernel`: Distinguish exact protective restore continuity from content admission membership while preserving canonical proposal recovery.
+- `hosted-vault-portability`: Preserve armed requirements through versioned export and fresh-state restore without copying source connector authority.
+- `disclosure-evidence`: Keep receipts plaintext-free, access-limited, append-only, and outside policy and knowledge.
+- `product-e2e`: Prove connector separation and allowed utility through real authentication, delegation, downgrade, and portability workflows.
 
 ## Impact
 
-- Adds a durable consolidation run engine, source archive/attestation validation, reconciliation planner, exact review token, sealed saga coordinator, verification matrix, rollback handling, and one command-registry entry.
-- Reuses Hosted portability manifests, governance journals/markers/receipts, batch writes, canonical identity/reference resolution, review primitives, rebuild machinery, and writer-lease/idempotency boundaries; Adoption Studio remains unchanged and is not used as a vault merge.
-- **BREAKING**: an unsigned or unauthenticated archive, stale plan, unresolved conflict, unbound destination principal, unverified rollback preimage, or failed disclosure probe refuses application.
-- The capability is deterministic pure substrate: the agent interprets intent and proposes decisions, while Exomem validates exact state and effects; no server-side reasoning model or optional heavy dependency is added.
-- This change implements reusable product capability only. A real source/destination rehearsal, connector switch, and source retirement remain separate exact-plan operational approvals.
+Delivery A changes principal propagation, shared admission, content producers, write admission, compatibility enrollment, and portability. It adds no reasoning model, signer service, public consolidation command, or Hosted profile.
+
+Delivery B follows the vocabulary registry foundation. Delivery C follows both earlier deliveries and retains the complete preservation contract in the vault-consolidation delta.
+
+The retired eleven-action signed-source saga is no longer the design. Existing reconciliation, fingerprint, preimage, and recovery code may be salvaged against this contract. The old stack is not an integration or verification target.
+
+Delivery A is independently useful. It does not complete T16 or authorize combining real vaults. Hosted end-client provenance requires gateway work outside this repository; shared-cell identity alone cannot provide it.

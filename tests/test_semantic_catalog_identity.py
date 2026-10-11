@@ -7,9 +7,10 @@ and *FTS-Unavailable Category Correctness*:
 * the semantic catalog (normal-table page/unit category-kind metadata) is
   maintained and queried independently of FTS5 / trigram availability;
 * catalog completeness is a COMPOUND identity — catalog schema version,
-  semantic-unit parser version, core category/authoring-contract identity, and
-  extension semantic-language registry content hash — so a parser or registry
-  change invalidates the projection even when no note Markdown changed;
+  semantic-unit parser version and core authoring-contract identity — so a
+  parser change invalidates the projection even when no note Markdown changed.
+  Rows are selection-free structural occurrences, so registry definitions are
+  read at query time and are not part of the identity;
 * a safe exact category request against an incomplete catalog raises a typed,
   non-cacheable ``RETRIEVAL_INDEX_WARMING`` outcome instead of a false empty.
 
@@ -26,8 +27,9 @@ from typing import Any
 
 import pytest
 
-from exomem import cli_ops, freshness, lexstore, semantic_index, semantic_language_registry
+from exomem import cli_ops, freshness, lexstore, semantic_index
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -63,12 +65,6 @@ def _write_note(root: Path, rel_path: str, body: str) -> Path:
         encoding="utf-8",
     )
     return path
-
-
-def _write_registry(root: Path, body: str) -> None:
-    path = semantic_language_registry.registry_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
 
 
 def _seed_live_freshness(root: Path, paths: list[Path]) -> None:
@@ -116,57 +112,6 @@ def test_catalog_identity_excludes_access_membership(tmp_path: Path) -> None:
     access.parent.mkdir(parents=True)
     access.write_text("readonly: []\n", encoding="utf-8")
     assert lexstore.catalog_semantic_identity(tmp_path) == baseline
-
-
-def test_precore_constraints_alias_change_invalidates_projection_identity(
-    tmp_path: Path,
-) -> None:
-    """A sidecar built before a portable-core category contract must not be
-    treated as complete once the core resolves an authored ``[constraints]``
-    label differently — the identity changes with no note edit."""
-    _write_note(tmp_path, "Knowledge Base/Notes/c.md", "- [constraints] pre-core token ^c")
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\ncategories: {}\nkinds: {}\n",
-    )
-    before = lexstore.catalog_semantic_identity(tmp_path)
-
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\n"
-        "categories:\n"
-        "  constraint:\n"
-        "    description: Constraint facts\n"
-        "    aliases: [constraints]\n"
-        "kinds: {}\n",
-    )
-    after = lexstore.catalog_semantic_identity(tmp_path)
-    assert before != after
-
-
-def test_extension_registry_save_invalidates_projection_identity(tmp_path: Path) -> None:
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\n"
-        "categories:\n"
-        "  config:\n"
-        "    description: Configuration facts\n"
-        "    aliases: [configuration]\n"
-        "kinds: {}\n",
-    )
-    before = lexstore.catalog_semantic_identity(tmp_path)
-
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\n"
-        "categories:\n"
-        "  config:\n"
-        "    description: Revised configuration facts\n"
-        "    aliases: [configuration, cfg]\n"
-        "kinds: {}\n",
-    )
-    after = lexstore.catalog_semantic_identity(tmp_path)
-    assert before != after
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +166,7 @@ def test_exact_category_recall_without_fts5_avoids_a_corpus_walk(
 
 
 @needs_fts5
+@library_scope()
 def test_incomplete_catalog_raises_non_cacheable_warming_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -282,35 +228,21 @@ def test_incomplete_catalog_raises_non_cacheable_warming_outcome(
 
 
 @needs_fts5
+@library_scope()
 def test_projection_identity_mismatch_is_warming_not_stale_recall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = _write_note(
         tmp_path,
         "Knowledge Base/Notes/identity.md",
-        "- [config] indexed under the first language contract ^identity",
-    )
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\n"
-        "categories:\n"
-        "  local_lens:\n"
-        "    description: First public-safe definition\n"
-        "kinds: {}\n",
+        "- [config] indexed under the first parser ^identity",
     )
     _seed_live_freshness(tmp_path, [target])
     lexstore.ensure_fresh(tmp_path)
 
-    # Registry bytes are part of the semantic projection identity even though
-    # the Markdown freshness checkpoint did not move.
-    _write_registry(
-        tmp_path,
-        "schema_version: 1\n"
-        "categories:\n"
-        "  local_lens:\n"
-        "    description: Revised public-safe definition\n"
-        "kinds: {}\n",
-    )
+    # The parser version is part of the semantic projection identity even
+    # though the Markdown freshness checkpoint did not move.
+    monkeypatch.setattr(semantic_index, "PARSER_VERSION", semantic_index.PARSER_VERSION + 1)
     scheduled: list[Path] = []
     monkeypatch.setattr(lexstore, "_schedule_repair", scheduled.append)
     monkeypatch.setattr(
@@ -393,6 +325,7 @@ def test_complete_delta_at_cap_repairs_catalog_once_without_a_walk(
 
 
 @needs_fts5
+@library_scope()
 def test_delta_over_cap_returns_warming_and_schedules_one_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
