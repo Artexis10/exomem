@@ -693,20 +693,20 @@ def test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_work(
         "working_set.resolve",
         "working_set.roles",
         "working_set.current_state",
-        "working_set.lanes.identity",
+        "working_set.lanes.0",
     } <= set(stages)
     # There is no partial packet: the second lane never ran, and the whole
     # request abstains rather than disclosing what the first lane found —
     # the discarded first lane's items never reach `packet["units"]`.
-    assert "working_set.lanes.constraints" not in stages
+    assert "working_set.lanes.1" not in stages
     assert "working_set.budget" not in stages
     # The guard still runs once, on the empty abstained packet, without
     # costing a second budget check (see the "after resolve" test above for
     # why).
     assert guard_calls == ["guard_working_set"]
     assert packet["units"] == []
-    assert budget.skipped == ["working_set.lanes.constraints"]
-    assert packet["request_budget"]["skipped"] == ["working_set.lanes.constraints"]
+    assert budget.skipped == ["working_set.lanes.1"]
+    assert packet["request_budget"]["skipped"] == ["working_set.lanes.1"]
     assert "timings" in packet
     assert working_set_runtime._PACKET_CACHE == {}
 

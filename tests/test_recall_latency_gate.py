@@ -373,6 +373,33 @@ def test_a_missed_stage_budget_diagnoses_without_failing_the_ceiling() -> None:
     assert report["series"]["filtered_hybrid"]["eligibility_over_budget"] is True
 
 
+@pytest.mark.parametrize("check,elapsed_ms", [(False, 40.0), (True, 40.0), (True, 421.5)])
+def test_saved_gate_output_keeps_stage_diagnosis_before_the_ceiling_verdict(
+    check: bool, elapsed_ms: float, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    transport = _StubTransport(elapsed_ms=elapsed_ms, stage_ms={"filter_eligibility": 44.0})
+    monkeypatch.setattr(gate, "VaultTransport", lambda _vault: transport)
+    monkeypatch.setattr(transport, "warm", lambda: None, raising=False)
+    measured_run = gate.run
+
+    def run_at_known_load(**kwargs):
+        return measured_run(**kwargs, load_source=_StubLoad([1.0] * 500))
+
+    monkeypatch.setattr(gate, "run", run_at_known_load)
+    arguments = ["--vault", "synthetic"] + (["--check"] if check else [])
+    if check and elapsed_ms > gate.HYBRID_P95_MS:
+        with pytest.raises(SystemExit, match="p95=421.5ms"):
+            gate.main(arguments)
+    else:
+        assert gate.main(arguments) == 0
+    report = json.loads(capsys.readouterr().out)
+    filtered = report["series"]["filtered_hybrid"]
+    assert filtered["eligibility_ms"] == 44.0
+    assert filtered["eligibility_budget_ms"] == 6.0
+    assert filtered["eligibility_over_budget"] is True
+
+
 def test_a_filtered_series_with_no_eligibility_stage_at_all_is_not_a_pass() -> None:
     """The premise cannot be certified from a stage that never ran.
 

@@ -1021,12 +1021,13 @@ def run_lanes(
     # The unit lanes select overlapping units off the same pages: each page is
     # read, checked and parsed once for all of them.
     parent_reads = find.UnitParentReads()
-    for role in roles:
+    for role_index, role in enumerate(roles):
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
         if definition is None:
             continue
-        lane_stage = f"working_set.lanes.{role_id}"
+        # Role identifiers are configured content; diagnostics expose positions only.
+        lane_stage = f"working_set.lanes.{role_index}"
         if budget_exhausted(lane_stage):
             # Discards any items/missing entries already gathered from prior
             # lanes in this same loop: there is no partial packet, only a

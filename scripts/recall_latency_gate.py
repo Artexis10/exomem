@@ -303,6 +303,13 @@ def _is_walker(stage: str) -> bool:
 
 
 def _report_targets(series: dict[str, Any], shape: str) -> None:
+    if shape == "filtered_hybrid":
+        eligibility = series.get("eligibility_ms")
+        # Stage budgets diagnose their row; they never fail the ceiling verdict.
+        series["eligibility_budget_ms"] = FILTERED_ELIGIBILITY_MS
+        series["eligibility_over_budget"] = (
+            float(eligibility) > FILTERED_ELIGIBILITY_MS if eligibility is not None else None
+        )
     p50 = series.get("p50_ms")
     p95 = series.get("p95_ms")
     target = _P50_TARGETS.get(shape)
@@ -565,10 +572,6 @@ def check(report: dict[str, Any]) -> None:
                     "stage-budget premise cannot be read on this cell, and an "
                     "absent stage is not a stage that ran in no time"
                 )
-            else:
-                # Stage budgets diagnose their row; they never fail the ceiling verdict.
-                series["eligibility_budget_ms"] = FILTERED_ELIGIBILITY_MS
-                series["eligibility_over_budget"] = float(eligibility) > FILTERED_ELIGIBILITY_MS
             # Matched the way `_is_walker` and the `eligibility_ms` collector
             # already match, because Lane 1 moves stages under qualified names
             # and a bare-key lookup stops watching on the day one is renamed:
