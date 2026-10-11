@@ -101,6 +101,7 @@ def _hook_diag_rung(function):
 
 _CLI_OBSERVER = '''
 import atexit
+from importlib.machinery import SourceFileLoader
 import json
 import os
 import sys
@@ -108,9 +109,30 @@ import threading
 import time
 ''' + _EMITTER + r'''
 
+# Measure native file-source compilation; cached, frozen and extension imports bypass it.
+_hook_diag_compilation = {"source_compile_calls": 0, "source_compile_seconds": 0.0,
+                          "product_source_compile_calls": 0,
+                          "product_source_compile_seconds": 0.0}
+_hook_diag_source_to_code = SourceFileLoader.source_to_code
+
+def _hook_diag_compile(loader, data, path, *, _optimize=-1):
+    began = time.monotonic()
+    try:
+        return _hook_diag_source_to_code(loader, data, path, _optimize=_optimize)
+    finally:
+        elapsed = time.monotonic() - began
+        _hook_diag_compilation["source_compile_calls"] += 1
+        _hook_diag_compilation["source_compile_seconds"] += elapsed
+        # The package namespace fixes this group; no source paths or content leave the child.
+        if loader.name == "exomem" or loader.name.startswith("exomem."):
+            _hook_diag_compilation["product_source_compile_calls"] += 1
+            _hook_diag_compilation["product_source_compile_seconds"] += elapsed
+
+SourceFileLoader.source_to_code = _hook_diag_compile
+
 def _hook_diag_child(phase, event, **extra):
     _hook_diag_emit({"phase": phase, "event": event, "pid": os.getpid(),
-                     "at": time.monotonic(), **extra})
+                     "at": time.monotonic(), **_hook_diag_compilation, **extra})
 
 def _hook_diag_wrap(phase, function, *, watch_drain=False):
     def observed(*args, **kwargs):
