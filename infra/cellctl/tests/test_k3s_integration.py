@@ -16,12 +16,14 @@ binary (HELM_BIN, or `helm` on PATH) available.
 Deliberate stand-ins, each named where it matters below and in the delivery
 report:
 
-- Cell image: lane A's real image was not ready when this was written, so a
-  minimal stand-in (serves /health, /health/ready, and test-only /write and
+- Cell image: backup/restore scenarios use a minimal stand-in (serves
+  /health, /health/ready, and test-only /write and
   /read endpoints round-tripping an owner-only file under the vault and
   under /data/host) is built and imported into the cluster, plus a second,
   deliberately-never-ready variant used only to force a canary failure. It
-  implements no MCP protocol.
+  implements no MCP protocol. The protected-import case uses a supplied,
+  source-built Cloud image for the runtime and every Job, with only the
+  disposable storage CA added to its certificate bundle.
 - Object storage: a real MinIO container (Chainguard's build) stands in for
   B2's S3-compatible endpoint per the D8 amendment, so the backup/restore
   Jobs' restic calls are genuinely live. B2's own application-key management
@@ -47,28 +49,39 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
+import ipaddress
 import json
 import os
 import random
 import re
 import shutil
+import ssl
 import subprocess
 import time
 import uuid
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
 import asyncpg
+import boto3
 import pytest
 import yaml
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
 from cellctl.capacity import CapacityConfig
 from cellctl.decide import ReconcileConfig
+from cellctl.imports import PHASES, job_name
 from cellctl.k8s_client import ClusterClient
 from cellctl.manifests import (
     BACKUP_JOB_NAME,
@@ -376,7 +389,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             (work / "k3s.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
             minio_logs = _run(["docker", "logs", minio_name], check=False)
             (work / "minio.log").write_text(minio_logs.stdout + minio_logs.stderr, encoding="utf-8")
-            _run(["docker", "rm", "--force", name], check=False)
+            _run(["docker", "rm", "--force", "--volumes", name], check=False)
             _run(["docker", "rm", "--force", minio_name], check=False)
             _run(["docker", "volume", "rm", "--force", minio_volume], check=False)
     finally:
@@ -400,6 +413,350 @@ def _issue_sa_token(k3s: K3sCluster, *, name: str, namespace: str, duration: str
     return _kubectl(
         k3s.name, ["create", "token", name, "--namespace", namespace, f"--duration={duration}"]
     ).stdout.strip()
+
+
+@pytest.fixture
+def import_storage(k3s: K3sCluster, tmp_path: Path) -> Iterator[dict[str, Any]]:
+    source_image = os.environ.get("CELLCTL_K3S_IMPORT_IMAGE")
+    if not source_image:
+        pytest.skip("set CELLCTL_K3S_IMPORT_IMAGE to the source-built Cloud image")
+    work = tmp_path / "import-storage"
+    certificates = work / "certificates"
+    certificates.mkdir(parents=True)
+    suffix = uuid.uuid4().hex[:12]
+    name = f"{k3s.name}-import-storage"
+    volume = f"{name}-data"
+    trusted_image = f"cellctl-import-tls:{suffix}"
+    try:
+        _run([
+            "docker", "run", "--detach", "--name", name, "--network", k3s.network,
+            "--user", "0:0", "--mount", f"type=volume,src={volume},dst=/data",
+            "--mount", f"type=bind,src={certificates},dst=/certificates,readonly",
+            "-e", f"MINIO_ROOT_USER={MINIO_ACCESS_KEY}",
+            "-e", f"MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}", MINIO_IMAGE,
+            "server", "/data", "--address", ":443", "--certs-dir", "/certificates",
+        ])
+        address = _container_ip(name)
+        # Docker assigns the address at start; restart this owned fixture after issuing its IP certificate.
+        _run(["docker", "stop", name])
+        now = datetime.now(UTC)
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Disposable import CA")])
+        ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+              .public_key(ca_key.public_key()).serial_number(x509.random_serial_number())
+              .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+              .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+              .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+              .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False,
+                             key_encipherment=False, data_encipherment=False, key_agreement=False,
+                             key_cert_sign=True, crl_sign=True, encipher_only=None, decipher_only=None), critical=True)
+              .sign(ca_key, hashes.SHA256()))
+        leaf_key = ec.generate_private_key(ec.SECP256R1())
+        leaf = (x509.CertificateBuilder().subject_name(x509.Name([
+                    x509.NameAttribute(NameOID.COMMON_NAME, "Disposable import storage")]))
+                .issuer_name(ca_name).public_key(leaf_key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+                .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address(address))]), critical=False)
+                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                .sign(ca_key, hashes.SHA256()))
+        ca_path = work / "ca.crt"
+        ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+        (certificates / "public.crt").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+        private_key = certificates / "private.key"
+        private_key.write_bytes(leaf_key.private_bytes(serialization.Encoding.PEM,
+                              serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        private_key.chmod(0o600)
+        _run(["docker", "start", name])
+        assert _container_ip(name) == address
+        # Omit the default port so the S3 signature and urllib's Host header agree.
+        endpoint = f"https://{address}"
+        storage = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1",
+                               aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY,
+                               verify=str(ca_path))
+        _wait_for(lambda: storage.list_buckets() is not None, timeout=60,
+                  description="TLS import storage with verified CA and IP SAN")
+        storage.create_bucket(Bucket=BUCKET_NAME)
+        storage.put_bucket_versioning(Bucket=BUCKET_NAME, VersioningConfiguration={"Status": "Enabled"})
+        assert storage.get_bucket_versioning(Bucket=BUCKET_NAME)["Status"] == "Enabled"
+        # Trust is the sole image change; the product and baked model remain the source image's bytes.
+        (work / "Dockerfile").write_text(
+            f"FROM {source_image}\nUSER 0:0\nCOPY ca.crt /tmp/import-ca.crt\n"
+            "RUN cat /tmp/import-ca.crt >> /etc/ssl/certs/ca-certificates.crt && rm /tmp/import-ca.crt\n"
+            "USER 10001:10001\n", encoding="utf-8")
+        _run(["docker", "build", "--tag", trusted_image, str(work)])
+        product_hash = (
+            "import hashlib,json; from pathlib import Path; "
+            "roots=[Path('/app/.venv'),Path('/opt/exomem-models')]; "
+            "digest=hashlib.sha256(); "
+            "[(digest.update(str(p).encode()),digest.update(p.read_bytes())) "
+            "for root in roots for p in sorted(root.rglob('*')) if p.is_file()]; "
+            "print(json.dumps({'sha256':digest.hexdigest()}))"
+        )
+        identities = []
+        for image in (source_image, trusted_image):
+            identities.append(json.loads(_run(["docker", "run", "--rm", "--network=none",
+                                              "--entrypoint=python3", image, "-c", product_hash]).stdout))
+        assert identities[0] == identities[1]
+        image = _import_image(k3s.name, trusted_image, repository="cellctl-import.test/exomem-cell")
+        source_id = _run(["docker", "image", "inspect", "--format={{.Id}}", source_image]).stdout.strip()
+        print(f"[import] source image {source_id}; trusted image {image}; product/model {identities[0]['sha256']}")
+        yield {"endpoint": endpoint, "ca": ca_path, "tag": trusted_image, "image": image, "client": storage}
+    finally:
+        logs = _run(["docker", "logs", name], check=False)
+        print(f"[import] TLS storage log:\n{logs.stdout}{logs.stderr}")
+        _run(["docker", "rm", "--force", name], check=False)
+        _run(["docker", "volume", "rm", "--force", volume], check=False)
+        _run(["docker", "image", "rm", trusted_image], check=False)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+@pytest.mark.skipif(not RUN_LIVE, reason="set RUN_CELLCTL_K3S_TEST=1 for the real import workflow")
+def test_protected_import_waits_for_real_cleanup_pod_gc(
+    k3s: K3sCluster, cell_db: CellDatabase, import_storage: dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted Job with a terminating Pod cannot publish done or release import admission."""
+    image = import_storage["image"]
+    documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml",
+                                 "templates/operator-access.yaml", settings=(
+                                     "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
+                                     "--set-json", "cells.jobEgressExcept=[]"))
+    storage_class = next(document for document in documents if document["kind"] == "StorageClass")
+    storage_class.update(provisioner="rancher.io/local-path", reclaimPolicy="Delete",
+                         volumeBindingMode="WaitForFirstConsumer")
+    storage_class.pop("parameters", None)
+    _kubectl(k3s.name, ["apply", "--filename=-"], documents=documents)
+    _wait_for(lambda: all(
+        "typeChecking" in (status := json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                          policy, "--output=json"]).stdout).get("status", {}))
+        and not status["typeChecking"].get("expressionWarnings")
+        for policy in ("exomem-cellctl-scope", "exomem-cell-connect-guard")),
+        timeout=30, description="normal controller and operator policies to type-check")
+    token = _issue_sa_token(k3s, name="cellctl", namespace="exomem-cloud")
+    # Load only the API endpoint and CA, then replace the admin credential with the actual SA token.
+    configuration = k8s.Configuration()
+    k8s_config.load_kube_config(config_file=str(k3s.kubeconfig), client_configuration=configuration)
+    configuration.cert_file = configuration.key_file = None
+    configuration.api_key = {"authorization": f"Bearer {token}"}
+    sa_client = k8s.ApiClient(configuration)
+    cluster = ClusterClient(sa_client)
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(import_storage["ca"]))
+    cell_id, tenant_id = _cell_id(), uuid.uuid4()
+    namespace = namespace_name(cell_id)
+    sources = {"metrics.json": b'{"value":23,"unit":"sample"}\n',
+               "notes/readme.txt": b"Neutral archive fixture.\n"}
+    archive = tmp_path / "export.zip"
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        for path, content in sources.items():
+            zipped.writestr(path, content)
+    expected_archive = {"sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                        "bytes": archive.stat().st_size}
+    expected_members = {path: {"sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
+                        for path, content in sources.items()}
+    envelope_source = (
+        "import json,tarfile; from pathlib import Path; "
+        "from exomem.cloud_import_envelope import Envelope,write; "
+        "archive=Path('/fixture/export.zip'); "
+        "envelope=Envelope(scope='Workspace',category='Exports',filename='export.zip'); "
+        "stream=Path('/fixture/envelope.tar').open('wb'); write(stream,archive,envelope); stream.close(); "
+        "members=tarfile.open('/fixture/envelope.tar').getmembers(); "
+        "print(json.dumps({'bytes':sum(m.size for m in members),'files':len(members)}))"
+    )
+    declared = json.loads(_run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
+                               "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=python3",
+                               import_storage["tag"], "-c", envelope_source]).stdout)
+
+    async def sql(query: str, *args: object, role: str = "substrate_owner"):
+        connection = await asyncpg.connect(cell_db.dsn(role=role))
+        try:
+            return await connection.fetchrow(query, *args)
+        finally:
+            await connection.close()
+
+    asyncio.run(sql("INSERT INTO exomem_tenants(id) VALUES($1)", tenant_id))
+    asyncio.run(sql("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')",
+                    cell_id, tenant_id))
+    asyncio.run(sql("INSERT INTO exomem_cloud_settings(key,value) VALUES('cell_image',$1) "
+                    "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", json.dumps(image)))
+    secrets = SecretsConfig(cell_token_key_current=b"k3s-integration-test-current-key-32b!",
+                            cell_token_key_previous=None, cell_token_key_version=1,
+                            cell_token_key_previous_version=None, backup_master_keys={1: b"0" * 32},
+                            backup_master_key_current_version=1)
+    cluster_config = ClusterConfig(object_storage_bucket=BUCKET_NAME,
+                                    object_storage_endpoint=import_storage["endpoint"],
+                                    capacity=CapacityConfig(attachments_limit_fallback=100, headroom=5))
+    fake_b2 = FakeB2(fixed_credentials=(MINIO_ACCESS_KEY, MINIO_SECRET_KEY))
+    volumes = FakeHetznerVolumeProvider()
+
+    async def step():
+        connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+        try:
+            await reconcile_once(connection, cluster, fake_b2, volumes, secrets, cluster_config,
+                                 config=LIVE_CONFIG)
+        finally:
+            await connection.close()
+
+    def ready():
+        asyncio.run(step())
+        row = asyncio.run(sql("SELECT observed_state,ready FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))
+        observed = cluster.observe(cell_id, namespace)
+        return row["observed_state"] == "running" and row["ready"] and observed.pod_ready
+
+    def import_row():
+        return asyncio.run(sql("SELECT * FROM exomem_cloud_imports WHERE import_id=$1", import_id))
+
+    def reconciled_key():
+        asyncio.run(step())
+        return import_row()["recipient"] is not None
+
+    try:
+        _wait_for(ready, timeout=360, description="actual cell-init and Cloud runtime Ready")
+        statefulset = json.loads(_kubectl(k3s.name, ["get", "statefulsets", "--namespace", namespace,
+                                                   "--output=json"]).stdout)["items"][0]
+        runtime = statefulset["spec"]["template"]["spec"]["containers"][0]
+        assert runtime["image"] == image and runtime["securityContext"]["runAsUser"] == 10001
+        assert runtime["securityContext"]["readOnlyRootFilesystem"] is True
+        assert runtime["resources"]["requests"]["memory"] == "512Mi"
+        assert runtime["resources"]["limits"]["memory"] == "3Gi"
+        assert runtime["startupProbe"]["periodSeconds"] * runtime["startupProbe"]["failureThreshold"] == 300
+        # Suppress the unrelated scheduled backup only after the real runtime has become ready.
+        asyncio.run(sql("UPDATE exomem_cloud_cells SET last_backup_at=now() WHERE cell_id=$1", cell_id))
+        import_id = asyncio.run(sql("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                                     "VALUES($1,'archive_members',$2,$3) RETURNING import_id", cell_id,
+                                     declared["bytes"], declared["files"], role="substrate_app"))["import_id"]
+        _wait_for(reconciled_key, timeout=120, description="actual prepare Job recipient")
+        recipient = import_row()["recipient"]
+        _run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
+              "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=age",
+              import_storage["tag"], "-r", recipient, "-o", "/fixture/upload.age", "/fixture/envelope.tar"])
+        ciphertext = (tmp_path / "upload.age").read_bytes()
+        cipher_hash = hashlib.sha256(ciphertext).hexdigest()
+        asyncio.run(sql("UPDATE exomem_cloud_imports SET ciphertext_sha256=$2,ciphertext_bytes=$3 WHERE import_id=$1",
+                        import_id, cipher_hash, len(ciphertext), role="substrate_app"))
+        _wait_for(lambda: (asyncio.run(step()), import_row()["part_urls"] is not None)[1],
+                  timeout=120, description="controller-issued multipart upload URLs")
+        parts, offset = [], 0
+        for part in json.loads(import_row()["part_urls"]):
+            size = part["part_size_bytes"]
+            request = Request(part["url"], data=ciphertext[offset:offset + size], method="PUT")
+            with urlopen(request, context=ssl.create_default_context(cafile=str(import_storage["ca"])), timeout=30) as response:
+                parts.append({"part_number": part["part_number"], "etag": response.headers["ETag"]})
+            offset += size
+        assert offset == len(ciphertext)
+        asyncio.run(sql("UPDATE exomem_cloud_imports SET requested_state='uploaded',part_etags=$2 WHERE import_id=$1",
+                        import_id, json.dumps(parts), role="substrate_app"))
+        _wait_for(lambda: (asyncio.run(step()), cluster.observe_import_jobs(namespace, str(import_id))["import"].succeeded)[1],
+                  timeout=180, description="actual encrypted protected import Job success")
+        completed = cluster.observe_import_jobs(namespace, str(import_id))["import"]
+        assert completed.report == {"ok": True, "files": declared["files"], "bytes": declared["bytes"]}
+        cleanup_name = job_name(str(import_id), "cleanup")
+
+        def cleanup_launched():
+            if not cluster.observe_import_jobs(namespace, str(import_id))["cleanup"].exists:
+                asyncio.run(step())
+            return cluster.observe_import_jobs(namespace, str(import_id))["cleanup"].exists
+
+        _wait_for(cleanup_launched, timeout=60, description="controller-launched local cleanup Job")
+        _wait_for(lambda: cluster.observe_import_jobs(namespace, str(import_id))["cleanup"].succeeded,
+                  timeout=120, description="actual local cleanup Job success")
+        cleanup_pod = json.loads(_kubectl(k3s.name, ["get", "pods", "--namespace", namespace,
+                                  f"--selector=batch.kubernetes.io/job-name={cleanup_name}", "--output=json"]).stdout)["items"][0]
+        pod_name = cleanup_pod["metadata"]["name"]
+        _kubectl(k3s.name, ["patch", "pod", pod_name, "--namespace", namespace, "--type=merge",
+                          "--patch", json.dumps({"metadata": {"finalizers": ["proof.example/retain-cleanup"]}})])
+        asyncio.run(step())
+        _wait_for(lambda: not cluster.observe_import_jobs(namespace, str(import_id))["cleanup"].exists,
+                  timeout=60, description="cleanup Job controller deletion")
+        _wait_for(lambda: json.loads(_kubectl(k3s.name, ["get", "pod", pod_name, "--namespace", namespace,
+                                   "--output=json"]).stdout)["metadata"].get("deletionTimestamp") is not None,
+                  timeout=60, description="retained cleanup Pod entering termination")
+        asyncio.run(step())
+        assert import_row()["observed_state"] == "cleanup_stopping"
+        observed = cluster.observe(cell_id, namespace)
+        assert observed.statefulset_replicas == 0
+        held = asyncio.run(sql("SELECT hold_kind,ready FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))
+        assert held["hold_kind"] == "import" and held["ready"] is False
+        with pytest.raises(asyncpg.UniqueViolationError):
+            asyncio.run(sql("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                            "VALUES($1,'archive_members',$2,$3)", cell_id, declared["bytes"],
+                            declared["files"], role="substrate_app"))
+        print("[import] cleanup Job absent, terminating Pod present: cleanup_stopping, replicas=0, admission occupied")
+        _kubectl(k3s.name, ["patch", "pod", pod_name, "--namespace", namespace, "--type=merge",
+                          "--patch", '{"metadata":{"finalizers":[]}}'])
+        _wait_for(lambda: all(not job.exists and not job.pods_present
+                  for job in cluster.observe_import_jobs(namespace, str(import_id)).values()),
+                  timeout=60, description="every import phase Job and Pod absent")
+        asyncio.run(step())
+        assert import_row()["observed_state"] == "done" and import_row()["error_code"] is None
+        _wait_for(ready, timeout=360, description="done import and actual Cloud runtime Ready again")
+        assert asyncio.run(sql("SELECT hold_kind FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))["hold_kind"] is None
+        # C5 must admit a successor only after cleanup; roll back this admission probe.
+        async def successor_admitted():
+            connection = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+            try:
+                transaction = connection.transaction()
+                await transaction.start()
+                successor = await connection.fetchval(
+                    "INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
+                    "VALUES($1,'archive_members',$2,$3) RETURNING import_id", cell_id,
+                    declared["bytes"], declared["files"])
+                await transaction.rollback()
+                return successor is not None
+            finally:
+                await connection.close()
+
+        assert asyncio.run(successor_admitted())
+        for phase in PHASES:
+            observed_job = cluster.observe_import_jobs(namespace, str(import_id))[phase]
+            assert not observed_job.exists and not observed_job.pods_present
+        key = f"cells/{cell_id}/imports/{import_id}.age"
+        storage = import_storage["client"]
+        assert not storage.list_multipart_uploads(Bucket=BUCKET_NAME, Prefix=key).get("Uploads")
+        versions = storage.list_object_versions(Bucket=BUCKET_NAME, Prefix=key)
+        assert not versions.get("Versions") and not versions.get("DeleteMarkers")
+        inspect = f"""
+import gzip, hashlib, json, os, stat
+from pathlib import Path
+from exomem import archive_members, state_paths
+from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
+vault = Path('/data/vault')
+receipt_path = state_paths.vault_state_dir(vault) / 'cloud-imports' / '{import_id}.json'
+receipt = json.loads(receipt_path.read_text())
+with request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface='proof', issuer_family='proof')):
+    manifest = archive_members.read_manifest(vault, receipt['manifest'])
+    assert manifest is not None
+    members = {{member['path']: {{'sha256': hashlib.sha256(gzip.decompress((vault / Path(receipt['manifest']).parent / member['blob']).read_bytes())).hexdigest(), 'bytes': len(gzip.decompress((vault / Path(receipt['manifest']).parent / member['blob']).read_bytes()))}} for member in manifest.members}}
+    assert members == {expected_members!r}
+    assert {{member['path']: {{key: member[key] for key in ('sha256', 'bytes')}} for member in manifest.members}} == {expected_members!r}
+    assert {{key: manifest.archive[key] for key in ('sha256', 'bytes')}} == {expected_archive!r}
+assert receipt['request'] == {{'import_id': '{import_id}', 'cell_id': '{cell_id}', 'kind': 'archive_members', 'ciphertext_sha256': '{cipher_hash}', 'ciphertext_bytes': {len(ciphertext)}, 'declared_bytes': {declared['bytes']}, 'declared_files': {declared['files']}}}
+assert receipt['result'] == {{'ok': True, 'files': {declared['files']}, 'bytes': {declared['bytes']}}}
+assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+assert Path('/data/host').is_dir() and os.getuid() == 10001
+assert not (vault / '_Imports' / '{import_id}').exists()
+assert not (vault.parent / '.import-keys' / '{import_id}').exists()
+assert not (vault.parent / '.import-{import_id}').exists()
+print(json.dumps({{'receipt': True, 'raw_manifest': True, 'archive': manifest.archive, 'members': members, 'identity_staging_adoption_absent': True}}, sort_keys=True))
+"""
+        runtime_pod = json.loads(_kubectl(k3s.name, ["get", "pods", "--namespace", namespace,
+                                      f"--selector=!{JOB_KIND_LABEL}", "--output=json"]).stdout)["items"][0]
+        inspected = _kubectl(k3s.name, [*BREAK_GLASS, "exec", "--namespace", namespace,
+                              runtime_pod["metadata"]["name"], "--", "python3", "-c", inspect])
+        print(f"[import] final PVC proof: {inspected.stdout.strip()}")
+    except BaseException:
+        _print_job_diagnostics(k3s.name, namespace, "import")
+        for args in (["describe", "pods"], ["logs", "statefulset/cell", "--all-containers", "--tail=100"]):
+            diagnostics = _kubectl(k3s.name, [*args, "--namespace", namespace], check=False)
+            print(f"[import] runtime diagnostics:\n{diagnostics.stdout}{diagnostics.stderr}")
+        raise
+    finally:
+        sa_client.close()
+        _kubectl(k3s.name, ["delete", "namespace", namespace, "--ignore-not-found", "--wait=false"], check=False)
+        for path in (archive, tmp_path / "envelope.tar", tmp_path / "upload.age"):
+            path.unlink(missing_ok=True)
 
 
 def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDatabase) -> None:
