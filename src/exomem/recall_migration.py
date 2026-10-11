@@ -48,6 +48,10 @@ retries it. A page the build encoded and that changed since does not answer
 from it (`current_in_build`) until a catch-up pass encodes it again. Only a
 personal server migrating from another model keeps reading the old, complete
 sidecar with that model's encoder.
+
+Before the job first plans, a vault with no active pointer has nothing that
+says its serving sidecar covers it (`coverage_unchecked`): recall is marked
+warming then too, so a fresh vault's empty sidecar never answers as complete.
 """
 
 from __future__ import annotations
@@ -280,6 +284,19 @@ def building_sidecar(vault_root: Path) -> Path | None:
     shadow = active.parent / str(target["sidecar"])
     # The job records the target before its first write creates the file.
     return shadow if shadow != active and shadow.exists() else None
+
+
+def coverage_unchecked(vault_root: Path) -> bool:
+    """Whether this process's job has not yet planned, and no active pointer
+    says an earlier build covered the vault.
+
+    Until then nothing says the serving sidecar covers the vault: on a fresh
+    or imported vault it holds nothing, and the build has not begun. Read from
+    the job's status and, only while the job is starting, one `stat`.
+    """
+    with _LOCK:
+        state = (_STATUS.get(_key(vault_root)) or {}).get("state")
+    return state == "starting" and index_paths.active_sidecar_name(vault_root) is None
 
 
 def current_in_build(vault_root: Path, index: Any, rel_paths: AbstractSet[str]) -> set[str]:
@@ -681,6 +698,8 @@ def _run_logged(vault_root: Path, stop: threading.Event) -> None:
 
 def start(vault_root: Path, stop: threading.Event) -> threading.Thread:
     """Run the job on a daemon thread of its own; `stop` ends it between batches."""
+    # Before the thread runs, so no query finds the job without a state.
+    _update(vault_root, state="starting")
     thread = threading.Thread(
         target=_run_logged, args=(vault_root, stop), name=THREAD_NAME, daemon=True
     )

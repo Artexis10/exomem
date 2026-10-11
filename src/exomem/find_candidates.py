@@ -318,6 +318,8 @@ def collect_candidates(
                         sources.append(serving)
                     if degraded_out is not None:
                         degraded_out.append("embeddings")
+                elif degraded_out is not None and recall_migration.coverage_unchecked(vault_root):
+                    degraded_out.append("embeddings")
                 with _span(timings, "vector.search"):
                     chunk_hits = []
                     for source in sources:
