@@ -470,6 +470,28 @@ def test_disable_warmup_preserves_unverified_lazy_runtime_admission(
         readiness.reset()
 
 
+def test_a_server_commits_to_the_re_embed_job_before_it_admits_a_request(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The job starts last of the workers: recall on a vault no build covered
+    # must be marked from construction, not from the job's thread.
+    from exomem import recall_migration
+
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    serving, standby = tmp_path / "serving", tmp_path / "standby"
+    serving.mkdir()
+    standby.mkdir()
+
+    server_runtime.LocalRuntimeActivation(serving, fallback_seconds=60.0)
+    held = server_runtime.LocalRuntimeActivation(standby, fallback_seconds=60.0, deferred=True)
+
+    assert recall_migration.coverage_unchecked(serving)
+    assert not recall_migration.coverage_unchecked(standby)  # a standby serves nothing yet
+    monkeypatch.setattr(held, "start", lambda: None)
+    held.release()
+    assert recall_migration.coverage_unchecked(standby)
+
+
 def test_terminal_semantic_warm_failure_does_not_strand_startup_recovery(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

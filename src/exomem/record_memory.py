@@ -506,11 +506,14 @@ def record_memory(
 
 def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """Project the parser-owned collection contract without vault content."""
+    from .collection_store.connection import UNSUPPORTED_WRITERS
     from .structured_collections import manifest_authoring_contract
 
+    # A served vault answers describe in file mode too, so both modes carry the store's writer rule.
     return {
         **manifest_authoring_contract(),
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
+        "writer_lease": UNSUPPORTED_WRITERS,
     }
 
 
