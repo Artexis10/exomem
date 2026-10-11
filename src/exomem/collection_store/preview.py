@@ -294,6 +294,12 @@ def dispatch(
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
+    if action == "history":
+        with writer.read_collection(collection, facade_profile=profile) as manifest:
+            if manifest.derived:
+                from .derived_rows import refused
+
+                raise refused("row history")
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )

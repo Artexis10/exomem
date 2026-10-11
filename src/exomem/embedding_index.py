@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
@@ -72,6 +72,8 @@ OCCURRENCE_COLUMNS = (  # nosemgrep: ep-word-set -- The table's own column names
     "source_order",
 )
 _CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
+#: The counter every unit write bumps inside its own transaction.
+SEMANTIC_UNIT_GENERATION = "semantic_unit_generation"
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
 
@@ -254,6 +256,182 @@ class SemanticUnitVectorRow(NamedTuple):
     parent_generation: str
 
 
+class _UnitBlock(NamedTuple):
+    """Unit vectors with the stamps a hit carries and validation reads.
+
+    `rows[i] = (unit_key, parent_path, parent_generation, parent_source_hash,
+    parser_version)` and `matrix[i]` is its vector. `parent_of[i]` indexes
+    `parents`, the block's distinct parent paths, so an allowed-parents filter
+    costs one membership test per parent rather than one per unit. Unit content,
+    form, category and kind are never held.
+    """
+
+    rows: list[tuple[str, str, str, str, int]]
+    parents: list[str]
+    parent_of: np.ndarray
+    matrix: np.ndarray
+
+
+class _UnitCache(NamedTuple):
+    """Neutral resident vectors and compact proof at an exact snapshot token.
+
+    Every unit write moves `generation`; a chunk-only write leaves it alone.
+    `width` binds the matrix to its loaded vector space. No selected meaning
+    or continuing admission authority lives here.
+    """
+
+    epoch: int
+    generation: int
+    instance: int
+    width: int
+    block: _UnitBlock
+    coverage: dict[str, tuple[str, int]]
+    unproved: frozenset[str]
+
+
+_UNIT_COLUMNS = (
+    "unit_key, parent_path, parent_generation, parent_source_hash, parser_version, vector"
+)
+
+
+def _unit_block(rows: Iterable[tuple], count: int, width: int) -> _UnitBlock:
+    """Read at most `count` unit rows of `width`-wide vectors; skip other widths."""
+    matrix = np.empty((count, width), dtype=np.float32)
+    parent_of = np.empty(count, dtype=np.int32)
+    kept: list[tuple[str, str, str, str, int]] = []
+    parents: list[str] = []
+    slots: dict[str, int] = {}
+    # Share repeated strings within this load only: sys.intern never frees on 3.12.
+    shared: dict[str, str] = {}
+    for unit_key, parent_path, generation, source_hash, parser_version, blob in rows:
+        if not isinstance(blob, bytes) or len(blob) != width * 4:
+            continue
+        try:
+            version = int(parser_version)
+        except (TypeError, ValueError):
+            continue
+        if len(kept) == count:
+            raise ValueError("semantic-unit row count differs from snapshot")
+        path = str(parent_path)
+        slot = slots.get(path)
+        if slot is None:
+            slot = slots[path] = len(parents)
+            parents.append(path)
+        matrix[len(kept)] = np.frombuffer(blob, dtype=np.float32)
+        parent_of[len(kept)] = slot
+        generation, source_hash = str(generation), str(source_hash)
+        kept.append(
+            (
+                str(unit_key),
+                parents[slot],
+                shared.setdefault(generation, generation),
+                shared.setdefault(source_hash, source_hash),
+                version,
+            )
+        )
+    size = len(kept)
+    if size < count:
+        matrix, parent_of = matrix[:size].copy(), parent_of[:size].copy()
+    return _UnitBlock(kept, parents, parent_of, matrix)
+
+
+def _unit_mask(block: _UnitBlock, admitted: Callable[[str], bool]) -> np.ndarray:
+    """Admit each parent before any score can spend a transport slot."""
+    mask = np.fromiter(
+        (admitted(path) for path in block.parents), dtype=bool, count=len(block.parents)
+    )
+    return mask[block.parent_of]
+
+
+def _best_with_ties(scores: np.ndarray, window: int) -> np.ndarray:
+    """Positions of the `window` highest scores and of every score tied with the
+    lowest of them, so ranking this subset by the full key gives exactly the first
+    `window` rows that ranking every row would. NaN ranks below every number."""
+    if len(scores) <= window:
+        return np.arange(len(scores))
+    negated = -scores
+    cut = negated[np.argpartition(negated, window - 1)[window - 1]]
+    if np.isnan(cut):
+        # Fewer than `window` scores are numbers: every row is needed.
+        return np.arange(len(scores))
+    return np.flatnonzero(negated <= cut)
+
+
+def _unit_rank(candidate: tuple[float, int, tuple[str, str, str, str, int]]) -> tuple:
+    """Best score first, then `unit_ref`: the order the unit lane publishes.
+
+    NaN ranks last. The row's position in the scan breaks a tie on both, which
+    makes the order total, so a wider window always starts with a narrower one.
+    """
+    score, position, row = candidate
+    return (score != score, -score, row[0], position)
+
+
+def _unit_top(
+    blocks: Callable[[], Iterable[tuple[_UnitBlock, np.ndarray | None]]],
+    query: np.ndarray,
+    window: int,
+    raw_window: int,
+    parents: semantic_index.AdmittedParents,
+    refs: frozenset[str] | None,
+) -> tuple[list[tuple[float, tuple[str, str, str, str, int]]], float, bool]:
+    """Bounded selected winners and a score bound on omitted transport rows.
+
+    Every cutoff tie is proposed before selected mapping. Mapping can suppress
+    or merge occurrences, so the caller widens until this bound proves its prefix.
+    """
+    best: dict[str, tuple[float, int, tuple[str, str, str, str, int]]] = {}
+    omitted_bound = -np.inf
+    complete = True
+    offset = 0
+    for block, mask in blocks():
+        positions = np.arange(len(block.rows)) if mask is None else np.flatnonzero(mask)
+        start, offset = offset, offset + len(block.rows)
+        if not len(positions):
+            continue
+        if len(positions) == len(block.rows):
+            scores = block.matrix @ query
+        else:
+            # Admission precedes scoring, without a second admitted corpus matrix.
+            scores = np.empty(len(positions), dtype=np.float32)
+            for first in range(0, len(positions), SEMANTIC_UNIT_READ_BATCH):
+                batch = positions[first : first + SEMANTIC_UNIT_READ_BATCH]
+                scores[first : first + len(batch)] = block.matrix[batch] @ query
+        proposed = _best_with_ties(scores, raw_window)
+        if len(proposed) < len(positions):
+            complete = False
+            omitted_bound = max(omitted_bound, float(scores[proposed].min()))
+        for first in range(0, len(proposed), SEMANTIC_UNIT_READ_BATCH):
+            batch = proposed[first : first + SEMANTIC_UNIT_READ_BATCH]
+            parents.prefetch(block.rows[int(positions[n])][1] for n in batch)
+            for n in batch:
+                position = int(positions[n])
+                key, path, generation, source_hash, version = block.rows[position]
+                parent = parents.parent(path)
+                if parent is None or (
+                    parent.metadata.get("parent_generation"),
+                    parent.metadata.get("parent_source_hash"),
+                    parent.metadata.get("parser_version"),
+                ) != (generation, source_hash, version):
+                    continue
+                unit = parent.structure.unit(key)
+                if (
+                    unit is None
+                    or not unit.unit_ref
+                    or (refs is not None and unit.unit_ref not in refs)
+                ):
+                    continue
+                row = (unit.unit_ref, path, generation, source_hash, version)
+                candidate = (float(scores[n]), start + position, row)
+                previous = best.get(unit.unit_ref)
+                if previous is None or _unit_rank(candidate) < _unit_rank(previous):
+                    best[unit.unit_ref] = candidate
+            # Ties can span the corpus. Keep only a window plus one transport batch.
+            best = {item[2][0]: item for item in sorted(best.values(), key=_unit_rank)[:window]}
+    ordered = sorted(best.values(), key=_unit_rank)
+    return [(score, row) for score, _position, row in ordered], float(omitted_bound), complete
+
+
 #: Paths per `file_mtimes` read: under SQLite's oldest default bound of 999
 #: parameters per statement.
 _PATHS_PER_READ = 900
@@ -414,6 +592,60 @@ def _coverage_records(conn: sqlite3.Connection, paths: list[str]) -> dict[str, d
     return records
 
 
+def _unit_coverage(
+    conn: sqlite3.Connection, width: int,
+) -> tuple[dict[str, tuple[str, int]], frozenset[str]]:
+    """Compact neutral proof of exact occurrence keys, row stamps and usable vectors.
+
+    SQLite checks JSON through its parser and compares both key directions. Counts
+    alone cannot detect a substituted occurrence. Full summaries stay on disk.
+    """
+    from .semantic_units import STRUCTURAL_FORMAT
+
+    coverage: dict[str, tuple[str, int]] = {}
+    unproved: set[str] = set()
+    rows = conn.execute(
+        "WITH records AS ("
+        "SELECT substr(key, ?) AS path, "
+        "CASE WHEN json_valid(value) THEN value ELSE '{}' END AS doc FROM meta "
+        "WHERE key >= ? AND key < ?) "
+        "SELECT path, json_extract(doc, '$.parent_generation'), "
+        "json_array_length(doc, '$.occurrences'), "
+        "json_extract(doc, '$.structural_complete') = 1 "
+        "AND json_extract(doc, '$.parser_version') = ? "
+        "AND json_extract(doc, '$.structure.format') = ? "
+        "AND json_type(doc, '$.parent_generation') = 'text' "
+        "AND json_type(doc, '$.parent_source_hash') = 'text' "
+        "AND json_type(doc, '$.occurrences') = 'array' "
+        "AND (SELECT COUNT(*) FROM semantic_unit_vectors v WHERE v.parent_path = records.path) "
+        "= json_array_length(doc, '$.occurrences') "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(doc, '$.occurrences') expected "
+        "WHERE expected.type != 'text' OR NOT EXISTS ("
+        "SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
+        "AND v.unit_key = expected.value "
+        "AND v.parent_generation = json_extract(doc, '$.parent_generation') "
+        "AND v.parent_source_hash = json_extract(doc, '$.parent_source_hash') "
+        "AND v.parser_version = json_extract(doc, '$.parser_version') "
+        "AND typeof(v.vector) = 'blob' AND length(v.vector) = ?)) "
+        "AND NOT EXISTS (SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
+        "AND v.unit_key NOT IN (SELECT value FROM json_each(doc, '$.occurrences'))) "
+        "FROM records",
+        (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END,
+         semantic_index.PARSER_VERSION, STRUCTURAL_FORMAT, width * 4),
+    )
+    for path, generation, count, proved in rows:
+        if generation is not None and count is not None:
+            coverage[str(path)] = (str(generation), int(count))
+        if not proved:
+            unproved.add(str(path))
+    unproved.update(
+        str(path)
+        for (path,) in conn.execute("SELECT DISTINCT parent_path FROM semantic_unit_vectors")
+        if str(path) not in coverage
+    )
+    return coverage, frozenset(unproved)
+
+
 def _top_admitted(
     scores: np.ndarray,
     k: int,
@@ -483,9 +715,14 @@ class EmbeddingIndex:
         self._cache: _EmbCache | None = None
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
+        # The resident semantic-unit matrix (see `_unit_vectors`).
+        self._unit_cache: _UnitCache | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
+        # stalls a chunk write's `_patch_cache`.
+        self._unit_lock = threading.Lock()
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -578,7 +815,7 @@ class EmbeddingIndex:
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
                 )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         if target == self.path:
             conn.execute("BEGIN")
             try:
@@ -887,7 +1124,7 @@ class EmbeddingIndex:
                         conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
                     )
                 if unit_replacements:
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -1083,7 +1320,7 @@ class EmbeddingIndex:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, removed_paths
                     )
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -1160,7 +1397,19 @@ class EmbeddingIndex:
                 self._admit(conn, np.asarray(vectors).shape[1])
             with conn:
                 self._replace_occurrences(conn, state, rows)
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+        finally:
+            conn.close()
+
+    def delete_semantic_units(self, parent_path: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (parent_path,)
+                )
+                _delete_coverage(conn, [parent_path])
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         finally:
             conn.close()
 
@@ -1343,10 +1592,11 @@ class EmbeddingIndex:
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
-        """Drop the resident matrix cache without deleting sidecar rows."""
+        """Drop the resident chunk and unit matrices without deleting sidecar rows."""
         with self._lock:
-            loaded = self._cache is not None
+            loaded = self._cache is not None or self._unit_cache is not None
             self._cache = None
+            self._unit_cache = None
             # The mask memo pins the metadata list by strong reference, so an
             # unload that left it behind would keep those rows resident after
             # the caller asked for the memory back. Correctness never depended
@@ -1355,18 +1605,25 @@ class EmbeddingIndex:
             return loaded
 
     def cache_status(self) -> dict:
-        """Best-effort residency status for this in-memory matrix only."""
-        c = self._cache
-        if c is None:
+        """Best-effort residency status for this index's in-memory matrices.
+
+        `rows` counts chunk rows and `unit_rows` unit rows; `bytes` sums both matrices.
+        """
+        c, units = self._cache, self._unit_cache
+        if c is None and units is None:
             return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
-        return {
+        status = {
             "loaded": True,
             "hits": self._hits,
-            "rows": len(c.metadata),
-            "bytes": int(c.matrix.nbytes),
-            "epoch": c.epoch,
-            "generation": c.generation,
+            "rows": len(c.metadata) if c is not None else 0,
+            "unit_rows": len(units.block.rows) if units is not None else 0,
+            "bytes": (int(c.matrix.nbytes) if c is not None else 0)
+            + (int(units.block.matrix.nbytes) if units is not None else 0),
         }
+        if c is not None:
+            status["epoch"] = c.epoch
+            status["generation"] = c.generation
+        return status
 
     def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
@@ -1685,7 +1942,7 @@ class EmbeddingIndex:
                     matrix = np.empty((len(rows), width), dtype=np.float32)
                     metadata = []
                     for n, (path, chunk, blob) in enumerate(rows):
-                        if len(blob) != width * 4:
+                        if not isinstance(blob, bytes) or len(blob) != width * 4:
                             raise ValueError("embedding row width differs from stored space")
                         matrix[n] = np.frombuffer(blob, dtype=np.float32)
                         metadata.append((path, chunk))
@@ -1827,23 +2084,13 @@ class EmbeddingIndex:
         allowed_parent_paths: set[str] | None = None,
         validate: bool = True,
         incomplete_out: list[str] | None = None,
+        encoded_for: recall_space.SpaceIdentity | None | object = _UNSPECIFIED_SPACE,
     ) -> list[SemanticUnitVectorHit]:
-        """Rank occurrence rows, map each to this reader's unit, then fill `k`.
+        """Rank selected units from neutral rows and one coverage snapshot.
 
-        Rows hold neutral occurrences. A candidate parent is interpreted once,
-        from its stored coverage record, with its page's selected instance; a
-        page the reader may not see is never interpreted. Hidden, suppressed,
-        duplicate and reference-less candidates are dropped before `k`, so
-        they spend no result slot. Equal cosines at the cut order by unit ref.
-
-        `incomplete_out` receives one admitted parent whose coverage the
-        records cannot prove (no record, missing occurrence rows, or
-        unavailable definitions) when any exists; one witness makes the answer
-        incomplete. That proof reads records, never Markdown.
-
-        Markdown freshness validation is the expensive part, so an unfiltered
-        validated query checks a bounded window of mapped units; an explicit
-        allowlist validates every mapped unit for audit and repair callers.
+        Admission precedes scoring; selected suppression, reference filtering and
+        deduplication precede result and validation limits. Raw windows widen until
+        their omitted-score bound proves the selected prefix, including cutoff ties.
         """
         if k <= 0 or not self.path.exists():
             return []
@@ -1853,74 +2100,40 @@ class EmbeddingIndex:
             return []
         from .governance import egress
 
-        allowed = None if allowed_parent_paths is None else sorted(allowed_parent_paths)
+        refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
+        paths = None if allowed_parent_paths is None else frozenset(allowed_parent_paths)
         keep = egress.page_release_filter(self.vault_root)
-        conn = self._connect()
-        try:
-            # One snapshot for the rows, the coverage index and the lazily read
-            # records: a publication between them would read a match as a miss.
-            conn.execute("BEGIN")
-            rows = conn.execute(
-                "SELECT unit_key, parent_path, parent_generation, parent_source_hash, "
-                "parser_version, vector FROM semantic_unit_vectors"
-                + ("" if allowed is None else " WHERE parent_path IN (SELECT value FROM json_each(?))"),
-                () if allowed is None else (json.dumps(allowed, ensure_ascii=False),),
-            ).fetchall()
-            coverage = _coverage_index(conn, allowed)
+
+        def allowed(path: str) -> bool:
+            return (paths is None or path in paths) and (keep is None or bool(keep(path)))
+
+        filtered = refs is not None or paths is not None
+        query = query_vec.astype(np.float32, copy=False)
+        window = max(k * 4, k + 32) if validate else k
+        raw_window = window
+        freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+        ranked: list[SemanticUnitVectorHit] = []
+        walked = 0
+        with self._unit_blocks(allowed) as (blocks, conn, coverage, unproved, identity):
+            if encoded_for is not _UNSPECIFIED_SPACE:
+                recall_space.require_same_space(
+                    SimpleNamespace(identity=identity), encoded_for, query
+                )
             parents = semantic_index.AdmittedParents(
-                lambda paths: _coverage_records(conn, paths),
-                allowed=lambda path: (keep is None or bool(keep(path)))
-                and (allowed_parent_paths is None or path in allowed_parent_paths),
+                lambda wanted: _coverage_records(conn, wanted),
+                allowed=allowed,
                 interpretations=semantic_index.Interpretations(self.vault_root),
             )
-            candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
-            present: dict[str, int] = {}
-            unproved: set[str] = set()
-            for key, parent_path, generation, source_hash, parser_version, blob in rows:
-                parent_path = str(parent_path)
-                expected = coverage.get(parent_path)
-                if expected is None or str(generation) != expected[0]:
-                    # No record binds this row's parse, so nothing can interpret it.
-                    unproved.add(parent_path)
-                    continue
-                present[parent_path] = present.get(parent_path, 0) + 1
-                vector = np.frombuffer(blob, dtype=np.float32)
-                if vector.shape != (self.dim,):
-                    continue
-                candidates.append(
-                    (str(key), parent_path, str(generation), str(source_hash), int(parser_version), vector)
+            while True:
+                ordered, bound, complete = _unit_top(
+                    blocks, query, window, raw_window, parents, refs
                 )
-            unproved.update(
-                path for path, (_generation, count) in coverage.items() if present.get(path, 0) != count
-            )
-
-            ranked: list[SemanticUnitVectorHit] = []
-            if candidates:
-                query = query_vec.astype(np.float32, copy=False)
-                scores = np.stack([candidate[5] for candidate in candidates]) @ query
-                order = sorted(
-                    range(len(candidates)),
-                    key=lambda index: (-float(scores[index]), candidates[index][1], candidates[index][0]),
-                )
-                exact = allowed_unit_refs is not None or allowed_parent_paths is not None
-                validation_limit = len(order) if exact else max(k * 4, k + 32)
-                validated = 0
-                freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
-                seen: set[str] = set()
-                for index in order:
-                    if len(ranked) >= k and float(scores[index]) != ranked[k - 1].cosine:
-                        break
-                    if validate and validated >= validation_limit:
-                        break
-                    key, parent_path, generation, source_hash, parser_version, _vector = candidates[index]
-                    parent = parents.parent(parent_path)
-                    unit = parent.structure.unit(key) if parent is not None else None
-                    if unit is None or not unit.unit_ref or unit.unit_ref in seen:
-                        continue
-                    if allowed_unit_refs is not None and unit.unit_ref not in allowed_unit_refs:
-                        continue
+                if not complete and (len(ordered) < window or not ordered[-1][0] >= bound):
+                    raw_window *= 4
+                    continue
+                for score, row in ordered[walked:]:
+                    unit_ref, parent_path, generation, source_hash, parser_version = row
                     if validate:
-                        validated += 1
                         stamp = (parent_path, generation, source_hash, parser_version)
                         accepted = freshness_by_stamp.get(stamp)
                         if accepted is None:
@@ -1934,32 +2147,39 @@ class EmbeddingIndex:
                             freshness_by_stamp[stamp] = accepted
                         if not accepted:
                             continue
-                    seen.add(unit.unit_ref)
                     ranked.append(
                         SemanticUnitVectorHit(
-                            unit.unit_ref, parent_path, generation, source_hash, parser_version,
-                            float(scores[index]),
+                            unit_ref, parent_path, generation, source_hash, parser_version, score
                         )
                     )
+                    if len(ranked) == k:
+                        break
+                if (
+                    len(ranked) == k
+                    or not (validate and filtered)
+                    or (complete and len(ordered) < window)
+                ):
+                    break
+                walked = len(ordered)
+                window *= 4
+                raw_window = max(raw_window, window)
             if incomplete_out is not None:
-                # Lazy, so the per-page owed and release checks stop at one witness.
                 owed = self._coverage_owed()
-                unpublished = (path for path in allowed or () if path not in coverage and owed(path))
+                unpublished = (path for path in paths or () if path not in coverage and owed(path))
                 witness = next(
                     chain(
                         sorted(parents.unavailable),
-                        (path for path in chain(sorted(unproved), unpublished) if parents.allowed(path)),
+                        (
+                            path
+                            for path in chain(sorted(unproved), unpublished)
+                            if parents.allowed(path)
+                        ),
                     ),
                     None,
                 )
                 if witness is not None:
                     incomplete_out.append(witness)
-        finally:
-            if conn.in_transaction:
-                conn.rollback()
-            conn.close()
-        ranked.sort(key=lambda hit: (-hit.cosine, hit.unit_ref))
-        return ranked[:k]
+        return ranked
 
     def _coverage_owed(self) -> Callable[[str], bool]:
         """Whether a publication writes a page a record: the rebuild walk's own rules."""
@@ -1971,6 +2191,86 @@ class EmbeddingIndex:
             and (walked is None or walked(rel_path))
             and access.is_indexable(self.vault_root, rel_path)
         )
+
+    @contextlib.contextmanager
+    def _unit_blocks(self, allowed: Callable[[str], bool]) -> Iterator[tuple]:
+        """Rows, compact coverage and lazy summaries share one SQLite read snapshot.
+
+        Local queries reuse a neutral resident matrix only under the exact snapshot
+        token. `service-v1` rescans ordered blocks and retains no corpus matrix.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            token = self._build_token(conn)
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            self._observe_identity(identity, token)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            if cloud_cell.resource_policy() != "service-v1":
+                cached = self._unit_vectors(conn, token, width)
+                source = ((cached.block, _unit_mask(cached.block, allowed)),)
+                yield lambda: source, conn, cached.coverage, cached.unproved, identity
+                return
+            coverage, unproved = _unit_coverage(conn, width)
+
+            def blocks() -> Iterator[tuple[_UnitBlock, np.ndarray]]:
+                cursor = conn.execute(
+                    f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors ORDER BY rowid"
+                )
+                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
+                    block = _unit_block(rows, len(rows), width)
+                    yield block, _unit_mask(block, allowed)
+
+            yield blocks, conn, coverage, unproved, identity
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _unit_vectors(
+        self, conn: sqlite3.Connection, token: tuple[int, int, int, int], width: int
+    ) -> _UnitCache:
+        """Reuse a neutral matrix and proof only at this read transaction's token."""
+        epoch, _chunk_generation, instance, generation = token
+
+        def current(cached: _UnitCache | None) -> bool:
+            return cached is not None and (
+                cached.epoch,
+                cached.generation,
+                cached.instance,
+                cached.width,
+            ) == (epoch, generation, instance, width)
+
+        served = self._unit_cache
+        if not current(served):
+            with self._unit_lock:
+                served = self._unit_cache
+                if not current(served):
+                    # Release this lane's stale matrix before allocating its replacement.
+                    served = self._unit_cache = None
+                    with call_spans.span("embeddings.unit_matrix_load"):
+                        served = self._unit_cache = self._load_unit_rows(conn, token, width)
+                    log.info(
+                        "semantic-unit matrix full load: rows=%d gen=%d epoch=%d",
+                        len(served.block.rows),
+                        generation,
+                        epoch,
+                    )
+        self._hits += 1
+        return served
+
+    def _load_unit_rows(
+        self, conn: sqlite3.Connection, token: tuple[int, int, int, int], width: int
+    ) -> _UnitCache:
+        """Load neutral vectors and their compact structural proof from one snapshot."""
+        count = conn.execute("SELECT COUNT(*) FROM semantic_unit_vectors").fetchone()[0]
+        block = _unit_block(
+            conn.execute(f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors ORDER BY rowid"),
+            count,
+            width,
+        )
+        coverage, unproved = _unit_coverage(conn, width)
+        epoch, _chunk_generation, instance, generation = token
+        return _UnitCache(epoch, generation, instance, width, block, coverage, unproved)
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
@@ -2282,7 +2582,7 @@ class EmbeddingIndex:
     @staticmethod
     def _build_token(conn: sqlite3.Connection) -> tuple[int, int, int, int]:
         unit_generation = conn.execute(
-            "SELECT value FROM meta WHERE key = 'semantic_unit_generation'"
+            "SELECT value FROM meta WHERE key = ?", (SEMANTIC_UNIT_GENERATION,)
         ).fetchone()
         return (*sidecar_store.read_meta_token(conn), int(unit_generation[0]) if unit_generation else 0)
 
@@ -2463,7 +2763,7 @@ class EmbeddingIndex:
                     mirror.repopulate_all(conn)
                 sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if self._projected_source_snapshot() != source_snapshot:
                     conn.rollback()
                     return 0

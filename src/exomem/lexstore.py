@@ -2872,8 +2872,17 @@ def search_semantic_units_result(
     recall_checkpoint: Any | None = None,
     allow_delta: bool = True,
     registry_scope: str | None = None,
+    validated: dict[tuple[str, str, str, int], bool] | None = None,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
-    """Typed exact-category unit query preserving every catalog outcome."""
+    """Typed exact-category unit query preserving every catalog outcome.
+
+    `validated` keeps each row stamp's currency check for the caller's request,
+    so several queries over the same parents read each one once. A request
+    shares it across its activation lanes, so a parent whose file changes
+    while its catalogue rows do not passes in every later query as it did in
+    the first: those lanes serve the parent as the request first read it. A
+    parent whose rows change has a new stamp and is checked again.
+    """
     from .semantic_units import canonicalize_category
 
     if not _catalog_usable():
@@ -2916,7 +2925,7 @@ def search_semantic_units_result(
     hits = list(result.value or [])
     current: list[SemanticUnitLexicalHit] = []
     stale_paths: set[str] = set()
-    freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+    freshness_by_stamp = {} if validated is None else validated
     for hit in hits:
         stamp = (
             hit.parent_path,
@@ -2961,6 +2970,7 @@ def search_semantic_units_result(
                 recall_checkpoint=recall_checkpoint,
                 allow_delta=allow_delta,
                 registry_scope=registry_scope,
+                validated=validated,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -7596,6 +7606,17 @@ class LexicalStore:
         allowed_clause += excluded_clause
         params.extend(excluded_params)
         if admitted is not None:
+            if groups and min_matched_terms <= 1:
+                # A row the all-of test keeps holds every stem of some group,
+                # so the index can name those rows first. Without this the
+                # test ran once per row the whole query matched: on a long
+                # turn that is nearly every page, times every group. This
+                # branch scores in Python, so the MATCH only selects rows and
+                # the test itself still decides; the rows are unchanged.
+                params[0] = f"({match}) AND (" + " OR ".join(
+                    "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
+                    for group in groups
+                ) + ")"
             candidates = {
                 path: stemmed.split() for path, stemmed in conn.execute(
                     f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "

@@ -44,18 +44,26 @@ def _live(root: Path) -> Path:
     return path
 
 
-def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
+def backup(vault_root, *, destination=None, stream=None, timeout=300.0, include_derived=False) -> dict:
     """`exomem collections backup`: a validated single-file snapshot, never a copy of the live files.
 
     The snapshot passes integrity, foreign-key, schema, identity and lineage checks
     before it replaces ``destination`` atomically or streams to ``stream``. The
     destination is checked, written and staged at its real path, so a symlink cannot
     land it inside the vault. A synced destination is the owner's choice and only warns.
+
+    Derived collections' rows are excluded: they rebuild from the import log. With
+    ``include_derived`` the derived file is snapshot first, beside ``destination`` as
+    ``<name>.derived``, and the store second, so after a restore the store can only be
+    ahead of the rows, which replays the log's tail.
     """
     root = Path(vault_root).resolve()
     _live(root)
     if (destination is None) == (stream is None):
         raise ValueError("backup needs exactly one of a destination or a stream")
+    if include_derived and destination is None:
+        raise CollectionStoreError("COLLECTION_BACKUP_DESTINATION_UNSAFE",
+                                   "derived rows are a second file, so they need --to, not --stdout")
     target, warnings = None, []
     scratch = connection.store_path(root).parent
     if destination is not None:
@@ -66,6 +74,11 @@ def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
                                        verdict.reason if not verdict.verified else "the destination is a directory")
         warnings = [found] if (found := custody.backup_sync_warning(root, target)) else []
         scratch = target.parent
+    derived = None
+    if include_derived:
+        from . import derived_rows
+
+        derived = derived_rows.snapshot(connection.store_path(root), target.with_name(f"{target.name}.derived"))
     with tempfile.TemporaryDirectory(prefix=".exomem-collection-backup-", dir=scratch) as private, \
             snapshot.staged_snapshot(root, directory=Path(private), deadline=time.monotonic() + timeout) as artifact:
         if target is None:
@@ -83,7 +96,7 @@ def backup(vault_root, *, destination=None, stream=None, timeout=300.0) -> dict:
         return {"path": None if target is None else str(target), "sha256": artifact.file_sha256,
                 "size_bytes": artifact.size_bytes, "store_id": artifact.store_id,
                 "commit_seq": artifact.commit_seq, "head_hash": artifact.head_hash, "integrity_check": "ok",
-                "warnings": warnings}
+                "warnings": warnings, **({"derived": derived} if include_derived else {})}
 
 
 def _head(meta) -> dict:

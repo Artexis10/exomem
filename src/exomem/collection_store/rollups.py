@@ -163,7 +163,9 @@ def prepare(conn, manifest, data: Mapping) -> None:
     for name, (rollup_id, encoded) in current.items():
         if name not in declared or declared[name].encoded() != encoded:
             _drop(conn, rollup_id)
-    empty = conn.execute("SELECT 1 FROM items WHERE collection_id=? LIMIT 1", (cid,)).fetchone() is None
+    # A derived collection's rows live outside the store; its import log says whether it has any.
+    empty = conn.execute("SELECT NOT EXISTS(SELECT 1 FROM items WHERE collection_id=?) "
+                         "AND NOT EXISTS(SELECT 1 FROM import_members WHERE collection_id=?)", (cid, cid)).fetchone()[0]
     for name, rollup in declared.items():
         if current.get(name, (None, None))[1] != rollup.encoded():
             conn.execute("INSERT INTO rollup_definitions(collection_id,name,state,definition_json) VALUES(?,?,?,?)",
@@ -210,52 +212,101 @@ def _save(conn, rollup_id, bucket, groups, rows, fields) -> None:
                  "DO UPDATE SET state_json=excluded.state_json", (rollup_id, bucket, groups, state))
 
 
-def _add(conn, rollup_id, rollup, place, row_id, key) -> None:
-    bucket, groups, order, values = place
-    rows, fields = _state(conn, rollup_id, bucket, groups, rollup)
-    for field, (_, ops), kind, value in zip(fields, rollup.values, rollup.kinds, values, strict=True):
-        field.add(value, kind, key, order, not EXTREMES.isdisjoint(ops))
-    _save(conn, rollup_id, bucket, groups, rows + 1, fields)
-    if rollup.members:
-        conn.execute("INSERT INTO rollup_members VALUES(?,?,?,?)", (rollup_id, bucket, groups, row_id))
+def _members(conn, rollup_id, bucket, groups):
+    """Each indexed member of a store bucket as ``(row_id, item_key, values)``."""
+    for member, member_key in conn.execute(
+            "SELECT m.row_id,i.item_key FROM rollup_members m JOIN items i ON i.row_id=m.row_id "
+            "WHERE m.rollup_id=? AND m.bucket=? AND m.groups=?", (rollup_id, bucket, groups)).fetchall():
+        yield member, member_key, typed_storage.item_values(conn, member)
 
 
-def _remove(conn, rollup_id, rollup, place, row_id, key) -> None:
-    bucket, groups, order, values = place
-    rows, fields = _state(conn, rollup_id, bucket, groups, rollup)
-    stale = False
-    for field, kind, value in zip(fields, rollup.kinds, values, strict=True):
-        stale |= field.remove(value, kind, key, order)
-    if rollup.members:
-        conn.execute("DELETE FROM rollup_members WHERE rollup_id=? AND bucket=? AND groups=? AND row_id=?",
-                     (rollup_id, bucket, groups, row_id))
-    if stale and rows > 1:
-        # The held extreme left this bucket: recompute it from the remaining indexed members.
-        for field in fields:
-            field.clear_extremes()
-        for member, member_key in conn.execute(
-                "SELECT m.row_id,i.item_key FROM rollup_members m JOIN items i ON i.row_id=m.row_id "
-                "WHERE m.rollup_id=? AND m.bucket=? AND m.groups=?", (rollup_id, bucket, groups)).fetchall():
-            current = _place(rollup, typed_storage.item_values(conn, member), member_key)
-            if current is _FLAGGED or current[:2] != (bucket, groups):
-                raise RuntimeError("rollup member index disagrees with its bucket")
-            for field, (_, ops), kind, value in zip(fields, rollup.values, rollup.kinds, current[3], strict=True):
-                if value is not None and not EXTREMES.isdisjoint(ops):
-                    field.extreme(value, kind, member_key, current[2])
-    _save(conn, rollup_id, bucket, groups, rows - 1, fields)
+class Upkeep:
+    """Rollup upkeep for a run of row moves in ``conn``: each touched bucket is read once and written once.
+
+    ``move`` folds a row's old and new contribution into the bucket states it holds, and
+    ``flush`` writes each touched bucket and the new indexed members. ``members`` reads a
+    bucket's indexed members when a held extreme leaves it; a derived collection's mirror
+    (``derived_rows``) reads them from its own rows.
+    """
+
+    def __init__(self, conn, *, members=_members) -> None:
+        self.conn, self.members = conn, members
+        self.buckets: dict[tuple[int, str, str], list] = {}  # (rollup, bucket, groups) -> [rows, fields]
+        self.added: list[tuple[int, str, str, int]] = []  # indexed members not yet written
+
+    def _bucket(self, rollup_id, rollup, bucket, groups) -> list:
+        state = self.buckets.get((rollup_id, bucket, groups))
+        if state is None:
+            state = self.buckets[rollup_id, bucket, groups] = list(_state(self.conn, rollup_id, bucket, groups, rollup))
+        return state
+
+    def _write_members(self) -> None:
+        self.conn.executemany("INSERT INTO rollup_members VALUES(?,?,?,?)", self.added)
+        self.added.clear()
+
+    def move(self, rollup_id, rollup, row_id, key, values, previous) -> tuple[int, tuple]:
+        """Move one row's contribution: the change in flagged rows and the buckets touched."""
+        old = None if previous is None else _place(rollup, previous, key)
+        new = _place(rollup, values, key)
+        if old is not None and _same(old, new):
+            return 0, ()
+        touched = []
+        if old is not None and old is not _FLAGGED:
+            self._remove(rollup_id, rollup, old, row_id, key)
+            touched.append(old[:2])
+        if new is not _FLAGGED:
+            self._add(rollup_id, rollup, new, row_id, key)
+            touched.append(new[:2])
+        return (new is _FLAGGED) - (old is _FLAGGED), tuple(touched)
+
+    def _add(self, rollup_id, rollup, place, row_id, key) -> None:
+        bucket, groups, order, values = place
+        state = self._bucket(rollup_id, rollup, bucket, groups)
+        for field, (_, ops), kind, value in zip(state[1], rollup.values, rollup.kinds, values, strict=True):
+            field.add(value, kind, key, order, not EXTREMES.isdisjoint(ops))
+        state[0] += 1
+        if rollup.members:
+            self.added.append((rollup_id, bucket, groups, row_id))
+
+    def _remove(self, rollup_id, rollup, place, row_id, key) -> None:
+        bucket, groups, order, values = place
+        state = self._bucket(rollup_id, rollup, bucket, groups)
+        rows, fields = state
+        stale = False
+        for field, kind, value in zip(fields, rollup.kinds, values, strict=True):
+            stale |= field.remove(value, kind, key, order)
+        if rollup.members:
+            self._write_members()  # in move order, so the recompute below sees every member added so far
+            self.conn.execute("DELETE FROM rollup_members WHERE rollup_id=? AND bucket=? AND groups=? AND row_id=?",
+                              (rollup_id, bucket, groups, row_id))
+        if stale and rows > 1:
+            # The held extreme left this bucket: recompute it from the remaining indexed members.
+            for field in fields:
+                field.clear_extremes()
+            for _, member_key, member_values in self.members(self.conn, rollup_id, bucket, groups):
+                current = _place(rollup, member_values, member_key)
+                if current is _FLAGGED or current[:2] != (bucket, groups):
+                    raise RuntimeError("rollup member index disagrees with its bucket")
+                for field, (_, ops), kind, value in zip(fields, rollup.values, rollup.kinds, current[3], strict=True):
+                    if value is not None and not EXTREMES.isdisjoint(ops):
+                        field.extreme(value, kind, member_key, current[2])
+        state[0] = rows - 1
+        if not state[0]:
+            state[1] = [Accumulator() for _ in rollup.values]  # an emptied bucket is deleted, so it starts over
+
+    def flush(self) -> None:
+        self._write_members()
+        for (rollup_id, bucket, groups), (rows, fields) in self.buckets.items():
+            _save(self.conn, rollup_id, bucket, groups, rows, fields)
+        self.buckets.clear()
 
 
 def _apply(conn, rollup_id, rollup, row_id, key, values, previous) -> int:
-    """Move one row's contribution; returns the change in flagged rows."""
-    old = None if previous is None else _place(rollup, previous, key)
-    new = _place(rollup, values, key)
-    if old is not None and _same(old, new):
-        return 0
-    if old is not None and old is not _FLAGGED:
-        _remove(conn, rollup_id, rollup, old, row_id, key)
-    if new is not _FLAGGED:
-        _add(conn, rollup_id, rollup, new, row_id, key)
-    return (new is _FLAGGED) - (old is _FLAGGED)
+    """Move one row's contribution in its own upkeep; returns the change in flagged rows."""
+    upkeep = Upkeep(conn)
+    flagged = upkeep.move(rollup_id, rollup, row_id, key, values, previous)[0]
+    upkeep.flush()
+    return flagged
 
 
 def maintain(conn, collection_id: str, row_id: int, key: str, values: Mapping, *, previous=None) -> None:
@@ -281,8 +332,10 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     """
     if type(limit) is not int or not 0 < limit <= 500:
         raise ValueError("rollup backfill limit must be between 1 and 500")
+    # A derived collection's rollups are built by its rebuild (``derived_rows``), never from store rows.
     building = conn.execute("SELECT rollup_id,name,definition_json,last_row_id FROM rollup_definitions "
-                            "WHERE collection_id=? AND state='building'", (collection_id,)).fetchall()
+                            "WHERE collection_id=? AND state='building' AND NOT EXISTS(SELECT 1 FROM collections "
+                            "WHERE collection_id=? AND derived=1)", (collection_id, collection_id)).fetchall()
     for rollup_id, name, encoded, last in building:
         rollup = decode(name, encoded)
         rows = typed_storage.hydrate(conn, [

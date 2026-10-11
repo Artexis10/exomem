@@ -2202,6 +2202,11 @@ def _collections_main(argv: list[str]) -> int:
     target = backup.add_mutually_exclusive_group(required=True)
     target.add_argument("--to", type=Path, help="snapshot file outside the vault; a synced folder only warns")
     target.add_argument("--stdout", action="store_true", help="stream the snapshot to standard output")
+    backup.add_argument(
+        "--include-derived", action="store_true",
+        help="also snapshot derived collections' rows, first, beside --to as <name>.derived; rows rebuild "
+        "from the import log without it",
+    )
     adopt = subcommands.add_parser(
         "adopt-local",
         help="continue from this host's store past a foreign head or replica, then hold the "
@@ -2251,7 +2256,8 @@ def _collections_main(argv: list[str]) -> int:
     try:
         if args.command == "backup":
             result = owner.backup(
-                Path(args.vault), destination=args.to, stream=sys.stdout.buffer if args.stdout else None
+                Path(args.vault), destination=args.to, stream=sys.stdout.buffer if args.stdout else None,
+                include_derived=args.include_derived,
             )
             print(json.dumps(result, sort_keys=True), file=sys.stderr if args.stdout else sys.stdout)
         elif args.command == "rollback":

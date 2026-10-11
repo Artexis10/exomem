@@ -3916,7 +3916,8 @@ def _validate_values(
             )
         value[representational] = note
     _collect_representation_issues(manifest, value, issues)
-    if not issues and manifest.storage.strategy == "markdown-items":
+    # A derived collection's rows never render as Markdown items, so they need no round-trip proof.
+    if not issues and manifest.storage.strategy == "markdown-items" and not manifest.derived:
         _collect_round_trip_issues(manifest, value, issues)
     if issues:
         raise _issue_refusal(issues)

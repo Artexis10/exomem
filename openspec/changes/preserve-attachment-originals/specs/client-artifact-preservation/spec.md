@@ -41,8 +41,11 @@ only when its file is stored or found already stored; when a claimed hold's file
 without being stored, the bytes SHALL be put back as the same hold, redeemable by the
 holding session until the original expiry.
 
-One local session SHALL keep at most 16 live holds and 256 MiB of held bytes; a hold
-beyond either SHALL be refused with `HELD_UPLOAD_QUOTA` and hold nothing. Expired holds
+One local session SHALL keep at most 16 live holds, and held bytes no more than the
+largest single hold the listener accepts, so one hold of that size always fits; a hold
+beyond either SHALL be refused with `HELD_UPLOAD_QUOTA` and hold nothing. A hold that
+does not fit in free disk SHALL be refused with `HELD_UPLOAD_NO_SPACE` before any byte
+is copied. Expired holds
 SHALL be removed when a hold is made and when one is redeemed, and an existing hold
 directory SHALL be made private to its owner before it is used.
 
@@ -78,8 +81,18 @@ the returned handle; `--lane source` SHALL hold it for `capture_source`.
 
 #### Scenario: A session exceeds its hold quota
 
-- **WHEN** a local session with 16 live holds, or 256 MiB of held bytes, holds another upload
+- **WHEN** a local session with 16 live holds, or with held bytes that this upload would take past the largest single hold, holds another upload
 - **THEN** it is refused with `HELD_UPLOAD_QUOTA`, nothing more is held, and another session's holds are unaffected
+
+#### Scenario: One hold of the largest accepted size
+
+- **WHEN** a local session that holds nothing holds an upload of the largest size the listener accepts
+- **THEN** the upload is held
+
+#### Scenario: A hold that does not fit on disk
+
+- **WHEN** a local session holds an upload larger than the free disk
+- **THEN** it is refused with `HELD_UPLOAD_NO_SPACE` and no bytes are held
 
 #### Scenario: A public upload asks to hold
 

@@ -14,8 +14,10 @@ caller presenting it -- unknown, malformed, another session's, expired, spent
 -- gets one answer, so a handle leaks nothing about holds its presenter does
 not own. Checks run before the claim, so a refused redemption consumes nothing,
 and a command that claims a hold but stores nothing puts it back with `restore`.
-Each local session may keep at most `HOLD_MAX_COUNT` holds and `HOLD_MAX_BYTES`
-held bytes at once.
+Each local session may keep at most `HOLD_MAX_COUNT` holds at once, holding
+together no more bytes than the largest single hold accepts, so one hold of that
+size always fits. A hold that would not fit in free disk is refused before a
+byte is copied.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import time
 from collections.abc import Callable
@@ -45,8 +48,6 @@ LANE_COMMANDS = {"evidence": "preserve_artifacts", "source": "capture_source"}
 STORE_DIRNAME = "held-uploads"
 #: Live holds one local session may keep: two full file-handle batches.
 HOLD_MAX_COUNT = 16
-#: Held bytes one local session may keep across its live holds.
-HOLD_MAX_BYTES = 256 * 1024 * 1024
 
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
@@ -177,6 +178,12 @@ def hold(
     held_count, held_bytes = _usage(store, binding)
     if held_count >= HOLD_MAX_COUNT:
         raise _quota()
+    # The route spools the body before it runs, so its length is known before a byte is copied.
+    start = stream.tell()
+    length = stream.seek(0, os.SEEK_END) - start
+    stream.seek(start)
+    if length > shutil.disk_usage(store).free:
+        raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
     secret = secrets.token_urlsafe(32)
     key = _key(secret)
     fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
@@ -189,7 +196,8 @@ def hold(
                 size += len(chunk)
                 if size > max_bytes:
                     raise HeldUploadError("TOO_LARGE", "upload exceeds the configured limit")
-                if held_bytes + size > HOLD_MAX_BYTES:
+                # The session's held total is the largest single hold, so one such hold always fits.
+                if held_bytes + size > max_bytes:
                     raise _quota()
                 digest.update(chunk)
                 sink.write(chunk)

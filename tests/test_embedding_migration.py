@@ -414,6 +414,48 @@ def test_a_live_write_before_the_first_plan_does_not_hide_the_imported_vault(
     assert warming == [{"components": ["embeddings"], "since_s": None}]
 
 
+def test_recall_is_marked_warming_until_the_job_first_plans(preseeded_world, monkeypatch) -> None:
+    # A fresh cell answered from its empty sidecar, unmarked, between warm-up
+    # and the build's first file.
+    vault, _log, _loads = preseeded_world
+    _warm(vault)
+    planning, proceed = threading.Event(), threading.Event()
+    plan = recall_migration.plan
+
+    def plan_when_released(root):
+        planning.set()
+        assert proceed.wait(timeout=60)
+        return plan(root)
+
+    monkeypatch.setattr(recall_migration, "plan", plan_when_released)
+
+    def unit_recall() -> dict:
+        from exomem import commands
+
+        find_module.clear_cache()
+        result = commands.op_ask_memory(
+            vault, query="retry backoff", limit=5, mode="vector", scope="kb-only", graph=False,
+            rerank=False, detail="compact", result_level="unit",
+        )
+        return {"hits": result} if isinstance(result, list) else result
+
+    job = recall_migration.start(vault, threading.Event())
+    try:
+        assert planning.wait(timeout=60)
+        marked = {"components": ["embeddings"], "since_s": None}
+        assert _recall(vault, "retry backoff")["warming"] == marked
+        assert unit_recall()["warming"] == marked
+    finally:
+        proceed.set()  # never leave the job waiting on a vault the fixture deletes
+    job.join(timeout=60)
+    assert recall_migration.status(vault)["state"] == "current"
+
+    recall_migration.will_start(vault)  # the next server start
+    # The active pointer says an earlier build covered the vault.
+    assert "warming" not in _recall(vault, "retry backoff")
+    assert "warming" not in unit_recall()
+
+
 def test_initial_build_resumes_after_first_encode_fails_and_a_live_write(
     preseeded_world, monkeypatch
 ) -> None:
