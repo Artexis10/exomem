@@ -1071,11 +1071,10 @@ def destination_segment_refusal(value: object, *, field: str) -> str | None:
     """Why `value` is not one clean destination segment, or None if it is.
 
     Validation, never normalisation. `_sanitize_segment` deletes the offending
-    character and writes somewhere else: the live vault holds one logical case
-    split across `Evidence/food/caviarhouse-group-order/` and
-    `Evidence/foodcaviarhouse-group-order/` because a separator was silently
-    removed. A refusal costs the caller one corrected call and names the field;
-    a silent fork costs a reader the case.
+    character and writes somewhere else: a scope `work/orders` would land in
+    `Evidence/workorders/`, splitting one logical case across two trees. A
+    refusal costs the caller one corrected call and names the field; a silent
+    fork costs a reader the case.
     """
     if not isinstance(value, str) or not value:
         return f"{field} is required as {DESTINATION_ACCEPTED_FORM}"
