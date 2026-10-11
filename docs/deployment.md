@@ -1158,8 +1158,10 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
   public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
   file stays within what `preserve_artifacts` can fetch, which on this server is
-  the session maximum below. One local token keeps at most 256 MiB of held files
-  at a time.
+  the session maximum below. The held files of one local token together stay
+  within that same cap, so one file of the largest size always fits. The
+  listener refuses a hold that does not fit in free disk with
+  `HELD_UPLOAD_NO_SPACE`.
 - A file over 64 MiB, a file that the listener refuses as too large, or any
   file with `--resumable` goes through a resumable upload session. The
   listener's cap is in the service's environment, so `exomem attach` does not

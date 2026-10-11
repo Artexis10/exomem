@@ -533,7 +533,7 @@ def register_transfer_routes(
             except held_uploads.HeldUploadError as exc:
                 return JSONResponse(
                     {"code": exc.code, "reason": exc.reason},
-                    status_code=413 if exc.code == "TOO_LARGE" else 400,
+                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400),
                 )
             return JSONResponse(held, status_code=201)
         from . import archive_members
