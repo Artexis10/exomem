@@ -2583,6 +2583,21 @@ def _transaction(root: Path, writer, work) -> None:
     _mutate(root, import_job_settlement)
 
 
+def _settle_alone(root: Path, writer, job: _Job, batch: Batch, guards, **settled) -> str:
+    """Record a batch that writes no rows: a stop fails the job, otherwise its checkpoint advances."""
+
+    def settle_alone():
+        _authorize(writer, job, prove=False)
+        _recheck(writer, guards)
+        if batch.stop is not None:
+            _record(writer, job, batch, fail=batch.stop)
+        else:
+            _record(writer, job, batch, **settled)
+
+    _transaction(root, writer, settle_alone)
+    return "paused" if batch.stop is not None else "batch"
+
+
 def _forget(writer, job_id: str) -> None:
     """Drop a job's host-local proof, open reader and store block once it stops running."""
     _proofs(writer).pop(job_id, None)
@@ -2725,17 +2740,8 @@ def _batch(root: Path, writer, job: _Job) -> str:
     version = manifest.schema.version
     try:
         if batch.stop is not None or not kept:
-
-            def settle_alone():
-                _authorize(writer, job, prove=False)
-                _recheck(writer, guards)
-                if batch.stop is not None:
-                    _record(writer, job, batch, fail=batch.stop)
-                else:
-                    _record(writer, job, batch, superseded=superseded, prepared=prepared, version=version)
-
-            _transaction(root, writer, settle_alone)
-            return "paused" if batch.stop is not None else "batch"
+            return _settle_alone(root, writer, job, batch, guards, superseded=superseded, prepared=prepared,
+                                 version=version)
         _mutate(
             root,
             writer.bulk_upsert_records,
@@ -2859,17 +2865,7 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     read = [event for event in batch.members if event[0] == "read"]
     if batch.stop is not None or not (batch.rows or batch.rejections or read):
         # A stop fails the job; skipped members alone only advance the store checkpoint.
-
-        def settle_alone():
-            _authorize(writer, job, prove=False)
-            _recheck(writer, guards)
-            if batch.stop is not None:
-                _record(writer, job, batch, fail=batch.stop)
-            else:
-                _record(writer, job, batch, version=manifest.schema.version)
-
-        _transaction(root, writer, settle_alone)
-        return "paused" if batch.stop is not None else "batch"
+        return _settle_alone(root, writer, job, batch, guards, version=manifest.schema.version)
     index = read[0][1] if read else batch.checkpoint["member"]
     if record is None or record["member"] != index:
         record = _opened(job, index, derived_rows.logged(writer.connection, cid)[1])

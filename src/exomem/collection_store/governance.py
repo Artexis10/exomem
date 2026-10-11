@@ -826,13 +826,7 @@ class OperationAuthorization:
                           subject=replace(manifest.basis.subject, refs=(prefix + "derived",), tags=(),
                                           types=(item_type.lower(),), classes=()))
             released = rows if self.decision(replace(manifest, row_id=0, basis=row)).level >= 6 else 0
-            if released == rows:
-                visible.update(container.encode())
-            release = SummaryRelease(manifest, decision, prefix, rows, released, tuple(held), "")
-            release = replace(release, snapshot=container if release.complete else visible.hexdigest())
-            self.summary_memo = {memo: release}
-            return release
-        if not varies:
+        elif not varies:
             released = 0
             if rows:
                 key = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",

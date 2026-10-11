@@ -200,6 +200,11 @@ def _rows_ddl(goal: Target) -> tuple[str, ...]:
 
 # State
 
+# nosemgrep: ep-word-set -- assess() below defines these actions; they are this module's closed set.
+_SERVING = frozenset({"empty", "ready", "live", "finalize"})
+# nosemgrep: ep-word-set -- the actions settle() leaves alone; it acts on every other one.
+_AT_REST = frozenset({"ready", "live", "rebuilding"})
+
 
 @dataclass(frozen=True, slots=True)
 class State:
@@ -213,7 +218,12 @@ class State:
     @property
     def serves(self) -> bool:
         """Whether the file holds the rows the log names, so a row query can read them."""
-        return self.action in ("empty", "ready", "live", "finalize")
+        return self.action in _SERVING
+
+    @property
+    def at_rest(self) -> bool:
+        """Whether ``settle`` leaves this state alone: ready, live, or a rebuild already underway."""
+        return self.action in _AT_REST
 
     def progress(self) -> dict[str, Any]:
         return {"state": "stopped" if self.stop else "rebuilding", "members_applied": self.applied,
@@ -384,7 +394,7 @@ class Store:
     def settle(self, main: sqlite3.Connection, collection_id: str) -> State:
         """Act on one collection's assessed state: create, finalise, replay the tail or rebuild."""
         state, goal = self.state(main, collection_id)
-        if goal is None or state.action in ("ready", "live", "rebuilding"):
+        if goal is None or state.at_rest:
             return state
         with self.transaction():
             if state.action == "empty":
@@ -707,7 +717,7 @@ def step(root: Path, writer) -> str:
     store = open_store(writer)
     for cid in sorted({*store.rebuilding(), *(
             found for (found,) in writer.connection.execute("SELECT collection_id FROM collections WHERE derived=1")
-            if store.state(writer.connection, found)[0].action in ("rebuild", "replay", "finalize", "empty"))}):
+            if not store.state(writer.connection, found)[0].at_rest)}):
         store.settle(writer.connection, cid)
     stopped = False
     for cid in store.rebuilding():
