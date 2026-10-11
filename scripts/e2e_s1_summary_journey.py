@@ -701,6 +701,8 @@ class Journey:
         self.older_python = getattr(args, "older_python", "")
         self.vault, self.work, self.home = Path(args.vault), Path(args.work), Path(args.home)
         self.work.mkdir(parents=True, exist_ok=True)
+        # The outer E2E collector rescues this directory before scratch cleanup.
+        self.observer_log_root = self.home / "logs" / "query-observation"
         self.timeout = args.request_timeout
         self.rows = export_rows()
         self.export = export_bytes(self.rows)
@@ -785,6 +787,15 @@ class Journey:
                 ) from error
             yield Session(client, self.timeout)
 
+    def observed_server(self, label: str, *arguments: str) -> list[str]:
+        """Launch the same installed module with temporary failure-only observation."""
+        from _recipient_query_observer import LOG_NAME
+
+        # Labels name the harness's observed process launches, not user categories.
+        log_path = self.observer_log_root / label / LOG_NAME
+        return [str(self.python), str(Path(__file__).resolve()),
+                "--observe-query-timeouts", str(log_path), *arguments]
+
     @contextlib.asynccontextmanager
     async def recipient_service(self) -> AsyncIterator[tuple[str, Session]]:
         """One installed writer: recipient MCP reads and owner REST release changes."""
@@ -820,10 +831,10 @@ class Journey:
             reservation.close()
         log = self.work / "service-recipient.log"
         with log.open("w", encoding="utf-8") as handle:
-            process = subprocess.Popen([
-                str(self.python), "-m", "exomem", "--transport", "http",
+            process = subprocess.Popen(self.observed_server(
+                "recipient", "--transport", "http",
                 "--host", "127.0.0.1", "--port", str(port),
-            ], cwd=self.work, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
+            ), cwd=self.work, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
             try:
                 loop._wait_http_ready(
                     lambda: loop._http_json(f"{base_url}/api/openapi.json", timeout=1)[0] == 200,
@@ -879,6 +890,7 @@ class Journey:
         child.coordinator_url = self.coordinator_url
         child.lease_vault_id = f"{LEASE_VAULT_ID}-{label}"
         child.replica_id = label
+        child.observer_log_root = self.observer_log_root
         child.file_collections = self.file_collections
         child.source_receipt = self.source_receipt
         child.member_receipt = self.member_receipt
@@ -1767,8 +1779,15 @@ def start_coordinator(journey: Journey) -> tuple[subprocess.Popen, Any]:
     return process, handle
 
 
-def print_log_tails(work: Path, chars: int = 1500) -> None:
+def print_log_tails(work: Path, chars: int = 1500, *, observer_log_root: Path | None = None) -> None:
     """The services' own logs, which the scratch root deletes with everything else."""
+    from _recipient_query_observer import LOG_NAME
+
+    observer_logs = observer_log_root if observer_log_root is not None else work
+    for log in sorted(observer_logs.rglob(LOG_NAME)):
+        with contextlib.suppress(OSError):
+            record = log.read_text(encoding="utf-8")
+            print(f"--- s1-journey {log.relative_to(observer_logs)} (complete aggregate) ---\n{record}", file=sys.stderr)
     for log in sorted(work.glob("*.log")):
         with contextlib.suppress(OSError):
             tail = log.read_text(encoding="utf-8", errors="replace")[-chars:]
@@ -1797,7 +1816,7 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
     except BaseException:
-        print_log_tails(journey.work)
+        print_log_tails(journey.work, observer_log_root=journey.observer_log_root)
         raise
     finally:
         loop._terminate(coordinator, 10)
@@ -1809,6 +1828,16 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--observe-query-timeouts"]:
+        import runpy
+
+        from _recipient_query_observer import observe_query_timeouts
+
+        log_path = Path(sys.argv[2])
+        sys.argv = ["exomem", *sys.argv[3:]]
+        with observe_query_timeouts(log_path):
+            runpy.run_module("exomem", run_name="__main__", alter_sys=True)
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", required=True, help="the installed wheel's python")
     parser.add_argument("--executable", required=True, help="the installed wheel's exomem")

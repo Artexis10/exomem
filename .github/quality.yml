@@ -20,6 +20,8 @@ classes:
     - ".test_durations.json"
     - "scripts/e2e_http_server.py"
     - "scripts/e2e_product_loop.py"
+    - "scripts/e2e_s1_summary_journey.py"
+    - "scripts/_recipient_query_observer.py"
     - "scripts/smoke-media-pipeline.py"
     - "scripts/smoke-upload.py"
     - "scripts/time-to-value.py"

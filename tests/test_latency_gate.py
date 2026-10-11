@@ -45,6 +45,7 @@ import yaml
 
 from exomem import find as find_module
 from exomem import freshness, lexstore
+from exomem.governance import principal
 from exomem.vault import walk_vault_md
 
 # Reuse the ONE synthetic-vault generator (scripts/synth_vault.py).
@@ -160,8 +161,10 @@ def _build_dense_vault(root: Path, n: int) -> Path:
     lexstore.ensure_fresh(vault)
     # Warm every lane once so the measured passes reflect steady state, not the
     # first-touch lexical-sidecar / bm25-corpus / resolver build.
-    for q in _QUERIES:
-        find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
+    # This fixture measures owner-local retrieval; explicit admission cases keep their predicates.
+    with principal.library_scope():
+        for q in _QUERIES:
+            find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
     return vault
 
 
@@ -201,19 +204,20 @@ def _measure(vault: Path, **find_kwargs) -> tuple[dict[str, float], float]:
     """Return (per-lane median ms, total median ms) over the warm query set."""
     lane_samples: dict[str, list[float]] = {}
     total_samples: list[float] = []
-    for _ in range(_REPEAT):
-        for q in _QUERIES:
-            t = find_module.FindTimings()
-            find_module.find(
-                vault, query=q, limit=10, mode="hybrid", graph=True, timings=t, **find_kwargs
-            )
-            d = t.as_dict()
-            total_samples.append(d["total_ms"])
-            for lane, stage in d["stages"].items():
-                # A lane's span records `ms` even when its body raised (the
-                # model-free vector ImportError), so skip errored/skipped lanes.
-                if "ms" in stage and "error" not in stage and "skipped" not in stage:
-                    lane_samples.setdefault(lane, []).append(stage["ms"])
+    with principal.library_scope():
+        for _ in range(_REPEAT):
+            for q in _QUERIES:
+                t = find_module.FindTimings()
+                find_module.find(
+                    vault, query=q, limit=10, mode="hybrid", graph=True, timings=t, **find_kwargs
+                )
+                d = t.as_dict()
+                total_samples.append(d["total_ms"])
+                for lane, stage in d["stages"].items():
+                    # A lane's span records `ms` even when its body raised (the
+                    # model-free vector ImportError), so skip errored/skipped lanes.
+                    if "ms" in stage and "error" not in stage and "skipped" not in stage:
+                        lane_samples.setdefault(lane, []).append(stage["ms"])
     medians = {lane: statistics.median(v) for lane, v in lane_samples.items()}
     return medians, statistics.median(total_samples)
 
