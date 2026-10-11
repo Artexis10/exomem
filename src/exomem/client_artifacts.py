@@ -487,7 +487,8 @@ def stage_direct_artifact(
     destination: Path | None = None
     file_deadline = _monotonic() + _RETRIEVAL_DEADLINE_SECONDS
     call_deadline = batch_deadline or float("inf")
-    deadline = min(file_deadline, call_deadline)
+    # The call keeps the time its earlier files earned.
+    deadline = min(file_deadline, budget.extended(call_deadline, budget.total_bytes))
     try:
         while True:
             if cancelled is not None and cancelled.is_set():
@@ -913,7 +914,7 @@ def _validate_receipt(
     if (
         type(receipt["size"]) is not int
         or receipt["size"] < 0
-        or receipt["size"] > fetch_budget().max_file_bytes
+        or receipt["size"] > MAX_FILE_BYTES
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt["key_digest"])) is None
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt["hash"])) is None
         or receipt["hash_algorithm"] != "sha256"
@@ -1197,7 +1198,8 @@ def _capture_source_adoption(
             _content_type(selected.get("mime_type"))
             artifact = stage_artifact(
                 selected,
-                fetch_budget(),
+                # An adoption replay re-verifies the stored file in memory, so adoption keeps the cell cap.
+                FetchBudget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
                 lane="source",
                 index=selected_index,
@@ -1325,7 +1327,8 @@ def _preserve_evidence_adoption(
             ].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(selected.get("mime_type"))
-            budget = fetch_budget()
+            # An adoption replay re-verifies the stored file in memory, so adoption keeps the cell cap.
+            budget = FetchBudget()
             artifact = stage_artifact(
                 selected,
                 budget,

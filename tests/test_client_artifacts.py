@@ -2183,6 +2183,27 @@ def test_a_slow_but_healthy_desktop_pull_earns_time_with_each_byte(
     assert staged.size == 10 * 1000
 
 
+def test_a_later_file_in_a_desktop_call_keeps_the_time_earlier_files_earned(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call earned time only inside each file's own pull, so after one long file every later file
+    in the call failed at once. Scaled down: 1 s allowances for each file and for the call, a 1,000 B/s
+    minimum rate, and two files that each take two seconds."""
+    from exomem import client_artifacts
+
+    monkeypatch.setattr(client_artifacts, "_RETRIEVAL_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(client_artifacts, "_BATCH_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(client_artifacts, "_MIN_BYTES_PER_SECOND", 1000)
+    monkeypatch.setattr(client_artifacts, "_CHUNK_SIZE", 1000)
+
+    with _download_url(monkeypatch, _paced(10, 1000, 0.2)) as first:
+        second = {"download_url": first["download_url"].replace("device_days", "device_nights"),
+                  "file_id": "device-nights"}
+        result = commands.op_preserve_artifacts(vault, scope="Device", category="Exports", files=[first, second])
+
+    assert [outcome["outcome"] for outcome in result["files"]] == ["stored", "stored"], result["files"]
+
+
 def test_a_trickling_desktop_pull_still_stops_and_leaves_no_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

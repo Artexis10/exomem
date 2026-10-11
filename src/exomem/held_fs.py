@@ -381,6 +381,10 @@ def publish_bytes(
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
 
+    A read error from a `Chunks` source returns as the publish's own refusal; any other
+    exception the source raises, such as a path guard's, propagates after the temporary
+    is removed.
+
     With no expected identity the publish is create-only and uses a no-replace
     hard-link installation. With an expected identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.

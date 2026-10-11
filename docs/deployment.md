@@ -1158,7 +1158,7 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
   public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
   file stays within what `preserve_artifacts` can fetch, which on this server is
-  the session maximum below. The held files of one local token together stay
+  the session maximum below. The held files of one local session together stay
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
@@ -1220,7 +1220,7 @@ requests carry only the session secret, so an upload can outlast the token.
 2. Save the script below as `exomem-upload.sh`.
 3. Run `CREATE_URL=<create_url> TOKEN=<token> SCOPE=Device CATEGORY=Exports sh exomem-upload.sh device_days.zip`.
 4. If the script stops, run the same command again. It continues from the offset that the service holds.
-5. Run it again until it prints `"state": "committed"`, then delete `device_days.zip.exomem-session`.
+5. Run it again until the state it prints is `committed`, then delete `device_days.zip.exomem-session`.
 
 The script prints the session state. Once the state is `committed`, the
 `receipt` names the stored path and the SHA-256 of the whole file.
@@ -1245,7 +1245,11 @@ if [ ! -s "$STATE" ]; then
 fi
 read -r SESSION SECRET < "$STATE"
 tus() { curl -sS -H "Tus-Resumable: 1.0.0" -H "Exomem-Upload-Secret: $SECRET" "$@"; }
+LAST=
 while OFFSET=$(tus -I "$SESSION" | header upload-offset) && [ -n "$OFFSET" ] && [ "$OFFSET" -lt "$SIZE" ]; do
+  # A part that kept no bytes: print the session's state and stop; run the script again later.
+  if [ "$OFFSET" = "$LAST" ]; then tus "$SESSION"; echo; exit 1; fi
+  LAST=$OFFSET
   tail -c +"$((OFFSET + 1))" "$FILE" | head -c $((64 * 1024 * 1024)) | tus -o /dev/null -X PATCH "$SESSION" \
     -H "Upload-Offset: $OFFSET" -H "Content-Type: application/offset+octet-stream" --data-binary @- || true
 done
@@ -1253,7 +1257,8 @@ tus "$SESSION"; echo
 ```
 
 A part that fails, for example because the connection drops, is sent again
-from the offset that the service reports. The state `failed` names a code: for
+from the offset that the service reports. If a part keeps no bytes, the script
+prints the session's state and stops. The state `failed` names a code: for
 example, the bytes did not match their SHA-256. A session that has expired
 answers `UPLOAD_SESSION_EXPIRED`. In both cases, delete the `.exomem-session`
 file, call `transfer_artifact` for a new token and run the script again. To keep

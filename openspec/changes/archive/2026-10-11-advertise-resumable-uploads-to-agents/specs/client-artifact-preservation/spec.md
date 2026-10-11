@@ -19,7 +19,7 @@ On a server that serves upload sessions, `transfer_artifact(operation="upload")`
 
 ### Requirement: A standalone server pulls file handles up to the upload session maximum
 
-On a standalone server, `preserve_artifacts` and `capture_source` SHALL accept one client file handle, and all the file handles of one call together, up to the upload session maximum that `EXOMEM_UPLOAD_SESSION_MAX_BYTES` sets. A held upload SHALL be held only up to the same cap, so that its redeeming command can fetch it. A pull SHALL stop with a stable timed-out failure and remove its temporary bytes when no byte arrives within its per-read timeout, or when, after a fixed allowance, its average rate falls below the documented minimum. Each byte that a pull receives SHALL extend the deadline of its file and of its call. Hosted and Cloud cells SHALL keep the per-file and per-call cap that the artifact broker's grants carry, and fixed deadlines.
+On a standalone server, `preserve_artifacts` and `capture_source` SHALL accept one client file handle, and all the file handles of one call together, up to the upload session maximum that `EXOMEM_UPLOAD_SESSION_MAX_BYTES` sets. A held upload SHALL be held only up to the same cap, so that its redeeming command can fetch it. A pull SHALL stop with a stable timed-out failure and remove its temporary bytes when no byte arrives within its per-read timeout, or when, after a fixed allowance, its average rate falls below the documented minimum. Each byte that a pull receives SHALL extend the deadline of its file and of its call. Hosted and Cloud cells SHALL keep the per-file and per-call cap that the artifact broker's grants carry, and fixed deadlines. A call that carries an adoption key SHALL keep that cell cap on every server, because replaying it re-verifies the stored artifact in memory.
 
 #### Scenario: A file handle larger than 100 MiB
 - **WHEN** a standalone server pulls a client file handle larger than 100 MiB and within the session maximum
@@ -28,6 +28,10 @@ On a standalone server, `preserve_artifacts` and `capture_source` SHALL accept o
 #### Scenario: A slow but healthy pull
 - **WHEN** a pull takes longer than the fixed allowance and its average rate stays above the minimum
 - **THEN** the pull completes
+
+#### Scenario: A later file in a call
+- **WHEN** one call pulls a long first file and then a second file
+- **THEN** the second file starts with the time the first file earned for the call
 
 #### Scenario: A trickling pull
 - **WHEN** the bytes of a pull arrive slower than the minimum rate after the fixed allowance
