@@ -48,6 +48,12 @@ retries it. A page the build encoded and that changed since does not answer
 from it (`current_in_build`) until a catch-up pass encodes it again. Only a
 personal server migrating from another model keeps reading the old, complete
 sidecar with that model's encoder.
+
+Before the job first plans, a vault with no active pointer has nothing that
+says its serving sidecar covers it (`coverage_unchecked`). A server records
+the job as starting when it commits to its workers (`will_start`), before it
+admits a request, so until the plan its recall is marked warming and a fresh
+vault's empty sidecar does not answer as complete.
 """
 
 from __future__ import annotations
@@ -280,6 +286,19 @@ def building_sidecar(vault_root: Path) -> Path | None:
     shadow = active.parent / str(target["sidecar"])
     # The job records the target before its first write creates the file.
     return shadow if shadow != active and shadow.exists() else None
+
+
+def coverage_unchecked(vault_root: Path) -> bool:
+    """Whether this process's job has not yet planned, and no active pointer
+    says an earlier build covered the vault.
+
+    Until then nothing says the serving sidecar covers the vault: on a fresh
+    or imported vault it holds nothing, and the build has not begun. Read from
+    the job's status and, only while the job is starting, one `stat`.
+    """
+    with _LOCK:
+        state = (_STATUS.get(_key(vault_root)) or {}).get("state")
+    return state == "starting" and index_paths.active_sidecar_name(vault_root) is None
 
 
 def current_in_build(vault_root: Path, index: Any, rel_paths: AbstractSet[str]) -> set[str]:
@@ -679,12 +698,28 @@ def _run_logged(vault_root: Path, stop: threading.Event) -> None:
         _update(vault_root, state="failed", error=type(error).__name__)
 
 
+def will_start(vault_root: Path) -> None:
+    """Record that this process will run the job for `vault_root`.
+
+    A server calls it when it commits to its workers, before it admits a
+    request: the job starts last of them, and `coverage_unchecked` holds from
+    here until the job plans.
+    """
+    _update(vault_root, state="starting")
+
+
 def start(vault_root: Path, stop: threading.Event) -> threading.Thread:
     """Run the job on a daemon thread of its own; `stop` ends it between batches."""
+    will_start(vault_root)
     thread = threading.Thread(
         target=_run_logged, args=(vault_root, stop), name=THREAD_NAME, daemon=True
     )
-    thread.start()
+    try:
+        thread.start()
+    except Exception as error:
+        # No job will plan, so "starting" must not mark recall for the process's life.
+        _update(vault_root, state="failed", error=type(error).__name__)
+        raise
     return thread
 
 
@@ -738,10 +773,10 @@ def status(vault_root: Path) -> dict[str, Any]:
     """
     with _LOCK:
         current = dict(_STATUS.get(_key(vault_root), {}))
-    if not current:
+    if "serving" not in current:  # no job has run, or it has not planned yet
         from . import embeddings
 
         active = embeddings.get_embedding_index(vault_root)
-        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None}
+        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None, **current}
     current["reembed"] = "on" if reembed_enabled() else "off"
     return current

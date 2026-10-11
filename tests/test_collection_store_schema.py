@@ -379,7 +379,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 9
+    assert schema.SCHEMA_VERSION == 10
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -445,13 +445,13 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["9", "8"])
+@pytest.mark.parametrize("revision", ["10", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
     store.connection.execute("ALTER TABLE intermediate_revision RENAME TO ALEMBIC_VERSION")
     store.connection.execute("UPDATE ALEMBIC_VERSION SET version_num=?", (revision,))
-    if revision == "8":
+    if revision == "9":
         with pytest.raises(ValueError, match="revision disagrees"):
             schema.schema_version(store.connection)
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
@@ -460,12 +460,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 9
+        assert schema.schema_version(store.connection) == 10
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 9
+            assert schema.schema_version(reader) == 10
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("9",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("10",)]
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -479,7 +479,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("9",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("10",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 
@@ -488,10 +488,10 @@ def _next_revision(tmp_path, monkeypatch, statements):
     migrations = tmp_path / "migrations%20"
     if not migrations.exists():
         shutil.copytree(schema._MIGRATION_PATH, migrations)
-    target = 10
-    script = migrations / "versions" / "10_probe.py"
+    target = 11
+    script = migrations / "versions" / "11_probe.py"
     script.write_text(
-        "from alembic import op\nrevision = '10'\ndown_revision = '9'\n"
+        "from alembic import op\nrevision = '11'\ndown_revision = '10'\n"
         "def upgrade():\n" + "".join(f"    op.get_bind().exec_driver_sql({sql!r})\n" for sql in statements)
     )
     monkeypatch.setattr(schema, "_MIGRATION_PATH", migrations)
