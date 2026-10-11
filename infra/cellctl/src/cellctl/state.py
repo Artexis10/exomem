@@ -12,7 +12,7 @@ from datetime import datetime
 
 DESIRED_STATES = ("running", "read_only", "stopped", "deleted")
 TERMINAL_OBSERVED_STATES = frozenset({"running", "read_only", "stopped", "deleted", "failed"})
-HOLD_KINDS = ("upgrade", "backup", "restore")
+HOLD_KINDS = ("upgrade", "backup", "restore", "import")
 # move-cloud-cells-to-local-storage D3: the hourly backup of a cell on local
 # storage, a hold that does not stop the cell.
 SNAPSHOT_BACKUP = "snapshot-backup"
@@ -289,6 +289,13 @@ class Decision:
     # and what this pass's measured backup found (one of the GROWTH_ values).
     grow_storage_gib: int | None = None
     storage_growth: str | None = None
+
+    import_action: str | None = None
+    import_updates: dict[str, object] = field(default_factory=dict)
+    stop_import_jobs: list[str] = field(default_factory=list)
+    prepare_import_upload: bool = False
+    cleanup_import_transport: bool = False
+    finalize_import: bool = False
 
     row_updates: dict[str, object] = field(default_factory=dict)
     rollout_updates: dict[str, object] = field(default_factory=dict)
