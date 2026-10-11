@@ -6588,6 +6588,8 @@ def op_activate_context(
     packet = None
     outcome = None
     error_code = None
+    # Finalization and logging share the leaf's budget, including error paths.
+    bound_token = None
     try:
         bounded = working_set_conversation_module.bound(conversation)
         # A foreground request: in-process bulk passes (a whole-vault graph
@@ -6595,40 +6597,35 @@ def op_activate_context(
         # GIL back after every SQLite call the request makes (5-15x per stage,
         # measured). Activation is read-only and never waits on bulk work.
         with state_paths_module.resolution_scope(), foreground_priority.foreground():
-            bound_token = None
             if readiness_module.runtime_managed() and request_budget_module.current() is None:
                 bound_token = request_budget_module.set_current(
                     request_budget_module.RequestBudget(
                         seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
                     )
                 )
-            try:
-                packet = _op_activate_context_body(
-                    vault_root,
-                    turn,
-                    max_chars,
-                    purpose=purpose,
-                    continuity=continuity,
-                    anchor=anchor,
-                    include_timings=include_timings,
-                    client=client,
-                    session=session,
-                    workspace=workspace,
-                    conversation=bounded,
-                    observation_timings=observation_timings,
-                )
-                # After the guard and outside the packet cache, like `continuity`:
-                # at a caller's session start, at most one upkeep item, and only in
-                # the process whose background worker proposed it. Never raises.
-                from . import sensed_model
-                from . import upkeep as upkeep_module
+            packet = _op_activate_context_body(
+                vault_root,
+                turn,
+                max_chars,
+                purpose=purpose,
+                continuity=continuity,
+                anchor=anchor,
+                include_timings=include_timings,
+                client=client,
+                session=session,
+                workspace=workspace,
+                conversation=bounded,
+                observation_timings=observation_timings,
+            )
+            # After the guard and outside the packet cache, like `continuity`:
+            # at a caller's session start, at most one upkeep item, and only in
+            # the process whose background worker proposed it. Never raises.
+            from . import sensed_model
+            from . import upkeep as upkeep_module
 
-                upkeep_module.for_packet(vault_root, packet, session=session)
-                # Also outside the cache: each resolved anchor page's sensed status.
-                sensed_model.for_packet(vault_root, packet)
-            finally:
-                if bound_token is not None:
-                    request_budget_module.reset_current(bound_token)
+            upkeep_module.for_packet(vault_root, packet, session=session)
+            # Also outside the cache: each resolved anchor page's sensed status.
+            sensed_model.for_packet(vault_root, packet)
         _carry_thread_through_abstention(packet, continuity)
         _withhold_vault_generation(vault_root, packet)
         # Every packet reports how its conversation was bounded; the compiler has
@@ -6641,14 +6638,18 @@ def op_activate_context(
         error_code = type(error).__name__
         raise
     finally:
-        query_log.log_activation_call(
-            vault_root, packet=packet, client=client, session=session,
-            outcome=outcome, error_code=error_code,
-            duration_ms=round((time.perf_counter() - started) * 1000, 3),
-            conversation=bounded.counts if bounded is not None else None,
-            spans=[{"name": name, "ms": stage["ms"]}
-                   for name, stage in observation_timings.stages.items() if "ms" in stage],
-        )
+        try:
+            query_log.log_activation_call(
+                vault_root, packet=packet, client=client, session=session,
+                outcome=outcome, error_code=error_code,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                conversation=bounded.counts if bounded is not None else None,
+                spans=[{"name": name, "ms": stage["ms"]}
+                       for name, stage in observation_timings.stages.items() if "ms" in stage],
+            )
+        finally:
+            if bound_token is not None:
+                request_budget_module.reset_current(bound_token)
 
 
 #: Abstentions that say something about this server rather than the turn:

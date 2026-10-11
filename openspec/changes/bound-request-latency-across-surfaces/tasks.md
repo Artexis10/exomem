@@ -39,7 +39,7 @@ Product work uses temporary runtime roots and an isolated tenant with external e
 
 The implementation packages the bar source and extends the existing watch,
 MCP dispatch, REST command, activation log, bootstrap and doctor surfaces.
-It preserves the current request-budget behavior. Activation collects existing
+It retains the existing request-budget limits and canonical-write immunity. Activation collects existing
 named stages without exposing public timing payloads unless the caller opts in.
 The runtime observation profile remains pending because automatic observations
 cannot prove pre-call warmth or installed acceptance.
@@ -60,3 +60,20 @@ CPU caps, RSS, current warm residency, paired latency gains and deadline repair
 remain unproved. Task boxes remain open until integrated delivery supplies the
 required evidence. The foreground and durable-acknowledgement owners retain
 their unfinished acceptance work and default-off fast acknowledgement.
+
+## Attributed graph wait and budget custody
+
+An isolated reproduction found four diagnostic queue reads after graph unavailability.
+Activation discards those lag values, so it now omits that diagnostic work.
+Public graph diagnostics retain their existing default behavior.
+The graph expansion loop checks the existing budget between controllable steps.
+Finalization and logging now retain the same activation budget until the leaf exits.
+
+A real exclusive SQLite queue test returns before the remaining absolute deadline.
+Its nine packet blocks match the equivalent unavailable-graph reference.
+The final integrated scope passed 90 activation, graph, logging and watch tests.
+The existing finalization-error workflow also verifies budget custody and restoration.
+
+This bounded repair does not localize the installed service's recorded overruns.
+Other I/O, graph snapshot proof and publication waits remain unbounded.
+Task 3.5 stays open; neither a live gain nor full deadline acceptance is claimed.

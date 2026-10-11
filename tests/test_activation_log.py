@@ -205,18 +205,29 @@ def test_activation_rows_never_feed_the_usage_signal(
 def test_finalization_error_is_one_observed_activation(vault, activation_log, monkeypatch) -> None:
     import time
 
-    from exomem import latency_watch
+    from exomem import latency_watch, readiness, request_budget
 
     watch = latency_watch.Watch(started_at=time.time() - 601)
     monkeypatch.setattr(latency_watch, "_WATCH", watch)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    assert request_budget.current() is None
 
     def fail_finalization(*args):
+        assert request_budget.current() is not None
         time.sleep(0.015)
         raise RuntimeError("finalization unavailable")
 
+    real_log = query_log.log_activation_call
+
+    def log_with_budget(*args, **kwargs):
+        assert request_budget.current() is not None
+        return real_log(*args, **kwargs)
+
+    monkeypatch.setattr(query_log, "log_activation_call", log_with_budget)
     monkeypatch.setattr(commands, "_withhold_vault_generation", fail_finalization)
     with pytest.raises(RuntimeError, match="finalization unavailable"):
         commands.op_activate_context(vault, turn=" ")
+    assert request_budget.current() is None
     [row] = watch.verdicts()
     assert row["observed"] == 1 and row["errors"] == 1
     assert row["boundary"] == "activation-leaf-v1"
