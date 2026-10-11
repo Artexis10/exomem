@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
@@ -54,6 +54,9 @@ def _sqlite_connect_owned(
 #: sidecar's own width is `EmbeddingIndex.dim`, read from its vector-space record.
 VECTOR_DIM = recall_space.LEGACY_DIM
 SEMANTIC_UNIT_SCHEMA_VERSION = 3
+#: The meta counter every semantic-unit write bumps inside its own transaction,
+#: beside the chunk `generation`; the resident unit matrix keys on it.
+SEMANTIC_UNIT_GENERATION = "semantic_unit_generation"
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
 
@@ -237,6 +240,147 @@ class SemanticUnitVectorRow(NamedTuple):
     parent_generation: str
 
 
+class _UnitBlock(NamedTuple):
+    """Unit vectors with the stamps a hit carries and validation reads.
+
+    `rows[i] = (unit_ref, parent_path, parent_generation, parent_source_hash,
+    parser_version)` and `matrix[i]` is its vector. `parent_of[i]` indexes
+    `parents`, the block's distinct parent paths, so an allowed-parents filter
+    costs one membership test per parent rather than one per unit. Unit content,
+    form, category and kind are never held.
+    """
+
+    rows: list[tuple[str, str, str, str, int]]
+    parents: list[str]
+    parent_of: np.ndarray
+    matrix: np.ndarray
+
+
+class _UnitCache(NamedTuple):
+    """The resident unit matrix, keyed like `_EmbCache` on `(epoch, generation,
+    instance)` with `mtime` for the generation-0 legacy fallback. Its
+    `generation` is `SEMANTIC_UNIT_GENERATION`, which every unit write moves and
+    a chunk-only write leaves alone. `width` is the vector width the block was
+    read at; rows of another width are not in it, as the scan always skipped them.
+    """
+
+    epoch: int
+    generation: int
+    instance: int
+    mtime: float
+    width: int
+    block: _UnitBlock
+
+
+_UNIT_COLUMNS = (
+    "unit_ref, parent_path, parent_generation, parent_source_hash, parser_version, vector"
+)
+
+
+def _unit_block(rows: Iterable[tuple], count: int, width: int) -> _UnitBlock:
+    """Read at most `count` unit rows of `width`-wide vectors; skip other widths."""
+    matrix = np.empty((count, width), dtype=np.float32)
+    parent_of = np.empty(count, dtype=np.int32)
+    kept: list[tuple[str, str, str, str, int]] = []
+    parents: list[str] = []
+    slots: dict[str, int] = {}
+    # Share repeated strings within this load only: sys.intern never frees on 3.12.
+    shared: dict[str, str] = {}
+    for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
+        if len(blob) != width * 4:
+            continue
+        if len(kept) == count:
+            raise ValueError("semantic-unit row count differs from snapshot")
+        path = str(parent_path)
+        slot = slots.get(path)
+        if slot is None:
+            slot = slots[path] = len(parents)
+            parents.append(path)
+        matrix[len(kept)] = np.frombuffer(blob, dtype=np.float32)
+        parent_of[len(kept)] = slot
+        generation, source_hash = str(generation), str(source_hash)
+        kept.append(
+            (
+                str(unit_ref),
+                parents[slot],
+                shared.setdefault(generation, generation),
+                shared.setdefault(source_hash, source_hash),
+                int(parser_version),
+            )
+        )
+    size = len(kept)
+    if size < count:
+        matrix, parent_of = matrix[:size].copy(), parent_of[:size].copy()
+    return _UnitBlock(kept, parents, parent_of, matrix)
+
+
+def _unit_mask(
+    block: _UnitBlock, parents: frozenset[str] | None, refs: frozenset[str] | None
+) -> np.ndarray | None:
+    """The block rows both allowlists admit; None when neither is given."""
+    mask = None
+    if parents is not None:
+        admitted = np.fromiter(
+            (path in parents for path in block.parents), dtype=bool, count=len(block.parents)
+        )
+        mask = admitted[block.parent_of]
+    if refs is not None:
+        by_ref = np.fromiter(
+            (row[0] in refs for row in block.rows), dtype=bool, count=len(block.rows)
+        )
+        mask = by_ref if mask is None else mask & by_ref
+    return mask
+
+
+def _best_with_ties(scores: np.ndarray, window: int) -> np.ndarray:
+    """Positions of the `window` highest scores and of every score tied with the
+    lowest of them, so ranking this subset by the full key gives exactly the first
+    `window` rows that ranking every row would. NaN ranks below every number."""
+    if len(scores) <= window:
+        return np.arange(len(scores))
+    negated = -scores
+    cut = negated[np.argpartition(negated, window - 1)[window - 1]]
+    if np.isnan(cut):
+        # Fewer than `window` scores are numbers: every row is needed.
+        return np.arange(len(scores))
+    return np.flatnonzero(negated <= cut)
+
+
+def _unit_rank(candidate: tuple[float, int, tuple[str, str, str, str, int]]) -> tuple:
+    """Best score first, then `unit_ref`: the order the unit lane publishes.
+
+    NaN ranks last. The row's position in the scan breaks a tie on both, which
+    makes the order total, so a wider window always starts with a narrower one.
+    """
+    score, position, row = candidate
+    return (score != score, -score, row[0], position)
+
+
+def _unit_top(
+    blocks: Callable[[], Iterable[tuple[_UnitBlock, np.ndarray | None]]],
+    query: np.ndarray,
+    window: int,
+) -> tuple[list[tuple[float, tuple[str, str, str, str, int]]], int]:
+    """The `window` best admitted rows over `blocks`, best first, and the admitted count."""
+    best: list[tuple[float, int, tuple[str, str, str, str, int]]] = []
+    admitted = 0
+    offset = 0
+    for block, mask in blocks():
+        positions = np.arange(len(block.rows)) if mask is None else np.flatnonzero(mask)
+        start, offset = offset, offset + len(block.rows)
+        if not len(positions):
+            continue
+        admitted += len(positions)
+        scores = (block.matrix @ query)[positions]
+        best.extend(
+            (float(scores[n]), start + int(positions[n]), block.rows[positions[n]])
+            for n in _best_with_ties(scores, window).tolist()
+        )
+        best.sort(key=_unit_rank)
+        del best[window:]
+    return [(score, row) for score, _position, row in best], admitted
+
+
 #: Paths per `file_mtimes` read: under SQLite's oldest default bound of 999
 #: parameters per statement.
 _PATHS_PER_READ = 900
@@ -327,9 +471,14 @@ class EmbeddingIndex:
         self._cache: _EmbCache | None = None
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
+        # The resident semantic-unit matrix (see `_unit_vectors`).
+        self._unit_cache: _UnitCache | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
+        # stalls a chunk write's `_patch_cache`.
+        self._unit_lock = threading.Lock()
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -417,7 +566,7 @@ class EmbeddingIndex:
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
                 )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         if target == self.path:
             conn.execute("BEGIN")
             try:
@@ -731,7 +880,7 @@ class EmbeddingIndex:
                         conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
                     )
                 if unit_replacements:
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -916,7 +1065,7 @@ class EmbeddingIndex:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, removed_paths
                     )
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -1001,7 +1150,7 @@ class EmbeddingIndex:
                         "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         rows,
                     )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         finally:
             conn.close()
 
@@ -1013,7 +1162,7 @@ class EmbeddingIndex:
                     "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
                     (parent_path,),
                 )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         finally:
             conn.close()
 
@@ -1210,10 +1359,11 @@ class EmbeddingIndex:
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
-        """Drop the resident matrix cache without deleting sidecar rows."""
+        """Drop the resident chunk and unit matrices without deleting sidecar rows."""
         with self._lock:
-            loaded = self._cache is not None
+            loaded = self._cache is not None or self._unit_cache is not None
             self._cache = None
+            self._unit_cache = None
             # The mask memo pins the metadata list by strong reference, so an
             # unload that left it behind would keep those rows resident after
             # the caller asked for the memory back. Correctness never depended
@@ -1222,18 +1372,25 @@ class EmbeddingIndex:
             return loaded
 
     def cache_status(self) -> dict:
-        """Best-effort residency status for this in-memory matrix only."""
-        c = self._cache
-        if c is None:
+        """Best-effort residency status for this index's in-memory matrices.
+
+        `rows` counts chunk rows and `unit_rows` unit rows; `bytes` sums both matrices.
+        """
+        c, units = self._cache, self._unit_cache
+        if c is None and units is None:
             return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
-        return {
+        status = {
             "loaded": True,
             "hits": self._hits,
-            "rows": len(c.metadata),
-            "bytes": int(c.matrix.nbytes),
-            "epoch": c.epoch,
-            "generation": c.generation,
+            "rows": len(c.metadata) if c is not None else 0,
+            "unit_rows": len(units.block.rows) if units is not None else 0,
+            "bytes": (int(c.matrix.nbytes) if c is not None else 0)
+            + (int(units.block.matrix.nbytes) if units is not None else 0),
         }
+        if c is not None:
+            status["epoch"] = c.epoch
+            status["generation"] = c.generation
+        return status
 
     def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
@@ -1696,11 +1853,16 @@ class EmbeddingIndex:
     ) -> list[SemanticUnitVectorHit]:
         """Score unit rows first, then validate only a bounded winner window.
 
-        Vector scoring is an in-memory/numpy scan of rebuildable blobs. Markdown
-        freshness validation is the expensive part, so an unfiltered query
-        overfetches a bounded ranked window instead of reopening every parent.
-        An explicit allowlist retains its exact validation contract for audit
-        and repair callers.
+        Rows rank by score, then `unit_ref`. Markdown freshness validation is
+        the expensive part, so an unfiltered query validates a ranked window of
+        `max(4k, k + 32)` instead of reopening every parent. An explicit
+        allowlist retains its exact validation contract for audit and repair
+        callers: it walks the whole ranked order until `k` rows validate.
+
+        Scoring keeps only the best `window` rows and never ranks the corpus in
+        Python (`_unit_blocks` says where the vectors come from). A filtered
+        validation that exhausts its window rescores with one four times wider;
+        the order is total, so the wider window starts with the narrower one.
         """
         if k <= 0 or not self.path.exists():
             return []
@@ -1708,121 +1870,157 @@ class EmbeddingIndex:
             return []
         if allowed_parent_paths is not None and not allowed_parent_paths:
             return []
-
-        conn = self._connect()
-        try:
-            if allowed_unit_refs is None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors"
-                ).fetchall()
-            elif allowed_unit_refs is not None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),),
-                ).fetchall()
-            elif allowed_unit_refs is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE parent_path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?)) "
-                    "AND parent_path IN (SELECT value FROM json_each(?))",
-                    (
-                        json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),
-                        json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),
-                    ),
-                ).fetchall()
-        finally:
-            conn.close()
-
-        candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
-        for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
-            vector = np.frombuffer(blob, dtype=np.float32)
-            if vector.shape != (self.dim,):
-                continue
-            candidates.append(
-                (
-                    str(unit_ref),
-                    str(parent_path),
-                    str(generation),
-                    str(source_hash),
-                    int(parser_version),
-                    vector,
-                )
-            )
-        if not candidates:
-            return []
-
+        refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
+        parents = None if allowed_parent_paths is None else frozenset(allowed_parent_paths)
+        filtered = refs is not None or parents is not None
         query = query_vec.astype(np.float32, copy=False)
-        matrix = np.stack([candidate[5] for candidate in candidates])
-        scores = matrix @ query
-        order = sorted(
-            range(len(candidates)),
-            key=lambda index: (-float(scores[index]), candidates[index][0]),
-        )
-        validation_limit = (
-            len(order)
-            if allowed_unit_refs is not None or allowed_parent_paths is not None
-            else min(len(order), max(k * 4, k + 32))
-        )
-        if not validate:
-            return [
-                SemanticUnitVectorHit(
-                    candidates[index][0],
-                    candidates[index][1],
-                    candidates[index][2],
-                    candidates[index][3],
-                    candidates[index][4],
-                    float(scores[index]),
-                )
-                for index in order[:k]
-            ]
-
+        window = max(k * 4, k + 32) if validate else k
         freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
         ranked: list[SemanticUnitVectorHit] = []
-        for index in order[:validation_limit]:
-            unit_ref, parent_path, generation, source_hash, parser_version, _vector = candidates[
-                index
-            ]
-            stamp = (parent_path, generation, source_hash, parser_version)
-            accepted = freshness_by_stamp.get(stamp)
-            if accepted is None:
-                accepted = semantic_index.validate_parent_record(
-                    self.vault_root,
-                    parent_path=parent_path,
-                    parent_generation_value=generation,
-                    parent_source_hash=source_hash,
-                    parser_version=parser_version,
-                ).current
-                freshness_by_stamp[stamp] = accepted
-            if not accepted:
-                continue
-            ranked.append(
-                SemanticUnitVectorHit(
-                    unit_ref,
-                    parent_path,
-                    generation,
-                    source_hash,
-                    parser_version,
-                    float(scores[index]),
+        walked = 0
+        with self._unit_blocks(refs, parents) as blocks:
+            while True:
+                ordered, admitted = _unit_top(blocks, query, window)
+                for score, row in ordered[walked:]:
+                    unit_ref, parent_path, generation, source_hash, parser_version = row
+                    if validate:
+                        stamp = (parent_path, generation, source_hash, parser_version)
+                        accepted = freshness_by_stamp.get(stamp)
+                        if accepted is None:
+                            accepted = semantic_index.validate_parent_record(
+                                self.vault_root,
+                                parent_path=parent_path,
+                                parent_generation_value=generation,
+                                parent_source_hash=source_hash,
+                                parser_version=parser_version,
+                            ).current
+                            freshness_by_stamp[stamp] = accepted
+                        if not accepted:
+                            continue
+                    ranked.append(SemanticUnitVectorHit(*row, score))
+                    if len(ranked) == k:
+                        return ranked
+                if not (validate and filtered) or len(ordered) == admitted:
+                    return ranked
+                walked = len(ordered)
+                window *= 4
+
+    @contextlib.contextmanager
+    def _unit_blocks(
+        self, refs: frozenset[str] | None, parents: frozenset[str] | None
+    ) -> Iterator[Callable[[], Iterable[tuple[_UnitBlock, np.ndarray | None]]]]:
+        """Yield a rescannable source of `(block, admitted-row mask)` pairs.
+
+        Every scan of one source reads the same snapshot in the same row order.
+        The local profile serves one block, the resident unit matrix, with the
+        allowlists applied as a mask. `service-v1` keeps no corpus matrix, so it
+        streams `DISK_BLOCK_ROWS` blocks of only the admitted rows inside one
+        read transaction, holding a block and the best window at a time.
+        """
+        if cloud_cell.resource_policy() != "service-v1":
+            block = self._unit_vectors().block
+            source = ((block, _unit_mask(block, parents, refs)),)
+            yield lambda: source
+            return
+        clauses: list[str] = []
+        params: list[str] = []
+        if refs is not None:
+            clauses.append("unit_ref IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(refs), ensure_ascii=False))
+        if parents is not None:
+            clauses.append("parent_path IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(sorted(parents), ensure_ascii=False))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            token = self._build_token(conn)
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            self._observe_identity(identity, token)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+
+            def blocks() -> Iterator[tuple[_UnitBlock, None]]:
+                cursor = conn.execute(
+                    f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors{where}", params
                 )
+                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
+                    yield _unit_block(rows, len(rows), width), None
+
+            yield blocks
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _unit_vectors(self) -> _UnitCache:
+        """The resident unit matrix, reloaded only when the unit generation moves.
+
+        Served like `all_vectors()`: a lock-free token check, then a re-check
+        and load under `_unit_lock`, with the same generation rules and gen==0
+        mtime fallback. An `unload_cache()` that interleaves with a load can
+        leave that load's matrix in place until the next unload; no answer
+        depends on it. Units have no in-place patch or bounded catch-up, so the
+        first query after a unit write pays one full read of the unit table,
+        which every query paid before this cache existed.
+        """
+        width = self.dim
+
+        def serve(c: _UnitCache | None) -> _UnitCache | None:
+            if c is None or c.width != width:
+                return None
+            return sidecar_store.try_serve_cached(
+                c, self.path, generation_key=SEMANTIC_UNIT_GENERATION
             )
-            if len(ranked) == k:
-                break
-        return ranked
+
+        served = serve(self._unit_cache)
+        if served is None:
+            with self._unit_lock:
+                previous = self._unit_cache
+                served = serve(previous)
+                if served is None:
+                    # Release the stale matrix before reading its replacement, so
+                    # a reload holds one matrix, not two; the log needs its epoch.
+                    stale = None if previous is None else SimpleNamespace(epoch=previous.epoch)
+                    previous = self._unit_cache = None
+                    with call_spans.span("embeddings.unit_matrix_load"):
+                        served = self._unit_cache = self._load_unit_rows()
+                    log.info(
+                        "semantic-unit matrix full load: reason=%s rows=%d gen=%d epoch=%d",
+                        sidecar_store.reload_reason(stale, served.epoch, served.generation),
+                        len(served.block.rows),
+                        served.generation,
+                        served.epoch,
+                    )
+        self._hits += 1
+        return served
+
+    def _load_unit_rows(self) -> _UnitCache:
+        """Read every unit vector of one snapshot into a `_UnitCache`."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            try:
+                token = self._build_token(conn)
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                width = identity.dim if identity is not None else recall_space.current_dim()
+                count = conn.execute("SELECT COUNT(*) FROM semantic_unit_vectors").fetchone()[0]
+                block = _unit_block(
+                    conn.execute(
+                        f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors ORDER BY rowid"
+                    ),
+                    count,
+                    width,
+                )
+            finally:
+                conn.rollback()
+        finally:
+            conn.close()
+        self._observe_identity(identity, token)
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        epoch, _chunk_generation, instance, unit_generation = token
+        return _UnitCache(epoch, unit_generation, instance, mtime, width, block)
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
@@ -2144,7 +2342,7 @@ class EmbeddingIndex:
     @staticmethod
     def _build_token(conn: sqlite3.Connection) -> tuple[int, int, int, int]:
         unit_generation = conn.execute(
-            "SELECT value FROM meta WHERE key = 'semantic_unit_generation'"
+            "SELECT value FROM meta WHERE key = ?", (SEMANTIC_UNIT_GENERATION,)
         ).fetchone()
         return (*sidecar_store.read_meta_token(conn), int(unit_generation[0]) if unit_generation else 0)
 
@@ -2336,7 +2534,7 @@ class EmbeddingIndex:
                     mirror.repopulate_all(conn)
                 sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if self._projected_source_snapshot() != source_snapshot:
                     conn.rollback()
                     return 0
