@@ -287,11 +287,8 @@ def test_the_capture_axis_names_both_lifecycle_classes_and_the_transition_bounda
 ) -> None:
     """Stated intent and observed outcomes are capture classes, not magic words.
 
-    The dogfood session that motivated this had the evidence in ordinary
-    language every turn -- "let's do the next one", "three done", "Kim posted
-    it" -- and the capture predicate was closed over three classes that name
-    none of them. The classes are asserted with their ROUTE, because a class
-    an agent cannot route is a label rather than an instruction.
+    The capture predicate must name stated intent and observed outcomes with
+    their routes. A class without a route cannot guide a client.
     """
     capture = prominence.CONTRACTS[level].capture.lower()
 

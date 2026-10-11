@@ -2,7 +2,7 @@
 
 ## Context
 
-This is the keystone slice of the 2026-08-15 no-nudge architecture (KB: `Notes/Research/Exomem/no-nudge-architecture-sensors-verifiers-one-decider`): representation shipped without activation, and detection shipped without delivery. Two review rounds shaped this contract — the counters channel was originally specced against a cache that does not exist and a bootstrap-only trigger that is blind mid-conversation; both defects are designed out here rather than papered over.
+The 2026-08-15 architecture audit found representation without activation and detection without delivery. This change closes both gaps. Two review rounds removed a nonexistent cache dependency and a bootstrap-only trigger that missed mid-conversation changes.
 
 ## Decisions
 

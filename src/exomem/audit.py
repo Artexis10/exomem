@@ -2275,7 +2275,7 @@ def _check_wikilinks(
         full_paths.add(no_ext)
         kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
         names_to_paths.setdefault(md_path.stem, []).append(no_ext)
-        # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
+        # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
             text, _guard = vault_module.read_guarded_text(vault_root, md_path)

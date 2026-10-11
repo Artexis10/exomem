@@ -54,9 +54,7 @@ def test_audit_skips_wikilinks_inside_inline_code(vault: Path) -> None:
 
 
 def test_audit_resolves_bare_link_via_frontmatter_title(vault: Path) -> None:
-    """A bare wikilink like `[[North-Led Content Manual]]` should resolve
-    against a date-prefixed source file whose title matches — the real-vault
-    case that produced 19 spurious broken_wikilink findings."""
+    """A title-based wikilink resolves even when its source filename is date-prefixed."""
     # Source file with date-prefixed slug + frontmatter title.
     _seed(
         vault / "Knowledge Base" / "Sources" / "Articles"
