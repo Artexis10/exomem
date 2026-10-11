@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     activation_conventions,
+    activation_result,
     context_intents,
     context_roles,
     lifecycle_statuses,
@@ -3240,7 +3241,7 @@ def _follow_up_packet(
     if packet is not None:
         return packet
     return abstained_packet(
-        reason="unresolved",
+        reason=activation_result.UNRESOLVED,
         max_chars=limit,
         generation=generation,
         anchors=(listed,),
@@ -3710,7 +3711,7 @@ def _compile_packet(
                 return packet
         else:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -3773,7 +3774,7 @@ def _compile_packet(
             )
         if pages:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -3892,7 +3893,7 @@ def _compile_packet(
             )
         if verdict.status == "ambiguous" and licensed:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -4033,7 +4034,7 @@ def _compile_packet(
             )
         if overlapping:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),

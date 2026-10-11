@@ -536,6 +536,8 @@ def attach_ledger_measurements(
     server interval. An unexpected count or tool ordering invalidates the
     measurement rather than guessing from a similarly named row.
     """
+    from exomem.activation_result import project_block
+
     joined: list[dict[str, Any]] = []
     if len(calls) != len(ledger_rows):
         raise ValueError("ledger row count does not match public call count")
@@ -550,14 +552,34 @@ def attach_ledger_measurements(
             row = ledger_rows[row_index]
             if "outcome" not in row or "error_code" not in row:
                 raise ValueError("ledger outcome/error fields are missing")
+            observation = None
+            if "activation_result" in row:
+                observation = project_block(row["activation_result"])
+                if observation is None or observation != row["activation_result"]:
+                    raise ValueError("invalid ledger activation result")
+                if row.get("tool") != "activate_context" or row.get("outcome") == "error":
+                    raise ValueError("unexpected ledger activation result")
+                observed_outcome = "abstained" if observation["abstained"] else "ok"
+                if row.get("outcome") in {"ok", "abstained"} and row["outcome"] != observed_outcome:
+                    raise ValueError("ledger activation result disagrees with outcome")
+            legacy_activation = (
+                row.get("tool") == "activate_context"
+                and "activation_result" not in row
+                and row.get("outcome") == "ok"
+                and row.get("error_code") is None
+                and call.get("outcome") in {"ok", "abstained"}
+                and call.get("error_code") is None
+            )
             wire_tool_error = call.get("outcome") == "tool_error"
             if wire_tool_error:
                 if row.get("outcome") not in {"error", "tool_error"}:
                     raise ValueError("ledger outcome does not match client tool error")
-            elif row.get("outcome") != call.get("outcome"):
+            elif not legacy_activation and row.get("outcome") != call.get("outcome"):
                 raise ValueError("ledger outcome does not match client outcome")
             if not wire_tool_error and row.get("error_code") != call.get("error_code"):
                 raise ValueError("ledger error code does not match client outcome")
+            result["server_outcome"] = row["outcome"]
+            result["server_activation_result"] = observation
             result["server_duration_ms"] = float(row["duration_ms"]) if row.get("duration_ms") is not None else None
             result["server_total_ms"] = float(row["total_ms"]) if row.get("total_ms") is not None else None
             result["server_interval"] = intervals[row_index]
@@ -1024,6 +1046,8 @@ def _result_outcome(payload: Mapping[str, Any]) -> tuple[str, str | None]:
     terminal = payload.get("outcome")
     if isinstance(terminal, str) and terminal.lower() in {"failed", "refused", "rejected", "error"}:
         return "refused", str(payload.get("code") or terminal.upper())
+    if payload.get("abstained") is True:
+        return "abstained", None
     return "ok", None
 
 

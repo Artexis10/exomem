@@ -445,6 +445,8 @@ def result_classification(payload: Mapping[str, Any]) -> str:
         return "refused"
     if str(payload.get("status") or "").lower() in {"error", "failed", "refused", "rejected"}:
         return "refused"
+    if payload.get("abstained") is True:
+        return "abstained"
     return "ok"
 
 

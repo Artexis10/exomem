@@ -16,6 +16,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from exomem.activation_result import project_block
+
 
 def _timestamp(value: str) -> float:
     parsed = datetime.fromisoformat(value)
@@ -28,6 +30,7 @@ def summarize_rows(rows: list[dict]) -> dict:
     calls = []
     invalid = []
     measured_spans = {}
+    activation_observations = {"calls": 0, "observed": 0, "unknown": 0, "invalid": 0}
     for index, row in enumerate(rows, 1):
         try:
             end = _timestamp(row["ts_utc"])
@@ -45,12 +48,30 @@ def summarize_rows(rows: list[dict]) -> dict:
                 not isinstance(code, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,95}", code)
             ):
                 raise ValueError("invalid error code")
-            if row.get("outcome", "unknown") not in {"ok", "refused", "error", "unknown"}:
+            if row.get("outcome", "unknown") not in {"ok", "abstained", "refused", "error", "unknown"}:
                 raise ValueError("invalid outcome")
             calls.append((end - total, end, total, row))
         except (KeyError, ValueError, TypeError, OverflowError):
             invalid.append({"row": index, "reason": "invalid_call_timing"})
             continue
+        if row["tool"] == "activate_context":
+            activation_observations["calls"] += 1
+            if "activation_result" not in row:
+                activation_observations["unknown"] += 1
+        if "activation_result" in row:
+            observation = project_block(row["activation_result"])
+            if (
+                observation is None or observation != row["activation_result"]
+                or row["tool"] != "activate_context" or row.get("outcome") == "error"
+                or (row.get("outcome") in {"ok", "abstained"} and row["outcome"] != (
+                    "abstained" if observation["abstained"] else "ok"
+                ))
+            ):
+                invalid.append({"row": index, "reason": "invalid_activation_result"})
+                if row["tool"] == "activate_context":
+                    activation_observations["invalid"] += 1
+            else:
+                activation_observations["observed"] += 1
         spans = row.get("spans", [])
         if not isinstance(spans, list):
             invalid.append({"row": index, "reason": "invalid_spans"})
@@ -143,6 +164,7 @@ def summarize_rows(rows: list[dict]) -> dict:
         ),
         "warming_refusals": codes["RETRIEVAL_INDEX_WARMING"],
         "observed_refusal_spans": warming,
+        "activation_observations": activation_observations,
         "outcomes": dict(Counter(item[3].get("outcome", "unknown") for item in calls)),
         "error_codes": dict(codes),
         "by_tool": {
