@@ -33,15 +33,16 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import find_corpus, sidecar_store
+from . import find_corpus, freshness, sidecar_store
 from .collection_store.preview import bound_writer, canonical_read, selected_writer
 from .kbdir import kb_dirname
 from .state_paths import vault_state_dir
@@ -1045,18 +1046,213 @@ def _source_signature(path: Path) -> str:
     return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
 
 
+@dataclass(frozen=True, slots=True)
+class _PageEntry:
+    """What one walked page contributes to a build, derived from its bytes,
+    its path and the walk's context (the KB folder name and the conventions)
+    and from nothing else, which is what lets an unchanged page reuse it."""
+
+    #: The page's distinct normalised name spellings, first-seen order.
+    spellings: tuple[str, ...]
+    links: tuple[str, ...]
+    #: Project keys the page is a member of; empty for raw material.
+    projects: tuple[str, ...]
+    updated: str
+    standing: bool
+    #: The raw anchor entry `_finalize_anchor_aliases` reads, or None.
+    anchor: Mapping[str, Any] | None
+
+
+#: A page whose last change is this recent is re-derived on every walk rather
+#: than reused: file times move in coarse ticks (two seconds on FAT), so a
+#: same-size rewrite inside the tick that was read keeps its whole stat
+#: (git's racy-clean rule).
+_RACY_WINDOW_NS = 2_000_000_000
+
+_PAGE_MEMO_LOCK = threading.Lock()
+#: vault -> (walk context, rel -> (page key, entry)): the last walk's entries,
+#: so an update re-derives only the pages whose key moved. Bounded like the
+#: manifest registry: one server serves one vault.
+_PAGE_MEMO: OrderedDict[str, tuple[Any, dict[str, tuple[tuple[Any, ...], _PageEntry]]]] = OrderedDict()
+
+
+def _directory_key(
+    directory: Path, kb_root: Path, seen: dict[Path, tuple[tuple[int, int], ...] | None]
+) -> tuple[tuple[int, int], ...] | None:
+    """The `(device, inode)` of every directory from the KB root down to this
+    one, unfollowed, or None when one cannot be read.
+
+    Part of a page's key because the governed read refuses a page reached
+    through a symlinked directory, and a directory swapped for a link to the
+    same tree leaves every file's own stat unchanged.
+    """
+    if directory in seen:
+        return seen[directory]
+    try:
+        stat = os.lstat(directory)
+    except OSError:
+        seen[directory] = None
+        return None
+    own = (stat.st_dev, stat.st_ino)
+    if directory == kb_root or directory.parent == directory:
+        key: tuple[tuple[int, int], ...] | None = (own,)
+    else:
+        parent = _directory_key(directory.parent, kb_root, seen)
+        key = None if parent is None else (*parent, own)
+    seen[directory] = key
+    return key
+
+
+def _page_key(
+    path: Path,
+    kb_root: Path,
+    seen: dict[Path, tuple[tuple[int, int], ...] | None],
+    *,
+    settled_before: int,
+) -> tuple[Any, ...] | None:
+    """Everything the page's derivation and its governed read depend on that
+    the file system reports without opening it, or None when it cannot, or
+    when the page changed at or after `settled_before` (`_RACY_WINDOW_NS`).
+
+    The stat signature every derived index here trusts (`freshness.
+    stat_signature`), plus the inode and link count the governed read refuses
+    on, plus the directories above it. Unfollowed, as that read is.
+    """
+    directories = _directory_key(path.parent, kb_root, seen)
+    if directories is None:
+        return None
+    try:
+        stat = os.lstat(path)
+    except OSError:
+        return None
+    if max(stat.st_mtime_ns, stat.st_ctime_ns) >= settled_before:
+        return None
+    return (
+        directories,
+        freshness.signature_from_stat(stat),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_nlink,
+        stat.st_mode,
+    )
+
+
+def _page_entry(
+    path: Path, rel: str, page: Any, *, kb: str, conventions: Any, filler: frozenset[str]
+) -> _PageEntry:
+    """Derive one walked page's `_PageEntry` from its parsed form."""
+    from . import provenance
+
+    frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    title = str(frontmatter.get("title") or page.title or path.stem).strip()
+    # Every spelling this vault resolves for the page. Frontmatter `aliases`
+    # belong here for the same reason the title does: `[[Dossier]]` is a
+    # working link, so an alias IS identity, and a map without it leaves an
+    # alias-spelled reference unresolvable — which the egress guard reads as
+    # "names nothing" and serves. It is also the resolver's strongest evidence
+    # kind (`exact_alias`), so treating it as weaker here was incoherent.
+    spellings = tuple(
+        dict.fromkeys(
+            key
+            for key in (
+                normalize(spelling)
+                for spelling in (
+                    rel.removesuffix(".md"),
+                    rel.removesuffix(".md").removeprefix(f"{kb}/"),
+                    path.stem,
+                    title,
+                    *_strings(frontmatter.get("aliases")),
+                )
+            )
+            if key
+        )
+    )
+    # A carrier is attribution, not a link (`provenance.without_carriers`),
+    # exactly as in the inbound-link index: its links are never an edge.
+    links = tuple(
+        dict.fromkeys(
+            normalize(match)
+            for match in _WIKILINK.findall(provenance.without_carriers(page.body))
+            + list(_strings(frontmatter.get("relations")))
+            + list(_strings(frontmatter.get("links")))
+            if normalize(match)
+        )
+    )
+    head = rel.removeprefix(f"{kb}/").split("/", 1)[0]
+    projects = (
+        tuple(find_corpus.all_projects(frontmatter)) if head not in _RAW_MATERIAL_FOLDERS else ()
+    )
+    kind = _page_anchor_kind(rel, frontmatter, kb=kb, conventions=conventions)
+    anchor: dict[str, Any] | None = None
+    if kind is not None and path.name.casefold() not in _NAVIGATION_BASENAMES:
+        sections = _sections(page.body)
+        tags = _strings(frontmatter.get("tags"))
+        # A learned name joins the anchor's activation aliases and never the
+        # `names` map above: it changes what a turn activates, not what a
+        # wikilink resolves to or what the egress guard matches.
+        learned, learned_rejected = learned_alias_verdicts(
+            frontmatter.get(LEARNED_ALIASES_FIELD),
+            stopwords=conventions.stopwords,
+            filler=filler,
+        )
+        aliases = tuple(
+            dict.fromkeys(
+                [
+                    *(normalize(alias) for alias in _strings(frontmatter.get("aliases"))),
+                    *learned,
+                ]
+            )
+        )
+        anchor = {
+            "anchor_id": rel,
+            "path": rel,
+            "ref": _page_ref(frontmatter),
+            "title": title,
+            "kind": kind,
+            "lifecycle": normalize(page.status or "active") or "active",
+            "aliases": aliases,
+            "sections": sections,
+            "tags": tags,
+            # The signature, not the body: it is all the build reads of the
+            # body, and a reused entry must not hold every anchor's prose.
+            "signature": _signature(title, page.body, owner_path=rel),
+            "source_signature": _source_signature(path),
+            "learned_rejected": len(learned_rejected),
+            "entity_type": normalize(frontmatter.get("entity_type") or "")
+            if kind == "entity"
+            else "",
+        }
+    return _PageEntry(
+        spellings=spellings,
+        links=links,
+        projects=projects,
+        updated=page.updated,
+        standing=frontmatter.get("standing") is True,
+        anchor=anchor,
+    )
+
+
 def _walk_page_entries(
     vault_root: Path,
     *,
     conventions: Any = None,
+    reuse: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, tuple[str, ...]],
     dict[str, list[str]],
-    dict[str, list[tuple[str, str]]],
+    dict[str, list[tuple[str, str, bool]]],
 ]:
     """Walk the knowledge base once: raw anchor-page entries, wikilink edges,
     a name map, and each project key's member pages.
+
+    `reuse` lets a page whose key (`_page_key`) matches the previous walk's
+    keep that walk's entry instead of being read and derived again, so an
+    update after a small change costs one unopened stat per page plus the
+    changed pages. Every walk, reusing or not, leaves its own entries for the
+    next one, except a page that changed within `_RACY_WINDOW_NS` of it. The
+    directory walk itself always runs: it decides which pages exist, under
+    exactly the rules a full build applies.
 
     The name map is one name to MANY paths: `normalize()` folds case and Unicode
     form, so distinct pages can share a spelling, and collapsing them would hide
@@ -1088,7 +1284,7 @@ def _walk_page_entries(
     caller that has not already loaded one this build) loads it fresh for
     this one vault — a cheap, memoised read, never a second vault walk.
     """
-    from . import activation_conventions, provenance, recall_policy
+    from . import activation_conventions, recall_policy
 
     if conventions is None:
         conventions = activation_conventions.load_conventions(Path(vault_root)).conventions
@@ -1096,93 +1292,59 @@ def _walk_page_entries(
     raw: list[dict[str, Any]] = []
     outbound: dict[str, tuple[str, ...]] = {}
     names: dict[str, list[str]] = {}
-    project_members: dict[str, list[tuple[str, str]]] = {}
+    project_members: dict[str, list[tuple[str, str, bool]]] = {}
     kb = kb_dirname()
+    kb_root = Path(vault_root) / kb
+    filler = activation_conventions.shipped_conventions().conventions.referential_filler
+    # An entry is derived under these, so a walk under others reuses none.
+    context = (kb, conventions)
+    vault_key = _vault_key(vault_root)
+    previous: dict[str, tuple[tuple[Any, ...], _PageEntry]] = {}
+    if reuse:
+        with _PAGE_MEMO_LOCK:
+            held = _PAGE_MEMO.get(vault_key)
+        if held is not None and held[0] == context:
+            previous = held[1]
+    current: dict[str, tuple[tuple[Any, ...], _PageEntry]] = {}
+    directories: dict[Path, tuple[tuple[int, int], ...] | None] = {}
+    # Each directory's vault-relative spelling, made once: `relative_to` per
+    # page was a third of an unchanged walk's cost.
+    folders: dict[Path, str] = {}
+    settled_before = time.time_ns() - _RACY_WINDOW_NS
     for path in _walk_kb(vault_root, skip_folders=conventions.skip_folders):
-        rel = path.relative_to(vault_root).as_posix()
-        if recall_policy.is_structured_only_path(vault_root, rel):
-            continue
-        page = find_corpus.CACHE.get(path, Path(vault_root))
-        if page is None:
-            continue
-        frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
-        title = str(frontmatter.get("title") or page.title or path.stem).strip()
-        # Every spelling this vault resolves for the page. Frontmatter `aliases`
-        # belong here for the same reason the title does: `[[Dossier]]` is a
-        # working link, so an alias IS identity, and a map without it leaves an
-        # alias-spelled reference unresolvable — which the egress guard reads as
-        # "names nothing" and serves. It is also the resolver's strongest evidence
-        # kind (`exact_alias`), so treating it as weaker here was incoherent.
-        for spelling in (
-            rel.removesuffix(".md"),
-            rel.removesuffix(".md").removeprefix(f"{kb}/"),
-            path.stem,
-            title,
-            *_strings(frontmatter.get("aliases")),
-        ):
-            key = normalize(spelling)
-            if not key:
+        folder = folders.get(path.parent)
+        if folder is None:
+            folder = folders[path.parent] = path.parent.relative_to(vault_root).as_posix()
+        rel = f"{folder}/{path.name}"
+        # Taken before the read: a change after it moves the key the next walk sees.
+        key = _page_key(path, kb_root, directories, settled_before=settled_before)
+        held_entry = previous.get(rel)
+        if key is not None and held_entry is not None and held_entry[0] == key:
+            entry = held_entry[1]
+        else:
+            if recall_policy.is_structured_only_path(vault_root, rel):
                 continue
-            bucket = names.setdefault(key, [])
+            page = find_corpus.CACHE.get(path, Path(vault_root))
+            if page is None:
+                continue
+            entry = _page_entry(path, rel, page, kb=kb, conventions=conventions, filler=filler)
+        if key is not None:
+            current[rel] = (key, entry)
+        for spelling in entry.spellings:
+            bucket = names.setdefault(spelling, [])
             if rel not in bucket:
                 bucket.append(rel)
-        # A carrier is attribution, not a link (`provenance.without_carriers`),
-        # exactly as in the inbound-link index: its links are never an edge.
-        links = tuple(
-            dict.fromkeys(
-                normalize(match)
-                for match in _WIKILINK.findall(provenance.without_carriers(page.body))
-                + list(_strings(frontmatter.get("relations")))
-                + list(_strings(frontmatter.get("links")))
-                if normalize(match)
-            )
-        )
-        if links:
-            outbound[rel] = links
-        head = rel.removeprefix(f"{kb}/").split("/", 1)[0]
-        if head not in _RAW_MATERIAL_FOLDERS:
-            for project_key in find_corpus.all_projects(frontmatter):
-                project_members.setdefault(project_key, []).append((rel, page.updated))
-        kind = _page_anchor_kind(rel, frontmatter, kb=kb, conventions=conventions)
-        if kind is None or path.name.casefold() in _NAVIGATION_BASENAMES:
-            continue
-        sections = _sections(page.body)
-        tags = _strings(frontmatter.get("tags"))
-        # A learned name joins the anchor's activation aliases and never the
-        # `names` map above: it changes what a turn activates, not what a
-        # wikilink resolves to or what the egress guard matches.
-        learned, learned_rejected = learned_alias_verdicts(
-            frontmatter.get(LEARNED_ALIASES_FIELD),
-            stopwords=conventions.stopwords,
-            filler=activation_conventions.shipped_conventions().conventions.referential_filler,
-        )
-        aliases = tuple(
-            dict.fromkeys(
-                [
-                    *(normalize(alias) for alias in _strings(frontmatter.get("aliases"))),
-                    *learned,
-                ]
-            )
-        )
-        raw.append(
-            {
-                "anchor_id": rel,
-                "path": rel,
-                "ref": _page_ref(frontmatter),
-                "title": title,
-                "kind": kind,
-                "lifecycle": normalize(page.status or "active") or "active",
-                "aliases": aliases,
-                "sections": sections,
-                "tags": tags,
-                "body": page.body,
-                "source_signature": _source_signature(path),
-                "learned_rejected": len(learned_rejected),
-                "entity_type": normalize(frontmatter.get("entity_type") or "")
-                if kind == "entity"
-                else "",
-            }
-        )
+        if entry.links:
+            outbound[rel] = entry.links
+        for project_key in entry.projects:
+            project_members.setdefault(project_key, []).append((rel, entry.updated, entry.standing))
+        if entry.anchor is not None:
+            raw.append(entry.anchor)
+    with _PAGE_MEMO_LOCK:
+        _PAGE_MEMO[vault_key] = (context, current)
+        _PAGE_MEMO.move_to_end(vault_key)
+        while len(_PAGE_MEMO) > MANIFEST_REGISTRY_VAULTS:
+            _PAGE_MEMO.popitem(last=False)
     return raw, outbound, names, project_members
 
 
@@ -1314,7 +1476,7 @@ def _finalize_anchor_aliases(
                 title=title,
                 kind=entry["kind"],
                 lifecycle=entry["lifecycle"],
-                signature=_signature(title, entry["body"], owner_path=entry["path"]),
+                signature=entry["signature"],
                 aliases=aliases,
                 terms=terms_of(" ".join((title, *aliases, *sections, *tags))),
                 categories=_categories(sections, tags, semantic_registry=semantic_registry),
@@ -1533,7 +1695,7 @@ def _member_recency_key(updated: str) -> tuple[int, object]:
     return (1, temporal.sort_key(moment))
 
 
-def _bounded_project_members(members: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+def _bounded_project_members(members: Sequence[tuple[str, str, bool]]) -> tuple[str, ...]:
     """The capped, deterministic member-path list for one project anchor.
 
     Most recently updated first, capped at `PROJECT_ANCHOR_MEMBER_CAP`. Two
@@ -1542,26 +1704,23 @@ def _bounded_project_members(members: Sequence[tuple[str, str]]) -> tuple[str, .
     its own key does not decide, which is exactly the deterministic
     tie-break a same-recency (or entirely undated) member set needs.
     """
-    ordered = sorted(dict(members).items())
+    ordered = sorted({rel: updated for rel, updated, _standing in members}.items())
     ordered.sort(key=lambda item: _member_recency_key(item[1]), reverse=True)
     return tuple(path for path, _updated in ordered[:PROJECT_ANCHOR_MEMBER_CAP])
 
 
-def _standing_page(vault_root: Path, members: Sequence[tuple[str, str]]) -> str:
+def _standing_page(members: Sequence[tuple[str, str, bool]]) -> str:
     """The one page a project declares standing, or `""`.
 
     A page declares itself with frontmatter `standing: true` and belongs to
     the project by its own `project` or `projects`. Several declarations
     (a superseded method note left in place) resolve to the most recently
     updated, ties broken by path, so exactly one page stands per project.
-    The pages come from the walk's own cache; no second enumeration.
+    The declaration is the walk's own reading of the page; nothing is read
+    twice.
     """
-    declared: list[tuple[str, str]] = []
-    for rel, updated in dict(members).items():
-        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
-        frontmatter = getattr(page, "frontmatter", None)
-        if isinstance(frontmatter, dict) and frontmatter.get("standing") is True:
-            declared.append((rel, updated))
+    latest = {rel: (updated, standing) for rel, updated, standing in members}
+    declared = [(rel, updated) for rel, (updated, standing) in latest.items() if standing]
     if not declared:
         return ""
     declared.sort(key=lambda item: item[0])
@@ -1571,13 +1730,13 @@ def _standing_page(vault_root: Path, members: Sequence[tuple[str, str]]) -> str:
 
 def _project_candidates(
     vault_root: Path,
-    member_paths: Mapping[str, Sequence[tuple[str, str]]],
+    member_paths: Mapping[str, Sequence[tuple[str, str, bool]]],
     *,
     registry: Any = None,
 ) -> tuple[list[_Candidate], dict[str, list[tuple[str, str, str]]]]:
     """Project-key anchors, and their member pages as the anchor's own links.
 
-    `member_paths` is `project key -> (rel_path, updated)` pairs, gathered by
+    `member_paths` is `project key -> (rel_path, updated, standing)`, gathered by
     `_walk_page_entries` from the single walk it already does — never a
     second enumeration. A project anchor has no page of its own (`path` stays
     `""`), so before this its `AnchorFacts.neighbourhood` was empty by
@@ -1637,7 +1796,7 @@ def _project_candidates(
             )
         )
         rows = [(path, "project_member", "outbound") for path in members]
-        standing = _standing_page(vault_root, member_paths.get(key, ()))
+        standing = _standing_page(member_paths.get(key, ()))
         if standing:
             rows.append((standing, STANDING_RELATION, "outbound"))
         if rows:
@@ -1972,6 +2131,76 @@ def reset_collection_manifests_for_tests() -> None:
         _MANIFEST_REGISTRY.clear()
 
 
+#: Each catalogue table `_write` diffs: its columns, and how many leading ones
+#: form its primary key (a changed row is deleted by key, then reinserted).
+_CATALOGUE_TABLES: tuple[tuple[str, tuple[str, ...], int], ...] = (
+    (
+        "anchors",
+        ("anchor_id", "path", "ref", "title", "kind", "lifecycle", "signature", "source_signature"),
+        1,
+    ),
+    ("anchor_aliases", ("anchor_id", "alias"), 2),
+    ("anchor_categories", ("anchor_id", "category"), 2),
+    ("anchor_entity_types", ("anchor_id", "entity_type"), 1),
+    ("anchor_links", ("anchor_id", "other_path", "relation_type", "direction"), 4),
+    ("anchor_term_rows", ("anchor_id", "term"), 2),
+    ("page_names", ("name", "path"), 2),
+    ("term_anchor_counts", ("term", "anchor_count"), 1),
+)
+
+
+def _catalogue_rows(
+    candidates: Sequence[_Candidate],
+    edges: Mapping[str, Sequence[tuple[str, str, str]]],
+    page_names: Mapping[str, Sequence[str]],
+    term_counts: Mapping[str, int],
+) -> dict[str, set[tuple[Any, ...]]]:
+    """Every row one build leaves in each `_CATALOGUE_TABLES` table."""
+    held = {candidate.anchor_id for candidate in candidates}
+    return {
+        "anchors": {
+            (c.anchor_id, c.path, c.ref, c.title, c.kind, c.lifecycle, c.signature, c.source_signature)
+            for c in candidates
+        },
+        "anchor_aliases": {(c.anchor_id, alias) for c in candidates for alias in c.aliases},
+        "anchor_categories": {(c.anchor_id, category) for c in candidates for category in c.categories},
+        "anchor_entity_types": {(c.anchor_id, c.entity_type) for c in candidates if c.entity_type},
+        "anchor_links": {
+            (anchor_id, *row) for anchor_id, rows in edges.items() if anchor_id in held for row in rows
+        },
+        "anchor_term_rows": {(c.anchor_id, term) for c in candidates for term in c.terms},
+        "page_names": {(name, path) for name, paths in page_names.items() for path in paths},
+        "term_anchor_counts": set(term_counts.items()),
+    }
+
+
+def _fts_changes(
+    stored: Sequence[tuple[int, str, str]] | None, wanted: Mapping[str, str]
+) -> tuple[list[int], list[tuple[str, str]]]:
+    """`(rowids to delete, (terms, anchor_id) rows to insert)` that turn the
+    stored term index into `wanted`; nothing when FTS5 is absent."""
+    if stored is None:
+        return [], []
+    kept: set[str] = set()
+    stale: list[int] = []
+    for rowid, anchor_id, terms in stored:
+        if anchor_id not in kept and wanted.get(anchor_id) == terms:
+            kept.add(anchor_id)
+        else:
+            stale.append(rowid)
+    return stale, [(terms, anchor_id) for anchor_id, terms in wanted.items() if anchor_id not in kept]
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredCatalogue:
+    """The catalogue rows on disk, and the token they were read under."""
+
+    token: tuple[int, int, int]
+    rows: dict[str, set[tuple[Any, ...]]]
+    #: `(rowid, anchor_id, terms)` of the term index, or None without FTS5.
+    fts: tuple[tuple[int, str, str], ...] | None
+
+
 class WorkingSetIndex:
     """One vault's activation sidecar. Read-mostly; every write bumps generation."""
 
@@ -2184,15 +2413,8 @@ class WorkingSetIndex:
         the old schema believe its cache is current.
         """
         for table in (
-            "anchors",
-            "anchor_aliases",
-            "anchor_categories",
-            "anchor_entity_types",
-            "anchor_links",
+            *(table for table, _columns, _key_width in _CATALOGUE_TABLES),
             "anchor_vectors",
-            "anchor_term_rows",
-            "page_names",
-            "term_anchor_counts",
             "index_meta",
         ):
             conn.execute(f"DELETE FROM {table}")
@@ -2481,7 +2703,8 @@ class WorkingSetIndex:
     # -- writes ------------------------------------------------------------- #
 
     def rebuild(self, *, freshness_stamp: str | None = None, load_encoder: bool = False) -> dict[str, Any]:
-        """Derive every anchor from the vault and replace the catalogue.
+        """Derive every anchor from the vault, reading every page, and replace
+        the catalogue.
 
         `load_encoder` is for a background pass only: it may load a cold
         activation encoder to embed signatures. Without it, signatures are
@@ -2494,6 +2717,9 @@ class WorkingSetIndex:
     def update(self, *, freshness_stamp: str | None = None, load_encoder: bool = False) -> dict[str, Any]:
         """Bring the catalogue to the current vault state, bumping only on change.
 
+        A page this process walked before and whose stat has not moved since
+        is not read again (`_walk_page_entries`), and only rows that differ
+        are written, so a small change costs little more than a stat walk.
         Also brings the signature vectors up to date, re-embedding only the
         anchors whose signature changed (see `rebuild` for `load_encoder`).
         """
@@ -2519,37 +2745,28 @@ class WorkingSetIndex:
         # Bind the published identity to exactly the snapshot that derives the
         # anchors, even if YAML changes again during the background walk.
         project_registry = project_keys.load_project_registry(self.vault_root)
-        candidates, edges, page_names, term_counts = self._collect(project_registry=project_registry)
-        existing = {
-            anchor_id: signature
-            for anchor_id, signature in conn.execute(
-                "SELECT anchor_id, source_signature FROM anchors"
-            )
-        }
-        wanted = {candidate.anchor_id: candidate for candidate in candidates}
+        candidates, edges, page_names, term_counts = self._collect(
+            project_registry=project_registry, reuse=not full
+        )
+        rows = _catalogue_rows(candidates, edges, page_names, term_counts)
+        terms_text = {candidate.anchor_id: " ".join(candidate.terms) for candidate in candidates}
+        stored = self._stored_catalogue(conn)
+        stale_fts, fresh_fts = _fts_changes(stored.fts, terms_text)
+        anchors_held = len(stored.rows["anchors"])
         changed = (
             full
             or self.project_registry_hash() != project_registry.content_hash
-            or set(existing) != set(wanted)
+            or stored.rows != rows
+            or bool(stale_fts or fresh_fts)
         )
-        if not changed:
-            changed = any(
-                existing[anchor_id] != candidate.source_signature
-                for anchor_id, candidate in wanted.items()
-            )
-        if not changed:
-            changed = self._links_differ(conn, edges)
-        if not changed:
-            stored_names = conn.execute("SELECT COUNT(*) FROM page_names").fetchone()
-            wanted_names = sum(len(paths) for paths in page_names.values())
-            changed = int(stored_names[0] if stored_names else 0) != wanted_names
         plan = self._plan_vectors(conn, candidates, load_encoder=load_encoder)
         if not changed and plan is not None and plan.changed:
             # The catalogue did not move but its vectors did: an encoder became
             # resident, changed, or caught up on a bounded inline pass.
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                self._apply_vectors(conn, plan)
+                current = sidecar_store.read_meta_token(conn) == stored.token
+                self._apply_vectors(conn, plan, base=plan.stored if current else None)
                 if freshness_stamp is not None:
                     conn.execute(
                         "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('freshness_key', ?)",
@@ -2561,9 +2778,9 @@ class WorkingSetIndex:
             except sqlite3.Error:
                 conn.rollback()
                 log.warning("activation index vector write failed", exc_info=True)
-                return {"anchors": len(existing), "generation": 0, "unavailable": True}
+                return {"anchors": anchors_held, "generation": 0, "unavailable": True}
             _publish_pending_manifests(self.vault_root, generation, token=vector_token)
-            return {"anchors": len(existing), "generation": generation, "vectors": len(plan.rows)}
+            return {"anchors": anchors_held, "generation": generation, "vectors": len(plan.rows)}
         if not changed:
             # The vault did not move, so the rows and the generation must not
             # either; only the stamp advances, so the next request stops asking.
@@ -2577,83 +2794,48 @@ class WorkingSetIndex:
                 self.vault_root, unchanged_token[1], token=unchanged_token
             )
             return {
-                "anchors": len(existing),
+                "anchors": anchors_held,
                 "generation": unchanged_token[1],
                 "unchanged": True,
             }
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for table in (
-                "anchors",
-                "anchor_aliases",
-                "anchor_categories",
-                "anchor_entity_types",
-                "anchor_links",
-                "anchor_term_rows",
-                "page_names",
-                "term_anchor_counts",
-            ):
-                conn.execute(f"DELETE FROM {table}")
+            current = sidecar_store.read_meta_token(conn) == stored.token
+            if not current:
+                # Another writer committed since the rows were read: diff
+                # against what it left, never against the earlier read.
+                stored = self._stored_catalogue(conn)
+                stale_fts, fresh_fts = _fts_changes(stored.fts, terms_text)
+            # Only the rows that differ are written: the end state is the
+            # full set either way, and most updates touch a handful.
+            for table, columns, key_width in _CATALOGUE_TABLES:
+                removed = stored.rows[table] - rows[table]
+                added = rows[table] - stored.rows[table]
+                if removed:
+                    match = " AND ".join(f"{column} = ?" for column in columns[:key_width])
+                    conn.executemany(
+                        f"DELETE FROM {table} WHERE {match}",
+                        [row[:key_width] for row in removed],
+                    )
+                if added:
+                    conn.executemany(
+                        f"INSERT INTO {table} ({', '.join(columns)}) "
+                        f"VALUES ({', '.join('?' * len(columns))})",
+                        list(added),
+                    )
+            if stale_fts:
+                conn.executemany(
+                    "DELETE FROM anchor_terms WHERE rowid = ?", [(rowid,) for rowid in stale_fts]
+                )
+            if fresh_fts:
+                conn.executemany(
+                    "INSERT INTO anchor_terms (terms, anchor_id) VALUES (?, ?)", fresh_fts
+                )
             if plan is None:
                 conn.execute("DELETE FROM anchor_vectors")
                 conn.execute("DELETE FROM index_meta WHERE key = 'activation_encoder_fingerprint'")
             else:
-                self._apply_vectors(conn, plan)
-            self._delete_fts(conn)
-            for candidate in candidates:
-                conn.execute(
-                    "INSERT INTO anchors (anchor_id, path, ref, title, kind, lifecycle, "
-                    "signature, source_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        candidate.anchor_id,
-                        candidate.path,
-                        candidate.ref,
-                        candidate.title,
-                        candidate.kind,
-                        candidate.lifecycle,
-                        candidate.signature,
-                        candidate.source_signature,
-                    ),
-                )
-                conn.executemany(
-                    "INSERT OR IGNORE INTO anchor_aliases (anchor_id, alias) VALUES (?, ?)",
-                    [(candidate.anchor_id, alias) for alias in candidate.aliases],
-                )
-                conn.executemany(
-                    "INSERT OR IGNORE INTO anchor_categories (anchor_id, category) VALUES (?, ?)",
-                    [(candidate.anchor_id, category) for category in candidate.categories],
-                )
-                if candidate.entity_type:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO anchor_entity_types (anchor_id, entity_type) "
-                        "VALUES (?, ?)",
-                        (candidate.anchor_id, candidate.entity_type),
-                    )
-                conn.executemany(
-                    "INSERT OR IGNORE INTO anchor_term_rows (anchor_id, term) VALUES (?, ?)",
-                    [(candidate.anchor_id, term) for term in candidate.terms],
-                )
-                self._insert_fts(conn, candidate)
-            conn.executemany(
-                "INSERT OR REPLACE INTO page_names (name, path) VALUES (?, ?)",
-                sorted(
-                    (name, path)
-                    for name, paths in page_names.items()
-                    for path in paths
-                ),
-            )
-            conn.executemany(
-                "INSERT OR REPLACE INTO term_anchor_counts (term, anchor_count) VALUES (?, ?)",
-                sorted(term_counts.items()),
-            )
-            for anchor_id, rows in edges.items():
-                if anchor_id not in wanted:
-                    continue
-                conn.executemany(
-                    "INSERT OR IGNORE INTO anchor_links "
-                    "(anchor_id, other_path, relation_type, direction) VALUES (?, ?, ?, ?)",
-                    [(anchor_id, *row) for row in rows],
-                )
+                self._apply_vectors(conn, plan, base=plan.stored if current else None)
             if freshness_stamp is not None:
                 conn.execute(
                     "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
@@ -2684,6 +2866,29 @@ class WorkingSetIndex:
             _ROW_CACHE.pop(self.path, None)
         _publish_pending_manifests(self.vault_root, generation, token=written_token)
         return {"anchors": len(candidates), "generation": generation}
+
+    def _stored_catalogue(self, conn: sqlite3.Connection) -> _StoredCatalogue:
+        """Every catalogue row as stored, and the token they were stored under,
+        read in one snapshot (inside the caller's transaction when it has one)."""
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")
+        try:
+            token = sidecar_store.read_meta_token(conn)
+            rows = {
+                table: set(conn.execute(f"SELECT {', '.join(columns)} FROM {table}"))
+                for table, columns, _key_width in _CATALOGUE_TABLES
+            }
+            try:
+                fts: tuple[tuple[int, str, str], ...] | None = tuple(
+                    conn.execute("SELECT rowid, anchor_id, terms FROM anchor_terms")
+                )
+            except sqlite3.Error:
+                fts = None
+        finally:
+            if own:
+                conn.rollback()
+        return _StoredCatalogue(token=token, rows=rows, fts=fts)
 
     def _plan_vectors(
         self, conn: sqlite3.Connection, candidates: Sequence[_Candidate], *, load_encoder: bool
@@ -2727,7 +2932,7 @@ class WorkingSetIndex:
             fingerprint = embeddings.activation_fingerprint()
         except Exception:  # noqa: BLE001 - the vector lane is optional by contract
             log.info("activation index: encoder state unavailable", exc_info=True)
-            return _VectorPlan(rows={}, fingerprint=None, changed=bool(stored))
+            return _VectorPlan(rows={}, fingerprint=None, changed=bool(stored), stored=stored)
 
         def reusable(space: str | None) -> dict[str, tuple[str, bytes]]:
             if space is None or space != stored_fingerprint:
@@ -2747,7 +2952,10 @@ class WorkingSetIndex:
             keep = reusable(stored_fingerprint)
             space = stored_fingerprint if keep else None
             return _VectorPlan(
-                rows=keep, fingerprint=space, changed=keep != stored or space != stored_fingerprint
+                rows=keep,
+                fingerprint=space,
+                changed=keep != stored or space != stored_fingerprint,
+                stored=stored,
             )
         keep = reusable(fingerprint or stored_fingerprint)
         missing = [c for c in candidates if c.signature and c.anchor_id not in keep]
@@ -2783,13 +2991,31 @@ class WorkingSetIndex:
         if not rows:
             space = None
         changed = rows != stored or space != stored_fingerprint
-        return _VectorPlan(rows=rows, fingerprint=space, changed=changed)
+        return _VectorPlan(rows=rows, fingerprint=space, changed=changed, stored=stored)
 
-    def _apply_vectors(self, conn: sqlite3.Connection, plan: _VectorPlan) -> None:
-        conn.execute("DELETE FROM anchor_vectors")
+    def _apply_vectors(
+        self,
+        conn: sqlite3.Connection,
+        plan: _VectorPlan,
+        *,
+        base: Mapping[str, tuple[str, bytes]] | None = None,
+    ) -> None:
+        """Leave exactly `plan.rows`, writing only what differs from `base`, the
+        rows known to be stored; all of them when that is not known."""
+        if base is None:
+            conn.execute("DELETE FROM anchor_vectors")
+            base = {}
+        conn.executemany(
+            "DELETE FROM anchor_vectors WHERE anchor_id = ?",
+            [(anchor_id,) for anchor_id, row in base.items() if plan.rows.get(anchor_id) != row],
+        )
         conn.executemany(
             "INSERT INTO anchor_vectors (anchor_id, signature_digest, vector) VALUES (?, ?, ?)",
-            sorted((anchor_id, digest, blob) for anchor_id, (digest, blob) in plan.rows.items()),
+            [
+                (anchor_id, digest, blob)
+                for anchor_id, (digest, blob) in plan.rows.items()
+                if base.get(anchor_id) != (digest, blob)
+            ],
         )
         if plan.fingerprint is None:
             conn.execute("DELETE FROM index_meta WHERE key = 'activation_encoder_fingerprint'")
@@ -2811,39 +3037,11 @@ class WorkingSetIndex:
         except sqlite3.Error:
             log.debug("activation index freshness stamp could not be written", exc_info=True)
 
-    def _links_differ(
-        self, conn: sqlite3.Connection, edges: Mapping[str, list[tuple[str, str, str]]]
-    ) -> bool:
-        stored: set[tuple[str, str, str, str]] = {
-            (anchor_id, other, relation, direction)
-            for anchor_id, other, relation, direction in conn.execute(
-                "SELECT anchor_id, other_path, relation_type, direction FROM anchor_links"
-            )
-        }
-        wanted = {
-            (anchor_id, *row) for anchor_id, rows in edges.items() for row in rows
-        }
-        return stored != wanted
-
-    def _delete_fts(self, conn: sqlite3.Connection) -> None:
-        try:
-            conn.execute("DELETE FROM anchor_terms")
-        except sqlite3.Error:
-            pass
-
-    def _insert_fts(self, conn: sqlite3.Connection, candidate: _Candidate) -> None:
-        try:
-            conn.execute(
-                "INSERT INTO anchor_terms (terms, anchor_id) VALUES (?, ?)",
-                (" ".join(candidate.terms), candidate.anchor_id),
-            )
-        except sqlite3.Error:
-            pass
-
     def _collect(
         self,
         *,
         project_registry: Any = None,
+        reuse: bool = False,
     ) -> tuple[
         list[_Candidate],
         dict[str, list[tuple[str, str, str]]],
@@ -2868,7 +3066,7 @@ class WorkingSetIndex:
         conventions = activation_conventions.load_conventions(self.vault_root).conventions
         semantic_registry = semantic_language_registry.load_registry(self.vault_root)
         raw_pages, outbound, names, project_members = _walk_page_entries(
-            self.vault_root, conventions=conventions
+            self.vault_root, conventions=conventions, reuse=reuse
         )
         records, plans = _collection_candidates(self.vault_root)
         projects, project_edges = _project_candidates(
@@ -2934,6 +3132,8 @@ class _VectorPlan:
     rows: dict[str, tuple[str, bytes]]
     fingerprint: str | None
     changed: bool
+    #: The vectors stored when this plan was made.
+    stored: dict[str, tuple[str, bytes]] = field(default_factory=dict)
 
 
 def _runtime_managed() -> bool:

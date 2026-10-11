@@ -3367,6 +3367,14 @@ def guard_working_set(
             if anchor is not None
         ]
 
+    # The path guard exempts memory IDs; origin IDs still require a visible page.
+    pointer_origins = {
+        item["anchor"] for item in guarded.get("pointers") or ()
+        if isinstance(item, Mapping) and memory_refs.parse_memory_ref(item.get("anchor"))
+    }
+    hidden_pointer_origins = pointer_origins - visible_memory_refs(
+        vault_root, pointer_origins, principal=who, purpose=purpose
+    )
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
         if isinstance(values, list):
@@ -3375,6 +3383,7 @@ def guard_working_set(
                 for item in values
                 if not _names_withheld(item, frozen, reference_field=True)
                 and not _value_names_an_invalid_reference(item, invalid_refs)
+                and not (section == "pointers" and item.get("anchor") in hidden_pointer_origins)
             ]
             if section in ("pointers", "current_state"):
                 _note_removal(section, len(values), len(kept))
@@ -3663,9 +3672,9 @@ def _item_has_own_page_field(item: Mapping[str, Any]) -> bool:
     these AND lacks its own path/anchor) or merely a TOLERATED one (T2,
     page-shape-gated, alongside a real `path`/`anchor`).
 
-    A pointer and an ambiguity entry carry neither field at all
-    (`working_set.py::_pointer`, `working_set_resolve.py::_ambiguity`), so
-    their `ref` is always typed. A unit's `provenance.path`/`.anchor` are
+    An ambiguity entry carries neither field (`working_set_resolve.py::_ambiguity`).
+    A pointer's anchor names its origin, so its target ref remains typed
+    regardless of this check. A unit's `provenance.path`/`.anchor` are
     unconditional for every real lane (`working_set.py::_provenance`, line
     ~307), so a unit's `ref` is usually merely tolerated -- except the one
     packet shape the test suite carries forward from an earlier round
@@ -3865,7 +3874,8 @@ def _working_set_paths(
     ):
         for item in packet.get(section) or ():
             if isinstance(item, Mapping):
-                _collect(item, ref_strict=not _item_has_own_page_field(item))
+                # A pointer's anchor identifies its origin, not its target page.
+                _collect(item, ref_strict=section == "pointers" or not _item_has_own_page_field(item))
     return paths, names, interpretations, unresolvable
 
 

@@ -719,7 +719,9 @@ class VaultProjector(Projector):
         self.runtime_surfaces = runtime_surfaces
         self.declared_entity_subjects = tuple(declared_entity_subjects)
         if runtime_surfaces:
-            self.endpoints_used = (*type(self).endpoints_used, *RUNTIME_ENDPOINTS)
+            # Extend, not restart from the class default: f33 combines both
+            # opt-in projections, and its snapshots must name both endpoint sets.
+            self.endpoints_used = (*self.endpoints_used, *RUNTIME_ENDPOINTS)
             if self.declared_entity_subjects:
                 self.endpoints_used = (
                     *self.endpoints_used,
