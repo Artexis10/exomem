@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import record_formats
 from .. import structured_collections as collections
-from ..collection_store import connection, governance, typed_storage
+from ..collection_store import connection, derived_rows, governance, typed_storage
 from ..governance import membership
 from ..governance.principal import effective_principal
 from .errors import QueryError
@@ -107,6 +107,7 @@ class AdmittedCollection:
     membership_sql: str
     layout: typed_storage.Layout | None
     _seal: object
+    items: str = "main.items"  # the relation standing for ``items``: the store's, or a derived file's
 
     @property
     def values_sql(self) -> str:
@@ -144,6 +145,8 @@ class ReadSession:
         self._estimated_visits = 0
         # Fields the projection can change; `project_with` is the only way to install one.
         self._projected_fields = frozenset()
+        self._attached = False  # whether the derived-rows file is attached read-only as ``derived``
+        self._sources = {}
 
     def __reduce__(self):
         raise TypeError("query sessions are request-local")
@@ -301,6 +304,18 @@ class ReadSession:
             if self._active:
                 cursor.close()
 
+    def row_source(self, collection_id: str) -> derived_rows.RowSource:
+        """Where this session reads a collection's rows; a derived one refuses while its rows rebuild."""
+        found = self._sources.get(collection_id)
+        if found is None:
+            try:
+                found = derived_rows.row_source(self.connection, collection_id, attached=self._attached)
+            except derived_rows.Rebuilding as error:
+                raise QueryError("QUERY_REBUILDING", "this derived collection's rows are rebuilding from its import "
+                                 "log", progress=error.progress) from error
+            self._sources[collection_id] = found
+        return found
+
     def admit(self, collection_id: str) -> AdmittedCollection:
         self.check()
         if collection_id in self._admitted:
@@ -317,9 +332,12 @@ class ReadSession:
                 if manifest.storage.strategy == "markdown-log":
                     direction = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
                     order = f"i.created_txn {direction}, i.row_id {direction}"
+                source = self.row_source(collection_id)
+                if source is not derived_rows.STORE and not uniform:
+                    raise QueryError("QUERY_UNAVAILABLE", "a derived collection's rows are released whole or not at all")
                 if uniform:
                     count = self.connection.execute(
-                        "SELECT count(*) FROM (SELECT 1 FROM items WHERE collection_id=? LIMIT ?)",
+                        f"SELECT count(*) FROM (SELECT 1 FROM {source.items} WHERE collection_id=? LIMIT ?)",
                         (collection_id, self.limits.max_row_visits + 1),
                     ).fetchone()[0]
                     predicate = "1"
@@ -338,9 +356,9 @@ class ReadSession:
                 if self._estimated_visits > self.limits.max_row_visits:
                     raise QueryError("QUERY_COST_LIMIT")
                 self.check_temp()
-                layout = self.typed_layout(collection_id)
+                layout = source.layout or self.typed_layout(collection_id)
                 result = AdmittedCollection(self, collection_id, fields, count, order, predicate, layout,
-                                            _ADMISSION_SEAL)
+                                            _ADMISSION_SEAL, source.items)
                 self._admitted[collection_id] = result
                 return result
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
@@ -430,7 +448,9 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
     try:
         conn = connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
+        attached = derived_rows.attach(conn, target)
         session = ReadSession(Path(root), conn, limits, cancelled, deadline)
+        session._attached = attached
         token = _CURRENT_SESSION.set(session)
         conn.set_progress_handler(session._progress, 1000)
         conn.create_function("exomem_query_values", 2, session._values)

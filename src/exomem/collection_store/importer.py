@@ -55,10 +55,13 @@ from ..governance.authorization_session_lifecycle import AuthorizationSessionCon
 from ..query_engine import scalars
 from . import (
     connection,
+    derived_rows,
     governance,
     import_document,
     import_recommendations,
     import_time,
+    index_migrations,
+    query_freshness,
     schema,
     takeover,
     tokens,
@@ -534,12 +537,13 @@ def _manifest_invalid() -> Never:
     )
 
 
-def _export(root: Path, source: Source, sha256: str, selector: Any) -> tuple[_Member, ...]:
-    """The members ``selector`` picks from the export manifest ``source``, in path order.
+def _export(root: Path, ref: str, sha256: str, selector: Any) -> tuple[_Member, ...]:
+    """The members ``selector`` picks from the export manifest at ``ref``, in path order.
 
-    ``sha256`` is the digest ``resolve_source`` proved; the manifest's binding must name it.
+    ``sha256`` is the digest ``resolve_source`` proved, or a rebuild's logged one; the
+    manifest's binding must name it.
     """
-    manifest = archive_members.read_manifest(root, source.ref)
+    manifest = archive_members.read_manifest(root, ref)
     if manifest is None or manifest.binding["artifact_sha256"] != sha256:
         _manifest_invalid()
     members = manifest.members
@@ -561,7 +565,7 @@ def _export(root: Path, source: Source, sha256: str, selector: Any) -> tuple[_Me
             "the selector matches no member of the export",
             expected="a glob or list that names member paths",
         )
-    family = source.ref.rpartition("/")[0]
+    family = ref.rpartition("/")[0]
     return tuple(
         _Member(index, member["path"], member["sha256"], member["bytes"],
                 f"{family}/{archive_members.member_blob(member['sha256'])}")
@@ -2157,7 +2161,7 @@ def _prove(writer, job: _Job, operation) -> Source:
         if (sha256, size) != (bound["sha256"], bound["bytes"]):
             raise _Lost
         if "members" in bound:
-            members = _export(writer.root, source, sha256, bound["members"]["select"])
+            members = _export(writer.root, source.ref, sha256, bound["members"]["select"])
             if [member.sha256 for member in members] != bound["members"]["sha256"]:
                 raise _Lost
             source = Source(source.ref, source.path, source.guard, members)
@@ -2396,14 +2400,7 @@ def _members(
     opened = job.checkpoint
     tallies = {opened["member"]: dict(opened["tally"])} if opened["member_row"] else {}
     for row, key, payload in rows:
-        tally = tallies.setdefault(row.after["member"], _tally())
-        if key is None:
-            tally["rejected"] += 1
-        else:
-            tally["accepted"] += 1
-            tally["rows_digest"] = hashlib.sha256(
-                f"{tally['rows_digest']}\0{key}\0{payload}".encode()
-            ).hexdigest()
+        _extend(tallies.setdefault(row.after["member"], _tally()), key, payload)
     counted = dict(progress["members"])
     for kind, index, sha256 in batch.members:
         counted[kind] += 1
@@ -2418,14 +2415,28 @@ def _tally() -> dict[str, Any]:
     return {"accepted": 0, "rejected": 0, "rows_digest": _NO_ROWS}
 
 
-def _log_member(writer, job: _Job, index: int, sha256: str, tally: Mapping[str, Any]) -> None:
+def _extend(tally: dict[str, Any], key: str | None, payload: str | None) -> None:
+    """Count one row of a member in source order; an accepted row extends the running digest."""
+    if key is None:
+        tally["rejected"] += 1
+    else:
+        tally["accepted"] += 1
+        tally["rows_digest"] = hashlib.sha256(f"{tally['rows_digest']}\0{key}\0{payload}".encode()).hexdigest()
+
+
+def _log_member(
+    writer, job: _Job, index: int, sha256: str, tally: Mapping[str, Any], rows: int | None = None
+) -> None:
     """Append one member's import log row, named by its own ``import_member`` transition.
 
     The row records the versions that produced the member's rows, the running importer's
     and, for a zoned mapping, its zone rules', so a rebuild can name what changed.
+    ``rows`` is the collection's row count after the member; a derived collection supplies
+    it, since its rows are outside the store.
     """
     cid = job.collection_id
-    rows = _row_count(writer.connection, cid)
+    if rows is None:
+        rows = _row_count(writer.connection, cid)
     counts = {"member_index": index, "accepted": tally["accepted"], "rejected": tally["rejected"],
               "row_count_after": rows}
     ids = {"import_job_ids": [job.id], "member_sha256": [sha256], "rows_digest": [tally["rows_digest"]]}
@@ -2572,6 +2583,21 @@ def _transaction(root: Path, writer, work) -> None:
     _mutate(root, import_job_settlement)
 
 
+def _settle_alone(root: Path, writer, job: _Job, batch: Batch, guards, **settled) -> str:
+    """Record a batch that writes no rows: a stop fails the job, otherwise its checkpoint advances."""
+
+    def settle_alone():
+        _authorize(writer, job, prove=False)
+        _recheck(writer, guards)
+        if batch.stop is not None:
+            _record(writer, job, batch, fail=batch.stop)
+        else:
+            _record(writer, job, batch, **settled)
+
+    _transaction(root, writer, settle_alone)
+    return "paused" if batch.stop is not None else "batch"
+
+
 def _forget(writer, job_id: str) -> None:
     """Drop a job's host-local proof, open reader and store block once it stops running."""
     _proofs(writer).pop(job_id, None)
@@ -2666,7 +2692,11 @@ def _step(root: Path, writer, job_id: str) -> str:
         outcome = _batch(root, writer, job)
     if outcome == "authority_lost":
         return _pause(root, writer, job, "authority_lost")
+    if outcome == "deferred":
+        return outcome  # a derived collection's rebuild, or another job's open member, holds it
     writer.handle.import_blocked.pop(job.id, None)
+    if outcome == "staged":
+        return "batch"  # a derived batch commits its rows and progress outside the store
     settled = _load(writer.connection, job.id)
     if settled.state == "running" and settled.checkpoint["batch"] == job.checkpoint["batch"]:
         raise RuntimeError("import batch replay did not settle its checkpoint")
@@ -2687,6 +2717,8 @@ def _batch(root: Path, writer, job: _Job) -> str:
                 (job.collection_id,),
             ).fetchone()
             manifest = writer._collection_manifest(writer._collection_row(job.collection_id))[0]
+        if manifest.derived:
+            return _derived_batch(root, writer, job, manifest, proof)
         fmt = job.binding["mapping"]["format"]
         plan = compile_mapping(job.binding["mapping"]["declared"], manifest, fmt)
         order = import_time.Fold(job.checkpoint.get("fold")) if plan.ordered else None
@@ -2708,17 +2740,8 @@ def _batch(root: Path, writer, job: _Job) -> str:
     version = manifest.schema.version
     try:
         if batch.stop is not None or not kept:
-
-            def settle_alone():
-                _authorize(writer, job, prove=False)
-                _recheck(writer, guards)
-                if batch.stop is not None:
-                    _record(writer, job, batch, fail=batch.stop)
-                else:
-                    _record(writer, job, batch, superseded=superseded, prepared=prepared, version=version)
-
-            _transaction(root, writer, settle_alone)
-            return "paused" if batch.stop is not None else "batch"
+            return _settle_alone(root, writer, job, batch, guards, superseded=superseded, prepared=prepared,
+                                 version=version)
         _mutate(
             root,
             writer.bulk_upsert_records,
@@ -2738,6 +2761,187 @@ def _batch(root: Path, writer, job: _Job) -> str:
         if not _authorized_now(writer, job):
             return "authority_lost"
         raise
+
+
+def _derived_items(
+    batch: Batch,
+    kept: list[tuple[Row, dict[str, Any]]],
+    prepared: list[tuple[str | None, Any]],
+    manifest,
+    source_ref: str,
+    shas: list[str],
+) -> tuple[list[tuple[int, str, dict[str, Any]]], list[dict[str, Any]]]:
+    """A derived batch's kept rows as ``(index, item key, stored values)``, and the outcomes of refused ones.
+
+    A row whose natural key is incomplete takes a deterministic key from its member's
+    SHA-256 and its position in the member, so a rebuild derives the same key.
+    """
+    position = {id(row): ordinal for ordinal, (row, _) in enumerate(batch.rows)}
+    items, refused = [], []
+    for index, (row, values) in enumerate(kept):
+        key, stored = prepared[position[id(row)]]
+        if stored is None:
+            try:
+                records._bulk_row_values(manifest, values, source_ref)
+                code = "IMPORT_ROW_REJECTED"
+            except collections.CollectionError as error:
+                code = error.code
+            refused.append({"index": index, "outcome": "rejected", "code": code})
+            continue
+        if key is None:
+            at = row.after
+            key = collections.inferred_item_key(
+                manifest.collection_id, f"\0member\0{shas[at['member']]}\0{at['member_row'] - 1}"
+            )
+        items.append((index, key, stored))
+    return items, refused
+
+
+@dataclass(slots=True)
+class _Applied:
+    outcomes: list[dict[str, Any]]
+    entries: list[tuple[Row, str | None, str | None]]
+    rejections: list[tuple[int, int, str, str]]
+    superseded: int
+
+
+def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: list[str]) -> _Applied:
+    """Apply one batch to a derived collection's rows: the one path a live import and a rebuild share.
+
+    The entries are each batch row in source order with its item key and payload hash, from
+    which the member's counts and digest are extended exactly as a store import logs them.
+    """
+    kept, superseded, prepared = _collapse(batch.rows, manifest, source_ref, logged=True)
+    items, refused = _derived_items(batch, kept, prepared, manifest, source_ref, shas)
+    outcomes = derived_rows.apply(conn, goal, items)
+    entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
+    rejections = [(row.ordinal, row.start, code, at) for row, code, at in batch.rejections] + [
+        (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], "item")
+        for outcome in refused
+    ]
+    return _Applied(outcomes, entries, rejections, superseded)
+
+
+def _opened(job: _Job, index: int, rows: int) -> dict[str, Any]:
+    """A derived collection's progress record for a member a job opens."""
+    counts = dict.fromkeys(("inserted", "updated", "unchanged", "rejected", "duplicates", "read", "skipped"), 0)
+    sha256 = job.binding["source"]["members"]["sha256"][index]
+    return {"job": job.id, "member": index, "sha256": sha256, "tally": _tally(), "counts": counts,
+            "rows": rows, "done": False, "eof": False, "checkpoint": None}
+
+
+def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> str:
+    """One batch of an import into a derived collection (OpenSpec bring-in-large-exports §4).
+
+    Its rows, rollup mirrors and the member's progress commit in the derived file
+    (``derived_rows`` step 1). The batch that ends a member then commits the member's log
+    row, touched rollup buckets and the job checkpoint in the store (step 2), and the
+    progress record is cleared (step 3). Returns ``staged`` when only the derived file
+    moved, ``batch`` when the store did, ``deferred`` while a rebuild or another job's
+    open member holds the collection, and ``paused`` or ``authority_lost`` as a store
+    import does. A job resumes from its progress record, which holds its reader position.
+    """
+    cid = job.collection_id
+    store = derived_rows.open_store(writer)
+    state = store.settle(writer.connection, cid)
+    goal = derived_rows.target(writer.connection, cid)
+    if not state.serves or goal is None:
+        return "deferred"
+    record = store.progress(cid)
+    if record is not None and record["job"] != job.id:
+        return "deferred"
+    if record is not None and record["done"]:
+        return _settle_member(root, writer, job, manifest, store, goal, record, [])
+    current = job if record is None else dataclasses.replace(
+        job, checkpoint={**record["checkpoint"], "batch": job.checkpoint["batch"]}
+    )
+    plan = compile_mapping(job.binding["mapping"]["declared"], manifest, job.binding["mapping"]["format"])
+    order = import_time.Fold(current.checkpoint.get("fold")) if plan.ordered else None
+    reader = _live(writer, current, proof, plan)
+    batch = _next_batch(reader, plan, reader.pending, order)
+    batch.members = reader.taken(batch.checkpoint)
+    reader.marked = _cursor(batch.checkpoint)
+    guards = reader.guards()
+    read = [event for event in batch.members if event[0] == "read"]
+    if batch.stop is not None or not (batch.rows or batch.rejections or read):
+        # A stop fails the job; skipped members alone only advance the store checkpoint.
+        return _settle_alone(root, writer, job, batch, guards, version=manifest.schema.version)
+    index = read[0][1] if read else batch.checkpoint["member"]
+    if record is None or record["member"] != index:
+        record = _opened(job, index, derived_rows.logged(writer.connection, cid)[1])
+    with _snapshot(writer):
+        _authorize(writer, job, prove=False)  # the store path rechecks inside its transaction
+    _recheck(writer, guards)
+    shas = job.binding["source"]["members"]["sha256"]
+
+    def work(conn):
+        applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas)
+        tally, counts = dict(record["tally"]), dict(record["counts"])
+        for _, key, payload in applied.entries:
+            _extend(tally, key, payload)
+        for outcome in applied.outcomes:
+            counts[outcome["outcome"]] += 1
+        counts["rejected"] += len(applied.rejections)
+        counts["duplicates"] += applied.superseded
+        counts["read"] += len(read)
+        counts["skipped"] += sum(event[0] == "skipped" for event in batch.members)
+        rows = record["rows"] + sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)
+        done = {**record, "tally": tally, "counts": counts, "rows": rows, "done": bool(read),
+                "eof": batch.eof, "checkpoint": batch.checkpoint}
+        return done, applied.rejections
+
+    record = store.stage(cid, job.id, work)
+    if not record["done"]:
+        return "staged"
+    return _settle_member(root, writer, job, manifest, store, goal, record, guards)
+
+
+def _settle_member(root: Path, writer, job: _Job, manifest, store, goal, record, guards) -> str:
+    """Steps 2 and 3 of a derived member: its log row and checkpoint in the store, then the progress cleared."""
+    cid = job.collection_id
+
+    def write():
+        _authorize(writer, job, prove=False)
+        _recheck(writer, guards)
+        current = _load(writer.connection, job.id)
+        if current is None or current.state != "running" or current.checkpoint["batch"] != job.checkpoint["batch"]:
+            raise RuntimeError("import job changed under its batch")
+        progress, counts = dict(current.progress), record["counts"]
+        for name in ("inserted", "updated", "unchanged"):
+            progress[name] += counts[name]
+        progress["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
+        progress["rejected"] += counts["rejected"]
+        progress["duplicates"] += counts["duplicates"]
+        progress["batches"] += 1
+        progress["members"] = {"read": progress["members"]["read"] + counts["read"],
+                               "skipped": progress["members"]["skipped"] + counts["skipped"]}
+        writer._execute(
+            "INSERT INTO import_rejections(job_id,ordinal,byte_offset,code,at) VALUES (?,?,?,?,?)",
+            [(job.id, *rejection) for rejection in store.rejections(cid)],
+            many=True,
+        )
+        _log_member(writer, job, record["member"], record["sha256"], record["tally"], rows=record["rows"])
+        store.publish_rollups(writer._execute, goal)
+        query_freshness.advance_all(index_migrations.AccountedWriter(writer.connection, writer._execute), cid)
+        generation = writer.connection.execute(
+            "SELECT generation FROM collections WHERE collection_id=?", (cid,)
+        ).fetchone()[0]
+        writer._pending_summary(manifest, generation)
+        checkpoint = {**record["checkpoint"], "batch": job.checkpoint["batch"] + 1}
+        state = "complete" if record["eof"] else "running"
+        cursor = writer._execute(
+            "UPDATE import_jobs SET state=?,reason=NULL,checkpoint_json=?,progress_json=?,updated_at=? "
+            "WHERE job_id=? AND state='running' AND json_extract(checkpoint_json,'$.batch')=?",
+            (state, _json(checkpoint), _json(progress), _stamp(), job.id, job.checkpoint["batch"]),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("import job changed under its batch")
+        if state == "complete":
+            _control(writer, job, "import_job_complete", progress, checkpoint)
+
+    _transaction(root, writer, write)
+    store.finalize(writer.connection, cid)
+    return "batch"
 
 
 def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exception) -> None:
@@ -2889,6 +3093,14 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
         request = _resolved(writer, row, manifest, request)
+        if manifest.derived and request.members is None:
+            _refuse(
+                derived_rows.COLLECTION_DERIVED,
+                "a derived collection imports export members only, so its import log can rebuild its rows",
+                at="import_request.members",
+                expected="members: a glob or list of member paths of an export manifest",
+                repair="preserve the export with archive=members and import from its manifest",
+            )
         if request.reimport is not None and request.members is None:
             _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
         plan = compile_mapping(request.mapping, manifest, request.format)
@@ -2905,7 +3117,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             operation.require_collection(cid, complete=True)
             source, sha256, size = resolve_source(root, operation, request.source_ref)
             if request.members is not None:
-                members = _export(root, source, sha256, request.members)
+                members = _export(root, source.ref, sha256, request.members)
                 source = Source(source.ref, source.path, source.guard, members)
         finally:
             operation.close()
@@ -2931,6 +3143,8 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
         }
     if plan.zoned:
         binding["mapping"]["zone_rules"] = import_time.version()
+    if manifest.derived:
+        binding["importer"] = __version__  # a rebuild names it when a member's digest differs
     streamed = _streamed(binding)
     start = {"row": 0, "byte": 0, "member": 0, "member_row": 0} if streamed else dict(_START)
     identity = _identity(binding)
@@ -3215,7 +3429,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             _source_not_found()
         request = _resolved(writer, row, manifest, request)
         source, sha256, size = resolve_source(root, writer._operation, request.source_ref)
-        members = () if request.members is None else _export(root, source, sha256, request.members)
+        members = () if request.members is None else _export(root, source.ref, sha256, request.members)
         plan, findings, rows = None, [], None
         if request.mapping is not None:
             try:

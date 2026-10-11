@@ -21,7 +21,7 @@ from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import due_state, get_page, mutation_terminal, record_formats, records, vault
 from exomem import structured_collections as collections
-from exomem.collection_store import governance, legacy_import, typed_storage
+from exomem.collection_store import governance, legacy_import, typed_storage, writer
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.reader import StoreAdapter
 from exomem.governance.principal import owner_principal, request_scope
@@ -308,6 +308,28 @@ def test_populated_mode_change_refuses_before_any_cutover(store, route):
     assert canonical(store) == before and guards(store) == guard
     store.update_record(CID, item_key=key, changes={"count": 3}, why="still guarded",
                         expected_container_hash=guard["expected_container_hash"], expected_item_version=version)
+
+
+def test_summary_past_the_items_cap_refuses_items_before_reading_a_row(store, monkeypatch):
+    """A summary collection past the items cap, with its pages still pending, converted to items: the refusal
+    comes only after every row is decoded and validated, so its cost grows with the collection, or the
+    conversion leaves item files, guards or canonical state changed."""
+    monkeypatch.setattr(writer, "ITEMS_MODE_MAX_ROWS", 1_000)  # the 100,000 cap scaled down: seeding it took ~13 s
+    create(store)
+    _seed(store, CID, writer.ITEMS_MODE_MAX_ROWS)
+    store.append_record(CID, item={"title": "Past the items cap"}, why="observe")
+    guard, before = guards(store), canonical(store)
+    vault_before = files(store)
+    decoded = []
+    values = typed_storage.collection_values
+    monkeypatch.setattr(typed_storage, "collection_values", lambda conn, cid: decoded.append(cid) or values(conn, cid))
+    current = store.connection.execute("SELECT manifest_text FROM collection_manifests").fetchone()[0]
+    with pytest.raises(collections.CollectionError, match=MODE_CHANGE) as refused:
+        store.revise_collection(CID, manifest_text=toggled(current), why="convert", **guard)
+    assert "new collection" in refused.value.details["migration"].lower()
+    assert decoded == []
+    assert canonical(store) == before and guards(store) == guard and files(store) == vault_before
+    assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone() == (writer.ITEMS_MODE_MAX_ROWS + 1,)
 
 
 def test_populated_file_collection_cannot_migrate_into_summary(tmp_path):

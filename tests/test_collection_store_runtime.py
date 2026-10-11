@@ -1,7 +1,10 @@
 """Cached preview operations and real replica handoff share one lifetime."""
 
+import shutil
+import sqlite3
 import threading
 import time
+from contextlib import closing
 
 import pytest
 from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
@@ -111,6 +114,22 @@ def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     manager.close()
     assert client.holder is None
     assert client.token == 1
+
+
+def test_shutdown_leaves_the_released_head_in_the_store_file_while_another_reader_is_open(runtime, tmp_path):
+    """Defect: another process holding the live store open at a clean shutdown keeps the acknowledged
+    commits in the WAL only, so a copy of collections.sqlite alone lacks the head the lease was released at."""
+    with closing(connection.open_reader(runtime.path)):  # another process's idle connection
+        _create(runtime)
+        runtime.manager.close()
+        copied = tmp_path / "copied.sqlite"
+        shutil.copyfile(runtime.path, copied)
+    with closing(sqlite3.connect(copied)) as conn:
+        meta = dict(conn.execute("SELECT key,value FROM store_meta"))
+    released = runtime.manager.client.release_head
+    assert released.commit_seq >= 1
+    assert (int(meta[schema.META_COMMIT_SEQ]), meta.get(schema.META_STORE_HEAD_HASH)) == (
+        released.commit_seq, released.head_hash)
 
 
 def test_warm_operations_reuse_cache_and_retained_bindings_expire(runtime, monkeypatch):

@@ -6,7 +6,7 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from ..collection_store import index_migrations
+from ..collection_store import derived_rows, index_migrations
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, ReadSession, wire_bytes
@@ -33,6 +33,7 @@ class AdmittedQuery:
     estimated_visits: int
     ordinal: int
     _seal: object
+    items: str = "main.items"  # the relation standing for ``items``: the store's, or a derived file's
 
     def check(self):
         if self._seal is not _SEAL or self.session._queries.get(self.ordinal) is not self:
@@ -130,6 +131,9 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
     conn = session.connection
     with session._manifest(query.source.ref) as (manifest, basis, subjects, uniform):
         fields, schema = _validate(query, manifest, basis)
+        source = session.row_source(manifest.collection_id)
+        if source is not derived_rows.STORE and not uniform:
+            raise QueryError("QUERY_UNAVAILABLE", "a derived collection's rows are released whole or not at all")
         projection = index_migrations.ready_plan(conn, manifest.collection_id)
         if projection is None:
             # Disclosed only after the session admitted the collection: an operator diagnostic.
@@ -160,7 +164,7 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                     session.check_temp()
         elif not compiled.page_bound:
             count = conn.execute(
-                "SELECT count(*) FROM (SELECT 1 FROM items WHERE collection_id=? LIMIT ?)",
+                f"SELECT count(*) FROM (SELECT 1 FROM {source.items} WHERE collection_id=? LIMIT ?)",
                 (manifest.collection_id, session.limits.max_row_visits + 1),
             ).fetchone()[0]
         cost = query.page.limit + 1 if count is None else count * 2
@@ -172,7 +176,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
             raise QueryError("QUERY_COST_LIMIT")
         session._estimated_visits += cost
         membership = "1" if uniform else f"EXISTS (SELECT 1 FROM temp.{ids} a WHERE a.row_id=i.row_id)"
-        table = "main." + projection.table_name
+        stored = f"{source.schema}.{projection.table_name}"
+        table = stored
         index = compiled.usable_index
         if materialize:
             # A private template ordinal is separate from the frozen READY
@@ -188,16 +193,16 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                 order = compiled.order_sql.replace("p.", "")
                 conn.execute(f"CREATE INDEX temp.{index} ON {private.table_name}({order})")
             if uniform:
-                source = f"main.{projection.table_name} p NOT INDEXED"
+                scanned = f"{stored} p NOT INDEXED"
                 where, params = "1", ()
             else:
-                source = f"temp.{ids} a CROSS JOIN main.{projection.table_name} p NOT INDEXED"
+                scanned = f"temp.{ids} a CROSS JOIN {stored} p NOT INDEXED"
                 where, params = "p.row_id=a.row_id", ()
             # Projection ordinals are fixed by the validated internal layout; withheld keys never enter TEMP.
             keys = ",".join(f"json_extract(p.keys_json,'$[{ordinal}]')" if scalar.field in manifest.schema.fields
                             else "json('[0,null]')" for ordinal, scalar in enumerate(projection.scalars))
             conn.execute(f"INSERT INTO {table}(row_id,item_key,row_version,keys_json) "
-                         f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {source} WHERE {where}", params)
+                         f"SELECT p.row_id,p.item_key,p.row_version,json_array({keys}) FROM {scanned} WHERE {where}", params)
         session.check_temp()
         selected = tuple(f.path for f in query.select.fields) or fields
         dependencies = set(compiled.dependency_paths) | set(selected)
@@ -206,8 +211,8 @@ def admit_query(session: ReadSession, query: ir.Query, *, as_of: str) -> Admitte
                                (basis.manifest_hash, basis.type_name, basis.type_version, basis.declaration_hash, schema),
                                manifest.schema.version,
                                selected,
-                               table, index, membership, session.typed_layout(manifest.collection_id),
-                               uniform, count, cost, ordinal, _SEAL)
+                               table, index, membership, source.layout or session.typed_layout(manifest.collection_id),
+                               uniform, count, cost, ordinal, _SEAL, source.items)
         session._queries[ordinal] = result
         return result
 
@@ -262,7 +267,7 @@ def execute_rows(admitted: AdmittedQuery, *, max_response_bytes: int | None = No
                     return RowPage(rows, True, last)
                 identity = conn.execute(
                     f"SELECT CASE WHEN {admitted.membership_sql} THEN i.item_key END "
-                    "FROM main.items i WHERE i.row_id=? AND i.collection_id=?",
+                    f"FROM {admitted.items} i WHERE i.row_id=? AND i.collection_id=?",
                     (row_id, admitted.query.source.ref),
                 ).fetchone()
                 if identity is None or identity[0] is None:
