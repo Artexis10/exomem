@@ -592,6 +592,56 @@ def test_mapping_aliases_keep_transitive_dependency_protection(store, target_kin
                     {"alias": instant if target_kind == "time" else "derived"}]
 
 
+@pytest.mark.parametrize("protection", ["coverage", "schema", "dependency"])
+def test_json_kind_guards_cannot_hide_protected_same_source_dependencies(store, protection):
+    """A nonmatching protected alias lets its matching alias escape the same source's release closure."""
+    from copy import deepcopy
+
+    from test_collection_store_importer import CID as IMPORT_CID
+    from test_collection_store_importer import (
+        MAPPING,
+        WORKOUT_FIELDS,
+        ndjson,
+        run,
+        setup,
+        start,
+        status,
+    )
+
+    from exomem.cli_ops import OpError
+
+    number = {"type": "number"}
+    if protection == "schema":
+        number["classification"] = "location"
+    elif protection == "dependency":
+        number["depends_on"] = ["bridge"]
+    fields = WORKOUT_FIELDS + (
+        "    numeric: " + yaml.safe_dump(number, default_flow_style=True).strip() + "\n"
+        "    text: {type: string}\n    bridge: {type: string, depends_on: [place]}\n"
+        "    place: {type: string, classification: location}\n")
+    mapping = deepcopy(MAPPING)
+    mapping["fields"].update(numeric={"from": "sample", "source_type": "number"},
+                             text={"from": "sample", "source_type": "string"}, place="place", bridge="bridge")
+    mapping["coverage"].update({path: {"classification": None} for path in ("sample", "place", "bridge")})
+    if protection == "coverage":
+        mapping["coverage"]["sample"]["classification"] = "location"
+    setup(store, ndjson([{"id": "one", "duration_s": 10, "sample": "3", "place": "invented", "bridge": "label",
+                         "start_utc": "2026-03-01T00:00:00Z", "utc_offset": "+02:00"}]), fields=fields)
+    job = start(store, OWNER, mapping=mapping)
+    run(store)
+    assert status(store, job, OWNER)["rows"]["imported"] == 1
+    guest = tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                 query={"version": 1})["rows"][0]
+    assert guest["duration_s"] == 10 and not {"numeric", "text"} & guest.keys()
+    for name in ("numeric", "text", "absent"):
+        with pytest.raises(OpError) as error:
+            tool(store, "record_memory", who=GUEST, action="query", collection=IMPORT_CID,
+                 query={"version": 1, "select": [name]})
+        assert error.value.code == "QUERY_FIELD_UNAVAILABLE"
+    assert tool(store, "record_memory", action="query", collection=IMPORT_CID,
+                query={"version": 1, "select": ["numeric", "text"]})["rows"] == [{"text": "3"}]
+
+
 def test_nested_dependency_protects_its_source_alias_without_hiding_reviewed_sibling(store):
     """A nested dependency alias that escapes its parent, or closure that hides an unrelated reviewed child."""
     from copy import deepcopy

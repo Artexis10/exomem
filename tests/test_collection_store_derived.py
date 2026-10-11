@@ -18,7 +18,15 @@ import zipfile
 from contextlib import closing
 
 import pytest
-from test_collection_store_import_exports import FIELDS, SAMPLES, at, samples
+from test_collection_store_import_exports import (
+    FIELDS,
+    MIXED_DOCUMENT,
+    MIXED_FIELDS,
+    MIXED_MAPPING,
+    SAMPLES,
+    at,
+    samples,
+)
 from test_collection_store_importer import manifest_text
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_s1_gate import _until
@@ -226,7 +234,7 @@ def derived(tmp_path, monkeypatch):
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
     opened = []
 
-    def build(name, days=DAYS):
+    def build(name, days=DAYS, *, text=TEXT, mapping=SAMPLES):
         base = tmp_path / name
         root = base / "vault"
         (root / "Knowledge Base").mkdir(parents=True)
@@ -234,16 +242,52 @@ def derived(tmp_path, monkeypatch):
         handle = connection.open_writer(base / "collections.sqlite", lease_check=lambda: True)
         writer = CollectionWriter(root, handle)
         opened.append(writer)
-        writer.create_collection(PATH, TEXT, why="derived samples", scaffold=False)
+        writer.create_collection(PATH, text, why="derived samples", scaffold=False)
         manifest = _preserve(root, _archive(days))["path"]
         job = agent(writer, mode="start", source_ref=manifest, format="json-document", members="samples/*",
-                    mapping=SAMPLES)
+                    mapping=mapping)
         return writer, job
 
     with library_scope():
         yield build
     for writer in opened:
         writer.handle.close()
+
+
+def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived):
+    """A rebuild drops the guard identity, rejects strings, or reconstructs a different scalar subtype."""
+    text = manifest_text(DERIVED, "Mixed", MIXED_FIELDS).replace(
+        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n")
+    writer, job = derived("mixed", {"samples/mixed.json": MIXED_DOCUMENT}, text=text, mapping=MIXED_MAPPING)
+    assert finish(writer, job)["rows"]["imported"] == 8
+
+    def rows(handle):
+        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, handle):
+            return commands.op_record_memory(writer.root, action="query", collection=DERIVED,
+                query={"version": 1, "select": ["day", "position", "numeric", "text"],
+                       "order_by": [{"field": "day"}, {"field": "position"}]})["rows"]
+
+    expected = [{"day": day["day"], "position": position,
+                 "text" if type(value) is str else "numeric": value}
+                for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
+    assert rows(writer.handle) == expected
+    path = writer.handle.path
+    before = _rows_file(derived_rows.path(path))
+    writer.handle.close()
+    for suffix in ("", "-wal", "-shm"):
+        derived_rows.path(path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = CollectionWriter(writer.root, handle)
+        with preview_store(writer.root, handle):
+            for _ in range(16):
+                outcome = derived_rows.step(writer.root, restarted)
+                if outcome in {"done", "idle"}:
+                    break
+            else:
+                raise AssertionError("the guarded rebuild did not settle")
+        assert rows(handle) == expected
+        assert _rows_file(derived_rows.path(path)) == before
+        assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
 
 
 def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):
