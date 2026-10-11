@@ -209,6 +209,11 @@ jobs:
           helm repo add jetstack https://charts.jetstack.io
           helm repo add topolvm https://topolvm.github.io/topolvm
           helm dependency build infra/helm/platform
+      - name: Read the source image build metadata
+        id: import-meta
+        run: |
+          build_time=$(git show -s --format=%cI HEAD)
+          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build the source Cloud image for encrypted import
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         timeout-minutes: 25
@@ -218,6 +223,8 @@ jobs:
           load: true
           push: false
           tags: cellctl-import-source:ci-${{ github.sha }}
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.import-meta.outputs.build_time }}
           cache-from: type=gha,scope=cloud-k3s
           cache-to: type=gha,mode=max,scope=cloud-k3s
       # A skip (no Docker, a missing variable) must fail the job, never pass it.
