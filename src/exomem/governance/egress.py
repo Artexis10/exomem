@@ -3449,7 +3449,7 @@ def guard_working_set(
         record="all",
     )
     if ctx is None:
-        return guarded
+        return _finalize_working_set(vault_root, guarded)
     decisions, withheld = ctx.decisions, ctx.withheld
     frozen, invalid_refs = ctx.frozen, ctx.invalid_refs
     #: Sections whose removals are reported. `ambiguity` and `missing` are
@@ -3605,16 +3605,7 @@ def guard_working_set(
     # empty blocks would state that the turn resolved and the vault had nothing,
     # which is a different and false claim. Everything downstream of an anchor
     # goes with it, since a unit's only warrant was the anchor it hung from.
-    from .. import working_set_conversation
-
-    witness = packet.witness_ref if isinstance(packet, working_set_conversation.InferredPacket) else None
-    witness_removed = witness is not None and all(
-        unit.get("ref") != witness for unit in guarded.get("units", ())
-    )
-    if (witness_removed or packet.get("anchors") and not guarded["anchors"]) and not guarded.get("abstained"):
-        if witness_removed:
-            guarded["anchors"] = []
-            guarded.get("generation", {}).pop("carried_by", None)
+    if packet.get("anchors") and not guarded["anchors"] and not guarded.get("abstained"):
         guarded["abstained"] = True
         # At L0 the turn resolved nothing the caller may know of, which is
         # what `unresolved` says; `withheld` is for material released at a
@@ -3638,7 +3629,14 @@ def guard_working_set(
                     if isinstance(entry, Mapping)
                 ),
             }
-    from .. import lifecycle_statuses
+    return _finalize_working_set(vault_root, guarded, noticed=noticed)
+
+
+def _finalize_working_set(
+    vault_root: Path, guarded: dict[str, Any], *, noticed: bool = False
+) -> dict[str, Any]:
+    """Recount inferred prose and check its chosen support after release projection."""
+    from .. import lifecycle_statuses, working_set_conversation
 
     if isinstance(guarded, working_set_conversation.InferredPacket):
         guarded["budget"]["used_chars"] = (
@@ -3647,6 +3645,21 @@ def guard_working_set(
                 guarded, status_basis=lifecycle_statuses.Basis(vault_root)
             )
         )
+        witness = guarded.witness_ref
+        witness_removed = witness is not None and all(
+            unit.get("ref") != witness for unit in guarded.get("units", ())
+        )
+        stale = any(not basis.current(vault_root) for basis in guarded.witness_bases)
+        # Expired support costs this optional carry, including an already-abstained ambiguity.
+        if stale or witness_removed:
+            guarded.get("generation", {}).pop("carried_by", None)
+            guarded["abstained"] = True
+            guarded["abstention"] = {"reason": "withheld" if witness_removed and noticed and not stale else "unresolved"}
+            for section in ("anchors", "ambiguity", "units", "pointers", "current_state", "roles"):
+                guarded[section] = []
+            guarded["budget"]["used_chars"] = sum(
+                _recent_entry_chars(entry) for entry in guarded.get("recent_context", ())
+            )
     return guarded
 
 

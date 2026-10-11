@@ -3278,7 +3278,7 @@ def _conversation_support(
     freshness_snapshot: Any,
     visible: Callable[[str], bool] | None,
     purpose: str | None,
-) -> tuple[bool, LaneItem | None]:
+) -> tuple[bool, LaneItem | None, working_set_conversation._WitnessBasis | None]:
     """License from the first 200 admitted units, in stable reference order.
 
     Raw keyset pages are transport only: withheld units spend no admitted slot.
@@ -3289,13 +3289,13 @@ def _conversation_support(
     from .governance import egress
 
     if working_set_conversation.may_carry(analysis, subject_title=subject.title):
-        return True, None
+        return True, None, None
     with (visible.page_batch() if isinstance(visible, egress.ReaderView) else nullcontext(visible)) as keep:
         paths = _neighbourhood_paths(vault_root, (subject,), keep=keep)
         if keep is not None:
             paths = frozenset(path for path in paths if keep(path))
     if not paths:
-        return False, None
+        return False, None, None
     # No reader view means nothing is withheld from this caller (`egress.reader_view`),
     # as every other lane reads it; the final guard still decides the packet.
     reader = visible if isinstance(visible, egress.ReaderView) else None if visible is None else egress.ReaderView(
@@ -3317,7 +3317,7 @@ def _conversation_support(
             recall_checkpoint=checkpoint, allow_delta=False,
         )
         if not result.readiness.complete:
-            return False, None
+            return False, None, None
         candidates = list(result.value or ())
         if not candidates:
             break
@@ -3332,18 +3332,18 @@ def _conversation_support(
                 parser_version=candidate.parser_version,
             )
             if not current.current:
-                return False, None
+                return False, None, None
             read = parent_reads.parents.get(candidate.parent_path)
             if read is not None and (
                 read.state.definitions is None or not read.state.definitions.current(vault_root)
             ):
-                return False, None
+                return False, None, None
         records = find._hydrate_indexed_unit_records(
             vault_root, candidates, plan=structured_filters.compile_filter(None), stale_out=stale,
             parent_reads=parent_reads,
         )
         if stale:
-            return False, None
+            return False, None, None
         hits = [
             find._semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
             for candidate in candidates if candidate.unit_ref in records
@@ -3388,8 +3388,16 @@ def _conversation_support(
         if role is None and not owners:
             role = next((role for role in selected if role.lane == "material"), None)
         if role is not None:
-            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane")
-    return False, None
+            basis = working_set_conversation._WitnessBasis(
+                unit_ref=item.ref, parent_path=state.path,
+                parent_generation=state.parent_generation,
+                parent_source_hash=state.parent_source_hash,
+                parser_version=state.parser_version, definitions=state.definitions,
+            )
+            if not basis.current(vault_root):
+                return False, None, None
+            return True, replace(item, role=role.id, why=role.description or f"{role.id} lane"), basis
+    return False, None, None
 
 
 def _follow_up_packet(
@@ -4188,7 +4196,8 @@ def _compile_packet(
                 )
                 for item in verdict.anchors
             ]
-            licensed = bool(support) and all(allowed for allowed, _witness in support)
+            licensed = bool(support) and all(allowed for allowed, _witness, _basis in support)
+            bases = tuple(basis for _allowed, _witness, basis in support if basis is not None)
         if verdict.status == "one" and licensed:
             (found,) = verdict.anchors
             source = next(item for item in rows if item.anchor_id == found.anchor_id)
@@ -4215,19 +4224,21 @@ def _compile_packet(
                 witness=witness,
                 status_basis=status_basis,
             )
-            # The witness is matched by its unit ref: currency, history and
-            # deduplication may reshape the served entry without removing it.
-            licensed = witness is None or any(unit.get("ref") == witness.ref for unit in packet["units"])
+            # A retained ref needs the same authored support and selected definitions.
+            licensed = (
+                witness is None or any(unit.get("ref") == witness.ref for unit in packet["units"])
+            ) and all(basis.current(root) for basis in bases)
             if licensed:
                 if isinstance(packet, working_set_conversation.InferredPacket):
                     packet.witness_ref = witness.ref if witness is not None else None
+                    packet.witness_bases = bases
                 if _origins is not None:
                     for key in (working_set_resolve.anchor_ref(source), source.path):
                         if key:
                             _origins[key] = working_set_conversation.ORIGIN_CONVERSATION
                 return packet
         if verdict.status == "ambiguous" and licensed:
-            return abstained_packet(
+            packet = abstained_packet(
                 reason="ambiguous",
                 max_chars=limit,
                 generation=generation,
@@ -4246,6 +4257,9 @@ def _compile_packet(
                 conversation_inferred=True,
                 status_basis=status_basis,
             )
+            if all(basis.current(root) for basis in bases):
+                packet.witness_bases = bases
+                return packet
 
     # Set when the carry below named no page at all, which is the one turn the
     # final abstention lists title-named pages for (`_title_named_anchors`).

@@ -6,7 +6,7 @@ import pytest
 from test_governance_egress import _external, _reset_caches, write_rule, write_scope
 from test_working_set_hot_projection import _live, _one_old_tick
 
-from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
+from exomem import commands, lexstore, working_set, working_set_heat, working_set_index, working_set_runtime
 from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 
@@ -302,3 +302,174 @@ def test_hidden_graph_neighbours_do_not_displace_the_public_supporting_unit(vaul
                    for unit in packet["units"])
     assert hidden["anchors"] == absent["anchors"]
     assert hidden["units"] == absent["units"]
+
+
+def test_earlier_parent_witness_edit_during_a_later_graph_page_revokes_support(vault, monkeypatch):
+    from exomem import epistemic_graph
+
+    later = "Knowledge Base/Notes/Insights/zinc-documentation.md"
+    _write(vault, SECRET, "Private fixture.", "Restricted dependency")
+    _write(vault, later, "- [fact] Separate transport context. ^last", "Zinc documentation")
+    hidden = "\n".join(f"- [fact] Entry {i} cites [[Restricted dependency]]. ^a-{i:03}" for i in range(1, 200))
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} ^a-000\n" + hidden
+           + f"\n\n## Relations\n- supports [[{later.removesuffix('.md')}]]")
+    write_scope(vault, paths="Notes/Restricted/**")
+    write_rule(vault, ceiling=0)
+    _ready(vault, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    search = lexstore.LexicalStore.search_semantic_units_result
+    changed = False
+
+    def edit_earlier_parent(store, *args, **kwargs):
+        nonlocal changed
+        result = search(store, *args, **kwargs)
+        if kwargs.get("after_unit_ref") and result.value and all(hit.parent_path == later for hit in result.value):
+            _write(vault, SUBJECT, "- [fact] Maintenance is scheduled. ^a-000")
+            changed = True
+        return result
+
+    monkeypatch.setattr(lexstore.LexicalStore, "search_semantic_units_result", edit_earlier_parent)
+    packet = _activate(vault)
+    assert changed
+    assert packet["generation"].get("carried_by") != "conversation"
+    assert all(SUPPORT != unit["text"] for unit in packet["units"])
+
+
+@pytest.mark.parametrize("changed", ["source", "selected_definitions"])
+def test_a_witness_that_changes_after_support_returns_cannot_license_a_carry(vault, monkeypatch, changed):
+    import yaml
+
+    from exomem import semantic_language_registry
+
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} ^support")
+    _write(vault, OTHER, f"- [fact] {SUPPORT} ^support", "Prism routing")
+    semantic_language_registry.registry_path(vault).write_text(yaml.safe_dump(semantic_language_registry.empty_proposal()))
+    _ready(vault, monkeypatch)
+    support = working_set._conversation_support
+    guard = egress.guard_working_set
+
+    def edit_after_support(*args, **kwargs):
+        result = support(*args, **kwargs)
+        assert result[0] and result[1] is not None
+        if changed == "source":
+            _write(vault, SUBJECT, "- [fact] Maintenance is scheduled. ^support")
+        else:
+            path = semantic_language_registry.registry_path(vault)
+            data = yaml.safe_load(path.read_text())
+            data.setdefault("categories", {})["maintenance_cost"] = {"description": "Maintenance costs"}
+            path.write_text(yaml.safe_dump(data))
+        return result
+
+    def check_compiler_output(root, packet, release, **kwargs):
+        assert packet["generation"].get("carried_by") != "conversation"
+        assert all(SUPPORT != unit["text"] for unit in packet["units"])
+        return guard(root, packet, release, **kwargs)
+
+    monkeypatch.setattr(working_set, "_conversation_support", edit_after_support)
+    monkeypatch.setattr(egress, "guard_working_set", check_compiler_output)
+    packet = _activate(vault, conversation={"recent": [
+        {"role": "user", "text": "Prism routing"},
+        {"role": "user", "text": "Lattice transport"},
+    ]})
+    assert packet["generation"].get("carried_by") != "conversation"
+    assert packet["anchors"] == []
+    assert all(SUPPORT != unit["text"] for unit in packet["units"])
+
+
+@pytest.mark.parametrize("owner", [False, True])
+@pytest.mark.parametrize("changed", ["source", "selected_definitions"])
+def test_witness_change_after_terminal_projection_abstains_and_keeps_recent_context(vault, monkeypatch, owner, changed):
+    import yaml
+
+    from exomem import semantic_language_registry
+
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} ^support")
+    _write(vault, OTHER, "Unrelated recent work.", "Prism routing")
+    _write(vault, SECRET, "Private recent work.", "Restricted dependency")
+    if not owner:
+        write_scope(vault, paths="Notes/Restricted/**")
+        write_rule(vault, ceiling=0)
+    semantic_language_registry.registry_path(vault).write_text(yaml.safe_dump(semantic_language_registry.empty_proposal()))
+    _ready(vault, monkeypatch)
+    recent = {"ref": OTHER, "title": "Prism routing", "statement": "Unrelated recent work."}
+    private = {"ref": SECRET, "title": "Restricted dependency", "statement": "Private recent work."}
+    monkeypatch.setattr(working_set, "_recent_context", lambda *args, **kwargs: (recent, private))
+    release_packet = egress._packet_release
+    projected = []
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if packet.get("generation", {}).get("carried_by") == "conversation":
+            projected.append(ctx is None)
+            if changed == "source":
+                _write(root, SUBJECT, "- [fact] Maintenance is scheduled. ^support")
+            else:
+                path = semantic_language_registry.registry_path(root)
+                data = yaml.safe_load(path.read_text())
+                data.setdefault("categories", {})["maintenance_cost"] = {"description": "Maintenance costs"}
+                path.write_text(yaml.safe_dump(data))
+        return ctx
+
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    with request_scope(owner_principal(surface="library") if owner else _external()):
+        packet = commands.op_activate_context(vault, turn="What does it cost?", conversation=CONVERSATION)
+    assert projected == [owner]
+    assert packet["abstained"]
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert packet["generation"].get("carried_by") != "conversation"
+    for section in ("anchors", "ambiguity", "units", "pointers", "current_state", "roles"):
+        assert packet[section] == []
+    assert packet["recent_context"] == ([recent, private] if owner else [recent])
+    assert packet["budget"]["used_chars"] == sum(
+        len(entry["title"]) + len(entry["statement"]) for entry in packet["recent_context"]
+    )
+
+
+def test_terminal_projection_revokes_ambiguity_when_one_subject_witness_expires(vault, monkeypatch):
+    _write(vault, SUBJECT, f"- [fact] {SUPPORT} ^support")
+    _write(vault, OTHER, f"- [fact] {SUPPORT} ^support", "Prism routing")
+    _ready(vault, monkeypatch)
+    release_packet = egress._packet_release
+    changed = False
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        nonlocal changed
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if packet.get("abstention", {}).get("reason") == "ambiguous":
+            assert {entry["title"] for entry in packet["ambiguity"]} == {"Lattice transport", "Prism routing"}
+            _write(root, SUBJECT, "- [fact] Maintenance is scheduled. ^support")
+            changed = True
+        return ctx
+
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    packet = _activate(vault, conversation={"recent": [{"role": "user", "text": "Lattice transport and Prism routing"}]})
+    assert changed
+    assert packet["abstention"]["reason"] == "unresolved"
+    assert packet["ambiguity"] == []
+    assert packet["anchors"] == []
+    assert packet["units"] == []
+    assert packet["budget"]["used_chars"] == sum(
+        len(entry.get("title", "")) + len(entry.get("statement", ""))
+        for entry in packet["recent_context"]
+    )
+
+
+def test_title_only_carry_has_no_unit_currency_dependency(vault, monkeypatch):
+    _write(vault, SUBJECT, "- [fact] Maintenance is scheduled. ^support")
+    _ready(vault, monkeypatch)
+    release_packet = egress._packet_release
+    changed = False
+
+    def edit_after_projection(root, packet, *args, **kwargs):
+        nonlocal changed
+        ctx = release_packet(root, packet, *args, **kwargs)
+        if packet.get("generation", {}).get("carried_by") == "conversation":
+            _write(root, SUBJECT, "- [fact] Maintenance is complete. ^support")
+            changed = True
+        return ctx
+
+    monkeypatch.setattr(egress, "_packet_release", edit_after_projection)
+    packet = _activate(vault, "What about the next one?")
+    assert changed
+    assert packet["generation"].get("carried_by") == "conversation"
+    assert packet["anchors"][0]["title"] == "Lattice transport"

@@ -28,9 +28,13 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from . import lifecycle_statuses
+
+if TYPE_CHECKING:
+    from .vocabulary.instances import PageDefinitions
 
 FOCUS_MAX_CHARS = 240
 USER_ENTRY_MAX_CHARS = 600
@@ -95,12 +99,39 @@ class Conversation:
 NONE = Conversation()
 
 
+@dataclass(frozen=True, slots=True)
+class _WitnessBasis:
+    """The source and selected definitions that supplied one admitted witness."""
+
+    unit_ref: str
+    parent_path: str
+    parent_generation: str
+    parent_source_hash: str
+    parser_version: int
+    definitions: PageDefinitions
+
+    def current(self, root: Path) -> bool:
+        from . import semantic_index
+
+        return semantic_index.validate_parent_record(
+            root, parent_path=self.parent_path,
+            parent_generation_value=self.parent_generation,
+            parent_source_hash=self.parent_source_hash,
+            parser_version=self.parser_version,
+        ).current and self.definitions.current(root)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _WitnessBasis:
+        # Immutable evidence contains registry mapping proxies; only packet payloads copy.
+        return self
+
+
 class InferredPacket(dict[str, Any]):
     """Request-local inference marker, preserved by deepcopy but not serialized."""
 
     #: The unit ref of the unit that licensed a single carry; egress drops the
     #: carry claim when it removes that unit.
     witness_ref: str | None = None
+    witness_bases: tuple[_WitnessBasis, ...] = ()
 
 
 _REFERENCE_FIELDS = frozenset({
