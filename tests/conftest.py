@@ -302,8 +302,38 @@ def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
     return False
 
 
-# The call-phase report, so `_isolate_state_root` can keep a failed test's state root.
+# The call-phase report, and the tmp_path and state root `_isolate_state_root`
+# handed the test, so a failed test keeps its scratch and a passing one does not.
 _CALL_REPORT = pytest.StashKey[pytest.TestReport]()
+_SCRATCH_PATHS = pytest.StashKey[tuple[Path, Path]]()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):  # noqa: ANN001, ANN201
+    """Drop a passing test's vault copy and state root, ~200 files kept forever.
+
+    After the yield, so every fixture has finalized and no test's filesystem
+    patch is still active. tmp_path is emptied, not removed: pytest numbers the
+    next same-prefix tmp_path from the directories that exist, and caches keyed
+    by vault or state-root path must never see one reused.
+    """
+    yield
+    paths = item.stash.get(_SCRATCH_PATHS, None)
+    report = item.stash.get(_CALL_REPORT, None)
+    if paths is None or (report is not None and not report.passed):
+        return
+    tmp_path, state_root = paths
+    shutil.rmtree(state_root, ignore_errors=True)
+    try:
+        children = list(tmp_path.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                child.unlink()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -776,6 +806,7 @@ def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
     """
     private = pytest.MonkeyPatch()
     state_root = tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
+    request.node.stash[_SCRATCH_PATHS] = (tmp_path, state_root)
     private.setenv("EXOMEM_STATE_ROOT", str(state_root))
     private.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR",
@@ -801,19 +832,6 @@ def _isolate_state_root(tmp_path: Path, request: pytest.FixtureRequest):
         if writer_lease_module is not None:
             writer_lease_module.reset_managers_for_tests()
         private.undo()
-        # A passing test's vault copy and state root are ~200 files kept forever,
-        # so drop them; a failed test keeps both. tmp_path is emptied, not removed:
-        # pytest numbers the next same-prefix tmp_path from the dirs that exist,
-        # and caches keyed by vault or state-root path must never see one reused.
-        report = request.node.stash.get(_CALL_REPORT, None)
-        if report is None or report.passed:
-            shutil.rmtree(state_root, ignore_errors=True)
-            for child in tmp_path.iterdir():
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    with contextlib.suppress(OSError):
-                        child.unlink()
 
 
 @pytest.fixture(autouse=True)
