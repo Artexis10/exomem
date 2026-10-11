@@ -815,6 +815,20 @@ def test_backup_is_an_integrity_checked_snapshot_without_the_live_store(abc, tmp
     assert not (tmp_path / "backup.sqlite-wal").exists()
 
 
+def test_backup_to_stdout_streams_exactly_the_snapshot_it_reports(abc, tmp_path):
+    """Defect: the stream a backup tool reads (`restic backup --stdin`) carries the JSON report or other
+    bytes than the integrity-checked snapshot the report names."""
+    abc.release()
+    result = subprocess.run([sys.executable, "-m", "exomem", "collections", "backup", "--stdout"],
+                            capture_output=True, env={**os.environ, "EXOMEM_VAULT_PATH": str(abc.root)}, timeout=120)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stderr.decode().strip().splitlines()[-1])
+    assert hashlib.sha256(result.stdout).hexdigest() == report["sha256"]
+    (tmp_path / "streamed.sqlite").write_bytes(result.stdout)
+    with closing(sqlite3.connect(tmp_path / "streamed.sqlite")) as conn:
+        assert conn.execute("SELECT count(*) FROM items").fetchone() == (1,)
+
+
 @pytest.mark.parametrize("where", ["vault", "live"])
 def test_backup_refuses_the_vault_or_the_live_store(abc, tmp_path, where):
     """Defect: backup lands a store copy where vault sync carries it, or replaces the live store itself."""
@@ -1278,6 +1292,26 @@ def test_fresh_copy_adoption_previews_before_installing_the_replica(abc, tmp_pat
     shutil.copytree(abc.root, copy)
     assert run_host(tmp_path, tmp_path / "copy-state", "copy", _adopt_fresh_copy,
                     root=copy, database=tmp_path / "copy-coordinator.sqlite") == "committed"
+
+
+def test_takeover_and_owner_evidence_never_open_the_vault_replica_in_sqlite(abc, monkeypatch):
+    """Defect: takeover staging or an owner preview opens the shared replica in SQLite in place, where a
+    writable open can roll back a delivered journal, leave SQLite files beside it or change the bytes
+    vault sync carries. A read-only file would not catch this: SQLite opens it read-only and only reads."""
+    from exomem.collection_store import owner
+
+    abc.release()
+    path = replica.replica_path(abc.root).resolve()
+    shared, before = {str(path), path.as_uri()}, path.read_bytes()
+    opened, connect = [], sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda database, *a, **kw: opened.append(str(database)) or connect(
+        database, *a, **kw))
+    head = (int(abc.meta()[schema.META_COMMIT_SEQ]), abc.meta()[schema.META_STORE_HEAD_HASH])
+    with takeover.staged_replica(abc.session, lambda: None, [head]) as staged:
+        assert staged.relation == {head: "same"}
+    assert owner.adopt_replica_preview(abc.root)["preview"]["replica"]["commit_seq"] == head[0]
+    assert opened and not [database for database in opened if any(name in database for name in shared)]
+    assert path.read_bytes() == before
 
 
 def test_launcher_refuses_an_actual_v1_marker_candidate_before_handoff(abc, tmp_path, monkeypatch):

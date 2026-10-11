@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import struct
 import zlib
@@ -604,20 +605,36 @@ def test_holds_are_capped_per_local_session(
     assert len(list(_store_dir(vault).glob("*.bin"))) == 3
 
 
-def test_held_bytes_are_capped_per_local_session(
+def test_held_bytes_are_capped_at_one_largest_hold_per_local_session(vault: Path) -> None:
+    from exomem import held_uploads
+
+    first = _png(2, 2)
+    with _local_session("session-home"):
+        # One hold of the largest accepted size fits; nothing more fits beside it.
+        held_uploads.hold(vault, io.BytesIO(first), lane="evidence", filename="a.png",
+                          content_type="image/png", max_bytes=len(first))
+        with pytest.raises(held_uploads.HeldUploadError) as refused:
+            held_uploads.hold(vault, io.BytesIO(b"x"), lane="evidence", filename="b.png",
+                              content_type="image/png", max_bytes=len(first))
+    assert refused.value.code == "HELD_UPLOAD_QUOTA"
+    assert len(list(_store_dir(vault).glob("*.bin"))) == 1
+    assert not list(_store_dir(vault).glob("*.part"))
+
+
+def test_a_hold_that_does_not_fit_on_disk_is_refused_before_copying(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import held_uploads
 
-    first = _png(2, 2)
-    monkeypatch.setattr(held_uploads, "HOLD_MAX_BYTES", len(first) + 10)
+    payload = _png(3, 3)
+    real = shutil.disk_usage
+    monkeypatch.setattr(held_uploads.shutil, "disk_usage",
+                        lambda path: real(path)._replace(free=len(payload) - 1))
     with _local_session("session-home"):
-        _hold(vault, first)
         with pytest.raises(held_uploads.HeldUploadError) as refused:
-            _hold(vault, _png(3, 3))
-    assert refused.value.code == "HELD_UPLOAD_QUOTA"
-    assert len(list(_store_dir(vault).glob("*.bin"))) == 1
-    assert not list(_store_dir(vault).glob("*.part"))
+            _hold(vault, payload)
+    assert refused.value.code == "HELD_UPLOAD_NO_SPACE"
+    assert list(_store_dir(vault).iterdir()) == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")

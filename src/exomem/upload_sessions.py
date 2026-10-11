@@ -1,8 +1,9 @@
 """Resumable upload sessions: one file sent in parts, preserved once its SHA-256 matches.
 
 `/upload/sessions` speaks the tus 1.0 core protocol with its creation,
-expiration and termination extensions (see `server_transfer`). This module is
-the session store under the routes: a `.part` file and a JSON record per
+expiration and termination extensions (see `server_transfer`). This module
+holds the protocol's constants, which `handoff` advertises to an upload
+handoff, and the session store under the routes: a `.part` file and a JSON record per
 session, in a private directory under the vault's state directory, the same
 shape as `held_uploads`. The client declares the whole file's length and
 SHA-256 at creation; the server keeps a running SHA-256 in memory and, after a
@@ -58,6 +59,23 @@ DEFAULT_MAX_BYTES = 2 * 1024**3
 MAX_BYTES_ENV = "EXOMEM_UPLOAD_SESSION_MAX_BYTES"
 #: Sessions one credential binding may keep open at once.
 MAX_LIVE_PER_BINDING = 4
+#: The route a session is created at; a session lives at `<SESSIONS_PATH>/<id>`.
+SESSIONS_PATH = "/upload/sessions"
+#: tus 1.0 (tus.io resumable-upload protocol): the version every request names.
+TUS_VERSION = "1.0.0"
+#: The session secret travels only in this header, never in a URL.
+SECRET_HEADER = "Exomem-Upload-Secret"
+#: The one upload lane a session preserves into.
+LANE = "evidence"
+#: `Upload-Metadata` keys that creation requires; `description`, `raw_protection` and
+#: `archive` are optional.
+# nosemgrep: ep-word-set -- the creation route fixes these metadata keys.
+REQUIRED_METADATA = ("filename", "sha256", "scope", "category")
+#: The shell recipe an upload handoff links to rather than carries.
+RECIPE_URL = (
+    "https://github.com/Artexis10/exomem/blob/main/docs/deployment.md"
+    "#resumable-uploads-from-a-shell"
+)
 
 RECEIVING = "receiving"
 VERIFYING = "verifying"
@@ -116,6 +134,23 @@ def max_bytes_from_env() -> int:
         return int(raw)
     log.warning("%s is not a positive integer; using %d", MAX_BYTES_ENV, DEFAULT_MAX_BYTES)
     return DEFAULT_MAX_BYTES
+
+
+def handoff(base_url: str) -> dict[str, Any]:
+    """What an upload handoff tells a client about sessions under `base_url`.
+
+    Only what a client needs to open and fill a session; the recipe stays in
+    the docs, because every field here costs every caller's result.
+    """
+    return {
+        "create_url": f"{base_url}{SESSIONS_PATH}",
+        "protocol": f"tus {TUS_VERSION}",
+        "resend_header": SECRET_HEADER,
+        "max_part_bytes": MAX_PATCH_BYTES,
+        "max_bytes": max_bytes_from_env(),
+        "metadata": list(REQUIRED_METADATA),
+        "recipe": RECIPE_URL,
+    }
 
 
 @dataclass

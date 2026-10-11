@@ -33,12 +33,10 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 #: Multipart framing and form fields that ride with the file part.
 _FORM_OVERHEAD_BYTES = 1024 * 1024
-#: tus 1.0 (tus.io resumable-upload protocol): the version, and the extensions served.
-_TUS_VERSION = "1.0.0"
+#: tus 1.0 (tus.io resumable-upload protocol): the extensions served. `upload_sessions`
+#: holds the version, the secret header and the route, which an upload handoff advertises.
 _TUS_EXTENSIONS = "creation,expiration,termination"
 _TUS_PATCH_CONTENT_TYPE = "application/offset+octet-stream"
-#: The session secret travels only in this header, never in a URL.
-_SESSION_SECRET_HEADER = "Exomem-Upload-Secret"
 _SESSION_WRITE_BYTES = 1024 * 1024
 #: Digits a byte count or offset header may carry: a 64-bit count has at most 19, and
 #: every limit here is far below one. Longer strings never reach `int()`, which caps at 4300.
@@ -519,7 +517,7 @@ def register_transfer_routes(
                     },
                     status_code=400,
                 )
-            from .client_artifacts import MAX_FILE_BYTES
+            from .client_artifacts import fetch_budget
 
             try:
                 held = await run_in_threadpool(
@@ -530,12 +528,12 @@ def register_transfer_routes(
                     filename=filename,
                     content_type=getattr(upload, "content_type", None),
                     # A hold is only worth what its redeeming command can fetch.
-                    max_bytes=min(max_bytes, MAX_FILE_BYTES),
+                    max_bytes=min(max_bytes, fetch_budget().max_file_bytes),
                 )
             except held_uploads.HeldUploadError as exc:
                 return JSONResponse(
                     {"code": exc.code, "reason": exc.reason},
-                    status_code=413 if exc.code == "TOO_LARGE" else 400,
+                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400),
                 )
             return JSONResponse(held, status_code=201)
         from . import archive_members
@@ -657,7 +655,9 @@ def register_transfer_routes(
     def _tus_headers(
         session: upload_sessions.Session | None = None, **extra: str
     ) -> dict[str, str]:
-        headers = {"Tus-Resumable": _TUS_VERSION, "Cache-Control": "no-store", **extra}
+        headers = {
+            "Tus-Resumable": upload_sessions.TUS_VERSION, "Cache-Control": "no-store", **extra
+        }
         if session is not None:
             headers["Upload-Expires"] = formatdate(session.expires, usegmt=True)
         return headers
@@ -672,7 +672,7 @@ def register_transfer_routes(
             status_code=204,
             headers=_tus_headers(
                 **{
-                    "Tus-Version": _TUS_VERSION,
+                    "Tus-Version": upload_sessions.TUS_VERSION,
                     "Tus-Extension": _TUS_EXTENSIONS,
                     "Tus-Max-Size": str(session_max_bytes),
                 }
@@ -680,13 +680,13 @@ def register_transfer_routes(
         )
 
     def _tus_version_refused(request: Request) -> JSONResponse | None:
-        if request.headers.get("tus-resumable") == _TUS_VERSION:
+        if request.headers.get("tus-resumable") == upload_sessions.TUS_VERSION:
             return None
         return _tus_refusal(
             "TUS_VERSION_UNSUPPORTED",
-            f"`Tus-Resumable: {_TUS_VERSION}` is required",
+            f"`Tus-Resumable: {upload_sessions.TUS_VERSION}` is required",
             412,
-            **{"Tus-Version": _TUS_VERSION},
+            **{"Tus-Version": upload_sessions.TUS_VERSION},
         )
 
     def _tus_metadata(header: str) -> dict[str, str] | None:
@@ -706,7 +706,7 @@ def register_transfer_routes(
 
     commit = functools.partial(commit_session, vault_root)
 
-    @mcp_app.custom_route("/upload/sessions", methods=["POST", "OPTIONS"])
+    @mcp_app.custom_route(upload_sessions.SESSIONS_PATH, methods=["POST", "OPTIONS"])
     async def _create_upload_session(request: Request) -> Response:
         if request.method == "OPTIONS":
             return _tus_options()
@@ -721,6 +721,14 @@ def register_transfer_routes(
         if declared is None or metadata is None:
             return _tus_refusal(
                 "INVALID_UPLOAD", "`Upload-Length` and a well-formed `Upload-Metadata` are required", 400
+            )
+        # The keys an upload handoff advertises: one list, so the two never disagree.
+        missing = [
+            key for key in upload_sessions.REQUIRED_METADATA if not metadata.get(key, "").strip()
+        ]
+        if missing:
+            return _tus_refusal(
+                "INVALID_UPLOAD", f"`Upload-Metadata` lacks {', '.join(missing)}", 400
             )
         preserve_module = _preserve_module()
         raw_protection, members, flag_refusal = _upload_flags(
@@ -739,10 +747,9 @@ def register_transfer_routes(
             for refusal in (
                 preserve_module.destination_segment_refusal(target["scope"], field="scope"),
                 preserve_module.destination_segment_refusal(target["category"], field="category"),
-                None if target["filename"] else "`filename` is required",
                 flag_refusal,
                 None
-                if _upload_lane(request) == "evidence"
+                if _upload_lane(request) == upload_sessions.LANE
                 else "an upload session preserves Evidence",
             )
             if refusal
@@ -784,14 +791,15 @@ def register_transfer_routes(
             headers=_tus_headers(
                 session,
                 **{
-                    "Location": f"/upload/sessions/{session.id}",
-                    _SESSION_SECRET_HEADER: secret,
+                    "Location": f"{upload_sessions.SESSIONS_PATH}/{session.id}",
+                    upload_sessions.SECRET_HEADER: secret,
                 },
             ),
         )
 
     @mcp_app.custom_route(
-        "/upload/sessions/{session_id}", methods=["HEAD", "PATCH", "DELETE", "GET", "OPTIONS"]
+        f"{upload_sessions.SESSIONS_PATH}/{{session_id}}",
+        methods=["HEAD", "PATCH", "DELETE", "GET", "OPTIONS"],
     )
     async def _upload_session(request: Request) -> Response:
         if request.method == "OPTIONS":
@@ -803,7 +811,7 @@ def register_transfer_routes(
                 upload_sessions.open_session,
                 vault_root,
                 request.path_params["session_id"],
-                request.headers.get(_SESSION_SECRET_HEADER),
+                request.headers.get(upload_sessions.SECRET_HEADER),
             )
         except upload_sessions.SessionError as exc:
             return _tus_refusal(exc.code, exc.reason, exc.status)

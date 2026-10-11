@@ -88,6 +88,10 @@ class Layout:
     collection_id: str
     generation: int
     fields: tuple[str, ...]
+    #: The relations a read joins: the store's ``items`` and current table by default, or a
+    #: derived collection's one rows table for both (``derived_rows``). Reads only; DDL never uses them.
+    items: str = "items"
+    current: str = ""
 
     def __post_init__(self):
         if str(UUID(self.collection_id)) != self.collection_id:
@@ -104,6 +108,10 @@ class Layout:
     @property
     def current_table(self) -> str:
         return f"tc_{self._suffix}"
+
+    @property
+    def current_relation(self) -> str:
+        return self.current or self.current_table
 
     @property
     def version_table(self) -> str:
@@ -332,8 +340,8 @@ def _current(conn, layout: Layout, where: str, parameters) -> list[tuple[int, st
     columns = ",".join(f"t.{column}" for column in (*layout.value_columns, "r"))
     rows = []
     for row_id, key, version, current, *values in conn.execute(
-        f"SELECT i.row_id,i.item_key,i.row_version,t.row_version,{columns} FROM items i "  # noqa: S608 - internal
-        f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id WHERE i.collection_id=? AND {where}",
+        f"SELECT i.row_id,i.item_key,i.row_version,t.row_version,{columns} FROM {layout.items} i "  # noqa: S608
+        f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id WHERE i.collection_id=? AND {where}",
         (layout.collection_id, *parameters),
     ).fetchall():
         if version != current:
@@ -363,8 +371,8 @@ def selected_current_values(conn, layout: Layout, row_id: int, selection, *, max
     if residual:
         columns.append("t.r")
     values = conn.execute(
-        f"SELECT i.row_version,t.row_version{',' if columns else ''}{','.join(columns)} FROM items i "
-        f"LEFT JOIN {layout.current_table} t ON t.row_id=i.row_id WHERE i.row_id=? AND i.collection_id=?",
+        f"SELECT i.row_version,t.row_version{',' if columns else ''}{','.join(columns)} FROM {layout.items} i "
+        f"LEFT JOIN {layout.current_relation} t ON t.row_id=i.row_id WHERE i.row_id=? AND i.collection_id=?",
         (row_id, layout.collection_id),
     ).fetchone()
     if values is None or values[0] != values[1]:
