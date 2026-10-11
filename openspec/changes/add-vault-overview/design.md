@@ -2,7 +2,7 @@
 
 ## Context
 
-`audit` is KB-lint by contract; `doctor` is install preflight; `list_directory`
+`audit` is KB-lint by contract; `doctor` is install preflight; `browse_memory(mode="list")`
 returns raw entry lists. None answers "what is the shape of this vault?" cheaply,
 so agents fall back to reading every file. The guided-setup wizard (sibling change
 `add-setup-wizard`) additionally needs to scan a vault *before* `init` runs — and
@@ -13,8 +13,8 @@ so the scanning core cannot go through the usual vault resolution.
 
 **Goals:**
 - One bounded, deterministic, read-only structure report per vault subtree.
-- Reachable from all three doors via the registry; callable pre-init as a plain
-  function.
+- Reachable from MCP, CLI and REST through `browse_memory(mode="overview")`;
+  callable pre-init as a plain function.
 - Fast and dependency-free: one `os.walk`, `stat()` for non-markdown, capped
   content reads for markdown only.
 
@@ -26,17 +26,18 @@ so the scanning core cannot go through the usual vault resolution.
 
 ## Decisions
 
-1. **New Tier 1 registry op, not an `audit` mode or `doctor` check.**
+1. **Tier 1 structural operation through the current public browse door.**
    `audit`'s spec, docstring, and tests all define it as KB-only lint with
    proposals; overloading it muddies both contracts. `doctor` is CLI-only install
    preflight and not MCP-reachable — but MCP reachability is the point (agents are
-   the ones bulk-reading). Tier 1 (not 2) so `EXOMEM_DISABLE_TIER2` cannot hide
-   the very tool that prevents full-vault scans; precedent: `find scope="vault"`
-   is Tier 1 and already walks the whole vault.
+   the ones bulk-reading). The current public `browse_memory(mode="overview")` door delegates to
+   `op_overview` on MCP, CLI and REST. Tier 1 keeps `EXOMEM_DISABLE_TIER2` from hiding
+   the tool that prevents bulk file reads. The legacy `overview` command is an
+   internal operation name, not an additional promised public tool.
 
 2. **Core/leaf split: `overview.overview(root, ...)` takes a raw `Path` and does
-   not require an initialized KB.** The leaf `op_overview(vault_root, path="",
-   ...)` resolves the subtree and delegates. The wizard imports the core directly.
+   not require an initialized KB.** The shared public browse leaf delegates to `op_overview(vault_root, path="",
+   ...)`, which resolves the subtree and delegates to the core. The wizard imports the core directly.
    Alternative (leaf-only) rejected: it would force the wizard through
    `resolve_vault()`, which refuses un-init'ed roots.
 

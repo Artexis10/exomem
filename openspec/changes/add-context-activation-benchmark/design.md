@@ -275,3 +275,14 @@ Additive: corrected fixtures, real product-path CI, scorer, variants and a runbo
   claim standing later (expected to sit pending).
 - The exact wording of C3 that avoids contaminating the Planning collection with the
   benchmark's own vocabulary.
+
+## Inherited single-product full-profile proof
+
+Task 4.9 retains the unfinished Exomem proof from semantic-language task 11.4.
+Reuse existing Exomem probe seams for nonlexical semantic retrieval, adversarial hybrid retrieval and explanation isolation.
+Exercise public PDF, image, audio and video preservation, search and read with a working native stack in quiesced disposable state.
+Freeze expectations before execution and bind corpus, configuration, source, model, backend, device, runtime, raw-envelope and mutation identities.
+Report correctness, lifecycle integrity, explanation truth, performance and extensions separately; missing, failed and unexecuted states stay visible.
+The current `graph_value_benchmark` direct command couples both contenders and is not a ready single-product instrument.
+Contender parity, competitor environments, paired bands, dominance and local-core advantage are retired.
+This transfer claims no acceptance and changes no runner, corpus, gold, scorer or threshold.
