@@ -53,6 +53,8 @@ def pytest_runtest_call(item):
         return
     original_start, original_stop = tracemalloc.start, tracemalloc.stop
     original_main, original_threads = sys.getprofile(), threading.getprofile()
+    # The dispatch defines this two-state diagnostic switch; it changes no product setting.
+    trace_enabled = os.environ.get("PROBE_TRACE", "1") == "1"
     records = []
     last_peak = 0
 
@@ -71,13 +73,16 @@ def pytest_runtest_call(item):
 
     def start(*args, **kwargs):
         print("CI_TRACE_BEFORE", json.dumps({"tracing": tracemalloc.is_tracing(),
+              "profile_enabled": trace_enabled,
               "python": sys.version.split()[0], "threads": [t.name for t in threading.enumerate()]}))
         original_start(*args, **kwargs)
-        threading.setprofile_all_threads(profile)
+        if trace_enabled:
+            threading.setprofile_all_threads(profile)
 
     def restore_profiles():
-        threading.setprofile_all_threads(original_threads)
-        sys.setprofile(original_main)
+        if trace_enabled:
+            threading.setprofile_all_threads(original_threads)
+            sys.setprofile(original_main)
 
     def stop():
         restore_profiles()

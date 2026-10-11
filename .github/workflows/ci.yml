@@ -8,6 +8,10 @@ on:
       source_ref:
         description: Exact source commit from the original failure
         required: true
+      trace_allocations:
+        description: Register allocation profiling during the target test
+        type: boolean
+        default: true
 defaults:
   run:
     working-directory: reproduction
@@ -58,7 +62,7 @@ jobs:
           JUNIT_ARTIFACT_ID: ${{ inputs.junit_artifact_id }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$JUNIT_ARTIFACT_ID/zip" > "$RUNNER_TEMP/original-junit.zip"
-      - name: Run the exact CI prefix with allocation tracing
+      - name: Run the exact CI prefix with the selected profiling mode
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
@@ -67,6 +71,7 @@ jobs:
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
           PYTHONPATH: ../probe/scripts:src:tests
           PROBE_JUNIT_ZIP: ${{ runner.temp }}/original-junit.zip
+          PROBE_TRACE: ${{ inputs.trace_allocations && '1' || '0' }}
           ANTHROPIC_API_KEY: ""
           ANTHROPIC_AUTH_TOKEN: ""
           OPENAI_API_KEY: ""
