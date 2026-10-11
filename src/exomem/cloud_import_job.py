@@ -186,6 +186,7 @@ def run_import(
                 if process.poll() not in (None, 0):
                     raise ArchiveRefused("ARCHIVE_UNDECRYPTABLE", "decrypt") from None
                 raise
+            # The stopped-cell Job deadline bounds the feed and decryptor before any vault write.
             worker.join()
             if process.wait() != 0:
                 raise ArchiveRefused("ARCHIVE_UNDECRYPTABLE", "decrypt")
@@ -236,6 +237,7 @@ def run_import(
         finally:
             if process.poll() is None:
                 process.kill()
+            # Reap the Job child before deleting its private staging directory.
             process.wait()
             worker.join(timeout=35)
             shutil.rmtree(staging, ignore_errors=True)

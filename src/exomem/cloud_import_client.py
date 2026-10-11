@@ -54,6 +54,7 @@ def _ciphertext(source: Path, target: Path, recipient: str, envelope) -> None:
                                 if path.is_symlink() or not (path.is_file() or path.is_dir()):
                                     raise ValueError("source contains a special entry")
                                 archive.add(path, arcname=path.relative_to(source).as_posix(), recursive=False)
+                # This CLI encryption process owns the archive lifetime, outside request serving.
                 if process.wait() != 0:
                     raise RuntimeError("encryption failed")
                 output.flush()
@@ -61,6 +62,7 @@ def _ciphertext(source: Path, target: Path, recipient: str, envelope) -> None:
             finally:
                 if process.poll() is None:
                     process.kill()
+                    # Reap the killed CLI child before removing its private pending output.
                     process.wait()
         os.replace(pending, target)
     finally:
