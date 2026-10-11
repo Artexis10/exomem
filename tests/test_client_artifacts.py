@@ -1160,11 +1160,10 @@ def test_destination_segments_are_refused_never_normalised(
 ) -> None:
     """A malformed destination is refused before a single byte moves.
 
-    The live vault holds one logical case split across
-    `Evidence/work/studio-equipment-orders/` and
-    `Evidence/workstudio-equipment-orders/` because the separator was deleted
-    instead of refused. Silent normalisation forks the tree; a named refusal
-    costs the caller one corrected call.
+    A deleted separator splits one logical case across two trees: a scope
+    `work/orders` would land in `Evidence/workorders/` beside
+    `Evidence/work/orders/`. Silent normalisation forks the tree; a named
+    refusal costs the caller one corrected call.
     """
     from exomem import client_artifacts
     from exomem.cli_ops import OpError

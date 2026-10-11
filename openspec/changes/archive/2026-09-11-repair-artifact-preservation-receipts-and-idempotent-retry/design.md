@@ -1,5 +1,7 @@
 ## Context
 
+> Case names in this record are invented stand-ins with the same canonical JSON lengths as the originals; the real names are private.
+
 The serving host's call ledger (`~/.local/share/exomem/service/logs/ledger.jsonl` and `personal-service/logs/ledger.jsonl`) is the connector's server-side truth: the Cloudflare tunnel on this host fronts `exomem.substratesystems.io`, and ChatGPT rows arrive as `openai-mcp/1.0.0`. Read on 2026-09-10, it shows:
 
 - Six `preserve_artifacts` calls ended `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` (12 to 39 s each). Every one carries post-commit spans `index.upsert_after_write` (1 to 15 s) and, from 2026-09-09, `graph.refresh_paths` and `derived.canonical_commit`. The canonical bytes committed; the derived acknowledgement did not.
