@@ -23,6 +23,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 from typing import Any, NamedTuple
 
 from . import working_set_anaphora
@@ -223,9 +224,10 @@ def shipped_vocabulary() -> ReferentialVocabulary:
 #: Worded contact: the turn's OWN WORDS reached the anchor's own names, terms
 #: or claims. Two of these together (or one plus any other kind besides
 #: `usage_prior`) is independent evidence that the turn is about the anchor —
-#: words and a ranking engine agreeing is two facts. `rare_term` is the weak
-#: member: a single shared term rare enough to be a lead, never a decision by
-#: itself (see the three-clause rule in `_status_for`).
+#: words and a ranking engine agreeing is two facts, unless the engine agreed
+#: on the same one word (`candidates_for`'s `retrieval` grant). `rare_term` is
+#: the weak member: a single shared term rare enough to be a lead, never a
+#: decision by itself (see the three-clause rule in `_status_for`).
 WORDED_CONTACT_KINDS: frozenset[str] = frozenset(
     {"exact_alias", "lexical_overlap", "claims_match", "rare_term"}
 )
@@ -1167,6 +1169,18 @@ def _is_cased(term: str) -> bool:
     return any(character.upper() != character.lower() for character in term)
 
 
+def _written_lower_case(terms: frozenset[str], analysis: TurnAnalysis) -> bool:
+    """Did a turn whose casing says something write every one of `terms`, in
+    a cased script, without a capital anywhere? Such a turn wrote them as
+    ordinary words (`CandidateFacts.name_lower_case`)."""
+    return bool(
+        terms
+        and analysis.cased_turn
+        and all(_is_cased(term) for term in terms)
+        and not terms & analysis.capitalised_anywhere
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Role-cue evidence (make-activation-conventions-vault-owned, decision 1)
 # --------------------------------------------------------------------------- #
@@ -1225,11 +1239,20 @@ class RowLexicon(NamedTuple):
     names: frozenset[str]
     name_terms: frozenset[str]
     terms: frozenset[str]
+    #: The name terms that are a whole registered name on their own: a title,
+    #: an alias or the page's file name that is one word. A turn sharing one
+    #: of these said a name of the anchor; any other shared name term is only
+    #: part of a longer name.
+    whole_name_terms: frozenset[str] = frozenset()
 
 
 def row_lexicon(row: AnchorFacts) -> RowLexicon:
     """`row`'s normalised names, the folded terms of its title and aliases,
-    and the folded terms of its whole vocabulary."""
+    the folded terms of its whole vocabulary, and its one-word names.
+
+    The file name counts as a registered name because the vault resolves a
+    link by it (`[[Name]]` reaches `Name.md` whatever its title says)."""
+    file_name = PurePosixPath(row.path).stem if row.path else ""
     return RowLexicon(
         names=frozenset({normalize(row.title), *row.aliases} - {""}),
         name_terms=frozenset(
@@ -1239,6 +1262,12 @@ def row_lexicon(row: AnchorFacts) -> RowLexicon:
         ),
         terms=frozenset(
             folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+        ),
+        whole_name_terms=frozenset(
+            folded
+            for name in (row.title, *row.aliases, file_name)
+            if len(words := tokens_of(name)) == 1
+            and (folded := _fold_lexical_term(words[0])) is not None
         ),
     )
 
@@ -1417,6 +1446,16 @@ def candidates_for(
         for term in frozenset(analysis.tokens) - stopwords
         if (folded := _fold_lexical_term(term)) is not None
     )
+    # The words inside the turn's hyphenated tokens ("kitchen-renovation").
+    # `tokens_of` joins them into one token, so the comparison below never
+    # sees them; `ordinary_name_word` counts them as name words the turn wrote.
+    hyphen_parts = frozenset(
+        folded
+        for token in analysis.tokens
+        if "-" in token
+        for part in token.split("-")
+        if part and part not in stopwords and (folded := _fold_lexical_term(part)) is not None
+    )
     phrases = _turn_phrases(analysis, stopwords)
     cue_categories = eligible_categories
     claims_winner = _claims_winner(analysis, routing_targets)
@@ -1531,6 +1570,9 @@ def candidates_for(
         shared_broad = turn_terms_folded & row_terms_folded
         shared_name = turn_terms_folded & name_terms_folded
         name_contact: frozenset[str] = frozenset()
+        # Does `rare_term` rest on one word of a longer name, written as an
+        # ordinary word? The `retrieval` grant below says why that matters.
+        ordinary_name_word = False
         if _lexical_overlap(shared_broad, shared_name, min_terms):
             evidence.add("lexical_overlap")
             name_contact = shared_name
@@ -1565,6 +1607,12 @@ def candidates_for(
                 if not consumed:
                     evidence.add("rare_term")
                     name_contact = shared_name
+                    ordinary_name_word = (
+                        not matched_phrases
+                        and not shared_name & lexicon.whole_name_terms
+                        and not (hyphen_parts - shared_name) & name_terms_folded
+                        and _written_lower_case(shared_name, analysis)
+                    )
         # An unspaced script writes a name inside a run of words, never as a
         # token of its own: containment is its `rare_term` (design §6.3),
         # never `exact_alias`, and like any `rare_term` it needs a second,
@@ -1584,7 +1632,20 @@ def candidates_for(
         # pages, so a neighbour hit is not the turn reaching the anchor —
         # it is corroborated instead, and only from a WORDED partner (see
         # `add_graph_corroboration`).
-        if row.path and row.path in retrieval_paths:
+        #
+        # Nor when `rare_term` rests on one word of a longer name that the
+        # turn wrote as an ordinary word (`ordinary_name_word`). The page
+        # carries its own title, so its recall hit counts that same word as
+        # one of the two content words the lexical lane requires, and any
+        # other turn word on the page completes it. That hit is `rare_term`
+        # again, not the independent second kind the third clause of
+        # `_status_for_evidence` needs, and a long turn shares some word with
+        # almost any page. The anchor stays a `partial` lead that an
+        # independent kind can still resolve. A whole name (title, alias,
+        # file name) keeps its hit, and so does a word the turn capitalises:
+        # casing marks it as a name, as `_spoken_as_name` reads it. A turn
+        # with no casing signal cannot tell the two apart and keeps the hit.
+        if row.path and row.path in retrieval_paths and not ordinary_name_word:
             evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
         # anchor with no contact kind is not a candidate at all — unless the
@@ -1630,12 +1691,7 @@ def candidates_for(
                 name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
-                name_lower_case=bool(
-                    name_contact
-                    and analysis.cased_turn
-                    and all(_is_cased(term) for term in name_contact)
-                    and not name_contact & analysis.capitalised_anywhere
-                ),
+                name_lower_case=_written_lower_case(name_contact, analysis),
             )
         )
     out.sort(key=_candidate_order)

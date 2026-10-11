@@ -150,8 +150,16 @@ routing.
 - **THEN** it is `partial`
 
 #### Scenario: A rare word and the anchor's own page in recall resolve
-- **WHEN** an anchor carries `rare_term` and its own page is among the recall hits
+- **WHEN** an anchor carries `rare_term`, its own page is among the recall hits, and
+  the word is a name of the anchor by itself (its title, an alias or its file name) or
+  the turn does not write it as an ordinary word
 - **THEN** it resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: One word of a longer name written as an ordinary word stays a lead
+- **WHEN** a turn whose casing carries a signal writes in lower case one rare word that
+  is only part of an anchor's names, and the anchor's own page is among the recall hits
+- **THEN** the anchor carries `rare_term` without `retrieval` and stays `partial`,
+  because that recall hit counts the same word
 
 #### Scenario: One common word is no contact
 - **WHEN** a turn shares exactly one term with an anchor and that term names more than
