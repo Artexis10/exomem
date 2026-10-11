@@ -145,7 +145,7 @@ def test_planning_views_are_the_six_scaffolded_horizons(tmp_path: Path) -> None:
     }
     text = _planning_manifest_text(fields)
     scaffolded = planning._with_default_scaffold(  # noqa: SLF001
-        text, _planning_manifest(tmp_path, text)
+        text, _planning_manifest(tmp_path, text), vault_root=None
     )
     expected = [
         {"name": name, "filters": _plain(view["query"]["filters"])}
@@ -211,20 +211,20 @@ def test_the_hierarchy_validator_accepts_a_typed_tree_and_refuses_a_cycle(
         initiative: {**base, "kind": "initiative", "parent": _plan_ref(outcome)},
         work: {**base, "kind": "work-item", "parent": _plan_ref(initiative)},
     }
-    validator.validate(manifest, tree)
+    validator.validate(manifest, tree, write=None)
 
     cyclic = {
         initiative: {**base, "kind": "initiative", "parent": _plan_ref(work)},
         work: {**base, "kind": "work-item", "parent": _plan_ref(initiative)},
     }
     with pytest.raises(collections.CollectionError, match="INVALID_PLAN_RELATION"):
-        validator.validate(manifest, cyclic)
+        validator.validate(manifest, cyclic, write=None)
     wrong_parent = {
         outcome: {**base, "kind": "outcome"},
         work: {**base, "kind": "work-item", "parent": _plan_ref(outcome)},
     }
     with pytest.raises(collections.CollectionError, match="INVALID_PLAN_RELATION"):
-        validator.validate(manifest, wrong_parent)
+        validator.validate(manifest, wrong_parent, write=None)
 
 
 @pytest.mark.parametrize(

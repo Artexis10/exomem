@@ -16,7 +16,15 @@ from functools import cached_property
 from numbers import Real
 from pathlib import Path, PurePosixPath
 
-from .. import bm25, find_corpus, find_policy, fusion, lifecycle_statuses, ranking_config
+from .. import (
+    bm25,
+    find_corpus,
+    find_policy,
+    fusion,
+    lifecycle_statuses,
+    note_types,
+    ranking_config,
+)
 from ..find_types import GraphProvenance, Hit
 from ..kbdir import kb_dirname
 from . import (
@@ -1167,16 +1175,18 @@ def _projected_rank_multiplier(
     prefer_compiled: bool,
     prefer_active: bool,
     status_basis: lifecycle_statuses.Basis,
+    type_basis: note_types.Basis,
 ) -> float:
     """Apply public type/status rank policy using projected fields only.
 
-    The projected status is a raw label; the caller's basis classifies it, as
-    unprojected find does, so a vault-defined superseded label is demoted too.
+    The projected status and type are raw values; the caller's bases classify
+    them, as unprojected find does, so a vault-defined superseded label is
+    demoted and a vault-defined compiled type is boosted too.
     """
 
     multiplier = 1.0
     if prefer_compiled and not fields.get("media_type"):
-        multiplier *= find_policy.type_multiplier(fields.get("type"), config)
+        multiplier *= find_policy.type_multiplier(fields.get("type"), config, type_basis)
     if prefer_active:
         multiplier *= find_policy.status_multiplier(
             status_basis.classify(fields.get("status")).require(), config
@@ -1831,6 +1841,7 @@ def _find_projected_hits_pinned(
     intent_weights = rank_config.intent_weights(find_policy.classify_intent(query))
     weights_by_lane = dict(zip(ranking_config.LANE_ORDER, intent_weights, strict=True))
     status_basis = lifecycle_statuses.Basis(vault_root)
+    type_basis = note_types.Basis(vault_root)
     fused = fusion.reciprocal_rank_fusion_weighted(
         rankings,
         [weights_by_lane[lane] for lane in active_lanes],
@@ -1846,6 +1857,7 @@ def _find_projected_hits_pinned(
                 prefer_compiled=prefer_compiled,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
+                type_basis=type_basis,
             ),
         )
         for identity, score in fused
@@ -1916,6 +1928,7 @@ def _find_projected_hits_pinned(
                         prefer_compiled=prefer_compiled,
                         prefer_active=prefer_active,
                         status_basis=status_basis,
+                        type_basis=type_basis,
                     )
                 )
             rerank_raw_scores.update(pending_raw)

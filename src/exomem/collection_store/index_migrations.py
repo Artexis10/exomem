@@ -29,6 +29,10 @@ class AccountedWriter:
         self.connection = connection
         self.execute = execute
 
+    def executemany(self, statement, rows):
+        # The writer's ``_execute`` accounts a many-row statement as one, as sqlite3's executemany runs it.
+        return self.execute(statement, rows, many=True)
+
     @property
     def in_transaction(self):
         return self.connection.in_transaction
@@ -269,6 +273,7 @@ def backfill_due(conn) -> tuple[tuple[str, bool, bool], ...]:
 
     One read over the collections, for the serving store thread. A collection
     with no projection mapping in any state is due: ``begin_missing`` starts it.
+    A derived collection's rollups build in its rebuild (``derived_rows``) instead.
     """
     return tuple((cid, bool(projection), bool(rollup)) for cid, projection, rollup in conn.execute(
         "SELECT * FROM (SELECT c.collection_id,"
@@ -276,7 +281,7 @@ def backfill_due(conn) -> tuple[tuple[str, bool, bool], ...]:
         "  AND m.state='building') OR NOT EXISTS(SELECT 1 FROM query_projection_mappings m"
         "  WHERE m.collection_id=c.collection_id) AS projection,"
         " EXISTS(SELECT 1 FROM rollup_definitions r WHERE r.collection_id=c.collection_id"
-        "  AND r.state='building') AS rollup"
+        "  AND r.state='building') AND c.derived=0 AS rollup"
         " FROM collections c) WHERE projection OR rollup ORDER BY collection_id"))
 
 

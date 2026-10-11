@@ -161,8 +161,12 @@ class LocalRuntimeActivation:
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
         self.graph_cleanup_attempted = False
+        # Set when this process builds an HTTP app, the only thing that serves
+        # `/upload/sessions`; a stdio server never resumes their commits.
+        self.serves_upload_sessions = False
         if not deferred:
             self._bind_graph_rebuild_lifetime()
+            self._commit_recall_reembed()
 
     def _bind_graph_rebuild_lifetime(self) -> None:
         from . import graph_sync
@@ -179,6 +183,7 @@ class LocalRuntimeActivation:
             was_deferred = self._deferred
             if was_deferred:
                 self._bind_graph_rebuild_lifetime()
+                self._commit_recall_reembed()
             self._deferred = False
         if was_deferred and warmup.warmup_enabled():
             readiness.manage_runtime()
@@ -263,6 +268,7 @@ class LocalRuntimeActivation:
         starters = (
             ("graph drain", self._start_graph_drain),
             ("media", self._start_media_worker),
+            ("upload sessions", self._resume_upload_sessions),
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
             # Last: upkeep is the least important background work and must
@@ -359,7 +365,10 @@ class LocalRuntimeActivation:
                 if label == "semantic drain":
                     semantic_failure = error
                 log.warning("%s runtime shutdown failed", label, exc_info=True)
-        if self.dreamer is not None:
+        from . import dreamer
+
+        # Hosting covers a worker the setting started after this activation.
+        if self.dreamer is not None or dreamer.hosting():
             try:
                 _stop_dreamer()
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
@@ -396,6 +405,14 @@ class LocalRuntimeActivation:
     def _start_graph_drain(self, vault_root: Path) -> None:
         self.graph_drain = _start_graph_drain(vault_root)
 
+    def _resume_upload_sessions(self, vault_root: Path) -> None:
+        """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
+        if not self.serves_upload_sessions:
+            return
+        from .server_transfer import resume_upload_sessions
+
+        resume_upload_sessions(vault_root)
+
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
 
@@ -414,6 +431,13 @@ class LocalRuntimeActivation:
         )
         thread.start()
         self.vocabulary_recovery = thread
+
+    def _commit_recall_reembed(self) -> None:
+        """The re-embed job starts last of the workers; until it plans, recall
+        on a vault no build has covered is marked warming."""
+        from . import recall_migration
+
+        recall_migration.will_start(self.vault_root)
 
     def _start_recall_reembed(self, vault_root: Path) -> None:
         """Bring the recall sidecar into the recall encoder's space, off-request.

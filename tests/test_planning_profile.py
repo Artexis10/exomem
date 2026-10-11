@@ -145,7 +145,7 @@ def test_planning_capture_defaults_are_explicit_and_areas_have_no_delivery_state
     from exomem.planning import normalize_item
     from exomem.structured_collections import CollectionError
 
-    assert normalize_item({"title": "Keep this for later"}) == {
+    assert normalize_item({"title": "Keep this for later"}, vault_root=None) == {
         "title": "Keep this for later",
         "kind": "work-item",
         "status": "candidate",
@@ -156,7 +156,7 @@ def test_planning_capture_defaults_are_explicit_and_areas_have_no_delivery_state
         "health": "unknown",
     }
     with pytest.raises(CollectionError, match="^INVALID_PLAN:"):
-        normalize_item({"title": "Area", "kind": "area", "status": "active"})
+        normalize_item({"title": "Area", "kind": "area", "status": "active"}, vault_root=None)
 
 
 def test_markdown_item_renderer_uses_planning_system_fields(tmp_path: Path) -> None:

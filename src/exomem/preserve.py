@@ -31,6 +31,7 @@ import logging
 import mimetypes
 import os
 import re
+import stat
 import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -48,6 +49,7 @@ from .vault import (
     FrontmatterError,
     PlannedWrite,
     PreparedBinaryContent,
+    _is_reparse,
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
@@ -231,6 +233,24 @@ class DuplicateArtifact:
     sidecar_path: str  # vault-relative path of its page
     ref: str           # the page's stable ref, always resolvable
 
+    def receipt(self, *, size: int | None, content_type: str | None) -> dict:
+        """The `already_stored` outcome naming this artifact, with the stored outcome's fields."""
+        return {
+            "path": self.path,
+            "stored_path": self.path,
+            "sidecar_path": self.sidecar_path,
+            "ref": self.ref,
+            "state": "already_stored",
+            "outcome": "stored",
+            "duplicate_of": {"path": self.path, "ref": self.ref},
+            "warnings": [],
+            "size": size,
+            "hash": self.hash,
+            "hash_algorithm": "sha256",
+            "media_id": f"sha256:{self.hash}",
+            "content_type": content_type,
+        }
+
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
@@ -320,7 +340,8 @@ def destination_duplicate_index(
     Only wanted hashes, when supplied, reach protected-original byte verification.
     """
     index: dict[str, DuplicateArtifact] = {}
-    folder = kb_root(vault_root) / "Evidence" / scope / category
+    folder = evidence_folder(vault_root, scope, category)
+    admit_destination(vault_root, folder, directory=True)
     try:
         sidecars = sorted(folder.glob("*.md"))
     except OSError:
@@ -373,6 +394,129 @@ def validate_raw_capture(
     return protected
 
 
+_EMPTY_FILENAME = "filename is empty or only invalid characters"
+
+
+def _artifact_name(
+    vault_root: Path, scope: str, category: str, filename: str | None, *, raw_protection: bool
+) -> tuple[str, bool]:
+    """The name `filename` is stored under in `Evidence/<scope>/<category>/`, and whether it is protected.
+
+    Empty when nothing is left of the name after sanitizing.
+    """
+    from .governance import raw_protection as raw_guard
+
+    safe = _sanitize_filename(filename)
+    protected = validate_raw_capture(
+        safe, destination=str(evidence_folder(vault_root, scope, category).relative_to(vault_root)),
+        raw_protection=raw_protection,
+    )
+    if protected and safe and not raw_guard.marked(safe):
+        safe = raw_guard.PREFIX + safe
+    return safe, protected
+
+
+def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
+    """The page beside an artifact: `<name>.md`, or `<stem>-notes.md` for an unprotected `.md`."""
+    if artifact.name.lower().endswith(".md") and not protected:
+        return artifact.with_name(f"{artifact.name[:-3]}-notes.md")
+    return artifact.with_name(f"{artifact.name}.md")
+
+
+def stored_artifact(
+    vault_root: Path, *, scope: str, category: str, filename: str, sha256: str, raw_protection: bool = False
+) -> DuplicateArtifact | None:
+    """The artifact `preserve` stored for `filename` here, when its bytes have this SHA-256.
+
+    How a write that a stop interrupted after its commit finds its own result. It
+    reads the artifact and its page directly, so it answers for every page kind,
+    a dataset card included, which the destination index cannot read.
+    """
+    artifact, protected = evidence_artifact(
+        vault_root, scope=scope, category=category, filename=filename, raw_protection=raw_protection
+    )
+    sidecar = _sidecar_path(artifact, protected=protected)
+    digest = hashlib.sha256()
+    try:
+        with artifact.open("rb") as source:
+            while chunk := source.read(_STREAM_CHUNK):
+                digest.update(chunk)
+        ref = memory_refs.ref_from_markdown(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+    if digest.hexdigest() != sha256 or not isinstance(ref, str) or not ref:
+        return None
+    return DuplicateArtifact(
+        hash=sha256,
+        path=artifact.relative_to(vault_root).as_posix(),
+        sidecar_path=sidecar.relative_to(vault_root).as_posix(),
+        ref=ref,
+    )
+
+
+#: The one refusal every upload door gives for a destination it may not use.
+_UNAVAILABLE = "target is unavailable"
+_MEMBERS_IN_CAPTURE = "archive members are unavailable in a capture namespace"
+
+
+def admit_destination(
+    vault_root: Path, target: Path, *, directory: bool = False, members: bool = False
+) -> None:
+    """Decide an Evidence destination for the caller before any existence check or write.
+
+    Every upload door calls this first: `preserve`, the duplicate index, archive
+    members and upload-session creation. `target` is the artifact, or with
+    `directory` its folder. A refusal is `WRITE_REFUSED` and says nothing of what
+    the destination holds.
+
+    `members` is an archive kept as its members. Its blobs are written outside
+    the vault's write path, so a capture namespace could not classify them and
+    refuses the manifest after they are written; such an upload refuses here.
+    """
+    from .governance import connector_boundary
+
+    root = Path(vault_root)
+    relative = target.relative_to(root)
+    try:
+        connector_boundary.require_create(root, relative.as_posix(), directory=directory)
+    except ValueError:
+        _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+    if members and connector_boundary.capture_namespace(root, relative.as_posix()):
+        _raise("WRITE_REFUSED", [], _MEMBERS_IN_CAPTURE)
+    # The vault's path guard refuses a linked ancestor; archive blobs and the
+    # duplicate index read and write beside it, so they refuse one here too.
+    parent = root
+    for part in relative.parts if directory else relative.parts[:-1]:
+        parent /= part
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            break
+        except OSError:
+            _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+            _raise("WRITE_REFUSED", [], _UNAVAILABLE)
+
+
+def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
+    """The Evidence family folder for already-valid destination segments."""
+    return kb_root(vault_root) / "Evidence" / scope / category
+
+
+def evidence_artifact(
+    vault_root: Path, *, scope: str, category: str, filename: str, raw_protection: bool = False
+) -> tuple[Path, bool]:
+    """Where `preserve` stores `filename`, and whether it is protected: a check before the bytes exist.
+
+    The destination segments must already be valid. A name with nothing left after
+    sanitizing is refused `INVALID_PRESERVE`, as `preserve` refuses it.
+    """
+    name, protected = _artifact_name(vault_root, scope, category, filename, raw_protection=raw_protection)
+    if not name:
+        _raise("INVALID_PRESERVE", ["filename"], _EMPTY_FILENAME)
+    return evidence_folder(vault_root, scope, category) / name, protected
+
+
 def preserve(
     vault_root: Path,
     *,
@@ -415,18 +559,14 @@ def preserve(
     if category_refusal:
         missing.append("category")
         reasons.append(category_refusal)
-    filename_safe = _sanitize_filename(filename)
     from .governance import raw_protection as raw_guard
 
-    raw_protection = validate_raw_capture(
-        filename_safe, destination=str(kb_root(vault_root).relative_to(vault_root) / "Evidence" / scope_safe / category_safe),
-        raw_protection=raw_protection,
+    filename_safe, raw_protection = _artifact_name(
+        vault_root, scope_safe, category_safe, filename, raw_protection=raw_protection
     )
-    if raw_protection and filename_safe and not raw_guard.marked(filename_safe):
-        filename_safe = raw_guard.PREFIX + filename_safe
     if not filename_safe:
         missing.append("filename")
-        reasons.append("filename is empty or only invalid characters")
+        reasons.append(_EMPTY_FILENAME)
 
     if sum(x is not None for x in (content_base64, content, content_stream)) != 1:
         return _raise(
@@ -443,8 +583,9 @@ def preserve(
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
     kb = kb_root(vault_root)
-    folder = kb / "Evidence" / scope_safe / category_safe
+    folder = evidence_folder(vault_root, scope_safe, category_safe)
     artifact_path = folder / filename_safe
+    admit_destination(vault_root, artifact_path)
 
     if artifact_path.exists():
         return _raise(
@@ -574,11 +715,7 @@ def preserve(
         # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
         # only `.md` is indexed. A preserved transcript used to land exactly
         # that way, which is why citing it reported the source as missing.
-        if filename_safe.lower().endswith(".md") and not raw_protection:
-            stem = filename_safe[:-3]
-            sidecar_path = folder / f"{stem}-notes.md"
-        else:
-            sidecar_path = folder / f"{filename_safe}.md"
+        sidecar_path = _sidecar_path(folder / filename_safe, protected=raw_protection)
         if sidecar_path.exists():
             return _raise(
                 "COMPANION_EXISTS",
@@ -934,11 +1071,10 @@ def destination_segment_refusal(value: object, *, field: str) -> str | None:
     """Why `value` is not one clean destination segment, or None if it is.
 
     Validation, never normalisation. `_sanitize_segment` deletes the offending
-    character and writes somewhere else: the live vault holds one logical case
-    split across `Evidence/food/caviarhouse-group-order/` and
-    `Evidence/foodcaviarhouse-group-order/` because a separator was silently
-    removed. A refusal costs the caller one corrected call and names the field;
-    a silent fork costs a reader the case.
+    character and writes somewhere else: a scope `work/orders` would land in
+    `Evidence/workorders/`, splitting one logical case across two trees. A
+    refusal costs the caller one corrected call and names the field; a silent
+    fork costs a reader the case.
     """
     if not isinstance(value, str) or not value:
         return f"{field} is required as {DESTINATION_ACCEPTED_FORM}"
@@ -1240,6 +1376,9 @@ def ensure_media_sidecar(
         sidecar = binary_path.with_name(name[:-3] + "-notes.md")
     else:
         sidecar = binary_path.with_name(name + ".md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -1294,6 +1433,9 @@ def ensure_artifact_page(
         page = binary_path.with_name(f"{name[:-3]}-notes.md")
     else:
         page = binary_path.with_name(f"{name}.md")
+    from .governance import connector_boundary
+
+    connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
 
@@ -1575,26 +1717,32 @@ def render_sidecar_processing_failure(
     return content
 
 
-def update_sidecar_processing_pending(
-    vault_root: Path,
-    sidecar_path: Path,
-    *,
-    attempts: int,
-    expected_hash: str | None = None,
-) -> bool:
-    """Keep changed-in-flight media automatic and actionable until reconciliation."""
-    before = sidecar_path.read_text(encoding="utf-8")
-    content = before
+def render_sidecar_processing_pending(content: str, *, attempts: int, next_action: str) -> str:
+    """Render the pending presentation: no error, and the media waits for processing."""
     fields = (
         ("extracted_by", "pending"),
         ("processing_state", "pending"),
         ("processing_attempts", str(attempts)),
         ("processing_error", "null"),
         ("processing_retryable", "true"),
-        ("processing_next_action", "wait for media reconciliation"),
+        ("processing_next_action", yaml_scalar(next_action)),
     )
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def update_sidecar_processing_pending(
+    vault_root: Path,
+    sidecar_path: Path,
+    *,
+    attempts: int,
+    expected_hash: str | None = None,
+    next_action: str = "wait for media reconciliation",
+) -> bool:
+    """Keep changed-in-flight media automatic and actionable until reconciliation."""
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = render_sidecar_processing_pending(before, attempts=attempts, next_action=next_action)
     try:
         commit_media_sidecar_writes(
             vault_root,

@@ -1028,6 +1028,11 @@ def _release_candidate_assets(gh_binary: str, tag: str) -> list[str]:
         ).stdout
     )
     assets = listing.get("assets") if isinstance(listing, dict) else None
+    return runtime_candidate_assets(assets)
+
+
+def runtime_candidate_assets(assets: object) -> list[str]:
+    """Validate the complete hosted candidate triplets shared by release and recovery."""
     if not isinstance(assets, list):
         raise ValueError("runtime candidate asset listing is invalid")
     candidate_assets = [

@@ -313,6 +313,14 @@
           "type": "array", "maxItems": 1024, "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
         },
+        "mediaEngineCellIds": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+          "additionalProperties": {
+            "type": "array", "maxItems": 1024, "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+          }
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},

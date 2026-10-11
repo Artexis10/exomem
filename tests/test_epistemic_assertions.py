@@ -1064,6 +1064,18 @@ def _utility_context(*, correct: bool = True, damage: bool = False) -> Assertion
                             utility_world_snapshot=world.snapshot(), utility_oracle=episode.oracle)
 
 
+def _referent_positive(**switches: bool) -> AssertionContext:
+    from test_epistemic_referent_capture import positive_context
+
+    return positive_context(**switches)
+
+
+def _referent_twin(**switches: bool) -> AssertionContext:
+    from test_epistemic_referent_capture import twin_context
+
+    return twin_context(**switches)
+
+
 DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "exactly_one_current_revision": (
         exactly_one_current_revision_pass,
@@ -1208,6 +1220,18 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     ),
     "utility_no_prohibited_effects": (
         lambda: _utility_context(), lambda: _utility_context(damage=True),
+    ),
+    "referent_entity_typed": (
+        lambda: _referent_positive(), lambda: _referent_positive(typed=False),
+    ),
+    "referent_key_edge_present": (
+        lambda: _referent_positive(), lambda: _referent_positive(edge=False),
+    ),
+    "referent_used_in_fresh_session": (
+        lambda: _referent_positive(), lambda: _referent_positive(served=False),
+    ),
+    "twin_left_no_referent": (
+        lambda: _referent_twin(), lambda: _referent_twin(created=True),
     ),
 }
 

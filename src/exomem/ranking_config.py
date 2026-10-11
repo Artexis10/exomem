@@ -29,9 +29,10 @@ class RankingConfig:
     """
 
     rrf_k: int = 60  # Cormack/Clarke/Buettcher 2009 default; fusion.py
-    compiled_boost: float = 1.15  # must equal _COMPILED_BOOST
-    source_penalty: float = 0.85  # must equal _SOURCE_PENALTY
-    superseded_penalty: float = 0.5  # must equal _SUPERSEDED_PENALTY
+    # Note-type role knobs; `note_type_factor` maps each role to one of them.
+    compiled_boost: float = 1.15
+    source_penalty: float = 0.85
+    superseded_penalty: float = 0.5
     candidate_multiplier: int = 5  # candidate_k = max(limit*mult, floor)
     candidate_floor: int = 50
     graph_seed_cap: int = 20  # per-ranker fanout cap for 1-hop expansion
@@ -96,6 +97,20 @@ class RankingConfig:
     # the same coverage floor `collection_claims.MIN_CLAIM_COVERAGE` uses: one
     # shared word is a coincidence, two is a reference.
     working_set_lexical_min_terms: int = 2
+
+    def note_type_factor(self, role: str | None) -> float:
+        """The ranking knob a note-type role takes; no role, or `evidence`, is neutral.
+
+        This is the one map from role to knob. An entry never carries its own
+        multiplier, because the bounded multiplier pass in `find_policy` needs
+        every factor between the declared knob values.
+        """
+        # The note-type registry schema fixes the roles (`note_types.ROLES`).
+        if role == "compiled" or role == "entity":
+            return self.compiled_boost
+        if role == "source":
+            return self.source_penalty
+        return 1.0
 
     def intent_weights(self, intent: str) -> tuple[float, ...]:
         """Lane-weight tuple for a classified intent; conceptual (neutral) default."""

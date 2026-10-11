@@ -17,7 +17,7 @@ import pytest
 from exomem import context_roles, lexstore, working_set, working_set_currency, working_set_state
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import library_scope, request_scope
 from test_governance_egress import _external
 from test_working_set_temporal_currency import _governed_entity_vault
 
@@ -561,13 +561,16 @@ def test_withheld_reverse_supersession_does_not_change_lane_or_hook(tmp_path):
             packet = egress.guard_working_set(root, packet, release)
         packets[name] = (_shape(packet, root), hook._packet_lines(packet))
         if with_successor:
-            owner_items, _ = working_set.run_lanes(
-                root,
-                anchors=(),
-                roles=({"id": "recent_change"},),
-                registry=registry,
-                neighbourhood=frozenset(hood),
-            )
+            # Selected interpretation admits pages for its caller, and an
+            # unbound caller is the most restrictive one: the owner declares itself.
+            with library_scope():
+                owner_items, _ = working_set.run_lanes(
+                    root,
+                    anchors=(),
+                    roles=({"id": "recent_change"},),
+                    registry=registry,
+                    neighbourhood=frozenset(hood),
+                )
             assert any("SECRETSUCC" in item.text for item in owner_items)
     assert packets["a"] == packets["b"]
 

@@ -44,6 +44,8 @@ from typing import Any, Protocol
 import yaml
 
 PACK_SCHEMA_VERSION = 1
+# The instance-selector protocol reserves this token for the public instance.
+PUBLIC_INSTANCE = "public"
 NO_OVERLAY_HASH = "none"
 #: The generic entry fields a delta may name. A spec narrows them.
 ENTRY_FIELDS = frozenset(
@@ -102,6 +104,7 @@ class Snapshot:
     content_hash: str
     effective_digest: str
     overlay_text: str | None
+    instance_id: str = PUBLIC_INSTANCE
 
     @property
     def active(self) -> tuple[Entry, ...]:
@@ -158,6 +161,11 @@ class RegistrySpec:
     cap: int = 512
     #: How usage counts are read: `(vault_root, snapshot) -> Usage`.
     usage: Callable[[Path, Snapshot], Any] | None = None
+    #: Whether the bootstrap vocabulary section lists this registry's keys. Some
+    #: registries' keys are listed elsewhere or are too many for the compact payload.
+    summarize_keys: bool = True
+    instance_id: str = PUBLIC_INSTANCE
+    binding_revision: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +213,97 @@ def pack_entries(name: str) -> tuple[Entry, ...]:
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class PackRegistry:
+    """A fixed-pack registry's entries and the findings of its overlay."""
+
+    entries: Mapping[str, Entry]
+    findings: tuple[Mapping[str, Any], ...] = ()
+
+
+class FixedPackAdapter:
+    """Grammar for a registry whose shipped entries are fixed: an overlay only adds.
+
+    `check(entry, entries)` refuses an overlay entry with a `RegistryError`. A malformed
+    overlay leaves the pack in force and reports one finding, so a guard that reads the
+    registry never loses a shipped entry.
+    """
+
+    def __init__(self, pack: str, spec: Callable[[], RegistrySpec],
+                 check: Callable[[Entry, Mapping[str, Entry]], None]) -> None:
+        self._pack, self._spec, self._check = pack, spec, check
+
+    def _shipped(self) -> dict[str, Entry]:
+        entries = {entry.key: entry for entry in pack_entries(self._pack)}
+        for entry in entries.values():
+            try:
+                self._check(entry, entries)
+            except RegistryError as error:
+                raise RuntimeError(f"shipped pack {self._pack} is invalid: {error}") from error
+        return entries
+
+    def normalize_key(self, raw: str) -> str:
+        key = token(raw)
+        if not key or len(key) > 64 or not key[0].isalpha():
+            raise RegistryError("INVALID_REGISTRY_KEY: registry keys start with a letter")
+        return key
+
+    def document(self, text: str | None) -> dict[str, Any]:
+        if text is None:
+            return {"schema_version": 1, "entries": {}}
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as error:
+            raise RegistryError("INVALID_REGISTRY_OVERLAY: overlay YAML is invalid") from error
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != 1
+            # The overlay schema fixes these two document fields.
+            or set(value) - {"schema_version", "entries"}
+            or not isinstance(value.get("entries", {}), dict)
+        ):
+            raise RegistryError("INVALID_REGISTRY_OVERLAY: expected schema_version and entries")
+        return {**value, "entries": value.get("entries", {})}
+
+    def parse(self, text: str | None, digest: str) -> PackRegistry:
+        try:
+            return self.parse_document(self.document(text))
+        except RegistryError as error:
+            finding = {"code": "invalid_registry_overlay", "path": "entries",
+                       "severity": "error", "detail": str(error)}
+            return PackRegistry(self._shipped(), (finding,))
+
+    def parse_document(self, document: Mapping[str, Any]) -> PackRegistry:
+        entries = self._shipped()
+        for raw_key, row in document["entries"].items():
+            if not isinstance(raw_key, str) or self.normalize_key(raw_key) != raw_key:
+                raise RegistryError("INVALID_REGISTRY_KEY: overlay key is not canonical")
+            if raw_key in entries:
+                raise RegistryError("PACK_ENTRY_FIXED: shipped entries cannot be overridden")
+            entry = _patch(self._spec(), raw_key, row, None)
+            self._check(entry, entries)
+            entries[raw_key] = entry
+        validate_replacements(self._spec(), entries)
+        return PackRegistry(entries)
+
+    def entries(self, typed: PackRegistry) -> Mapping[str, Entry]:
+        return typed.entries
+
+    def findings(self, typed: PackRegistry) -> tuple[Mapping[str, Any], ...]:
+        return typed.findings
+
+    def put(self, document: dict[str, Any], key: str, entry: Entry, *, existing: bool) -> None:
+        if key in self._shipped():
+            raise RegistryError("PACK_ENTRY_FIXED: shipped entries cannot be changed")
+        row = entry.as_dict()
+        row.pop("key")
+        row.pop("origin")
+        document["entries"][key] = row
+
+    def render(self, document: Mapping[str, Any]) -> str:
+        return yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=True)
+
+
 # --------------------------------------------------------------------------- #
 # Loading and caching
 # --------------------------------------------------------------------------- #
@@ -235,12 +334,13 @@ class _Cached:
     snapshot: Snapshot
 
 
-_CACHE: dict[tuple[str, str], _Cached] = {}
+_CACHE: dict[tuple[str, str, str, str, str], _Cached] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str]:
-    return (os.path.abspath(vault_root), spec.name)
+def _cache_key(vault_root: Path, spec: RegistrySpec) -> tuple[str, str, str, str, str]:
+    return (os.path.abspath(vault_root), spec.name, spec.instance_id,
+            os.path.abspath(spec.overlay(Path(vault_root))), spec.stem)
 
 
 def _stat_key(path: Path) -> tuple[int, ...] | None:
@@ -261,8 +361,11 @@ def _build(spec: RegistrySpec, text: str | None) -> Snapshot:
         entries=entries,
         findings=tuple(spec.adapter.findings(typed)),
         content_hash=digest,
-        effective_digest=effective_digest(spec.name, entries),
+        effective_digest=effective_digest(
+            spec.name if spec.instance_id == PUBLIC_INSTANCE else f"{spec.name}:{spec.instance_id}", entries
+        ),
         overlay_text=text,
+        instance_id=spec.instance_id,
     )
 
 
@@ -270,6 +373,12 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     """The current snapshot of one registry for one vault (pack only without a vault)."""
     if vault_root is None:
         return _pack_only(spec)
+    from . import instances
+
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(Path(vault_root), spec)
+    if spec.binding_revision is not None:
+        instances.recheck(Path(vault_root), spec)
     path = spec.overlay(Path(vault_root))
     key = _cache_key(vault_root, spec)
     stat = _stat_key(path)
@@ -299,18 +408,25 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
 
 def cached(spec: RegistrySpec, vault_root: Path) -> Snapshot | None:
     """The snapshot cached for one vault's registry, without loading; None if absent."""
+    from . import instances
+
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(vault_root, spec)
+    if spec.binding_revision is not None:
+        instances.recheck(vault_root, spec)
     with _CACHE_LOCK:
         entry = _CACHE.get(_cache_key(vault_root, spec))
     return None if entry is None else entry.snapshot
 
 
-_PACK_ONLY: dict[str, Snapshot] = {}
+_PACK_ONLY: dict[tuple[str, str], Snapshot] = {}
 
 
 def _pack_only(spec: RegistrySpec) -> Snapshot:
-    snapshot = _PACK_ONLY.get(spec.name)
+    identity = (spec.name, spec.instance_id)
+    snapshot = _PACK_ONLY.get(identity)
     if snapshot is None:
-        snapshot = _PACK_ONLY[spec.name] = _build(spec, None)
+        snapshot = _PACK_ONLY[identity] = _build(spec, None)
     return snapshot
 
 
@@ -325,8 +441,7 @@ def invalidate(vault_root: Path | None = None, *, path: Path | str | None = None
             if path is None:
                 _CACHE.pop(cache_key, None)
                 continue
-            spec = _specs().get(cache_key[1])
-            if spec is None or os.path.abspath(spec.overlay(Path(root))) == os.path.abspath(
+            if cache_key[3] == os.path.abspath(
                 Path(root) / path if not Path(path).is_absolute() else path
             ):
                 _CACHE.pop(cache_key, None)
@@ -342,12 +457,6 @@ def invalidate_registry(name: str) -> None:
     with _CACHE_LOCK:
         for cache_key in [key for key in _CACHE if key[1] == name]:
             _CACHE.pop(cache_key, None)
-
-
-def _specs() -> Mapping[str, RegistrySpec]:
-    from . import registry_specs
-
-    return registry_specs()
 
 
 # --------------------------------------------------------------------------- #
@@ -631,8 +740,11 @@ def commit(
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
     from .. import registry_history
+    from . import instances
 
     root = Path(vault_root)
+    if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
+        spec = instances.select(root, spec, authoring=True)
     path = spec.overlay(root)
     try:
         history = registry_history.commit(
@@ -646,6 +758,9 @@ def commit(
             previous=previous,
             after_hash=content_hash(rendered),
             added={spec.name: added},
+            private=spec.instance_id != PUBLIC_INSTANCE,
+            validate_bindings=(lambda: instances.recheck(root, spec))
+            if spec.binding_revision is not None else None,
         )
     finally:
         invalidate(root, path=path)

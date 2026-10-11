@@ -340,6 +340,21 @@ def test_the_carried_page_is_not_in_the_anchor_catalogue(carry_vault: Path) -> N
     assert CARRY_EVIDENCE not in paths
 
 
+def test_ordinary_carry_asks_no_partial_name_dependence_query(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages with no authored partial-name contact must keep the ordinary carry's query cost."""
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("ordinary carry asked a partial-name dependence query")
+
+    monkeypatch.setattr(working_set_runtime, "lexical_hits_without", unexpected)
+
+    packet = working_set.compile_packet(carry_vault, turn=CARRY_TURN, max_chars=4000)
+
+    assert not packet["abstained"]
+    assert any(item["provenance"]["path"] == CARRY_PAGE for item in packet["units"])
+
+
 # --------------------------------------------------------------------------- #
 # Named contact: the rarity gate the dominance test rests on
 # --------------------------------------------------------------------------- #

@@ -17,17 +17,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .. import find_corpus
+from .. import find_corpus, memory_refs
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
 from .policy import Policy, Scope
 
 _MEMO_MAX = 4096
-_MEMO: OrderedDict[tuple[str, str, int, int, bool], frozenset[str]] = OrderedDict()
-_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str], frozenset[str]] = OrderedDict()
+#: The frontmatter fields `_evaluate_markdown_scopes` reads, through `ParsedPage`
+#: and `find_corpus.all_projects`. A stored summary keeps these for membership.
+FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
+_MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str]], frozenset[str]] = OrderedDict()
+_SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str, str, frozenset[str]], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
-    tuple[str, str, tuple[companions.BoundSnapshot, ...]], MembershipOutcome
+    tuple[str, str, tuple[companions.BoundSnapshot, ...], frozenset[str] | None], MembershipOutcome
 ] = OrderedDict()
 
 
@@ -155,12 +158,32 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
+def _registry_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
+    from ..vocabulary import instances
+
+    if page.vault_root is None:
+        return frozenset()
+    try:
+        return instances.bound_scopes(page.vault_root, page.rel_path, policy) or frozenset()
+    except ValueError as error:
+        raise MembershipUnresolved("registry binding is unavailable") from error
+
+
 def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
     if page.frontmatter_valid:
         classes = page.frontmatter.get("classes") or []
+        identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+        if memory_refs.ID_FIELD in page.frontmatter and identity is None and any(
+            memory_refs.parse_memory_ref(ref) is not None
+            for scope in policy.scopes.values() for ref in (*scope.refs, *scope.exclude_refs)
+        ):
+            # Only identity selectors require valid identity; legacy IDs must
+            # not block unrelated path or metadata membership.
+            raise MembershipUnresolved("malformed governed identity leaves membership unresolved")
         return evaluate_metadata(
             MetadataSubject(
                 path=page.rel_path,
+                refs=(memory_refs.memory_ref(identity),) if identity is not None else (),
                 projects=tuple(p.lower() for p in find_corpus.all_projects(page.frontmatter)),
                 tags=tuple(page.tags),
                 types=(page.page_type.lower(),) if page.page_type is not None else (),
@@ -173,6 +196,11 @@ def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, page.rel_path):
             continue
+        # Invalid metadata cannot disprove a protected identity; only this
+        # malformed page becomes unavailable until its author repairs it.
+        if any(memory_refs.parse_memory_ref(ref) is not None
+               for ref in (*scope.refs, *scope.exclude_refs)):
+            raise MembershipUnresolved("malformed frontmatter leaves canonical identity unresolved")
         if _path_ref_matches(scope, page.rel_path):
             matched.add(scope_id)
             continue
@@ -205,7 +233,7 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy
+    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -226,7 +254,13 @@ def evaluate_path_only(
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
 
-    matched: set[str] = set()
+    from ..vocabulary import instances
+
+    try:
+        assigned = instances.bound_scopes(vault_root, rel_path, policy)
+    except ValueError as error:
+        raise MembershipUnresolved("registry binding is unavailable") from error
+    matched: set[str] = set(assigned or ())
     undecided: list[tuple[str, Scope]] = []
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, rel_path):
@@ -237,12 +271,27 @@ def evaluate_path_only(
         if _needs_frontmatter(scope):
             undecided.append((scope_id, scope))
     if undecided:
+        if assigned is not None and proposed_companion is None:
+            from .. import reserved_paths
+
+            try:
+                identity = reserved_paths.inspect_generic_path(vault_root, rel_path)
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code == "MISSING":
+                    return MembershipOutcome("classified", frozenset(matched))
+                return MembershipOutcome("unresolved", frozenset(matched), "artifact_unsafe")
+            if identity.kind == "directory":
+                return MembershipOutcome("classified", frozenset(matched))
         try:
-            companion = companions.classify(vault_root, rel_path)
+            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path)
         except companions.CompanionClassificationError as error:
+            # A portable assignment supplies registry metadata only when no
+            # companion exists; malformed or conflicting companion data still refuses.
+            if assigned is not None and error.reason == "descriptor_missing":
+                return MembershipOutcome("classified", frozenset(matched))
             return MembershipOutcome("unresolved", frozenset(matched), error.reason)
-        memo_key = (policy.fingerprint, rel_path, companion.identities)
-        cached = _PATH_MEMO.get(memo_key)
+        memo_key = (policy.fingerprint, rel_path, companion.identities, assigned)
+        cached = _PATH_MEMO.get(memo_key) if proposed_companion is None else None
         if cached is not None:
             _PATH_MEMO.move_to_end(memo_key)
             return cached
@@ -250,10 +299,11 @@ def evaluate_path_only(
             if _semantic_scope_matches(scope, companion):
                 matched.add(scope_id)
         result = MembershipOutcome("classified", frozenset(matched))
-        _PATH_MEMO[memo_key] = result
-        _PATH_MEMO.move_to_end(memo_key)
-        while len(_PATH_MEMO) > _MEMO_MAX:
-            _PATH_MEMO.popitem(last=False)
+        if proposed_companion is None:
+            _PATH_MEMO[memo_key] = result
+            _PATH_MEMO.move_to_end(memo_key)
+            while len(_PATH_MEMO) > _MEMO_MAX:
+                _PATH_MEMO.popitem(last=False)
         return result
     return MembershipOutcome("classified", frozenset(matched))
 
@@ -287,12 +337,14 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
         raise MembershipUnresolved(
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
-    key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid)
+    assigned = _registry_scopes(page, policy)
+    key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid,
+           str(page.vault_root), assigned)
     cached = _MEMO.get(key)
     if cached is not None:
         _MEMO.move_to_end(key)
         return cached
-    result = _evaluate_markdown_scopes(page, policy)
+    result = _evaluate_markdown_scopes(page, policy) | assigned
     _MEMO[key] = result
     _MEMO.move_to_end(key)
     while len(_MEMO) > _MEMO_MAX:
@@ -313,12 +365,13 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    key = (policy.fingerprint, page.rel_path, content_hash)
+    assigned = _registry_scopes(page, policy)
+    key = (policy.fingerprint, page.rel_path, content_hash, str(page.vault_root), assigned)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:
         _SNAPSHOT_MEMO.move_to_end(key)
         return cached
-    result = _evaluate_markdown_scopes(page, policy)
+    result = _evaluate_markdown_scopes(page, policy) | assigned
     _SNAPSHOT_MEMO[key] = result
     _SNAPSHOT_MEMO.move_to_end(key)
     while len(_SNAPSHOT_MEMO) > _MEMO_MAX:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 from . import epistemic_graph, find_corpus, freshness, lifecycle_statuses, memory_refs, readiness
 from .entity_registry import load_entity_registry, schedule_entity_registry_warm
 from .entity_types import load_entity_types
-from .find import FreshnessSnapshot
+from .find import FreshnessSnapshot, RetrievalIndexWarming, recall_resolver_snapshot
 from .governance import egress
 from .referent_resolution import (
     EdgeFact,
@@ -96,14 +97,24 @@ def _edge_facts(
     entity_paths: frozenset[str],
     graph: bool,
     anchor_cap: int,
+    keep: Callable[[str], bool] | None = None,
+    resolver: Any | None = None,
 ) -> tuple[EdgeFact, ...]:
-    if not graph or not anchors:
+    """Typed edges between the anchors and entity pages.
+
+    `keep` is a restricted caller's admission (`None` for the owner). Its edges
+    re-resolve with `resolver`, the request's recall resolver; while that
+    resolver warms, corroboration is skipped, as the graph lane waits.
+    """
+    if not graph or not anchors or (keep is not None and resolver is None):
         return ()
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if not index.available():
         return ()
     facts: set[EdgeFact] = set()
-    for neighbor in index.neighbors_for(anchors[: max(0, anchor_cap)]):
+    for neighbor in index.neighbors_for(
+        anchors[: max(0, anchor_cap)], keep=keep, resolver=resolver
+    ):
         if neighbor.other_rel in entity_paths:
             facts.add(
                 EdgeFact(
@@ -148,8 +159,12 @@ def resolve_for_find(
     purpose: str | None,
     cue: ReferentCue | None = None,
     expected_recall_checkpoints: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve a bounded referent block; every exception soft-fails."""
+    """Resolve a bounded referent block; every exception soft-fails.
+
+    `keep` is a restricted caller's admission (`None` for the owner).
+    """
     try:
         if mode not in {"hybrid", "vector"}:
             return None
@@ -219,12 +234,25 @@ def resolve_for_find(
                 hit_facts,
                 anchor_cap=anchor_cap,
             )
+        view_resolver = None
+        if keep is not None and graph:
+            try:
+                view_resolver = recall_resolver_snapshot(
+                    vault_root,
+                    freshness=snapshot.projection_key("vault"),
+                    allow_fallback=not snapshot.requires_live_recall,
+                    expected_checkpoint=snapshot.recall_checkpoint("vault"),
+                )
+            except RetrievalIndexWarming:
+                view_resolver = None
         edges = _edge_facts(
             vault_root,
             anchors=[item.path for item in hit_facts],
             entity_paths=frozenset(registry),
             graph=graph,
             anchor_cap=anchor_cap,
+            keep=keep,
+            resolver=view_resolver,
         )
         resolution = resolve_referents(
             cue=cue,

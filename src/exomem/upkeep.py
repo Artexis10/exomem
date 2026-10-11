@@ -320,9 +320,10 @@ def review(
         "integrity": {},
         "truncated": False,
     }
-    view = dreamer_store.read_view(Path(vault_root))
-    if view is None:
-        return {**base, "status": "unavailable"}
+    view, refusal = dreamer_store.read_view_or_refusal(Path(vault_root))
+    if view is None or view.health.get("last_tick_at") is None:
+        # A sidecar no tick has written yet holds only the worker's wait.
+        return {**base, "status": "unavailable", **_unavailable(view, refusal)}
     payload = _payload(Path(vault_root))
     if payload is None:
         return {**base, "status": "review_state_unavailable"}
@@ -387,6 +388,48 @@ def review(
         "integrity": integrity,
         "truncated": len(collected) > bound,
     }
+
+
+def _unavailable(view: dreamer_store.StoreView | None, refusal: str | None) -> dict[str, Any]:
+    """Why upkeep cannot be listed: a closed `reason`, and the wait when there is one.
+
+    The five reasons are this response's own closed enum, fixed by its contract,
+    not a reading of anyone's meaning (sound under C6). They come from the worker's live state in the process that hosts
+    it, else from what the worker recorded in its sidecar, never from the empty
+    state of a process that runs no worker.
+    """
+    from . import dreamer
+
+    if dreamer.hosting():
+        live = dreamer.status()
+        if not live["running"]:
+            return {"reason": "worker_not_running"}
+        if view is None and refusal != "missing":
+            return {"reason": refusal}
+        return {
+            "reason": "no_tick_yet",
+            "waiting": _waiting(live["waiting_reason"], live["waiting_since"], "worker"),
+        }
+    if view is not None:
+        recorded = view.health
+        waiting = _waiting(recorded.get("waiting_reason"), recorded.get("waiting_since"), "sidecar")
+        # When it was written, so a stopped service's last wait never reads as live.
+        waiting["recorded_at"] = _stamp(recorded.get("recorded_at"))
+        return {"reason": "no_tick_yet", "waiting": waiting}
+    # A running worker records its first wait, so no file means no worker has run.
+    return {"reason": "worker_not_running" if refusal == "missing" else refusal}
+
+
+def _waiting(reason: Any, since: Any, source: str) -> dict[str, Any]:
+    """The gate's reason and since when (UTC), and whether it is live or recorded."""
+    return {"reason": reason, "since": _stamp(since), "source": source}
+
+
+def _stamp(value: Any) -> str | None:
+    """A recorded epoch time as UTC ISO-8601, or None when none was recorded."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+    return None
 
 
 def _order_time(row: dict[str, Any], *, withheld: bool) -> float:

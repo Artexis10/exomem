@@ -14,8 +14,10 @@ caller presenting it -- unknown, malformed, another session's, expired, spent
 -- gets one answer, so a handle leaks nothing about holds its presenter does
 not own. Checks run before the claim, so a refused redemption consumes nothing,
 and a command that claims a hold but stores nothing puts it back with `restore`.
-Each local session may keep at most `HOLD_MAX_COUNT` holds and `HOLD_MAX_BYTES`
-held bytes at once.
+Each local session may keep at most `HOLD_MAX_COUNT` holds at once, holding
+together no more bytes than the largest single hold accepts, so one hold of that
+size always fits. A hold that would not fit in free disk is refused before a
+byte is copied.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import json
 import os
 import re
 import secrets
-import stat
+import shutil
 import tempfile
 import time
 from collections.abc import Callable
@@ -35,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import local_ingress
+from . import local_ingress, private_state
 
 #: The `download_url` scheme of a held handle. Never fetched.
 HELD_SCHEME = "exomem-held:"
@@ -46,8 +48,6 @@ LANE_COMMANDS = {"evidence": "preserve_artifacts", "source": "capture_source"}
 STORE_DIRNAME = "held-uploads"
 #: Live holds one local session may keep: two full file-handle batches.
 HOLD_MAX_COUNT = 16
-#: Held bytes one local session may keep across its live holds.
-HOLD_MAX_BYTES = 256 * 1024 * 1024
 
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 _CHUNK = 1024 * 1024
@@ -90,21 +90,7 @@ def _binding() -> str | None:
 
 
 def _store(vault_root: Path) -> Path:
-    from .state_paths import ensure_vault_state_dir
-
-    store = ensure_vault_state_dir(vault_root) / STORE_DIRNAME
-    store.mkdir(mode=0o700, exist_ok=True)
-    # `mkdir` leaves an existing directory as it was; a hold directory is
-    # private whoever created it.
-    info = os.lstat(store)
-    if not stat.S_ISDIR(info.st_mode):
-        raise OSError(f"held-upload store is not a directory: {store}")
-    if os.name == "posix":
-        if info.st_uid != os.geteuid():
-            raise OSError(f"held-upload store is owned by another user: {store}")
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            os.chmod(store, 0o700)
-    return store
+    return private_state.store(vault_root, STORE_DIRNAME)
 
 
 def _key(secret: str) -> str:
@@ -115,12 +101,7 @@ def _unavailable() -> HeldUploadError:
     return HeldUploadError("HELD_UPLOAD_UNAVAILABLE", UNAVAILABLE_REASON)
 
 
-def _remove(*paths: Path) -> None:
-    for path in paths:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+_remove = private_state.remove
 
 
 def _sweep(store: Path, now: float) -> None:
@@ -167,15 +148,8 @@ def _quota() -> HeldUploadError:
 
 
 def _write_record(store: Path, key: str, record: dict) -> None:
-    meta_fd, meta_raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
-    try:
-        with os.fdopen(meta_fd, "w", encoding="utf-8") as sink:
-            json.dump(record, sink)
-        # The record is what makes a hold redeemable, so it lands last.
-        os.replace(meta_raw, store / f"{key}.json")
-    except BaseException:
-        _remove(Path(meta_raw))
-        raise
+    # The record is what makes a hold redeemable, so it lands last; `_sweep` owns its `.part` temp.
+    private_state.write_record(store, key, record, temp_suffix=".part")
 
 
 def hold(
@@ -204,6 +178,12 @@ def hold(
     held_count, held_bytes = _usage(store, binding)
     if held_count >= HOLD_MAX_COUNT:
         raise _quota()
+    # The route spools the body before it runs, so its length is known before a byte is copied.
+    start = stream.tell()
+    length = stream.seek(0, os.SEEK_END) - start
+    stream.seek(start)
+    if length > shutil.disk_usage(store).free:
+        raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
     secret = secrets.token_urlsafe(32)
     key = _key(secret)
     fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
@@ -216,7 +196,8 @@ def hold(
                 size += len(chunk)
                 if size > max_bytes:
                     raise HeldUploadError("TOO_LARGE", "upload exceeds the configured limit")
-                if held_bytes + size > HOLD_MAX_BYTES:
+                # The session's held total is the largest single hold, so one such hold always fits.
+                if held_bytes + size > max_bytes:
                     raise _quota()
                 digest.update(chunk)
                 sink.write(chunk)

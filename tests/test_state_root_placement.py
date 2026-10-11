@@ -152,6 +152,7 @@ _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
 }
 
 _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
+    "connector-boundary",
     "collection-replica",
     "consolidation-tree",
     "governance-tree",

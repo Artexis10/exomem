@@ -567,6 +567,7 @@ def parse_page(
         mtime=mtime,
         snapshot_hash=hashlib.sha256(content).hexdigest(),
         frontmatter_valid=frontmatter_valid,
+        vault_root=vault_root,
     )
 
 

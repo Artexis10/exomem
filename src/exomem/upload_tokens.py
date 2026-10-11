@@ -169,7 +169,7 @@ def mint_principal(signing_root: str, principal, *, ttl: int = DEFAULT_TTL) -> s
 
 def bound_principal(presented: str, signing_root: str | None, *, now: int | None = None):
     from .governance.authorization_session_lifecycle import AuthorizationSessionContext
-    from .governance.principal import RequestPrincipal
+    from .governance.principal import ClientBinding, OriginSessionBinding, RequestPrincipal
 
     if signing_root is None or len(presented) > 16384:
         return None
@@ -189,6 +189,14 @@ def bound_principal(presented: str, signing_root: str | None, *, now: int | None
         session = values.get("verified_authorization_session")
         if session is not None:
             values["verified_authorization_session"] = AuthorizationSessionContext(**session)
+        client = values.get("client_binding")
+        if client is not None:
+            values["client_binding"] = ClientBinding(**client)
+        origin = values.get("origin_session")
+        if origin is not None:
+            values["origin_session"] = OriginSessionBinding(**origin)
+        # Delegation preserves identity, never local administrative ingress.
+        values["administrative_ingress"] = False
         return RequestPrincipal(**values)
     except (ValueError, TypeError, AttributeError):
         return None
@@ -243,6 +251,11 @@ def mint_for_endpoint(
     Cloudflare edge cap, for uploads larger than that. The same minted token
     authenticates on both.
 
+    An Evidence upload also returns `resumable`: how to send a larger file in
+    parts through an upload session under `base_url`, which the minted token
+    opens. Only a server that serves sessions mints here: the hosted runtime
+    intercepts `transfer_artifact` and a Cloud cell does not publish it.
+
     A download token carries `audience`, the canonical audience of the caller
     minting it. Omitted, it carries the fail-closed floor, never the owner: a
     caller that forgot to say who is asking must not be handed the owner's view.
@@ -271,6 +284,11 @@ def mint_for_endpoint(
     }
     if scope == "upload":
         out["lane"] = lane or "evidence"
+        from . import upload_sessions
+
+        # A session preserves into one lane, so a capability for another advertises none.
+        if out["lane"] == upload_sessions.LANE:
+            out["resumable"] = upload_sessions.handoff(base_url)
     if scope == "download":
         from .governance.raw_protection import is_owner
 

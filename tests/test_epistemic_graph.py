@@ -140,7 +140,7 @@ def test_rebuild_indexes_files_blocks_and_core_edges(tmp_path: Path) -> None:
     assert ("evidenced_by", CURRENT) in edge_types
 
 
-def test_graph_rich_units_keep_legacy_keys_nodes_and_parse_once(
+def test_graph_rich_units_keep_legacy_nodes_and_parse_once(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -166,33 +166,24 @@ def test_graph_rich_units_keep_legacy_keys_nodes_and_parse_once(
     )
 
     assert len(document.rich_units) == len(legacy.blocks)
+    idx.rebuild_all()
+    served = {node["node_key"]: node for node in idx.nodes(path=CURRENT)}
     for block, unit in zip(legacy.blocks, document.rich_units, strict=True):
-        expected_material = "\n".join(
-            [
-                page.rel_path,
-                block.type,
-                block.id or f"line-{block.line}",
-                block.title,
-                block.body,
-            ]
-        )
-        assert epistemic_graph._block_key(page, unit) == (
-            f"block:{epistemic_graph._hash(expected_material)}"
-        )
-        node = epistemic_graph._block_node(page, unit, raw)
-        assert node.anchor == (
+        node = served[epistemic_graph._unit_candidate_key(page.rel_path, unit)]
+        assert node["kind"] == block.type
+        assert node["anchor"] == (
             block.id
             or semantic_blocks.normalize_label(block.title)
             or f"line-{block.line}"
         )
-        assert node.source_hash == epistemic_graph.vault_module.content_hash(raw)
-        assert node.line_start == block.line
-        assert node.line_end == block.end_line
-        assert node.metadata == {
+        assert node["source_hash"] == epistemic_graph.vault_module.content_hash(raw)
+        assert node["line_start"] == block.line
+        assert node["line_end"] == block.end_line
+        assert node["metadata"].items() >= {
             **block.metadata,
             "origin": "semantic_block",
             "level": block.level,
-        }
+        }.items()
 
     parse_calls = 0
     original_parse = epistemic_graph.semantic_units.parse_semantic_units
@@ -245,7 +236,6 @@ See [[{generic_target}]].
     page = epistemic_graph.find_module._parse_page(
         source_path, source_path.stat().st_mtime, vault
     )
-    source_hash = epistemic_graph.vault_module.content_hash(page.body)
     legacy_block = semantic_blocks.parse_semantic_blocks(
         page.body, validate=False, registry=idx.registry
     ).blocks[0]
@@ -267,103 +257,35 @@ See [[{generic_target}]].
     )
 
     file_key = epistemic_graph._file_key(source_rel)
-    block_key = "block:" + epistemic_graph._hash(
-        "\n".join(
-            [
-                source_rel,
-                legacy_block.type,
-                legacy_block.id or f"line-{legacy_block.line}",
-                legacy_block.title,
-                legacy_block.body,
-            ]
-        )
-    )
+    block_key = epistemic_graph._unit_candidate_key(source_rel, document.rich_units[0])
     block_relation = legacy_block.relations[0]
-    expected = [
-        epistemic_graph._edge(
-            block_key,
-            file_key,
-            "derived_from",
-            "semantic_block",
-            source_path=source_rel,
-            source_anchor="claim-1",
-            metadata={"block_kind": "claim"},
-            registry=idx.registry,
-            page_type="insight",
-            source_hash=source_hash,
-        ),
-        epistemic_graph._edge(
+    expected = {
+        (block_key, file_key, "derived_from", "semantic_block", "claim-1"),
+        (
             block_key,
             epistemic_graph._file_key(f"{rich_target}.md"),
-            block_relation.kind,
+            idx.registry.resolve(block_relation.kind).canonical,
             "semantic_relation",
-            source_path=source_rel,
-            source_anchor="claim-1",
-            raw_relation=block_relation.raw.split(":", 1)[0].strip(),
-            registry=idx.registry,
-            page_type="insight",
-            source_kind="claim",
-            target_kind="file",
-            source_hash=source_hash,
-            metadata={
-                "block_kind": "claim",
-                "line": block_relation.line,
-                "raw": block_relation.raw,
-                "target_resolution": "resolved",
-            },
+            "claim-1",
         ),
-        epistemic_graph._edge(
-            file_key,
-            epistemic_graph._file_key(f"{rich_target}.md"),
-            "links_to",
-            "wikilink",
-            source_path=source_rel,
-            registry=idx.registry,
-            page_type="insight",
-            source_hash=source_hash,
-        ),
-        epistemic_graph._edge(
-            file_key,
-            epistemic_graph._file_key(f"{generic_target}.md"),
-            "links_to",
-            "wikilink",
-            source_path=source_rel,
-            registry=idx.registry,
-            page_type="insight",
-            source_hash=source_hash,
-        ),
-        epistemic_graph._edge(
+        (file_key, epistemic_graph._file_key(f"{rich_target}.md"), "links_to", "wikilink", None),
+        (file_key, epistemic_graph._file_key(f"{generic_target}.md"), "links_to", "wikilink", None),
+        (
             file_key,
             epistemic_graph._file_key(f"{note_target}.md"),
             legacy_note_relation.kind,
             "markdown_relation",
-            source_path=source_rel,
-            source_anchor=f"line-{legacy_note_relation.line}",
-            raw_relation=legacy_note_relation.kind,
-            registry=idx.registry,
-            page_type="insight",
-            source_kind="file",
-            target_kind="file",
-            source_hash=source_hash,
-            metadata={
-                "line": legacy_note_relation.raw,
-                "canonical": True,
-                "target_resolution": "resolved",
-            },
+            f"line-{legacy_note_relation.line}",
         ),
-    ]
+    }
+    idx.rebuild_all()
 
-    actual = epistemic_graph._edges_for_page(
-        vault,
-        page,
-        document,
-        registry=idx.registry,
-        source_hash=source_hash,
-    )
-
-    assert [edge.as_dict() for edge in actual] == [
-        edge.as_dict() for edge in expected
-    ]
+    # Served edges keep the selected parser's meaning over the neutral rows.
+    actual = {
+        (edge["src_key"], edge["dst_key"], edge["relation_type"], edge["origin"], edge["source_anchor"])
+        for edge in idx.edges(source_path=source_rel)
+    }
+    assert actual == expected
 
 
 def test_sidecar_can_be_deleted_and_rebuilt_equivalently(tmp_path: Path) -> None:

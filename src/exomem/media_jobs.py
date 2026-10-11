@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import held_fs, reserved_paths
+from . import held_fs, media_brakes, reserved_paths
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .vault import parse_frontmatter
 
@@ -80,6 +80,25 @@ _MAX_RESULT_PAYLOAD_BYTES = 768 * 1024
 _MAX_RESULT_TEXT_BYTES = 752 * 1024
 _MAX_RESULT_ERROR_BYTES = 4096
 _RESULT_KINDS = frozenset({"extraction", "failure", "pending"})
+# Typed blocked reasons (the `blocked_reason` column), a closed set this module
+# implements. A row's reason counts only while the row is blocked, and every write
+# that blocks a row sets it.
+#: The engine's software could not load (`extract.ExtractionUnavailable`).
+ENGINE_UNAVAILABLE = "engine_unavailable"
+#: The media waits for an engine the deployment switched off; `blocked_context`
+#: names the engine.
+ENGINE_DISABLED = "engine_disabled"
+#: The memory verdicts of `cloud-multimodal-processing` D2; `blocked_context` holds
+#: the `media_brakes.context` they depended on.
+MEMORY_BLOCKED = "memory_blocked"
+OVER_BUDGET = "over_budget"
+#: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
+_WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
+#: Reasons whose rows return by themselves, as a SQL list of these constants.
+_SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REASONS, OVER_BUDGET}))
+OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
+OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
+WAIT_ACTION = "wait for media processing"
 
 
 def _canonical_json(value: object) -> str:
@@ -148,7 +167,19 @@ def _validated_result_payload(kind: str, payload: object) -> dict[str, object] |
         next_action = _bounded_text(payload.get("next_action"), 512)
         if error is None or next_action is None:
             return None
-        return {"error": error, "next_action": next_action}
+        validated: dict[str, object] = {"error": error, "next_action": next_action}
+        # Optional, so a result recorded before these fields existed still publishes.
+        retryable = payload.get("retryable", True)
+        if not isinstance(retryable, bool):
+            return None
+        if not retryable:
+            validated["retryable"] = False
+        presented = payload.get("presented_state")
+        if presented is not None:
+            if presented != PENDING:
+                return None
+            validated["presented_state"] = PENDING
+        return validated
     return None
 
 
@@ -156,6 +187,15 @@ def is_compute_runtime_error(error: object) -> bool:
     """Conservative compatibility recognition for retained CUDA failures."""
     text = str(error or "")
     return text.startswith("ASRRuntimeRefusal:") or is_compute_runtime_failure(text)
+
+
+def _presents_as_waiting(state: object, blocked_reason: object) -> bool:
+    return state == BLOCKED and blocked_reason in _WAITING_REASONS
+
+
+def _returns_by_itself(state: object, blocked_reason: object) -> bool:
+    """Whether a row leaves its state without a person: waiting or over budget."""
+    return state == BLOCKED and (blocked_reason in _WAITING_REASONS or blocked_reason == OVER_BUDGET)
 
 
 def _blocked_presentation_is_current(content: str, error: object) -> bool:
@@ -382,6 +422,8 @@ class MediaJob:
     ocr_generation: int = 0
     state: str = PENDING
     last_error: str | None = None
+    blocked_reason: str | None = None
+    blocked_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -537,6 +579,7 @@ class MediaJobStore:
                     "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
                 )
                 self._migrate_claim_revision(conn)
+                self._migrate_blocked_reasons(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS media_job_results (
@@ -594,6 +637,39 @@ class MediaJobStore:
         if "ocr_generation" not in columns:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN ocr_generation INTEGER NOT NULL DEFAULT 0"
+            )
+
+    @staticmethod
+    def _migrate_blocked_reasons(conn: sqlite3.Connection) -> None:
+        """Typed blocked reasons and the memory-stop counters.
+
+        `memory_stops` counts consecutive memory stops and `memory_soft_stops` those
+        of them that were pressure stops, not the child's own hard-limit failure.
+        `timeout_stops` counts the watchdog's stops apart from both. `blocked_reason`
+        and `blocked_context` say why a row is blocked and what that verdict depended on.
+        """
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "memory_stops" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN memory_stops INTEGER NOT NULL DEFAULT 0")
+        if "memory_soft_stops" not in columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN memory_soft_stops INTEGER NOT NULL DEFAULT 0"
+            )
+        if "timeout_stops" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN timeout_stops INTEGER NOT NULL DEFAULT 0")
+        if "blocked_context" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN blocked_context TEXT")
+        if "blocked_reason" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN blocked_reason TEXT")
+            # A row blocked before the column existed names its missing engine only as
+            # the exception type the worker wrote into last_error.
+            conn.execute(
+                "UPDATE jobs SET blocked_reason = ? "
+                "WHERE state = 'blocked' AND last_error LIKE 'ExtractionUnavailable:%'",
+                (ENGINE_UNAVAILABLE,),
             )
 
     @staticmethod
@@ -750,14 +826,19 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def claim_next(self) -> MediaJob | None:
+    def claim_next(self, admit: Any = None) -> MediaJob | None:
+        """Claim the oldest pending job.
+
+        `admit`, when given, sees that job before the claim and may refuse it, so a
+        job the memory brakes do not admit stays pending and unclaimed.
+        """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
             ).fetchone()
-            if row is None:
+            if row is None or (admit is not None and not admit(self._row_to_job(row))):
                 conn.commit()
                 return None
             now = time.time()
@@ -840,7 +921,15 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def mark(self, job: MediaJob | int, state: str, error: str | None = None) -> bool:
+    def mark(
+        self,
+        job: MediaJob | int,
+        state: str,
+        error: str | None = None,
+        *,
+        blocked_reason: str | None = None,
+        blocked_context: str | None = None,
+    ) -> bool:
         if state not in STATES:
             raise ValueError(f"unknown media job state: {state}")
         job_id = job.id if isinstance(job, MediaJob) else job
@@ -848,7 +937,9 @@ class MediaJobStore:
             return False
         revision_clause = ""
         state_clause = ""
-        params: list[object] = [state, (error or "")[:1000] or None, time.time(), job_id]
+        params: list[object] = [
+            state, (error or "")[:1000] or None, blocked_reason, blocked_context, time.time(), job_id
+        ]
         if isinstance(job, MediaJob):
             revision_clause = " AND claim_revision = ?"
             state_clause = " AND state = ?"
@@ -857,7 +948,8 @@ class MediaJobStore:
         try:
             with conn:
                 return conn.execute(
-                    "UPDATE jobs SET state = ?, last_error = ?, updated_at = ? WHERE id = ?"
+                    "UPDATE jobs SET state = ?, last_error = ?, blocked_reason = ?, "
+                    "blocked_context = ?, updated_at = ? WHERE id = ?"
                     + revision_clause
                     + state_clause
                     + " AND NOT EXISTS (SELECT 1 FROM media_job_results "
@@ -901,6 +993,8 @@ class MediaJobStore:
         binary_identity: dict[str, Any],
         payload: dict[str, Any],
         terminal_state: str | None = None,
+        blocked_reason: str | None = None,
+        blocked_context: str | None = None,
     ) -> bool:
         """Atomically hand child computation to the parent under one claim fence."""
         if job.id is None or kind not in _RESULT_KINDS:
@@ -968,13 +1062,16 @@ class MediaJobStore:
                 if changed:
                     changed = conn.execute(
                         """
-                        UPDATE jobs SET state = ?, last_error = ?, updated_at = ?
+                        UPDATE jobs SET state = ?, last_error = ?, blocked_reason = ?,
+                            blocked_context = ?, updated_at = ?
                         WHERE id = ? AND state IN ('running', 'blocked', 'failed')
                             AND claim_revision = ?
                         """,
                         (
                             terminal_state,
                             str(validated.get("error") or "")[:1000] or None,
+                            blocked_reason,
+                            blocked_context,
                             now,
                             job.id,
                             job.claim_revision,
@@ -988,6 +1085,218 @@ class MediaJobStore:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def record_memory_stop(
+        self, job: MediaJob, *, kind: str, stop_limit: int, context: str
+    ) -> str | None:
+        """Return a memory-stopped running job to pending, refunding its attempt.
+
+        After `stop_limit` consecutive stops the job is blocked instead: over budget
+        when every stop was a hard-limit failure, memory-blocked when any was a
+        pressure stop. Returns PENDING, MEMORY_BLOCKED, OVER_BUDGET, or None when the
+        claim is no longer this job's.
+        """
+        soft = 0 if kind == media_brakes.HARD_LIMIT else 1
+        blocked_error = "MemoryBlocked: waiting for memory after repeated memory stops"
+        return self._record_stop(
+            job,
+            """
+            memory_stops = memory_stops + 1,
+            memory_soft_stops = memory_soft_stops + ?,
+            state = CASE WHEN memory_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN memory_stops + 1 >= ? THEN
+                CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
+                ELSE NULL END,
+            last_error = CASE WHEN memory_stops + 1 >= ? THEN
+                CASE WHEN memory_soft_stops + ? = 0 THEN ? ELSE ? END
+                ELSE NULL END,
+            blocked_context = CASE WHEN memory_stops + 1 >= ? THEN ? ELSE NULL END
+            """,
+            (
+                soft, stop_limit,
+                stop_limit, soft, OVER_BUDGET, MEMORY_BLOCKED,
+                stop_limit, soft, OVER_BUDGET_ERROR, blocked_error,
+                stop_limit, context,
+            ),
+        )
+
+    def record_timeout_stop(self, job: MediaJob, *, stop_limit: int, context: str) -> str | None:
+        """Return a job the watchdog stopped to pending, refunding its attempt.
+
+        A watchdog stop spends the time budget, not memory, so it counts apart from
+        memory stops and a memory-blocked return does not reset it. After `stop_limit`
+        of them the file is over budget, with `context` naming the timeout it exceeded:
+        a file costs at most `stop_limit` timeouts before it leaves the queue. Returns
+        PENDING, OVER_BUDGET, or None when the claim is no longer this job's.
+        """
+        return self._record_stop(
+            job,
+            """
+            timeout_stops = timeout_stops + 1,
+            state = CASE WHEN timeout_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END,
+            last_error = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END,
+            blocked_context = CASE WHEN timeout_stops + 1 >= ? THEN ? ELSE NULL END
+            """,
+            (
+                stop_limit,
+                stop_limit, OVER_BUDGET,
+                stop_limit, OVER_BUDGET_ERROR,
+                stop_limit, context,
+            ),
+        )
+
+    def _record_stop(self, job: MediaJob, assignments: str, params: tuple[object, ...]) -> str | None:
+        """Apply a stop's counter `assignments` to the still-claimed running job.
+
+        Every stop refunds the job's attempt. Returns PENDING or the blocked reason the
+        stop left, or None when the claim is no longer this job's.
+        """
+        if job.id is None:
+            return None
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE jobs SET attempts = MAX(0, attempts - 1), updated_at = ?, "
+                + assignments
+                + " WHERE id = ? AND state = 'running' AND claim_revision = ? "
+                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id)",
+                (time.time(), *params, job.id, job.claim_revision),
+            ).rowcount
+            row = conn.execute(
+                "SELECT state, blocked_reason FROM jobs WHERE id = ?", (job.id,)
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if changed != 1 or row is None:
+            return None
+        if row["state"] == PENDING:
+            return PENDING
+        return str(row["blocked_reason"])
+
+    def running_jobs(self) -> list[MediaJob]:
+        """Claimed jobs whose result the child has not handed to the parent."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'running' AND NOT EXISTS "
+                "(SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id) "
+                "ORDER BY id"
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
+    def recover_memory_verdicts(self, *, lifted: Any, include_memory_blocked: bool) -> int:
+        """Return memory-blocked and over-budget jobs to pending when they may now fit.
+
+        Both return when `lifted(media_type, blocked_context)` reports that what their
+        verdict depended on changed: the cell's limit, the engine's budget, or a longer
+        job timeout. Memory-blocked jobs also return when `include_memory_blocked` is
+        set: at supervisor start, and on the periodic retry while memory pressure is low.
+        An over-budget job returns with fresh stop counts; a memory-blocked one keeps
+        its watchdog count, so the watchdog's bound per file holds across its returns.
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, media_type, blocked_reason, blocked_context FROM jobs "
+                "WHERE state = 'blocked' AND blocked_reason IN (?, ?) "
+                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id) ORDER BY id",
+                (MEMORY_BLOCKED, OVER_BUDGET),
+            ).fetchall()
+            due = [
+                (int(row["id"]), row["blocked_reason"])
+                for row in rows
+                if lifted(str(row["media_type"]), row["blocked_context"])
+                or (include_memory_blocked and row["blocked_reason"] == MEMORY_BLOCKED)
+            ]
+            changed = 0
+            with conn:
+                for job_id, reason in due:
+                    changed += conn.execute(
+                        "UPDATE jobs SET state = 'pending', last_error = NULL, memory_stops = 0, "
+                        "memory_soft_stops = 0, "
+                        "timeout_stops = CASE WHEN ? THEN 0 ELSE timeout_stops END, "
+                        "blocked_reason = NULL, blocked_context = NULL, "
+                        "updated_at = ? WHERE id = ? AND state = 'blocked' AND blocked_reason IS ?",
+                        (reason == OVER_BUDGET, time.time(), job_id, reason),
+                    ).rowcount
+            return changed
+        finally:
+            conn.close()
+
+    def engine_waits(self) -> list[MediaJob]:
+        """Blocked jobs whose engine could not load, or that wait for a disabled one."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'blocked' AND blocked_reason IN (?, ?) "
+                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id) ORDER BY id",
+                (ENGINE_UNAVAILABLE, ENGINE_DISABLED),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
+    def requeue_engine_wait(self, job: MediaJob) -> bool:
+        """Return a job from `engine_waits` to pending, unless it changed since."""
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', last_error = NULL, blocked_reason = NULL, "
+                    "blocked_context = NULL, updated_at = ? WHERE id = ? AND state = 'blocked' "
+                    "AND blocked_reason IS ? AND claim_revision = ?",
+                    (time.time(), job.id, job.blocked_reason, job.claim_revision),
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def drop_extraction_stage(self, job: MediaJob) -> bool:
+        """Remove the extraction stage of a job from `engine_waits`.
+
+        Its media then waits with a pending sidecar and no job until reconciliation
+        queues it for the enabled engine. Later stages of the same job stay queued.
+        """
+        guard = (job.id, job.blocked_reason, job.claim_revision)
+        conn = self._connect()
+        try:
+            with conn:
+                if job.do_clip or job.do_reembed:
+                    return conn.execute(
+                        "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, "
+                        "blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
+                        "WHERE id = ? AND state = 'blocked' AND blocked_reason IS ? "
+                        "AND claim_revision = ?",
+                        (time.time(), *guard),
+                    ).rowcount == 1
+                return conn.execute(
+                    "DELETE FROM jobs WHERE id = ? AND state = 'blocked' AND blocked_reason IS ? "
+                    "AND claim_revision = ?",
+                    guard,
+                ).rowcount == 1
+        finally:
+            conn.close()
+
+    def next_pending(self) -> MediaJob | None:
+        """The job `claim_next` would claim now, without claiming it."""
+        conn = self._connect(readonly=True)
+        try:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id LIMIT 1"
+            ).fetchone()
+            return self._row_to_job(row) if row is not None else None
         finally:
             conn.close()
 
@@ -1059,7 +1368,8 @@ class MediaJobStore:
             expected_states = (BLOCKED, FAILED) if result.kind == "failure" else (RUNNING,)
             placeholders = ",".join("?" for _ in expected_states)
             changed = conn.execute(
-                "UPDATE jobs SET state = ?, last_error = ?, updated_at = ? "
+                "UPDATE jobs SET state = ?, last_error = ?, blocked_reason = NULL, "
+                "blocked_context = NULL, updated_at = ? "
                 f"WHERE id = ? AND state IN ({placeholders}) AND claim_revision = ?",
                 (
                     state,
@@ -1361,7 +1671,8 @@ class MediaJobStore:
             placeholders = ",".join("?" for _ in ids)
             with conn:
                 changed = conn.execute(
-                    f"UPDATE jobs SET state = 'blocked', updated_at = ? WHERE id IN ({placeholders}) "
+                    f"UPDATE jobs SET state = 'blocked', blocked_reason = NULL, blocked_context = NULL, "
+                    f"updated_at = ? WHERE id IN ({placeholders}) "
                     "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                     "WHERE media_job_results.job_id = jobs.id)",
                     (time.time(), *ids),
@@ -1428,9 +1739,13 @@ class MediaJobStore:
             params.append(self._relative(binary_path))
         conn = self._connect()
         try:
+            # Waiting and over-budget rows return by themselves, when memory, the
+            # cell's limit, the engine's budget, the job timeout or the engine switch
+            # changes; a retry would only repeat their verdict.
             candidates = conn.execute(
                 f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
-                f"{target_clause} AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                f"{target_clause} AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
+                f"IN ({_SELF_RETURNING_SQL})) AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id)",
                 params,
             ).fetchall()
@@ -1447,8 +1762,10 @@ class MediaJobStore:
             with conn:
                 for job_id, state, error in admitted:
                     changed += conn.execute(
-                        "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                        "WHERE id = ? AND state = ? AND last_error IS ? "
+                        "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
+                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
+                        "blocked_reason = NULL, "
+                        "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                         "WHERE media_job_results.job_id = jobs.id)",
                         (now, job_id, state, error),
@@ -1472,6 +1789,8 @@ class MediaJobStore:
             eligible: list[MediaJob] = []
             for row in rows:
                 if _classify_batch_write_failure(row["last_error"]) is not None:
+                    continue
+                if _returns_by_itself(row["state"], row["blocked_reason"]):
                     continue
                 eligible.append(self._row_to_job(row))
                 if len(eligible) == limit:
@@ -1662,6 +1981,8 @@ class MediaJobStore:
             ocr_generation=int(row["ocr_generation"]),
             state=str(row["state"]),
             last_error=row["last_error"],
+            blocked_reason=row["blocked_reason"] if "blocked_reason" in row.keys() else None,
+            blocked_context=row["blocked_context"] if "blocked_context" in row.keys() else None,
         )
 
     def _row_to_result(self, row: Any) -> MediaJobResult | None:
@@ -1763,16 +2084,25 @@ class MediaJobStore:
 def _read_status_rows(
     conn: sqlite3.Connection,
 ) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
-    rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
+    # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    # A retained store from before the column existed has no typed reasons.
+    reason = "blocked_reason" if "blocked_reason" in columns else "NULL AS blocked_reason"
+    rows = conn.execute(
+        f"SELECT state, count(*) AS n, {reason} FROM jobs GROUP BY state, blocked_reason"
+    ).fetchall()
     runtime = conn.execute(
         "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
     ).fetchone()
+    waiting = ",".join(f"'{value}'" for value in sorted(_WAITING_REASONS))
+    # Waiting rows are not errors to the tenant; doctor reports their reasons.
     errors = conn.execute(
-        "SELECT state, last_error FROM jobs "
-        "WHERE state IN ('blocked', 'failed') ORDER BY updated_at DESC LIMIT 5"
+        f"SELECT state, last_error FROM (SELECT state, last_error, updated_at, {reason} FROM jobs) "
+        "WHERE state IN ('blocked', 'failed') AND NOT (state = 'blocked' AND "
+        f"coalesce(blocked_reason, '') IN ({waiting})) ORDER BY updated_at DESC LIMIT 5"
     ).fetchall()
     jobs = conn.execute(
-        "SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error "
+        f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason} "
         "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
         (STATUS_JOB_LIMIT,),
     ).fetchall()
@@ -1866,6 +2196,9 @@ def status(
         "idle_seconds": None,
         "reconciliation_required_count": 0,
         "compute_runtime_count": 0,
+        "memory_blocked_count": 0,
+        "over_budget_count": 0,
+        "engine_waiting_count": 0,
         "jobs": [],
         "errors": [],
     }
@@ -1887,7 +2220,13 @@ def status(
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
-        counts.update({str(row["state"]): int(row["n"]) for row in rows})
+        reasons = {MEMORY_BLOCKED: 0, OVER_BUDGET: 0, ENGINE_DISABLED: 0}
+        for row in rows:
+            state, reason = str(row["state"]), row["blocked_reason"]
+            if state == BLOCKED and reason in reasons:
+                reasons[reason] += 1
+            # Counted as each job's own row presents it, so a waiting row is pending.
+            counts[PENDING if _presents_as_waiting(state, reason) else state] += int(row["n"])
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
         active = pid_alive(pid)
         return {
@@ -1901,6 +2240,10 @@ def status(
             else None,
             "reconciliation_required_count": reconciliation_required_count,
             "compute_runtime_count": compute_runtime_count,
+            # Operator surfaces read these; a job's own row shows only that it waits.
+            "memory_blocked_count": reasons[MEMORY_BLOCKED],
+            "over_budget_count": reasons[OVER_BUDGET],
+            "engine_waiting_count": reasons[ENGINE_DISABLED],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
         }
@@ -1911,10 +2254,12 @@ def status(
 def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None
+    from . import media_engines
+
     actions = {
-        PENDING: "wait for media processing",
+        PENDING: WAIT_ACTION,
         RUNNING: "wait for media processing to finish",
-        BLOCKED: "install the required media dependency, then retry",
+        BLOCKED: media_engines.unavailable_next_action(),
         FAILED: "repair or replace the media artifact, then retry",
     }
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
@@ -1938,6 +2283,22 @@ def _status_job(row: Any) -> dict[str, Any]:
         actions[FAILED] = (
             "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
         )
+    reason = row["blocked_reason"] if state == BLOCKED else None
+    if _presents_as_waiting(state, reason):
+        # The tenant sees only that the job waits; doctor reports the reason.
+        return {
+            "id": int(row["id"]),
+            "path": str(row["binary_rel"]),
+            "sidecar_path": str(row["sidecar_rel"]),
+            "media_type": str(row["media_type"]),
+            "state": PENDING,
+            "attempts": int(row["attempts"]),
+            "error": None,
+            "retryable": False,
+            "next_action": WAIT_ACTION,
+        }
+    if reason == OVER_BUDGET:
+        actions[BLOCKED] = OVER_BUDGET_ACTION
     if state == FAILED and error and "sidecar content changed" in error:
         actions[FAILED] = "review the sidecar changes, then retry media processing"
     elif state == FAILED and error and error.startswith("stale extraction:"):
@@ -1950,7 +2311,7 @@ def _status_job(row: Any) -> dict[str, Any]:
         "state": state,
         "attempts": int(row["attempts"]),
         "error": error,
-        "retryable": state in {BLOCKED, FAILED},
+        "retryable": state in {BLOCKED, FAILED} and reason != OVER_BUDGET,
         "next_action": actions[state],
     }
     failure = _classify_batch_write_failure(error)

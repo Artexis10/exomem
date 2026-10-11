@@ -155,8 +155,14 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
             "INVALID_MANIFEST_PATH",
             f"manifest_path must be under {kb_dirname()}/",
         )
+    from .governance import connector_boundary
+
+    try:
+        connector_boundary.require_create(root, rel)
+    except ValueError as error:
+        raise AdoptError("WRITE_REFUSED", "target is unavailable") from error
     if defaulted:
-        target = unique_path(target.parent, target.stem, target.suffix)
+        target = unique_path(target.parent, target.stem, target.suffix, vault_root=root)
         rel = target.relative_to(root).as_posix()
     elif target.exists():
         raise AdoptError("MANIFEST_EXISTS", f"manifest already exists: {rel}")

@@ -4,7 +4,7 @@ Confirms the GPU path works for the media engines on this box:
 - torch sees CUDA and lists the GPU's compute arch (sm_120 for Blackwell RTX 50-series)
 - faster-whisper (ctranslate2) loads on cuda and transcribes a generated silent clip
   — this is the real test of whether CTranslate2 has sm_120 kernels
-- pymupdf + pytesseract import; the Tesseract binary is reported separately
+- pymupdf import; the Tesseract binary that OCR runs is reported separately
 
 Run: uv run python scripts/verify-media-gpu.py
 Exit 0 = gate PASS only when faster-whisper/CTranslate2 executes on the GPU.
@@ -267,17 +267,22 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"per-keyframe video CLIP diagnostic unavailable: {e}")
 
-    # --- pymupdf / pytesseract import + Tesseract binary ---
-    for mod in ("fitz", "pytesseract"):
-        try:
-            __import__(mod)
-            print(f"{mod} import OK")
-        except Exception as e:  # noqa: BLE001
-            print(f"{mod} diagnostic unavailable: {e}")
+    # --- pymupdf import + the Tesseract binary OCR runs ---
     try:
-        import pytesseract
+        __import__("fitz")
+        print("fitz import OK")
+    except Exception as e:  # noqa: BLE001
+        print(f"fitz diagnostic unavailable: {e}")
+    try:
+        import subprocess
 
-        print(f"tesseract binary: {pytesseract.get_tesseract_version()}")
+        from exomem.extract import resolve_tesseract_cmd
+
+        cmd = resolve_tesseract_cmd()
+        if cmd is None:
+            raise FileNotFoundError("not on PATH or in the standard install locations")
+        version = subprocess.run([cmd, "--version"], capture_output=True, text=True, check=True)
+        print(f"tesseract binary: {(version.stdout or version.stderr).splitlines()[0]}")
     except Exception as e:  # noqa: BLE001
         print(f"tesseract binary NOT found (install: winget install UB-Mannheim.TesseractOCR): {e}")
 

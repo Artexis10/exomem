@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import memory_refs, vault
+from . import memory_refs, note_types, vault
 from .kbdir import kb_prefix
 
 PUBLIC_UNRESOLVED_LIMIT = 8
@@ -23,16 +23,6 @@ UNRESOLVED_REMEDIATION = (
     "unsupported citation explicitly."
 )
 
-_COMPILED_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "failure",
-        "pattern",
-        "experiment",
-        "production-log",
-    }
-)
 _EXTERNAL_LOCATOR = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 
 
@@ -109,9 +99,9 @@ def _bounded_value(value: str) -> str:
     return prefix.decode("utf-8", errors="ignore") + suffix
 
 
-def _source_values(markdown: str) -> tuple[str, ...]:
+def _source_values(markdown: str, type_basis: note_types.Basis) -> tuple[str, ...]:
     frontmatter, _body, _frontmatter_text = vault.parse_frontmatter(markdown)
-    if frontmatter.get("type") not in _COMPILED_TYPES:
+    if not type_basis.selects(frontmatter.get("type"), note_types.compiled):
         return ()
     raw = frontmatter.get("sources")
     if raw is None or raw == "":
@@ -128,9 +118,9 @@ def _target(value: str) -> str:
     return cleaned.split("#", 1)[0].strip()
 
 
-def source_claims(markdown: str) -> tuple[str, ...]:
+def source_claims(markdown: str, type_basis: note_types.Basis) -> tuple[str, ...]:
     """Return normalized explicit source values from a compiled page."""
-    return _source_values(markdown)
+    return _source_values(markdown, type_basis)
 
 
 def _default_authorizer(root: Path) -> Callable[[str], bool]:
@@ -150,6 +140,7 @@ def _resolve_one(
     *,
     resolver: vault.WikilinkResolver,
     authorize_path: Callable[[str], bool],
+    type_basis: note_types.Basis,
 ) -> ResolvedSource | None:
     target = _target(supplied)
     if not target:
@@ -186,7 +177,7 @@ def _resolve_one(
     except (OSError, UnicodeError, vault.PathGuardError):
         return None
     frontmatter, _body, frontmatter_text = vault.parse_frontmatter(source)
-    if frontmatter_text is None or frontmatter.get("type") not in {"source", "evidence"}:
+    if frontmatter_text is None or not type_basis.selects(frontmatter.get("type"), note_types.raw):
         return None
     return ResolvedSource(
         supplied,
@@ -206,7 +197,8 @@ def inspect_source_closure(
 ) -> SourceClosureInspection:
     """Resolve final explicit source claims without exposing failed candidates."""
     root = Path(vault_root)
-    values = _source_values(markdown)
+    type_basis = note_types.Basis(root)
+    values = _source_values(markdown, type_basis)
     if not values:
         return SourceClosureInspection((), (), ())
     authorize = authorize_path or _default_authorizer(root)
@@ -219,6 +211,7 @@ def inspect_source_closure(
             supplied,
             resolver=resolver,
             authorize_path=authorize,
+            type_basis=type_basis,
         )
         if item is None:
             unresolved.append(supplied)

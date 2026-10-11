@@ -30,11 +30,13 @@ from .. import (
     writer_lease,
 )
 from .. import structured_collections as collections
+from ..governance import connector_boundary
 from ..governance.principal import effective_principal
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
     chain,
     connection,
+    derived_rows,
     governance,
     index_migrations,
     rollups,
@@ -264,6 +266,12 @@ class CollectionWriter:
                 f"{profile.title()} collection is required",
             )
         return row, manifest, declared
+
+    @staticmethod
+    def _rows_writable(manifest, action):
+        """The one gate on row mutations: a derived collection's rows change only through its imports."""
+        if manifest.derived:
+            raise derived_rows.refused(action)
 
     def _collection_manifest(self, row):
         self._require_operation_context()
@@ -509,10 +517,15 @@ class CollectionWriter:
         )
         saved_views = record_governance._inspection_saved_views(self.root, manifest, links, diagnostics)
         catalog = selection.catalog
+        # Global guards and audit state cannot depend on whether hidden rows
+        # happen to exist. Limited callers receive the admitted snapshot only.
+        unrestricted = connector_boundary.unrestricted(self.root, self._operation.who)
         if release is not None:
-            complete, committed = release.complete, release.released
+            complete, committed = unrestricted and release.complete, release.released
         else:
-            complete = len(allowed_rows) == sum(isinstance(subject.row_id, int) for subject in catalog)
+            complete = unrestricted and len(allowed_rows) == sum(
+                isinstance(subject.row_id, int) for subject in catalog
+            )
             committed = len(allowed_rows)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
         pending = sum(
@@ -548,6 +561,10 @@ class CollectionWriter:
             # Items mode stays wire-identical to file collections; summary names its own bounds.
             payload["contract"]["view_mode"] = manifest.view_mode
             payload["capacity"] = summary.capacity()
+        if manifest.derived:
+            payload["contract"]["derived"] = True
+            payload["derived_rows"] = derived_rows.rebuild_status(self.connection, self.handle.path,
+                                                                  manifest.collection_id)
         if release is None and (manifest.item_presentation or manifest.record_presentation or manifest.item_filename):
             payload["presentation"] = record_governance._presentation_inspection(inspection.presentation, manifest)
         if declared.kind == "intended" and facade_profile != "records":
@@ -849,10 +866,10 @@ class CollectionWriter:
             ).fetchone()
         elif projection["kind"] == "summary":
             # Generated read-only output: hold any edit with its bytes, never parse it into rows.
-            generation = self.connection.execute(
-                "SELECT generation FROM collections WHERE collection_id=?", (projection["collection_id"],)
-            ).fetchone()[0]
-            return "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
+            generation, derived = self.connection.execute(
+                "SELECT generation,derived FROM collections WHERE collection_id=?", (projection["collection_id"],)
+            ).fetchone()
+            return derived_rows.COLLECTION_DERIVED if derived else "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
         else:
             return "VIEW_INVALID", view_stamp, projection["pending_row_version"]
         version, payload = current
@@ -877,8 +894,8 @@ class CollectionWriter:
                 self._validate(manifest, declared, key, values, operation="update", validate_graph=False)
             else:
                 proposed = collections.parse_manifest_bytes(self.root, projection["path"], raw)
-                if proposed.view_mode != manifest.view_mode and summary.populated(
-                        self.connection, manifest.collection_id):
+                if proposed.derived != manifest.derived or (proposed.view_mode != manifest.view_mode and
+                                                            summary.populated(self.connection, manifest.collection_id)):
                     return summary.MODE_CHANGE_UNSUPPORTED, view_stamp, version
         except collections.CollectionError:
             return "VIEW_INVALID", view_stamp, version
@@ -1274,6 +1291,9 @@ class CollectionWriter:
                                                manifest, data, types.type_for_manifest(manifest))
         except IndexDeclarationError as error:
             raise collections.CollectionError(error.code, error.reason) from error
+        from .importer import saved_imports
+
+        saved_imports(manifest, data)
         self._execute(
             "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
             "schema_json,natural_key_json,txn_id,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1330,7 +1350,9 @@ class CollectionWriter:
                     f"{self._facade_profile.title()} collection is required",
                 )
             if self._facade_profile == "planning" and scaffold:
-                manifest_text = planning._with_default_scaffold(manifest_text, manifest)
+                manifest_text = planning._with_default_scaffold(
+                    manifest_text, manifest, vault_root=self.root
+                )
                 manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
             if declared.kind == "intended":
                 planning.require_planning_profile(manifest)
@@ -1343,6 +1365,11 @@ class CollectionWriter:
             if manifest.view_diagnostics:
                 diagnostic = manifest.view_diagnostics[0]
                 raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+            try:
+                connector_boundary.require_create(self.root, manifest.path)
+                connector_boundary.require_create(self.root, manifest.storage.source)
+            except ValueError as error:
+                raise collections.CollectionError("WRITE_REFUSED", "target is unavailable") from error
             conflicts = self.connection.execute(
                 "SELECT collection_id FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
                 (manifest.collection_id, manifest.path, manifest.storage.source),
@@ -1362,8 +1389,8 @@ class CollectionWriter:
             types.register_builtins(self.connection, txn_id=txn["txn_id"])
             self._execute(
                 "INSERT INTO collections (collection_id, type_name, type_version, manifest_path, source_path, layout, "
-                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?)",
+                "manifest_version, generation, audit_head, audit_reader_version, created_txn, updated_txn, view_mode, "
+                "derived) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 1, ?, ?, ?, ?)",
                 (
                     manifest.collection_id,
                     declared.name,
@@ -1375,6 +1402,7 @@ class CollectionWriter:
                     txn["txn_id"],
                     txn["txn_id"],
                     manifest.view_mode,
+                    int(manifest.derived),
                 ),
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
@@ -1424,6 +1452,9 @@ class CollectionWriter:
             planning.require_planning_profile(manifest)
             values = planning.normalize_item(
                 values,
+                vault_root=self.root,
+                # A revision re-checks stored values against the proposed manifest.
+                stored=values if operation == "revise" else before,
                 apply_defaults=operation == "append",
                 validate_motivation=planning.motivation_is_governed(manifest),
             )
@@ -1434,8 +1465,9 @@ class CollectionWriter:
         if declared.validators and validate_graph:
             plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
             plans[key] = values
+            write = planning.HierarchyWrite(self.root, key, before)
             for name in declared.validators:
-                types.named_validator(name).validate(manifest, plans)
+                types.named_validator(name).validate(manifest, plans, write=write)
         return values
 
     def _held(self, cid: str, held: str | None):
@@ -1780,6 +1812,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, _ = self._collection(collection, facade_profile="records")
+            self._rows_writable(manifest, "bulk_upsert")
             current_hash = self._container(row)
             records._expect_hash(expected_container_hash, current_hash, "container")
             batch_id = uuid.uuid4().hex[:12]
@@ -1952,6 +1985,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, declared = self._collection(collection)
+            self._rows_writable(manifest, "append")
             resumed = self._held(manifest.collection_id, held)
             if (item is None and resumed is None) or (
                 item is not None and not isinstance(item, Mapping)
@@ -1979,7 +2013,9 @@ class CollectionWriter:
                 )
             if declared.kind == "intended":
                 values = planning.normalize_item(
-                    values, validate_motivation=planning.motivation_is_governed(manifest)
+                    values,
+                    vault_root=self.root,
+                    validate_motivation=planning.motivation_is_governed(manifest),
                 )
             key = (
                 records._validate_item_key(item_key, manifest=manifest, candidate=values)
@@ -2133,6 +2169,7 @@ class CollectionWriter:
             if replay is not None:
                 return replay
             row, manifest, declared = self._collection(collection)
+            self._rows_writable(manifest, operation)
             key = records._validate_item_key(item_key, manifest=manifest, candidate=changes)
             before = self._item(manifest.collection_id, key)
             if before is None:
@@ -2345,6 +2382,12 @@ class CollectionWriter:
                 )
             # A populated collection never changes view mode in place; refuse
             # before any manifest, mapping, file, guard or cursor work.
+            if proposed.derived != current.derived:
+                raise derived_rows.conversion_refused(current.derived)
+            if current.derived and summary.populated(self.connection, current.collection_id):
+                refused = derived_rows.field_change_refused(current, proposed)
+                if refused is not None:
+                    raise refused
             mode_change = proposed.view_mode != current.view_mode
             if mode_change and summary.populated(self.connection, current.collection_id):
                 raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
@@ -2360,7 +2403,7 @@ class CollectionWriter:
                 for key, values in typed_storage.collection_values(self.connection, current.collection_id)
             }
             for name in declared.validators:
-                types.named_validator(name).validate(proposed, plans)
+                types.named_validator(name).validate(proposed, plans, write=None)
             retired_pages = summary.page_paths(current) if mode_change else ()
             self._preflight_views([current.path, *retired_pages, *(path for (path,) in self.connection.execute(
                 "SELECT view_path FROM items WHERE collection_id=? AND view_path IS NOT NULL UNION ALL "

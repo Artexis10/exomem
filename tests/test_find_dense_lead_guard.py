@@ -29,6 +29,7 @@ import pytest
 
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
+from exomem.governance.principal import library_scope
 from exomem.kbdir import kb_dirname
 
 _GOLD = "Notes/Patterns/retry-with-backoff.md"
@@ -243,6 +244,7 @@ def test_no_withheld_record_when_the_guard_is_silent(
     assert all("lexical_votes_withheld" not in hit["ranking_explanation"] for hit in result["hits"])
 
 
+@library_scope()
 def test_the_guard_reads_only_candidates_that_can_reach_the_fused_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -32,6 +32,7 @@ from typing import Any, ClassVar
 from fastmcp.server.auth.auth import AccessToken
 
 from .auth_sessions import SessionStoreUnavailable
+from .governance.principal import OriginSessionBinding
 from .service_ingress import (
     INGRESS_KEY_ENV,
     INGRESS_PROOF_HEADER,
@@ -67,6 +68,7 @@ class LocalGrant:
     access_token: LocalIngressAccessToken = field(repr=False)
     client_id: str
     session_id: str
+    origin_session: OriginSessionBinding | None = None
 
 
 _GRANT: ContextVar[LocalGrant | None] = ContextVar("exomem_local_ingress_grant", default=None)
@@ -155,6 +157,9 @@ class LocalCredentialVerifier:
             access_token=token,
             client_id=record.client_id,
             session_id=record.session_id,
+            origin_session=OriginSessionBinding(
+                session_id=record.session_id, generation=record.generation, audience=record.audience,
+            ),
         )
 
 

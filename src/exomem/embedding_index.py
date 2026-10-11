@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from itertools import chain
 from pathlib import Path
@@ -53,7 +53,27 @@ def _sqlite_connect_owned(
 #: The width of the legacy English space, kept for callers that name it. A
 #: sidecar's own width is `EmbeddingIndex.dim`, read from its vector-space record.
 VECTOR_DIM = recall_space.LEGACY_DIM
-SEMANTIC_UNIT_SCHEMA_VERSION = 3
+#: 4: rows are selection-free structural occurrences, and each parent's
+#: coverage record lives in `meta`. An older table is dropped, not migrated.
+SEMANTIC_UNIT_SCHEMA_VERSION = 4
+#: `meta` key prefix of one parent's neutral structural coverage record. A storage
+#: key format this sidecar alone writes and reads; it decides no meaning.
+COVERAGE_PREFIX = "occurrence_coverage:"
+#: The first key past the prefix's range, so a range scan uses the key index.
+_COVERAGE_END = COVERAGE_PREFIX[:-1] + chr(ord(COVERAGE_PREFIX[-1]) + 1)
+#: The generation `semantic_unit_parent_states` reports for an absent record. A
+#: sentinel, not a vocabulary value: no parse produces it.
+MISSING_COVERAGE = "missing-coverage"
+#: The occurrence columns, in table order, before `vector` and `file_mtime`. The
+#: table's own schema, named once for every reader and writer of its rows.
+OCCURRENCE_COLUMNS = (  # nosemgrep: ep-word-set -- The table's own column names.
+    "unit_key", "record_type", "parent_path", "parent_ref", "parent_generation",
+    "parent_source_hash", "parser_version", "form", "content", "unit_source_hash",
+    "source_order",
+)
+_CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
+#: The counter every unit write bumps inside its own transaction.
+SEMANTIC_UNIT_GENERATION = "semantic_unit_generation"
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
 
@@ -223,18 +243,198 @@ class SemanticUnitVectorHit(NamedTuple):
 
 
 class SemanticUnitVectorRow(NamedTuple):
-    """One stored unit vector as the corpus-level read returns it.
+    """One stored occurrence vector as the corpus-level read returns it.
 
     `parent_generation` travels with the geometry on purpose: a consumer that
     reads these vectors against a NEWER parse of the same page would be reading
-    deleted text, and an anchored `unit_ref` is content-independent so the join
-    alone cannot detect that.
+    deleted text, and an occurrence key alone cannot detect that.
     """
 
-    unit_ref: str
+    unit_key: str
     source_order: int
     vector: np.ndarray
     parent_generation: str
+
+
+class _UnitBlock(NamedTuple):
+    """Unit vectors with the stamps a hit carries and validation reads.
+
+    `rows[i] = (unit_key, parent_path, parent_generation, parent_source_hash,
+    parser_version)` and `matrix[i]` is its vector. `parent_of[i]` indexes
+    `parents`, the block's distinct parent paths, so an allowed-parents filter
+    costs one membership test per parent rather than one per unit. Unit content,
+    form, category and kind are never held.
+    """
+
+    rows: list[tuple[str, str, str, str, int]]
+    parents: list[str]
+    parent_of: np.ndarray
+    matrix: np.ndarray
+
+
+class _UnitCache(NamedTuple):
+    """Neutral resident vectors and compact proof at an exact snapshot token.
+
+    Every unit write moves `generation`; a chunk-only write leaves it alone.
+    `width` binds the matrix to its loaded vector space. No selected meaning
+    or continuing admission authority lives here.
+    """
+
+    epoch: int
+    generation: int
+    instance: int
+    width: int
+    block: _UnitBlock
+    coverage: dict[str, tuple[str, int]]
+    unproved: frozenset[str]
+
+
+_UNIT_COLUMNS = (
+    "unit_key, parent_path, parent_generation, parent_source_hash, parser_version, vector"
+)
+
+
+def _unit_block(rows: Iterable[tuple], count: int, width: int) -> _UnitBlock:
+    """Read at most `count` unit rows of `width`-wide vectors; skip other widths."""
+    matrix = np.empty((count, width), dtype=np.float32)
+    parent_of = np.empty(count, dtype=np.int32)
+    kept: list[tuple[str, str, str, str, int]] = []
+    parents: list[str] = []
+    slots: dict[str, int] = {}
+    # Share repeated strings within this load only: sys.intern never frees on 3.12.
+    shared: dict[str, str] = {}
+    for unit_key, parent_path, generation, source_hash, parser_version, blob in rows:
+        if not isinstance(blob, bytes) or len(blob) != width * 4:
+            continue
+        try:
+            version = int(parser_version)
+        except (TypeError, ValueError):
+            continue
+        if len(kept) == count:
+            raise ValueError("semantic-unit row count differs from snapshot")
+        path = str(parent_path)
+        slot = slots.get(path)
+        if slot is None:
+            slot = slots[path] = len(parents)
+            parents.append(path)
+        matrix[len(kept)] = np.frombuffer(blob, dtype=np.float32)
+        parent_of[len(kept)] = slot
+        generation, source_hash = str(generation), str(source_hash)
+        kept.append(
+            (
+                str(unit_key),
+                parents[slot],
+                shared.setdefault(generation, generation),
+                shared.setdefault(source_hash, source_hash),
+                version,
+            )
+        )
+    size = len(kept)
+    if size < count:
+        matrix, parent_of = matrix[:size].copy(), parent_of[:size].copy()
+    return _UnitBlock(kept, parents, parent_of, matrix)
+
+
+def _unit_mask(block: _UnitBlock, admitted: Callable[[str], bool]) -> np.ndarray:
+    """Admit each parent before any score can spend a transport slot."""
+    mask = np.fromiter(
+        (admitted(path) for path in block.parents), dtype=bool, count=len(block.parents)
+    )
+    return mask[block.parent_of]
+
+
+def _best_with_ties(scores: np.ndarray, window: int) -> np.ndarray:
+    """Positions of the `window` highest scores and of every score tied with the
+    lowest of them, so ranking this subset by the full key gives exactly the first
+    `window` rows that ranking every row would. NaN ranks below every number."""
+    if len(scores) <= window:
+        return np.arange(len(scores))
+    negated = -scores
+    cut = negated[np.argpartition(negated, window - 1)[window - 1]]
+    if np.isnan(cut):
+        # Fewer than `window` scores are numbers: every row is needed.
+        return np.arange(len(scores))
+    return np.flatnonzero(negated <= cut)
+
+
+def _unit_rank(candidate: tuple[float, int, tuple[str, str, str, str, int]]) -> tuple:
+    """Best score first, then `unit_ref`: the order the unit lane publishes.
+
+    NaN ranks last. The row's position in the scan breaks a tie on both, which
+    makes the order total, so a wider window always starts with a narrower one.
+    """
+    score, position, row = candidate
+    return (score != score, -score, row[0], position)
+
+
+def _unit_top(
+    blocks: Callable[[], Iterable[tuple[_UnitBlock, np.ndarray | None]]],
+    query: np.ndarray,
+    window: int,
+    raw_window: int,
+    parents: semantic_index.AdmittedParents,
+    refs: frozenset[str] | None,
+) -> tuple[list[tuple[float, tuple[str, str, str, str, int]]], float, bool]:
+    """Bounded selected winners and a score bound on omitted transport rows.
+
+    Every cutoff tie is proposed before selected mapping. Mapping can suppress
+    or merge occurrences, so the caller widens until this bound proves its prefix.
+    """
+    best: dict[str, tuple[float, int, tuple[str, str, str, str, int]]] = {}
+    omitted_bound = -np.inf
+    complete = True
+    offset = 0
+    for block, mask in blocks():
+        positions = np.arange(len(block.rows)) if mask is None else np.flatnonzero(mask)
+        start, offset = offset, offset + len(block.rows)
+        if not len(positions):
+            continue
+        if len(positions) == len(block.rows):
+            scores = block.matrix @ query
+        else:
+            # Admission precedes scoring, without a second admitted corpus matrix.
+            scores = np.empty(len(positions), dtype=np.float32)
+            for first in range(0, len(positions), SEMANTIC_UNIT_READ_BATCH):
+                batch = positions[first : first + SEMANTIC_UNIT_READ_BATCH]
+                scores[first : first + len(batch)] = block.matrix[batch] @ query
+        proposed = _best_with_ties(scores, raw_window)
+        if len(proposed) < len(positions):
+            complete = False
+            omitted_bound = max(omitted_bound, float(scores[proposed].min()))
+        for first in range(0, len(proposed), SEMANTIC_UNIT_READ_BATCH):
+            batch = proposed[first : first + SEMANTIC_UNIT_READ_BATCH]
+            parents.prefetch(block.rows[int(positions[n])][1] for n in batch)
+            for n in batch:
+                position = int(positions[n])
+                key, path, generation, source_hash, version = block.rows[position]
+                parent = parents.parent(path)
+                if parent is None or (
+                    parent.metadata.get("parent_generation"),
+                    parent.metadata.get("parent_source_hash"),
+                    parent.metadata.get("parser_version"),
+                ) != (generation, source_hash, version):
+                    continue
+                unit = parent.structure.unit(key)
+                if (
+                    unit is None
+                    or not unit.unit_ref
+                    or (refs is not None and unit.unit_ref not in refs)
+                ):
+                    continue
+                row = (unit.unit_ref, path, generation, source_hash, version)
+                candidate = (float(scores[n]), start + position, row)
+                previous = best.get(unit.unit_ref)
+                if previous is None or _unit_rank(candidate) < _unit_rank(previous):
+                    best[unit.unit_ref] = candidate
+            # Ties can span the corpus. Keep only a window plus one transport batch.
+            best = {item[2][0]: item for item in sorted(best.values(), key=_unit_rank)[:window]}
+    ordered = sorted(best.values(), key=_unit_rank)
+    return [(score, row) for score, _position, row in ordered], float(omitted_bound), complete
+
+
+#: Paths per `file_mtimes` read: under SQLite's oldest default bound of 999
+#: parameters per statement.
+_PATHS_PER_READ = 900
 
 
 #: Rows per batch in the corpus-level unit-vector read. Bounds the result set a
@@ -251,6 +451,199 @@ SEMANTIC_UNIT_READ_BATCH = 2_000
 #: and 100 s for one `search` per chunk.
 SEARCH_MANY_BLOCK = 64
 _UNSPECIFIED_SPACE = object()
+
+
+def occurrence_rows(state: semantic_index.SemanticParentIndexState) -> list[tuple]:
+    """One parent's occurrence rows, in `OCCURRENCE_COLUMNS` order, without vectors.
+
+    Every occurrence some selected interpretation could emit is encoded once:
+    the rich heading body or the compact content, never a selected meaning.
+    """
+    return [
+        (
+            occurrence.key, "structural_occurrence", state.path, state.parent_ref,
+            state.parent_generation, state.parent_source_hash, state.parser_version,
+            occurrence.form, occurrence.content, occurrence.source_hash, source_order,
+        )
+        for source_order, occurrence in enumerate(state.occurrences)
+    ]
+
+
+def coverage_record(state: semantic_index.SemanticParentIndexState) -> str:
+    """The parent's neutral summary plus the occurrence keys its rows must hold.
+
+    It binds parser generation, source hash and format, and lists every
+    expected key, so an empty set still proves a parent with no occurrences.
+    """
+    return json.dumps(
+        {
+            **semantic_index.structural_metadata(state),
+            "occurrences": sorted(occurrence.key for occurrence in state.occurrences),
+        },
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def expected_parent_state(
+    state: semantic_index.SemanticParentIndexState,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """What `semantic_unit_parent_states` reports for a current publication of `state`."""
+    return (
+        frozenset({state.parent_generation}),
+        frozenset(occurrence.key for occurrence in state.occurrences),
+    )
+
+
+def stored_parent_states(
+    conn: sqlite3.Connection, paths: list[str] | None = None
+) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+    """Stored generations and occurrence keys per parent, from rows and records.
+
+    A parent appears when it has rows or a coverage record. Its generations
+    hold every row's and the record's; `MISSING_COVERAGE` stands for an absent
+    record. `expected_parent_state` is the value of a current publication.
+    """
+    rows = conn.execute(
+        "SELECT parent_path, parent_generation, unit_key FROM semantic_unit_vectors"
+        + ("" if paths is None else " WHERE parent_path IN (SELECT value FROM json_each(?))"),
+        () if paths is None else (json.dumps(paths, ensure_ascii=False),),
+    ).fetchall()
+    grouped: dict[str, tuple[set[str], set[str]]] = {
+        path: ({generation}, set()) for path, (generation, _count) in _coverage_index(conn, paths).items()
+    }
+    for parent_path, generation, unit_key in rows:
+        generations, keys = grouped.setdefault(str(parent_path), ({MISSING_COVERAGE}, set()))
+        generations.add(str(generation))
+        keys.add(str(unit_key))
+    return {
+        parent_path: (frozenset(generations), frozenset(keys))
+        for parent_path, (generations, keys) in grouped.items()
+    }
+
+
+def _write_coverage(conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        (COVERAGE_PREFIX + state.path, coverage_record(state)),
+    )
+
+
+def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -> None:
+    if paths is None:
+        conn.execute(
+            "DELETE FROM meta WHERE key >= ? AND key < ?",
+            (COVERAGE_PREFIX, _COVERAGE_END),
+        )
+        return
+    conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
+
+
+def indexed_parent_paths(conn: sqlite3.Connection) -> list[str]:
+    """Parents this sidecar holds chunks or an occurrence coverage record for."""
+    return [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT file_path FROM chunks UNION "
+            "SELECT substr(key, ?) FROM meta WHERE key >= ? AND key < ?",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END),
+        )
+    ]
+
+
+def _coverage_index(
+    conn: sqlite3.Connection, paths: list[str] | None = None
+) -> dict[str, tuple[str, int]]:
+    """`{path: (record generation, expected occurrence count)}`, parsed by SQLite."""
+    select = (
+        "SELECT substr(key, ?), json_extract(value, '$.parent_generation'), "
+        "json_array_length(value, '$.occurrences') FROM meta "
+    )
+    if paths is None:
+        rows = conn.execute(
+            select + "WHERE key >= ? AND key < ? AND json_valid(value)",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END),
+        )
+    else:
+        rows = conn.execute(
+            select + "WHERE key IN (SELECT ? || value FROM json_each(?)) AND json_valid(value)",
+            (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, json.dumps(paths, ensure_ascii=False)),
+        )
+    return {
+        str(path): (str(generation), int(count))
+        for path, generation, count in rows
+        if generation is not None and count is not None
+    }
+
+
+def _coverage_records(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict[str, Any]]:
+    """Stored coverage records by parent path; an unreadable record is absent."""
+    rows = conn.execute(
+        "SELECT key, value FROM meta WHERE key IN (SELECT ? || value FROM json_each(?))",
+        (COVERAGE_PREFIX, json.dumps(sorted(paths), ensure_ascii=False)),
+    )
+    records: dict[str, dict[str, Any]] = {}
+    for key, value in rows:
+        try:
+            record = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict) and isinstance(record.get("occurrences"), list):
+            records[str(key)[len(COVERAGE_PREFIX):]] = record
+    return records
+
+
+def _unit_coverage(
+    conn: sqlite3.Connection, width: int,
+) -> tuple[dict[str, tuple[str, int]], frozenset[str]]:
+    """Compact neutral proof of exact occurrence keys, row stamps and usable vectors.
+
+    SQLite checks JSON through its parser and compares both key directions. Counts
+    alone cannot detect a substituted occurrence. Full summaries stay on disk.
+    """
+    from .semantic_units import STRUCTURAL_FORMAT
+
+    coverage: dict[str, tuple[str, int]] = {}
+    unproved: set[str] = set()
+    rows = conn.execute(
+        "WITH records AS ("
+        "SELECT substr(key, ?) AS path, "
+        "CASE WHEN json_valid(value) THEN value ELSE '{}' END AS doc FROM meta "
+        "WHERE key >= ? AND key < ?) "
+        "SELECT path, json_extract(doc, '$.parent_generation'), "
+        "json_array_length(doc, '$.occurrences'), "
+        "json_extract(doc, '$.structural_complete') = 1 "
+        "AND json_extract(doc, '$.parser_version') = ? "
+        "AND json_extract(doc, '$.structure.format') = ? "
+        "AND json_type(doc, '$.parent_generation') = 'text' "
+        "AND json_type(doc, '$.parent_source_hash') = 'text' "
+        "AND json_type(doc, '$.occurrences') = 'array' "
+        "AND (SELECT COUNT(*) FROM semantic_unit_vectors v WHERE v.parent_path = records.path) "
+        "= json_array_length(doc, '$.occurrences') "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(doc, '$.occurrences') expected "
+        "WHERE expected.type != 'text' OR NOT EXISTS ("
+        "SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
+        "AND v.unit_key = expected.value "
+        "AND v.parent_generation = json_extract(doc, '$.parent_generation') "
+        "AND v.parent_source_hash = json_extract(doc, '$.parent_source_hash') "
+        "AND v.parser_version = json_extract(doc, '$.parser_version') "
+        "AND typeof(v.vector) = 'blob' AND length(v.vector) = ?)) "
+        "AND NOT EXISTS (SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
+        "AND v.unit_key NOT IN (SELECT value FROM json_each(doc, '$.occurrences'))) "
+        "FROM records",
+        (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END,
+         semantic_index.PARSER_VERSION, STRUCTURAL_FORMAT, width * 4),
+    )
+    for path, generation, count, proved in rows:
+        if generation is not None and count is not None:
+            coverage[str(path)] = (str(generation), int(count))
+        if not proved:
+            unproved.add(str(path))
+    unproved.update(
+        str(path)
+        for (path,) in conn.execute("SELECT DISTINCT parent_path FROM semantic_unit_vectors")
+        if str(path) not in coverage
+    )
+    return coverage, frozenset(unproved)
 
 
 def _top_admitted(
@@ -322,9 +715,14 @@ class EmbeddingIndex:
         self._cache: _EmbCache | None = None
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
+        # The resident semantic-unit matrix (see `_unit_vectors`).
+        self._unit_cache: _UnitCache | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
+        # stalls a chunk write's `_patch_cache`.
+        self._unit_lock = threading.Lock()
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -370,33 +768,6 @@ class EmbeddingIndex:
             )
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS semantic_unit_vectors (
-                unit_key TEXT NOT NULL,
-                record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),
-                unit_ref TEXT NOT NULL,
-                parent_path TEXT NOT NULL,
-                parent_ref TEXT,
-                parent_generation TEXT NOT NULL,
-                parent_source_hash TEXT NOT NULL,
-                parser_version INTEGER NOT NULL,
-                form TEXT NOT NULL,
-                category TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                content TEXT NOT NULL,
-                unit_source_hash TEXT NOT NULL,
-                source_order INTEGER NOT NULL,
-                vector BLOB NOT NULL,
-                file_mtime REAL NOT NULL,
-                PRIMARY KEY (parent_path, unit_key)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
-            "ON semantic_unit_vectors(parent_path, parent_generation)"
-        )
         sidecar_store.ensure_meta_table(conn, "chunks", self.path.name)
         # Before any write on this connection: every writer must have the log, so
         # that a writer which bumps the generation without logging its paths is
@@ -405,14 +776,46 @@ class EmbeddingIndex:
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
-        if stored_unit_schema != (SEMANTIC_UNIT_SCHEMA_VERSION,):
-            with conn:
-                conn.execute("DELETE FROM semantic_unit_vectors")
+        current_unit_schema = stored_unit_schema == (SEMANTIC_UNIT_SCHEMA_VERSION,)
+        with conn:
+            if not current_unit_schema:
+                # The row shape changed, so an older table and its staging copy
+                # are replaced rather than emptied under their old constraints.
+                conn.execute("DROP TABLE IF EXISTS semantic_unit_vectors")
+                conn.execute("DROP TABLE IF EXISTS embedding_build_units")
+                conn.execute("DROP TABLE IF EXISTS embedding_build_coverage")
+                _delete_coverage(conn)
+            # The record_type CHECK fixes this table's one row format token.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS semantic_unit_vectors (
+                    unit_key TEXT NOT NULL,
+                    record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),
+                    parent_path TEXT NOT NULL,
+                    parent_ref TEXT,
+                    parent_generation TEXT NOT NULL,
+                    parent_source_hash TEXT NOT NULL,
+                    parser_version INTEGER NOT NULL,
+                    form TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    unit_source_hash TEXT NOT NULL,
+                    source_order INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    file_mtime REAL NOT NULL,
+                    PRIMARY KEY (parent_path, unit_key)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
+                "ON semantic_unit_vectors(parent_path, parent_generation)"
+            )
+            if not current_unit_schema:
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
                 )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         if target == self.path:
             conn.execute("BEGIN")
             try:
@@ -682,7 +1085,7 @@ class EmbeddingIndex:
         for state, vectors, mtime in unit_replacements:
             if len(vectors) and np.asarray(vectors).shape[1] != identity.dim:
                 raise ValueError(f"semantic-unit vector width mismatch for {state.path}")
-            unit_rows.append((state.path, self._semantic_unit_rows(state, vectors, mtime)))
+            unit_rows.append((state, self._semantic_unit_rows(state, vectors, mtime)))
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -691,7 +1094,7 @@ class EmbeddingIndex:
                     raise ValueError("embedding input drifted before publication")
                 stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
                 if any(chunks for _path, chunks, _vectors, _mtime in replacements) or any(
-                    rows for _path, rows in unit_rows
+                    rows for _state, rows in unit_rows
                 ):
                     stored = self._admit_producer(conn, identity)
                 mirror = self._publication_vec(conn, stored)
@@ -714,19 +1117,14 @@ class EmbeddingIndex:
                     )
                     if mirror is not None:
                         mirror.dual_insert(conn, "file_path = ?", (path,))
-                for path, rows in unit_rows:
-                    conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (path,))
-                    conn.executemany(
-                        "INSERT INTO semantic_unit_vectors VALUES "
-                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        rows,
-                    )
+                for state, rows in unit_rows:
+                    self._replace_occurrences(conn, state, rows)
                 if replacements:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
                     )
                 if unit_replacements:
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -793,7 +1191,13 @@ class EmbeddingIndex:
                 "OR length(vector) != ?) FROM semantic_unit_vectors WHERE parent_path = ?",
                 (parent_generation, parent_source_hash, width, rel_path),
             ).fetchone()
-            return units[0] == unit_count and (units[1] or 0) == 0
+            record = _coverage_records(conn, [rel_path]).get(rel_path)
+            return (
+                units[0] == unit_count and (units[1] or 0) == 0
+                and record is not None
+                and record.get("parent_generation") == parent_generation
+                and len(record["occurrences"]) == unit_count
+            )
         finally:
             conn.close()
 
@@ -809,7 +1213,7 @@ class EmbeddingIndex:
         """
         if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
             return None
-        units = {row[0]: row for row in self._semantic_unit_metadata_rows(state)}
+        units = {row[0]: row for row in occurrence_rows(state)}
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -830,11 +1234,7 @@ class EmbeddingIndex:
             )):
                 if row != (number, chunks[number], width):
                     return None
-            columns = (
-                "unit_key", "record_type", "unit_ref", "parent_path", "parent_ref",
-                "parent_generation", "parent_source_hash", "parser_version", "form",
-                "category", "kind", "content", "unit_source_hash", "source_order",
-            )
+            columns = OCCURRENCE_COLUMNS
             text_size = " + ".join(
                 f"COALESCE(length(CAST({column} AS BLOB)), 0)"
                 for column in columns if column not in {"parser_version", "source_order"}
@@ -857,6 +1257,11 @@ class EmbeddingIndex:
             ):
                 if units.get(row[0]) != row[:-1] or row[-1] != width:
                     return None
+            stored = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (COVERAGE_PREFIX + state.path,),
+            ).fetchone()
+            if stored is None or stored[0] != coverage_record(state):
+                return None
             return self._build_token(conn)
         finally:
             conn.close()
@@ -893,7 +1298,10 @@ class EmbeddingIndex:
                         "SELECT COUNT(*) FROM semantic_unit_vectors WHERE parent_path = ?",
                         (rel_path,),
                     ).fetchone()[0]
-                    if not chunk_count and not unit_count:
+                    covered = conn.execute(
+                        "SELECT 1 FROM meta WHERE key = ?", (COVERAGE_PREFIX + rel_path,),
+                    ).fetchone()
+                    if not chunk_count and not unit_count and covered is None:
                         continue
                     if vec_on and chunk_count:
                         self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
@@ -902,6 +1310,7 @@ class EmbeddingIndex:
                         "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
                         (rel_path,),
                     )
+                    _delete_coverage(conn, [rel_path])
                     removed += 1
                     removed_paths.append(rel_path)
                 if removed:
@@ -911,7 +1320,7 @@ class EmbeddingIndex:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, removed_paths
                     )
-                    sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -976,27 +1385,19 @@ class EmbeddingIndex:
         vectors: np.ndarray,
         mtime: float,
     ) -> None:
-        """Replace one parent's unit vectors in a single sidecar transaction."""
+        """Replace one parent's occurrence vectors and coverage in one transaction.
+
+        An empty `vectors` publishes a parent with no occurrences: its coverage
+        record still proves the empty set.
+        """
         rows = self._semantic_unit_rows(state, vectors, mtime)
         conn = self._connect()
         try:
             if rows:
                 self._admit(conn, np.asarray(vectors).shape[1])
             with conn:
-                conn.execute(
-                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
-                    (state.path,),
-                )
-                if rows:
-                    conn.executemany(
-                        "INSERT INTO semantic_unit_vectors("
-                        "unit_key, record_type, unit_ref, parent_path, parent_ref, "
-                        "parent_generation, parent_source_hash, parser_version, form, "
-                        "category, kind, content, unit_source_hash, source_order, vector, "
-                        "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        rows,
-                    )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                self._replace_occurrences(conn, state, rows)
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         finally:
             conn.close()
 
@@ -1005,38 +1406,24 @@ class EmbeddingIndex:
         try:
             with conn:
                 conn.execute(
-                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
-                    (parent_path,),
+                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (parent_path,)
                 )
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                _delete_coverage(conn, [parent_path])
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
         finally:
             conn.close()
 
     @staticmethod
-    def _semantic_unit_metadata_rows(
-        state: semantic_index.SemanticParentIndexState,
-    ) -> list[tuple]:
-        """The shared exact metadata for publication and cold validation."""
-        return [
-            (
-                unit.unit_ref,
-                "semantic_unit",
-                unit.unit_ref,
-                state.path,
-                state.parent_ref,
-                state.parent_generation,
-                state.parent_source_hash,
-                state.parser_version,
-                unit.form,
-                unit.category,
-                unit.kind,
-                unit.content,
-                unit.source_hash,
-                source_order,
-            )
-            for source_order, unit in enumerate(state.document.units)
-            if unit.unit_ref is not None
-        ]
+    def _replace_occurrences(
+        conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState, rows: list[tuple],
+    ) -> None:
+        conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,))
+        conn.executemany(
+            f"INSERT INTO semantic_unit_vectors({', '.join(OCCURRENCE_COLUMNS)}, vector, file_mtime) "
+            f"VALUES ({', '.join('?' for _ in range(len(OCCURRENCE_COLUMNS) + 2))})",
+            rows,
+        )
+        _write_coverage(conn, state)
 
     @classmethod
     def _semantic_unit_rows(
@@ -1045,7 +1432,7 @@ class EmbeddingIndex:
         vectors: np.ndarray,
         mtime: float,
     ) -> list[tuple]:
-        metadata = cls._semantic_unit_metadata_rows(state)
+        metadata = occurrence_rows(state)
         if len(metadata) != len(vectors):
             raise ValueError(
                 f"semantic-unit/vector length mismatch for {state.path}: "
@@ -1205,10 +1592,11 @@ class EmbeddingIndex:
             return loaded.metadata, loaded.matrix
 
     def unload_cache(self) -> bool:
-        """Drop the resident matrix cache without deleting sidecar rows."""
+        """Drop the resident chunk and unit matrices without deleting sidecar rows."""
         with self._lock:
-            loaded = self._cache is not None
+            loaded = self._cache is not None or self._unit_cache is not None
             self._cache = None
+            self._unit_cache = None
             # The mask memo pins the metadata list by strong reference, so an
             # unload that left it behind would keep those rows resident after
             # the caller asked for the memory back. Correctness never depended
@@ -1217,18 +1605,25 @@ class EmbeddingIndex:
             return loaded
 
     def cache_status(self) -> dict:
-        """Best-effort residency status for this in-memory matrix only."""
-        c = self._cache
-        if c is None:
+        """Best-effort residency status for this index's in-memory matrices.
+
+        `rows` counts chunk rows and `unit_rows` unit rows; `bytes` sums both matrices.
+        """
+        c, units = self._cache, self._unit_cache
+        if c is None and units is None:
             return {"loaded": False, "rows": 0, "bytes": 0, "hits": self._hits}
-        return {
+        status = {
             "loaded": True,
             "hits": self._hits,
-            "rows": len(c.metadata),
-            "bytes": int(c.matrix.nbytes),
-            "epoch": c.epoch,
-            "generation": c.generation,
+            "rows": len(c.metadata) if c is not None else 0,
+            "unit_rows": len(units.block.rows) if units is not None else 0,
+            "bytes": (int(c.matrix.nbytes) if c is not None else 0)
+            + (int(units.block.matrix.nbytes) if units is not None else 0),
         }
+        if c is not None:
+            status["epoch"] = c.epoch
+            status["generation"] = c.generation
+        return status
 
     def _catch_up_cache(self, c: _EmbCache) -> _EmbCache | None:
         """Patch a slightly-stale warm cache forward from the changed paths only.
@@ -1547,7 +1942,7 @@ class EmbeddingIndex:
                     matrix = np.empty((len(rows), width), dtype=np.float32)
                     metadata = []
                     for n, (path, chunk, blob) in enumerate(rows):
-                        if len(blob) != width * 4:
+                        if not isinstance(blob, bytes) or len(blob) != width * 4:
                             raise ValueError("embedding row width differs from stored space")
                         matrix[n] = np.frombuffer(blob, dtype=np.float32)
                         metadata.append((path, chunk))
@@ -1688,14 +2083,14 @@ class EmbeddingIndex:
         allowed_unit_refs: set[str] | None = None,
         allowed_parent_paths: set[str] | None = None,
         validate: bool = True,
+        incomplete_out: list[str] | None = None,
+        encoded_for: recall_space.SpaceIdentity | None | object = _UNSPECIFIED_SPACE,
     ) -> list[SemanticUnitVectorHit]:
-        """Score unit rows first, then validate only a bounded winner window.
+        """Rank selected units from neutral rows and one coverage snapshot.
 
-        Vector scoring is an in-memory/numpy scan of rebuildable blobs. Markdown
-        freshness validation is the expensive part, so an unfiltered query
-        overfetches a bounded ranked window instead of reopening every parent.
-        An explicit allowlist retains its exact validation contract for audit
-        and repair callers.
+        Admission precedes scoring; selected suppression, reference filtering and
+        deduplication precede result and validation limits. Raw windows widen until
+        their omitted-score bound proves the selected prefix, including cutoff ties.
         """
         if k <= 0 or not self.path.exists():
             return []
@@ -1703,121 +2098,179 @@ class EmbeddingIndex:
             return []
         if allowed_parent_paths is not None and not allowed_parent_paths:
             return []
+        from .governance import egress
 
-        conn = self._connect()
-        try:
-            if allowed_unit_refs is None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors"
-                ).fetchall()
-            elif allowed_unit_refs is not None and allowed_parent_paths is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),),
-                ).fetchall()
-            elif allowed_unit_refs is None:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE parent_path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT unit_ref, parent_path, parent_generation, "
-                    "parent_source_hash, parser_version, vector "
-                    "FROM semantic_unit_vectors "
-                    "WHERE unit_ref IN (SELECT value FROM json_each(?)) "
-                    "AND parent_path IN (SELECT value FROM json_each(?))",
-                    (
-                        json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),
-                        json.dumps(sorted(allowed_parent_paths), ensure_ascii=False),
-                    ),
-                ).fetchall()
-        finally:
-            conn.close()
+        refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
+        paths = None if allowed_parent_paths is None else frozenset(allowed_parent_paths)
+        keep = egress.page_release_filter(self.vault_root)
 
-        candidates: list[tuple[str, str, str, str, int, np.ndarray]] = []
-        for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
-            vector = np.frombuffer(blob, dtype=np.float32)
-            if vector.shape != (self.dim,):
-                continue
-            candidates.append(
-                (
-                    str(unit_ref),
-                    str(parent_path),
-                    str(generation),
-                    str(source_hash),
-                    int(parser_version),
-                    vector,
-                )
-            )
-        if not candidates:
-            return []
+        def allowed(path: str) -> bool:
+            return (paths is None or path in paths) and (keep is None or bool(keep(path)))
 
+        filtered = refs is not None or paths is not None
         query = query_vec.astype(np.float32, copy=False)
-        matrix = np.stack([candidate[5] for candidate in candidates])
-        scores = matrix @ query
-        order = sorted(
-            range(len(candidates)),
-            key=lambda index: (-float(scores[index]), candidates[index][0]),
-        )
-        validation_limit = (
-            len(order)
-            if allowed_unit_refs is not None or allowed_parent_paths is not None
-            else min(len(order), max(k * 4, k + 32))
-        )
-        if not validate:
-            return [
-                SemanticUnitVectorHit(
-                    candidates[index][0],
-                    candidates[index][1],
-                    candidates[index][2],
-                    candidates[index][3],
-                    candidates[index][4],
-                    float(scores[index]),
-                )
-                for index in order[:k]
-            ]
-
+        window = max(k * 4, k + 32) if validate else k
+        raw_window = window
         freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
         ranked: list[SemanticUnitVectorHit] = []
-        for index in order[:validation_limit]:
-            unit_ref, parent_path, generation, source_hash, parser_version, _vector = candidates[
-                index
-            ]
-            stamp = (parent_path, generation, source_hash, parser_version)
-            accepted = freshness_by_stamp.get(stamp)
-            if accepted is None:
-                accepted = semantic_index.validate_parent_record(
-                    self.vault_root,
-                    parent_path=parent_path,
-                    parent_generation_value=generation,
-                    parent_source_hash=source_hash,
-                    parser_version=parser_version,
-                ).current
-                freshness_by_stamp[stamp] = accepted
-            if not accepted:
-                continue
-            ranked.append(
-                SemanticUnitVectorHit(
-                    unit_ref,
-                    parent_path,
-                    generation,
-                    source_hash,
-                    parser_version,
-                    float(scores[index]),
+        walked = 0
+        with self._unit_blocks(allowed) as (blocks, conn, coverage, unproved, identity):
+            if encoded_for is not _UNSPECIFIED_SPACE:
+                recall_space.require_same_space(
+                    SimpleNamespace(identity=identity), encoded_for, query
                 )
+            parents = semantic_index.AdmittedParents(
+                lambda wanted: _coverage_records(conn, wanted),
+                allowed=allowed,
+                interpretations=semantic_index.Interpretations(self.vault_root),
             )
-            if len(ranked) == k:
-                break
+            while True:
+                ordered, bound, complete = _unit_top(
+                    blocks, query, window, raw_window, parents, refs
+                )
+                if not complete and (len(ordered) < window or not ordered[-1][0] >= bound):
+                    raw_window *= 4
+                    continue
+                for score, row in ordered[walked:]:
+                    unit_ref, parent_path, generation, source_hash, parser_version = row
+                    if validate:
+                        stamp = (parent_path, generation, source_hash, parser_version)
+                        accepted = freshness_by_stamp.get(stamp)
+                        if accepted is None:
+                            accepted = semantic_index.validate_parent_record(
+                                self.vault_root,
+                                parent_path=parent_path,
+                                parent_generation_value=generation,
+                                parent_source_hash=source_hash,
+                                parser_version=parser_version,
+                            ).current
+                            freshness_by_stamp[stamp] = accepted
+                        if not accepted:
+                            continue
+                    ranked.append(
+                        SemanticUnitVectorHit(
+                            unit_ref, parent_path, generation, source_hash, parser_version, score
+                        )
+                    )
+                    if len(ranked) == k:
+                        break
+                if (
+                    len(ranked) == k
+                    or not (validate and filtered)
+                    or (complete and len(ordered) < window)
+                ):
+                    break
+                walked = len(ordered)
+                window *= 4
+                raw_window = max(raw_window, window)
+            if incomplete_out is not None:
+                owed = self._coverage_owed()
+                unpublished = (path for path in paths or () if path not in coverage and owed(path))
+                witness = next(
+                    chain(
+                        sorted(parents.unavailable),
+                        (
+                            path
+                            for path in chain(sorted(unproved), unpublished)
+                            if parents.allowed(path)
+                        ),
+                    ),
+                    None,
+                )
+                if witness is not None:
+                    incomplete_out.append(witness)
         return ranked
+
+    def _coverage_owed(self) -> Callable[[str], bool]:
+        """Whether a publication writes a page a record: the rebuild walk's own rules."""
+        from . import access
+
+        walked = index_paths.index_markdown_admitter(self.vault_root)
+        return lambda rel_path: (
+            index_paths.is_embeddable_path(Path(rel_path))
+            and (walked is None or walked(rel_path))
+            and access.is_indexable(self.vault_root, rel_path)
+        )
+
+    @contextlib.contextmanager
+    def _unit_blocks(self, allowed: Callable[[str], bool]) -> Iterator[tuple]:
+        """Rows, compact coverage and lazy summaries share one SQLite read snapshot.
+
+        Local queries reuse a neutral resident matrix only under the exact snapshot
+        token. `service-v1` rescans ordered blocks and retains no corpus matrix.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            token = self._build_token(conn)
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            self._observe_identity(identity, token)
+            width = identity.dim if identity is not None else recall_space.current_dim()
+            if cloud_cell.resource_policy() != "service-v1":
+                cached = self._unit_vectors(conn, token, width)
+                source = ((cached.block, _unit_mask(cached.block, allowed)),)
+                yield lambda: source, conn, cached.coverage, cached.unproved, identity
+                return
+            coverage, unproved = _unit_coverage(conn, width)
+
+            def blocks() -> Iterator[tuple[_UnitBlock, np.ndarray]]:
+                cursor = conn.execute(
+                    f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors ORDER BY rowid"
+                )
+                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
+                    block = _unit_block(rows, len(rows), width)
+                    yield block, _unit_mask(block, allowed)
+
+            yield blocks, conn, coverage, unproved, identity
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _unit_vectors(
+        self, conn: sqlite3.Connection, token: tuple[int, int, int, int], width: int
+    ) -> _UnitCache:
+        """Reuse a neutral matrix and proof only at this read transaction's token."""
+        epoch, _chunk_generation, instance, generation = token
+
+        def current(cached: _UnitCache | None) -> bool:
+            return cached is not None and (
+                cached.epoch,
+                cached.generation,
+                cached.instance,
+                cached.width,
+            ) == (epoch, generation, instance, width)
+
+        served = self._unit_cache
+        if not current(served):
+            with self._unit_lock:
+                served = self._unit_cache
+                if not current(served):
+                    # Release this lane's stale matrix before allocating its replacement.
+                    served = self._unit_cache = None
+                    with call_spans.span("embeddings.unit_matrix_load"):
+                        served = self._unit_cache = self._load_unit_rows(conn, token, width)
+                    log.info(
+                        "semantic-unit matrix full load: rows=%d gen=%d epoch=%d",
+                        len(served.block.rows),
+                        generation,
+                        epoch,
+                    )
+        self._hits += 1
+        return served
+
+    def _load_unit_rows(
+        self, conn: sqlite3.Connection, token: tuple[int, int, int, int], width: int
+    ) -> _UnitCache:
+        """Load neutral vectors and their compact structural proof from one snapshot."""
+        count = conn.execute("SELECT COUNT(*) FROM semantic_unit_vectors").fetchone()[0]
+        block = _unit_block(
+            conn.execute(f"SELECT {_UNIT_COLUMNS} FROM semantic_unit_vectors ORDER BY rowid"),
+            count,
+            width,
+        )
+        coverage, unproved = _unit_coverage(conn, width)
+        epoch, _chunk_generation, instance, generation = token
+        return _UnitCache(epoch, generation, instance, width, block, coverage, unproved)
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
@@ -1992,20 +2445,32 @@ class EmbeddingIndex:
             self._vec_failed = True
             return None
 
-    def file_mtimes(self) -> dict[str, float]:
+    def file_mtimes(self, paths: AbstractSet[str] | None = None) -> dict[str, float]:
         """Map each indexed `file_path` → its max stored `file_mtime` (one query).
 
         The idempotency oracle for `index_incremental`: a file whose on-disk mtime
         does not exceed this value is already current in the sidecar and is skipped.
+        `paths` limits the read to those files, for a caller that checks a few.
         Empty dict when the sidecar has not been created yet.
         """
         if not self.path.exists():
             return {}
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
-            ).fetchall()
+            if paths is None:
+                rows = conn.execute(
+                    "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
+                ).fetchall()
+            else:
+                wanted = sorted(paths)
+                rows = []
+                for start in range(0, len(wanted), _PATHS_PER_READ):
+                    batch = wanted[start : start + _PATHS_PER_READ]
+                    rows += conn.execute(
+                        "SELECT file_path, MAX(file_mtime) FROM chunks "
+                        f"WHERE file_path IN ({','.join('?' * len(batch))}) GROUP BY file_path",
+                        batch,
+                    ).fetchall()
         finally:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
@@ -2013,30 +2478,19 @@ class EmbeddingIndex:
     def semantic_unit_parent_states(
         self,
     ) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
-        """Return stored generations and unit refs for incremental parity checks."""
+        """Stored generations and occurrence keys per parent, for incremental parity."""
         if not self.path.exists():
             return {}
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT parent_path, parent_generation, unit_ref FROM semantic_unit_vectors"
-            ).fetchall()
+            return stored_parent_states(conn)
         finally:
             conn.close()
-        grouped: dict[str, tuple[set[str], set[str]]] = {}
-        for parent_path, generation, unit_ref in rows:
-            generations, unit_refs = grouped.setdefault(str(parent_path), (set(), set()))
-            generations.add(str(generation))
-            unit_refs.add(str(unit_ref))
-        return {
-            parent_path: (frozenset(generations), frozenset(unit_refs))
-            for parent_path, (generations, unit_refs) in grouped.items()
-        }
 
     def all_semantic_unit_vectors(
         self, *, batch_size: int = SEMANTIC_UNIT_READ_BATCH
     ) -> dict[str, list[SemanticUnitVectorRow]]:
-        """Every stored unit vector, grouped by parent path, in ONE corpus read.
+        """Every stored occurrence vector, grouped by parent path, in ONE corpus read.
 
         The audit's semantic scope-divergence sensor needs a page's unit geometry,
         and nothing here could supply it: `all_vectors()` is the CHUNK matrix
@@ -2044,6 +2498,8 @@ class EmbeddingIndex:
         kNN query whose hit type carries a cosine but no vector. This is the
         missing bulk read, and it is deliberately the ONLY one — a per-page
         `WHERE parent_path = ?` across a sweep is the shape this exists to prevent.
+        Rows carry occurrence keys; the caller maps them to the units of the
+        parse it holds.
 
         Read-only, and NOT wired into `_cache`: that cache is keyed by
         `(file_path, chunk_idx)` and patched by chunk-path deltas, so admitting
@@ -2069,15 +2525,14 @@ class EmbeddingIndex:
             cursor = ("", "")
             while True:
                 rows = conn.execute(
-                    "SELECT parent_path, unit_key, unit_ref, source_order, vector, "
-                    "parent_generation "
+                    "SELECT parent_path, unit_key, source_order, vector, parent_generation "
                     "FROM semantic_unit_vectors WHERE (parent_path, unit_key) > (?, ?) "
                     "ORDER BY parent_path, unit_key LIMIT ?",
                     (*cursor, limit),
                 ).fetchall()
                 if not rows:
                     break
-                for parent_path, _unit_key, unit_ref, source_order, blob, generation in rows:
+                for parent_path, unit_key, source_order, blob, generation in rows:
                     try:
                         vector = np.frombuffer(blob, dtype=np.float32)
                     except (ValueError, TypeError):
@@ -2088,7 +2543,7 @@ class EmbeddingIndex:
                         continue
                     grouped.setdefault(str(parent_path), []).append(
                         SemanticUnitVectorRow(
-                            str(unit_ref), int(source_order), vector, str(generation)
+                            str(unit_key), int(source_order), vector, str(generation)
                         )
                     )
                 cursor = (str(rows[-1][0]), str(rows[-1][1]))
@@ -2097,7 +2552,7 @@ class EmbeddingIndex:
         finally:
             conn.close()
         for unit_rows in grouped.values():
-            unit_rows.sort(key=lambda row: (row.source_order, row.unit_ref))
+            unit_rows.sort(key=lambda row: (row.source_order, row.unit_key))
         return grouped
 
     def _projected_source_snapshot(
@@ -2127,7 +2582,7 @@ class EmbeddingIndex:
     @staticmethod
     def _build_token(conn: sqlite3.Connection) -> tuple[int, int, int, int]:
         unit_generation = conn.execute(
-            "SELECT value FROM meta WHERE key = 'semantic_unit_generation'"
+            "SELECT value FROM meta WHERE key = ?", (SEMANTIC_UNIT_GENERATION,)
         ).fetchone()
         return (*sidecar_store.read_meta_token(conn), int(unit_generation[0]) if unit_generation else 0)
 
@@ -2161,10 +2616,8 @@ class EmbeddingIndex:
                     state = semantic_index.build_parent_index_state(self.vault_root, md)
                 except (OSError, UnicodeError, ValueError):
                     state = None
-                if chunks or (
-                    state is not None
-                    and any(unit.unit_ref is not None for unit in state.document.units)
-                ):
+                # Every parsed parent publishes coverage, even with no occurrence.
+                if chunks or state is not None:
                     yield page, chunks, state
 
         inputs = pages()
@@ -2195,6 +2648,10 @@ class EmbeddingIndex:
                     "FROM semantic_unit_vectors WHERE 0"
                 )
                 conn.execute(
+                    "CREATE TABLE IF NOT EXISTS embedding_build_coverage "
+                    "(run_key TEXT NOT NULL, parent_path TEXT NOT NULL, record TEXT NOT NULL)"
+                )
+                conn.execute(
                     "INSERT INTO embedding_build_runs(run_key, serving_token) VALUES (?, ?)",
                     (run_key, json.dumps(captured_token)),
                 )
@@ -2209,7 +2666,7 @@ class EmbeddingIndex:
                     raise recall_space.VectorSpaceMismatch(
                         "rebuild producer changed during staging"
                     )
-                texts = [row[11] if units else row[2] for row in rows]
+                texts = [row[_CONTENT_COLUMN] if units else row[2] for row in rows]
                 vectors, encoded = embeddings_module._encode_prepared(
                     lambda: embeddings_module.embed_texts(texts, is_query=False)
                 )
@@ -2230,9 +2687,9 @@ class EmbeddingIndex:
                     if units:
                         conn.executemany(
                             "INSERT INTO embedding_build_units VALUES "
-                            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            f"({', '.join('?' for _ in range(len(OCCURRENCE_COLUMNS) + 3))})",
                             (
-                                (run_key, *row[:14], vector.tobytes(), row[15])
+                                (run_key, *row[:-2], vector.tobytes(), row[-1])
                                 for row, vector in zip(rows, vectors, strict=True)
                             ),
                         )
@@ -2256,30 +2713,14 @@ class EmbeddingIndex:
                         flush(pending_chunks)
                 if state is None:
                     continue
-                # Build row metadata without allocating placeholder vectors for a page.
-                for order, unit in enumerate(state.document.units):
-                    if unit.unit_ref is None:
-                        continue
-                    pending_units.append(
-                        (
-                            unit.unit_ref,
-                            "semantic_unit",
-                            unit.unit_ref,
-                            state.path,
-                            state.parent_ref,
-                            state.parent_generation,
-                            state.parent_source_hash,
-                            state.parser_version,
-                            unit.form,
-                            unit.category,
-                            unit.kind,
-                            unit.content,
-                            unit.source_hash,
-                            order,
-                            None,
-                            page.mtime,
-                        )
+                with conn:
+                    conn.execute(
+                        "INSERT INTO embedding_build_coverage VALUES (?, ?, ?)",
+                        (run_key, state.path, coverage_record(state)),
                     )
+                # Build row metadata without allocating placeholder vectors for a page.
+                for row in occurrence_rows(state):
+                    pending_units.append((*row, None, page.mtime))
                     if len(pending_units) >= limit:
                         flush(pending_units, units=True)
             flush(pending_chunks)
@@ -2306,12 +2747,15 @@ class EmbeddingIndex:
                     (run_key,),
                 )
                 conn.execute(
-                    "INSERT INTO semantic_unit_vectors SELECT "
-                    "unit_key, record_type, unit_ref, parent_path, parent_ref, "
-                    "parent_generation, parent_source_hash, parser_version, form, category, "
-                    "kind, content, unit_source_hash, source_order, vector, file_mtime "
-                    "FROM embedding_build_units WHERE run_key = ?",
+                    f"INSERT INTO semantic_unit_vectors SELECT {', '.join(OCCURRENCE_COLUMNS)}, "
+                    "vector, file_mtime FROM embedding_build_units WHERE run_key = ?",
                     (run_key,),
+                )
+                _delete_coverage(conn)
+                conn.execute(
+                    "INSERT INTO meta(key, value) SELECT ? || parent_path, record "
+                    "FROM embedding_build_coverage WHERE run_key = ?",
+                    (COVERAGE_PREFIX, run_key),
                 )
                 mirror = self._publication_vec(conn, producer)
                 if mirror is not None:
@@ -2319,7 +2763,7 @@ class EmbeddingIndex:
                     mirror.repopulate_all(conn)
                 sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
-                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 if self._projected_source_snapshot() != source_snapshot:
                     conn.rollback()
                     return 0
@@ -2337,6 +2781,7 @@ class EmbeddingIndex:
                     for table in (
                         "embedding_build_chunks",
                         "embedding_build_units",
+                        "embedding_build_coverage",
                         "embedding_build_runs",
                     ):
                         if (

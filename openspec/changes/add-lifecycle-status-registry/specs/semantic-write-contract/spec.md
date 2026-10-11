@@ -66,7 +66,8 @@ interpreted as an inactive page or a false minimum-unit obligation.
 ### Requirement: Lifecycle Classification Does Not Pollute Shared Structural Evidence
 
 The shared semantic cache SHALL retain neutral parsed structure and complete stable identity evidence.
-A request SHALL admit each page before enriching its lifecycle facts and SHALL NOT publish those facts into the shared cache.
+A request SHALL admit each page before enriching its lifecycle facts and SHALL NOT publish those facts into the shared structural cache.
+A caller who admits every page MAY reuse its enrichment through a memo bound to the structural entry and to the status dependency it consulted; a restricted caller SHALL NOT read or write that memo.
 A stored manifest exemption SHALL require admitted target eligibility and complete identity uniqueness evidence.
 Explicit request paths SHALL NOT infer an activation census from missing identity evidence.
 The activation census SHALL come from the complete structural corpus, independent of the caller, and SHALL record each eligible page's raw status label without classifying it. It SHALL NOT be served.

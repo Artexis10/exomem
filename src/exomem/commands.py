@@ -79,6 +79,7 @@ from . import find as find_module
 from . import (
     find_types,
     foreground_priority,
+    note_types,
     query_log,
     retrieval_models,
     semantic_census,
@@ -161,6 +162,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
+from .governance import connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -682,9 +684,10 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
     agent that never sees the lists still classifies correctly.
     """
     from . import source_taxonomy as source_taxonomy_module
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary import instances
+    from .vocabulary.contract import selected_admission_refusal
 
-    refusal = admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
+    refusal = selected_admission_refusal(vault_root, source_taxonomy_module.KIND_SPEC)
     if refusal is not None:
         return refusal
     taxonomy = source_taxonomy_module.load_taxonomy(vault_root)
@@ -711,8 +714,8 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
             "this metadata, not the model itself. A captured source keeps its path so "
             "provenance references stay valid; classification applies to new captures."
         )
-        projection["registry"] = (
-            source_taxonomy_module.registry_path(vault_root).relative_to(vault_root).as_posix()
+        projection["registry"] = instances.selected_overlay(
+            vault_root, source_taxonomy_module.KIND_SPEC
         )
         projection["source_kinds"] = [
             taxonomy.kinds[key].as_dict() for key in sorted(taxonomy.kinds)
@@ -1016,9 +1019,9 @@ def op_bootstrap(
             "resolution_required": workflow_resolution_required,
             "status": workflow_public_status,
         }
-    from .vocabulary.contract import admission_refusal
+    from .vocabulary.contract import selected_admission_refusal
 
-    entity_registry_refusal = admission_refusal(vault_root, entity_types_module.SPEC)
+    entity_registry_refusal = selected_admission_refusal(vault_root, entity_types_module.SPEC)
     entity_type_registry = entity_types_module.load_entity_types(
         None if entity_registry_refusal else vault_root
     )
@@ -1105,7 +1108,7 @@ def op_bootstrap(
                 "due-state",
             ],
         }
-    relation_registry_refusal = admission_refusal(vault_root, relation_registry_module.SPEC)
+    relation_registry_refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
     relation_registry = relation_registry_module.load_registry(
         None if relation_registry_refusal else vault_root
     )
@@ -1472,17 +1475,21 @@ def op_bootstrap(
             "available": False,
             "unavailable_reason": "The active surface does not export the Records command.",
         }
+    from .planning_values import PlanningValues
+
+    # A released profile keeps its published lists; the live surface adds the vault's.
+    planning_values = PlanningValues(None if frozen_profile else vault_root)
     planning_contract = {
         "available": "plan_memory" in active_product_names,
         "route": {
             "tool": "plan_memory",
             "actions": ["inspect", "create", "query", "add", "update", "triage"],
         },
-        "kinds": ["area", "outcome", "initiative", "work-item"],
-        "horizons": ["inbox", "week", "month", "quarter", "year", "multi-year"],
+        "kinds": list(planning_values.values("kind")),
+        "horizons": list(planning_values.values("horizon")),
         "lifecycle": ["active", "archived"],
-        "priorities": ["critical", "high", "medium", "low", "none"],
-        "commitments": ["uncommitted", "considering", "committed"],
+        "priorities": list(planning_values.values("priority")),
+        "commitments": list(planning_values.values("commitment")),
         "default_capture": (
             "Default capture creates an active candidate work-item with none priority, "
             "uncommitted commitment, unknown health, and inbox horizon."
@@ -1902,9 +1909,9 @@ def op_bootstrap(
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
                     if profile == "compact" and not frozen_profile
-                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
                 ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
@@ -2150,8 +2157,12 @@ def op_bootstrap(
         },
         "search_guidance": {
             "prefer_compiled_default": True,
-            "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
-            "raw_types": ["source", "evidence"],
+            # The shipped types `find` boosts and treats as raw. A vault may register
+            # more; the vocabulary section (the core's `vocabulary` pointer) lists them.
+            "compiled_types": [
+                note_type.key for note_type in note_types.shipped(note_types.ranks_as_compiled)
+            ],
+            "raw_types": [note_type.key for note_type in note_types.shipped(note_types.raw)],
             "semantic_recall": {
                 "result_levels": ["page", "unit", "mixed"],
                 "structured_filters": (
@@ -2635,9 +2646,8 @@ def op_find(
             candidate count, not wall-clock latency: the synchronous model
             call has no safe cancellation boundary.
         prefer_compiled: When true (default), applies a small boost to
-            compiled types (insight, pattern, failure, research-note,
-            entity) and a small penalty to raw `source` after fusion
-            AND rerank. Reflects the KB's epistemic hierarchy. Set
+            note-type roles `compiled` and `entity` and a small penalty to
+            role `source` after fusion AND rerank. Reflects the KB's epistemic hierarchy. Set
             false to retrieve raw source discussion verbatim (e.g.
             "what did I capture from Dr. X").
         prefer_active: When true (default), soft-demotes `status:
@@ -2907,14 +2917,8 @@ def op_find(
         )
         hits = release.hits
     else:
-        from .governance import raw_protection
-
-        who = principal_module.effective_principal()
-        admit_path = (
-            (lambda path: raw_protection.permits(vault_root, path, who))
-            if not raw_protection.has_unrestricted_access(vault_root, who) else None
-        )
-        # RAW admission precedes candidate selection; ordinary policy still
+        admit_path = find_module.caller_admission(vault_root)
+        # Content admission precedes candidate selection; ordinary policy still
         # uses its existing annotation pool and final authorization below.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
         retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
@@ -2984,6 +2988,7 @@ def op_find(
                         purpose=purpose,
                         cue=referent_cue,
                         expected_recall_checkpoints=catalog_proof or None,
+                        keep=admit_path,
                     )
                 except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
@@ -3107,7 +3112,8 @@ def op_find(
         warming = {"components": sorted(set(degraded))}
         if projection_runtime is None:
             info = readiness_module.warming_info() or {}
-            warming["since_s"] = info.get("since_s", 0.0)
+            # Null outside the warm-up window (a recall build): not zero seconds.
+            warming["since_s"] = info.get("since_s")
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot
@@ -3582,6 +3588,7 @@ def op_graph_context(
     max_edges: int = 80,
     traversal_profile: str | None = None,
     purpose: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -3623,19 +3630,11 @@ def op_graph_context(
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
-    # A unit seed is a fact about its parent page: resolved against a withheld
-    # parent it answers as a unit of an absent page does (see
-    # `egress.unit_parent_withheld`).
-    graph_unit_ref = unit_ref
-    if unit_ref is not None and egress_module.unit_parent_withheld(
-        vault_root, unit_ref, purpose=purpose
-    ):
-        graph_unit_ref = egress_module.UNRESOLVABLE_UNIT_REF
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
         query=query,
-        unit_ref=graph_unit_ref,
+        unit_ref=unit_ref,
         categories=categories,
         kinds=kinds,
         depth=depth,
@@ -3644,7 +3643,9 @@ def op_graph_context(
         max_nodes=max_nodes,
         max_edges=max_edges,
         traversal_profile=traversal_profile,
+        registry_scope=registry_scope,
         keep=egress_module.restricted_release_filter(vault_root, purpose=purpose),
+        seed_keep=egress_module.unit_seed_parent_filter(vault_root, purpose=purpose),
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
@@ -4440,7 +4441,9 @@ def op_get(
         out["body_chars"] = len(str(out.get("body", "")))
     if (
         not frontmatter_only
-        and str(result.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+        and note_types.Basis(vault_root).selects(
+            str(result.frontmatter.get("type") or "").casefold(), note_types.raw
+        )
         and out.get("body") == result.body
         and out.get("frontmatter") == result.frontmatter
         and out.get("content_hash") == result.content_hash
@@ -4977,6 +4980,7 @@ def op_link(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     aliases: list[str] | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Create a typed entity under Entities/<Folder>/<Name>.md.
 
@@ -5020,6 +5024,7 @@ def op_link(
             in another script (a Japanese name for an English-titled page) so
             a turn in that script reaches it. At most 8, one line and 64
             characters each; one any other page already answers to refuses.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
 
     Returns:
         {path, warnings}, or a non-mutating `identity_preparation` when the
@@ -5057,6 +5062,7 @@ def op_link(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     except link_module.LinkError as e:
         suffix = f" (missing: {e.missing})"
@@ -5181,26 +5187,13 @@ def op_preserve(
         mark_active_mutation_committed()
         # Nothing is handed to the ledger: this call committed nothing, and the
         # path it resolved to was recorded by the call that did.
-        return {
-            "path": duplicate.path,
-            "stored_path": duplicate.path,
-            "sidecar_path": duplicate.sidecar_path,
-            "ref": duplicate.ref,
-            "state": "already_stored",
-            "outcome": "stored",
-            "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
-            "warnings": [],
-            "size": len(content.encode("utf-8")) if isinstance(content, str) else None,
-            "hash": digest or None,
-            "hash_algorithm": "sha256",
-            "media_id": f"sha256:{digest}" if digest else None,
+        return duplicate.receipt(
+            size=len(content.encode("utf-8")) if isinstance(content, str) else None,
             # The same derivation the stored branch uses, from the sanitized
             # filename: a name whose sanitized form has a different extension
             # must not yield two content types for one set of bytes.
-            "content_type": mimetypes.guess_type(
-                preserve_module._sanitize_filename(filename)
-            )[0],
-        }
+            content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
+        )
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -7194,7 +7187,21 @@ def _op_activate_context_body(
             attribution=attribution,
             ts_ns=working_set_runtime_module.continuity_minted_ns(token) if token else None,
         )
-    if attribution is not None and attribution.session:
+    recording = attribution
+    if served and caller_thread is None and not (attribution is not None and attribution.session):
+        # A keyless caller's first served packet is recorded under the thread
+        # its token now names, exactly as each later packet of that thread is,
+        # so a follow-up that echoes the token can be carried on what this one
+        # served. Ranking above used no thread: this packet had none yet.
+        recording = working_set_heat_module.attribution_for(
+            vault_root,
+            client=client,
+            session=session,
+            workspace=workspace,
+            salt=salt or None,
+            thread=thread,
+        )
+    if recording is not None and recording.session:
         # The session's last served thread (ruling S5-1): what its token names,
         # after the guard, so a compacted or resumed conversation that lost its
         # token still continues its own work. Never an event in the ring:
@@ -7202,9 +7209,9 @@ def _op_activate_context_body(
         working_set_heat_module.note_session(
             vault_root,
             working_set_heat_module.SessionMark(
-                session=attribution.session,
-                workspace=attribution.workspace,
-                client=attribution.client,
+                session=recording.session,
+                workspace=recording.workspace,
+                client=recording.client,
                 paths=tuple(
                     str(item.get("path") or "")
                     for item in (packet.get("anchors") or ())
@@ -7341,7 +7348,9 @@ def op_read_memory(
         if (
             unit.status == "found"
             and unit.unit is not None
-            and str(page.frontmatter.get("type") or "").casefold() in {"source", "evidence"}
+            and note_types.Basis(vault_root).selects(
+                str(page.frontmatter.get("type") or "").casefold(), note_types.raw
+            )
             and released.get("frontmatter") == page.frontmatter
         ):
             try:
@@ -9200,11 +9209,14 @@ def _dispositions_view(vault_root: Path) -> dict:
     half the story: "you quieted this family, and you had put down N of its
     items by hand before you did" is what makes the decision legible later.
     """
+    from .governance import egress
+
     store = review_state_module.ReviewStateStore(vault_root)
     payload = store.load()
     dispositions = payload.get("dispositions") or {}
-    keys_by_family = _review_keys_by_family(vault_root)
-    counts = review_state_module.manual_dismissals_by_family(payload, keys_by_family)
+    # Both counts reduce every decision record, withheld pages' included, so they
+    # are the owner's aggregate: another audience gets the refusal, not a number.
+    refusal = egress.owner_only_aggregate(Path(vault_root))
     rows = []
     for family in sorted(dispositions):
         record = dispositions[family]
@@ -9226,13 +9238,18 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "why": record.get("why"),
                 "updated_at": record.get("updated_at"),
                 "origin": record.get("origin"),
-                "manual_dismissals": counts.get(family, 0),
+                "manual_dismissals": (
+                    refusal
+                    if refusal is not None
+                    else review_state_module.manual_dismissal_events(payload, family)
+                ),
             }
         )
     from . import envelope as envelope_module
 
     return {
         "dispositions": rows,
+        "effect": refusal if refusal is not None else _effect_block(vault_root, payload),
         "registered_families": sorted(review_state_module.registered_families()),
         "reason_codes": list(review_state_module.REASON_CODES),
         "note": (
@@ -9258,58 +9275,88 @@ def _dispositions_view(vault_root: Path) -> dict:
     }
 
 
-def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
-    """``family -> the record keys its current signals occupy``.
+def _effect_block(vault_root: Path, payload: dict) -> dict:
+    """Per-family effect over the last week, from records that already exist.
 
-    Composed from the live surface rather than stored, because the store keys on
-    `review_id:fingerprint` and deliberately knows nothing about which queue
-    produced a signal. Read over the all-states view of the triageable
-    categories, so a dismissed item still counts — it is precisely the thing
-    being counted.
-
-    `record_surfacing=False`: this is a COUNT, not a surface. It runs the whole
-    fusion to read one number out of it and shows nobody anything, so stamping
-    the ledger here would record a first surfacing for every item in the vault
-    every time somebody asked which families are quiet.
-
-    Attribution is by COMPONENT fingerprint, not by the item's fused one. A page
-    flagged by two families carries one fused key that `apply_for_item` records
-    against, and counting that key under both families would report one
-    dismissal twice. The component fingerprint is the per-finding identity
-    `apply_for_item` also records, so each family is charged for its own signal
-    and for nothing else.
+    The current set comes from the stored due-state projection and the
+    dreamer's sidecar, never from an audit: a family neither holds reports
+    `cleared` and `open` as unknown. When the sidecar cannot be read, every
+    upkeep family is listed with the counts it holds as unknown, and the block
+    says why: an absent family would read as one that surfaced nothing.
     """
-    out: dict[str, list[str]] = {}
-    try:
-        report = attention_module.attention(
-            vault_root,
-            categories=list(attention_module._TRIAGEABLE_CATEGORIES),
-            limit=0,
-            state="all",
-            record_surfacing=False,
-        )
-    except Exception:  # noqa: BLE001 — a count never breaks the view
-        log.debug("dispositions view could not read the review surface", exc_info=True)
-        return out
-    items = [item for item in report.items if item.item_id]
-    # ONE ref resolution for the whole view. `refs_for_paths` opens a database
-    # connection, and asking it per item made a 103-item vault open 103 of them
-    # to answer a question about four families.
-    paths: list[str] = []
-    for item in items:
-        paths.extend(review_state_module.component_paths(item))
-    refs = review_state_module.refs_for_paths(vault_root, paths) if paths else {}
-    for item in items:
-        for category, value in review_state_module.component_fingerprints(
-            vault_root, item, with_category=True, refs=refs
-        ):
-            if not category:
-                continue
-            key = f"{item.item_id}:{value}"
-            keys = out.setdefault(category, [])
-            if key not in keys:
-                keys.append(key)
-    return out
+    import datetime as dt
+
+    from . import dreamer_families, dreamer_store, due_state
+
+    since, until, window = review_state_module.effect_window()
+    current: dict[str, set[str]] = {}
+    projection = due_state.load(vault_root)
+    for category, pages in ((projection or {}).get("categories") or {}).items():
+        if isinstance(pages, dict):
+            current[str(category)] = {
+                due_state._ref_id(str(entry.get("ref") or ""))
+                for entries in pages.values()
+                for entry in due_state._unbucket(entries)
+            }
+    extra: list[tuple[str, str, str, dt.datetime]] = []
+    unknown: dict[str, str] = {}
+    view, refusal = dreamer_store.read_view_or_refusal(vault_root)
+    sidecar = refusal or "readable"
+    if view is None:
+        unknown = {family: sidecar for family in dreamer_families.family_names()}
+    else:
+        family_of = {str(row["id"]): str(row.get("family") or "") for row in view.candidates}
+        for row in view.candidates:
+            if row.get("state") == "open":
+                current.setdefault(family_of[str(row["id"])], set()).add(str(row["id"]))
+        first: dict[str, tuple[str, float]] = {}
+        for cid, fingerprint, _caller, delivered_at in view.deliveries:
+            held = first.get(cid)
+            if held is None or delivered_at < held[1]:
+                first[cid] = (fingerprint, delivered_at)
+        for cid, (fingerprint, delivered_at) in first.items():
+            family = family_of.get(cid) or ""
+            if family:
+                current.setdefault(family, set())
+                stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
+                extra.append((family, cid, fingerprint, stamp))
+    counts = review_state_module.effect_counts(
+        payload,
+        since=since,
+        until=until,
+        current={family: frozenset(ids) for family, ids in current.items()},
+        extra_surfaced=extra,
+        unknown=unknown,
+    )
+    return {
+        "dreamer_sidecar": sidecar,
+        "window": window,
+        "sources": {
+            "surfaced": (
+                "identities first stamped on the first-surfaced ledger in the window; "
+                "for upkeep families, first deliveries recorded in the dreamer's sidecar"
+            ),
+            "dismissed": "manual dismiss decisions updated in the window, counted by item",
+            "snoozed": "manual snooze decisions updated in the window, counted by item",
+            "cleared": (
+                "surfaced in the window, no decision recorded, and no longer in the "
+                "family's current set (the stored due-state projection, or the "
+                "dreamer's open candidates); unknown where only an audit could list it"
+            ),
+            "open": "surfaced in the window, no decision recorded, still in the current set",
+        },
+        "note": (
+            "The window is whole UTC days, today included: events count from `since` "
+            "00:00Z through the time of this read. "
+            "Cleared is not acted: deleting or withholding a page clears an item too. "
+            "Only surfaces that stamp the first-surfaced ledger or record a dreamer "
+            "delivery are counted, and a family absent here surfaced nothing recorded "
+            "in the window. When the dreamer's sidecar is not readable, every upkeep "
+            "family is listed with what it holds as unknown and an unknown_reason. "
+            "Rows written before families were stamped are unattributed."
+        ),
+        **counts,
+    }
 
 
 def op_triage_memory(
@@ -9588,6 +9635,7 @@ def op_connect_memory(
     identity_decision: _IdentityDecisionArgument = None,
     facets: _EntityFacetsArgument = None,
     entity_family: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities; propose or accept connections.
 
@@ -9610,12 +9658,20 @@ def op_connect_memory(
         facets: create-entity only. Registry-declared facet values.
         entity_family: Registry family: resolve-entity matches its leaf types;
             context and graph-context keep only its entity neighbours.
+        registry_scope: create-entity instance selector; public or a canonical private Scope ID.
     """
+    if registry_scope is not None and operation != "create-entity":
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires create-entity")
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=operation in {"create-entity", "accept-relation"},
     )
     if operation == "resolve-relation":
+        from .vocabulary.contract import selected_admission_refusal
+
+        refusal = selected_admission_refusal(vault_root, relation_registry_module.SPEC)
+        if refusal is not None:
+            return {"available": False, "reason": refusal["reason"]}
         supplied = locals()
         unrelated_defaults = {
             "unit_ref": None,
@@ -9819,6 +9875,7 @@ def op_connect_memory(
             identity_decision=identity_decision,
             facets=facets,
             aliases=aliases,
+            registry_scope=registry_scope,
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
@@ -10051,6 +10108,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "collections-store",
         "collections-store-adopt-local",
     ] = "audit",
     categories: list[str] | None = None,
@@ -10326,6 +10384,26 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "collections-store":
+        if (
+            categories is not None
+            or dry_run is not True
+            or rebuild_embeddings
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+            or apply is not None
+            or plan_id is not None
+            or why is not None
+        ):
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight with "
+                "dry_run=true; migrating a vault is the declared offline upgrade step"
+            )
+        from .collection_store import preflight as store_preflight
+
+        return store_preflight.preflight(vault_root)
     if mode == "collections-store-adopt-local":
         from .collection_store import admission as store_admission
 
@@ -10503,21 +10581,23 @@ def op_schema_memory(
     vocabulary_fingerprint: str | None = None,
     detail: Literal["counts", "keys"] | None = None,
     version: str | None = None,
+    registry_scope: str | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
     Contracts describe recurring fields, units and relations; write validation
     stays unchanged. Inference is read-only unless save=true; overwrite needs
-    the current hash. For entity-types, relations, source-kinds, domains, statuses and
-    categories: inspect lists the live vocabulary and usage; propose previews
-    a delta; save applies upsert, alias or deprecate with expected_hash and why;
-    history lists kept versions; restore reverts one without rewriting pages.
+    the current hash. For a vocabulary registry: inspect lists the live vocabulary
+    and usage; propose previews a delta; save applies upsert, alias or deprecate
+    with expected_hash and why; history lists kept versions; restore reverts one
+    without rewriting pages.
     Operations: references/operation-routing.md.
 
     Args:
         operation: Operation for the subject; see references/operation-routing.md.
         name: Saved workflow key.
-        subject: contract, categories, entity-types, relations, source-kinds, domains, statuses,
+        subject: contract; a vocabulary registry (categories, entity-types, relations,
+            source-kinds, domains, statuses, planning-values or note-types);
             traversal-profiles, context-roles, activation-conventions, or workflow-contracts.
         project: Project scope for inference.
         page_type: Page-type scope for inference.
@@ -10543,12 +10623,23 @@ def op_schema_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         detail: Census detail; keys adds predicate keys.
         version: Kept version from `history`, for `restore`.
+        registry_scope: Public instance token or canonical private Scope ID; grants no authority.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
     from .vocabulary import contract as vocabulary_contract
     from .vocabulary import registry_spec
 
+    if registry_scope is not None and not (
+        operation in _REGISTRY_OPERATIONS and subject in _registry_subjects()
+    ):
+        raise ValueError("INVALID_SCHEMA_ARGUMENT: registry_scope requires a registry operation")
+
+    if operation == "save-entity-types" and not connector_boundary.unrestricted(
+        vault_root, principal_module.effective_principal()
+    ):
+        # Entity saves validate global usage, including hidden rows.
+        return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
     if subject == "query-engine":
         # The typed query grammar's bounded discovery chapters; no vault read or write.
         from .query_engine import route as query_route
@@ -10593,7 +10684,7 @@ def op_schema_memory(
             queued = vocabulary_contract.queues_for_owner(vault_root)
             if queued is not None and spec.family is None:
                 return {"subject": registry_subject, "available": False, "reason": queued}
-        refusal = vocabulary_contract.admission_refusal(vault_root, spec)
+        refusal = vocabulary_contract.selected_admission_refusal(vault_root, spec)
         if refusal is not None:
             return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
@@ -10607,6 +10698,7 @@ def op_schema_memory(
             version=version,
             limit=limit,
             continuation=continuation,
+            registry_scope=registry_scope,
             unexpected={
                 "name": name,
                 "project": project,
@@ -11179,6 +11271,12 @@ def op_schema_memory(
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "traversal-profiles":
+        profile_path = traversal_profiles_module.profile_path(vault_root)
+        if not egress_module.content_permits(
+            vault_root, profile_path.relative_to(vault_root).as_posix(),
+            principal_module.effective_principal(),
+        ):
+            return {"subject": subject, "available": False, "reason": egress_module.AUDIENCE_RESTRICTED}
         if operation == "infer":
             result = memory_schema_module.infer_traversal_profiles(vault_root)
             if save:
@@ -11310,6 +11408,7 @@ def _registry_schema_operation(
     limit: int,
     continuation: str | None,
     unexpected: Mapping[str, Any],
+    registry_scope: str | None = None,
 ) -> dict[str, Any]:
     """One registry contract for every vocabulary subject."""
     from .vocabulary import contract, registry_spec
@@ -11340,7 +11439,12 @@ def _registry_schema_operation(
             + "; also got "
             + ", ".join(extra)
         )
-    spec = registry_spec(subject)
+    from .vocabulary import instances
+
+    try:
+        spec = instances.select(vault_root, registry_spec(subject), registry_scope, authoring=True)
+    except instances.RegistryError as error:
+        return contract.selection_refusal(subject, error)
     if operation == "inspect":
         return contract.inspect(vault_root, spec, limit=limit, continuation=continuation)
     if operation == "history":

@@ -273,6 +273,39 @@ The importer SHALL stream authorized preserved-source CSV, NDJSON and JSON array
 - **WHEN** the private authorized wearable-export journey compares its roughly 244 MB raw source to the imported store
 - **THEN** the report separately names raw bytes, active typed/index bytes, full audited database, retained evidence, replica and WAL peak, and makes no unsupported claim of whole-import compression
 
+### Requirement: JSON source kind guards preserve heterogeneous rows
+
+JSON-document, JSON-array, and NDJSON object field mappings SHALL accept optional `source_type`: number, string, boolean, null, object, or array. These JSON Schema kinds form a closed set. Number SHALL match integers and finite floats, excluding booleans. A guard SHALL run before scale and target validation without converting the source value. A matching target SHALL receive the exact original value before any declared scale; a nonmatching target SHALL be absent.
+
+Absent source paths SHALL retain existing absence behavior. Present null SHALL be a kind, never absence. All guarded targets reading the same compiled source path SHALL form one guard group, including enclosing scopes and `$value`. Every present source value in that group SHALL match at least one declared guard. Otherwise the importer SHALL report bounded `IMPORT_SOURCE_TYPE_UNMAPPED` through existing stop or explicit skip handling. Stop SHALL expose the exact error and source position, retaining earlier committed counters and checkpoint. Explicit skip SHALL count and log each skipped row. Unknown mapping keys or kinds SHALL produce bounded mapping diagnostics. CSV SHALL reject `source_type` and preserve its existing conversion rules. `{const}` SHALL remain alone.
+
+Canonical mappings SHALL include `source_type` only when declared. Old canonical mappings and hashes SHALL remain unchanged; guarded mappings SHALL have distinct identities. Existing immutable source, member, checkpoint, history, and derived rebuild paths SHALL retain their behavior. Every guarded alias SHALL inherit the complete existing source coverage and dependency closure, including location protection. A guard SHALL NOT hide a dependency or widen release. This contract SHALL add no storage union, encoding migration, endpoint, or tool parameter.
+
+#### Scenario: Mixed source values retain their types and identities
+- **WHEN** a JSON array source path contains integers, finite fractions, numeric-looking strings, Unicode strings, and repeated values
+- **AND** separate numeric and string targets declare the corresponding guards
+- **THEN** every source element produces one row with its original type and ordinal identity
+- **AND** numeric daily count, sum, and average use only numeric values while total and string counts remain visible
+
+#### Scenario: A late source kind cannot disappear silently
+- **WHEN** a present boolean, null, object, or array appears beyond preview's first 100 rows without a corresponding guard
+- **THEN** stop reports failed partial progress at that row, or explicit skip records its rejection and continues
+- **AND** neither policy fabricates a null, zero, accepted empty row, or complete successful import without visible rejection
+
+#### Scenario: Missing source differs from guarded null
+- **WHEN** one row lacks the guarded source path and another contains null with a declared null guard
+- **THEN** the first row omits all guarded targets and the second retains present null only in the matching target
+
+#### Scenario: Replay and rebuild preserve guarded mappings
+- **WHEN** an import restarts mid-member, replays completed start, skips an already imported member, or rebuilds derived rows
+- **THEN** exact values, identities, and logged member effects remain unchanged
+- **AND** an old unguarded mapping retains its previous canonical hash
+
+#### Scenario: A nonmatching protected alias cannot release another alias
+- **WHEN** guarded aliases share a source path whose coverage, declaration, or dependencies require location protection
+- **THEN** every alias retains that protection even when its guard does not match the current value
+- **AND** released unrelated metrics remain available
+
 ### Requirement: Incremental rollups preserve governed exactness
 
 Declared daily/ISO-week rollups SHALL use each record's source-local day basis and SHALL support exact count/sum/avg/min/max/latest and update affected old/new buckets, readiness and generation in the same canonical transaction as every relevant write. Dirty/unproven rollups SHALL be unavailable, never stale-complete. Rollup implementation SHALL begin with uniform release and bounded exact base fallback; maintained mixed partitions SHALL require measured demand and SHALL cap at 8 rollups/collection, 4 group dimensions, 16 total maintained release partitions and 16 affected old/new bucket-partition updates/row mutation, with precommit refusal above bounds. Rollup reuse SHALL require uniform release or exact fully admitted release partitions and admission of every field affecting membership/buckets/reductions under Location fields and preserved sources require explicit owner release; a policy splitting a partition SHALL use a bounded governed base reduction or an explicit unavailable/cost result. Percentile and distinct-count SHALL NOT be fabricated by combining insufficient rollup statistics.

@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from . import access, activation, lifecycle_statuses
+from . import access, activation, lifecycle_statuses, note_types
 from . import find as find_module
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
@@ -538,6 +538,8 @@ def _owner_local_classes(vault_root: Path, labels: Iterable[str]) -> dict[str, s
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
     kb = vault_root / kb_dirname()
     candidates: list[ActivationCandidate] = []
+    # The census is shared and never served, so it reads the owner's note types.
+    census_types = note_types.Basis(vault_root, owner_local=True)
     if kb.is_dir():
         paths = sorted(
             find_module._walk_md(kb),
@@ -563,8 +565,8 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
                 title="",
                 mtime=0.0,
             )
-            if not activation.structurally_eligible_for_types(
-                vault_root, page, page_types=activation._COMPILED_PAGE_TYPES
+            if not activation.structurally_eligible(
+                vault_root, page, selects=note_types.compiled, type_basis=census_types
             ):
                 continue
             candidates.append(

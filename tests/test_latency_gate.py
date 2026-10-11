@@ -103,6 +103,12 @@ CEIL_GRAPH_RATIO = 1.5  # warm graph median at 4x corpus must stay within 1.5x
 GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
 CEIL_REFERENTS_RATIO = 1.5
 REFERENTS_RATIO_SLACK_MS = 25.0
+# --- Admitted-caller fusion bound. MEASURED BASIS (2026-10-09, a loaded 20-core
+# laptop, the 2000-note dense vault, model-free, two passes each): unrestricted
+# fusion median 7-19ms; an admit-all caller 497-984ms while admission sized the
+# candidate pool, 9ms once it did not. The bound sits far below the regression.
+CEIL_ADMITTED_FUSION_RATIO = 1.5
+ADMITTED_FUSION_SLACK_MS = 25.0
 
 # --- Context-compiler ceilings (add-context-activation, design D9).
 # The metric includes the entire activation request. Excluding its retrieval
@@ -191,14 +197,16 @@ def dense_vault_2k(tmp_path: Path, model_free) -> Path:
     return _build_dense_vault(tmp_path, N_NOTES)
 
 
-def _measure(vault: Path) -> tuple[dict[str, float], float]:
+def _measure(vault: Path, **find_kwargs) -> tuple[dict[str, float], float]:
     """Return (per-lane median ms, total median ms) over the warm query set."""
     lane_samples: dict[str, list[float]] = {}
     total_samples: list[float] = []
     for _ in range(_REPEAT):
         for q in _QUERIES:
             t = find_module.FindTimings()
-            find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True, timings=t)
+            find_module.find(
+                vault, query=q, limit=10, mode="hybrid", graph=True, timings=t, **find_kwargs
+            )
             d = t.as_dict()
             total_samples.append(d["total_ms"])
             for lane, stage in d["stages"].items():
@@ -239,6 +247,26 @@ def test_no_lane_exceeds_ceiling_at_scale(dense_vault_2k: Path) -> None:
         f"total find() median {total_ms:.0f}ms >= ceiling {CEIL_TOTAL_MS:.0f}ms at "
         f"{N_NOTES} notes (warm baseline ~805ms). Dominant lane: {worst[0]} "
         f"({worst[1]:.0f}ms). all medians: {rounded}"
+    )
+
+
+def test_admission_does_not_deepen_the_candidate_pool(dense_vault_2k: Path) -> None:
+    """A caller with an admission predicate fuses what an unrestricted caller does.
+
+    Admission used to size the candidate pool to the whole admitted corpus, so
+    every admitted recall fused and re-ranked every matching page: fusion took
+    0.5-1s here (bound basis above) and 2-3s on a 6,349-page cell. Every lane
+    already ranks only admitted pages, so admission must not deepen the pool.
+    """
+    open_medians, _ = _measure(dense_vault_2k)
+    admitted_medians, _ = _measure(dense_vault_2k, admit_path=lambda _path: True)
+
+    open_fusion, admitted_fusion = open_medians["fusion"], admitted_medians["fusion"]
+    bound = max(open_fusion * CEIL_ADMITTED_FUSION_RATIO, open_fusion + ADMITTED_FUSION_SLACK_MS)
+    assert admitted_fusion < bound, (
+        f"admitted fusion median {admitted_fusion:.1f}ms against {open_fusion:.1f}ms unrestricted "
+        f"at {N_NOTES} notes (bound {bound:.1f}ms): admission is sizing the candidate pool again. "
+        f"admitted medians: { {k: round(v, 1) for k, v in admitted_medians.items()} }"
     )
 
 

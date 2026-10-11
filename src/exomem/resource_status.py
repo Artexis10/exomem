@@ -71,8 +71,8 @@ def _cache_residency() -> dict[str, Any]:
         caches["vector_matrices"] = embeddings.index_cache_status()
     else:
         caches["vector_matrices"] = {
-            "embedding": {"loaded": 0, "indexes": 0, "rows": 0, "bytes": 0},
-            "clip": {"loaded": 0, "indexes": 0, "rows": 0, "bytes": 0},
+            "embedding": {"loaded": 0, "indexes": 0, "rows": 0, "unit_rows": 0, "bytes": 0},
+            "clip": {"loaded": 0, "indexes": 0, "rows": 0, "unit_rows": 0, "bytes": 0},
         }
 
     bm25 = sys.modules.get("exomem.bm25")
@@ -202,7 +202,7 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
-    from . import dreamer, media_jobs, runtime_resources
+    from . import dreamer, media_brakes, media_engines, media_jobs, runtime_resources
 
     policy = mode.resolved()
     return {
@@ -216,6 +216,8 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "deferred_work": _deferred_work(vault_root),
         "recall_reembed": _recall_reembed(vault_root),
         "media": media_jobs.status(vault_root),
+        "media_engines": media_engines.status(),
+        "media_brakes": media_brakes.status(),
         "compute": runtime_resources.status(),
         "asr": asr_runtime_status(),
         "cuda": cuda_accounting_if_initialized(),

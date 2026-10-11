@@ -88,7 +88,9 @@ UNPROMPTED_FAMILIES: frozenset[str] = frozenset({"f20", "f21", "f22"})
 #: vocabulary lives in the corpus module beside the fold it protects; this is the
 #: second of its two enforcement points — corpus construction is the first, and a
 #: fixture authored by hand reaches only this one.
-STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27", "f28", "f29", "f30", "f31"})
+STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset(
+    {"f27", "f28", "f29", "f30", "f31", "f33"}
+)
 
 ScenarioKind = Literal["corpus", "operational"]
 
@@ -337,14 +339,17 @@ def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
         StoreBearingUtterance,
         assert_no_store_bearing_utterance,
     )
-    if scenario.family_id in {"f28", "f29", "f30", "f31"}:
+    # Every gated family after f27 takes the wider f28 gate, which also refuses
+    # collection, ledger, schema and claim terms and an empty turn.
+    if scenario.family_id in STORE_BEARING_GATED_FAMILIES - {"f27"}:
         from .journeys.collection_replay import assert_no_store_bearing_utterance
 
+    # A fresh agent's prompt is a user utterance too.
     turns = tuple(
         (op.ref, op.detail)
         for phase in scenario.phases
         for op in phase.ops
-        if op.op == "agent_turn"
+        if op.op in {"agent_turn", "fresh_agent"}
     )
     if not turns:
         raise ScenarioLoadError(
@@ -385,6 +390,29 @@ def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
             )
 
 
+def _validate_frozen_case(scenario: Scenario, text: str, source: str) -> None:
+    """f33 only: a case loads only from the exact bytes its receipt froze.
+
+    f33 is the one family whose receipt records case digests; the receipt path
+    and fixture folder live in :mod:`.journeys.referent_capture`.
+    """
+
+    from .journeys.referent_capture import (
+        FAMILY_ID,
+        ReferentCaseError,
+        case_path,
+        verify_fixture_bytes,
+    )
+
+    if scenario.family_id != FAMILY_ID:
+        return
+
+    try:
+        verify_fixture_bytes(case_path(scenario.scenario_id), text.encode("utf-8"))
+    except ReferentCaseError as error:
+        raise ScenarioLoadError(f"{source}: {error}") from error
+
+
 def load_scenario_text(text: str, *, source: str) -> Scenario:
     """Parse and fully validate one scenario document."""
 
@@ -407,6 +435,7 @@ def load_scenario_text(text: str, *, source: str) -> Scenario:
         _validate_pair_requirements(scenario, source)
         _validate_unprompted_trajectory(scenario, source)
         _validate_store_bearing_turns(scenario, source)
+        _validate_frozen_case(scenario, text, source)
         scenario.bound_assertions()
     except RegistryError as error:
         raise ScenarioLoadError(f"{source}: {error}") from error

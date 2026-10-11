@@ -1,0 +1,66 @@
+scenario_id: f33-sparse-existing-twin-v1
+family_id: f33
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-seed
+  - op: agent_turn
+    ref: t01
+    detail: Tobias Hallworth needed a new sketchbook, so he stopped at Quillfeather Bindery on his way
+      to the station.
+  - op: agent_turn
+    ref: t02
+    detail: Quillfeather Bindery had one left in the size he wanted, so the visit took five minutes.
+  - op: agent_turn
+    ref: t03
+    detail: Tobias usually orders sketchbooks online, so the trip to Quillfeather Bindery was a one-off.
+  - op: snapshot
+    ref: s-hookless-end
+  expect:
+  - assert: twin_left_no_referent
+    subject: f33-sparse-existing-twin-v1
+- phase_id: hooked
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-seed
+  - op: agent_turn
+    ref: t01
+    detail: Tobias Hallworth needed a new sketchbook, so he stopped at Quillfeather Bindery on his way
+      to the station.
+  - op: agent_turn
+    ref: t02
+    detail: Quillfeather Bindery had one left in the size he wanted, so the visit took five minutes.
+  - op: agent_turn
+    ref: t03
+    detail: Tobias usually orders sketchbooks online, so the trip to Quillfeather Bindery was a one-off.
+  - op: snapshot
+    ref: s-hooked-end
+  expect:
+  - assert: twin_left_no_referent
+    subject: f33-sparse-existing-twin-v1
+fairness:
+  why_neutral: Ordinary conversation about people and the things around them, with no turn naming a store;
+    state is read from canonical pages and the fresh session's delivered packet and answer.
+  public_coverage_subtraction: No public suite covers referent capture followed by owner-anchored activation.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Canonical entity pages, typed relation bullets and the fresh-session activation packet
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only canonical pages, registries and delivered client responses
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Both surfaces are visible to the client.
+    competitor_surface: Documented file and client response
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-seven referent-capture predicates.

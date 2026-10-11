@@ -340,7 +340,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "pytesseract", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -966,6 +966,27 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     return _check("fast_ack_custody", "pass", message, details=details)
+
+
+def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
+    """State the collection store's unsupported writer setup for a vault that has a store.
+
+    A vault without the store's routing marker has only file collections, so it gets no line, and
+    a missing vault root is another check's finding.
+    """
+    if vault_root is None or not vault_root.is_dir():
+        return None
+    from . import held_fs
+    from .collection_store import authority, connection
+
+    try:
+        marker = authority.read_marker(vault_root)
+    except (OSError, held_fs.HeldFsError):
+        return _check("collection_store", "warn", "The collection store's routing marker could not be read.",
+                      f"Check that this user can read {authority.marker_path(vault_root)}.")
+    if marker is None:
+        return None
+    return _check("collection_store", "pass", f"This vault has store collections. {connection.UNSUPPORTED_WRITERS}")
 
 
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
@@ -1820,7 +1841,11 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             details=status,
         )
     counts = status["counts"]
-    blocked = int(counts.get("blocked", 0))
+    memory_blocked = int(status.get("memory_blocked_count", 0))
+    over_budget = int(status.get("over_budget_count", 0))
+    engine_waiting = int(status.get("engine_waiting_count", 0))
+    # Memory-blocked and engine-waiting rows count as pending, as their rows show.
+    blocked = int(counts.get("blocked", 0)) - over_budget
     failed = int(counts.get("failed", 0))
     if blocked or failed:
         compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
@@ -1836,13 +1861,73 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             remediation,
             details=status,
         )
+    if memory_blocked or over_budget:
+        # Operator-only: tenants see memory-blocked work as waiting.
+        return _check(
+            "media.runtime",
+            "warn",
+            f"Media work waits: {memory_blocked} memory-blocked, "
+            f"{over_budget} over this deployment's processing budget.",
+            "Memory-blocked work resumes by itself when pressure stays low. Over-budget "
+            "files resume when the cell's memory limit or the engine's budget changes "
+            "(EXOMEM_MEDIA_BUDGETS), or, for a file that ran past the job timeout, when "
+            "that timeout grows (EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS).",
+            details=status,
+        )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
+    waiting = f", {engine_waiting} waiting for a switched-off engine" if engine_waiting else ""
     return _check(
         "media.runtime",
         "pass",
-        f"Durable media runtime healthy ({queued} queued/running).",
+        f"Durable media runtime healthy ({queued} queued/running{waiting}).",
         details=status,
     )
+
+
+def _check_media_brakes() -> DoctorCheck | None:
+    """The Cloud memory brakes, read from the cell's cgroup now; None without brakes."""
+    from . import media_brakes
+
+    state = media_brakes.status()
+    if state["state"] == "off":
+        return None
+    if state["state"] == "unavailable":
+        return _check(
+            "media.brakes",
+            "warn",
+            f"media brakes unavailable: {state['reason']}",
+            "Media waits until the cell's cgroup v2 memory files read as expected. Check "
+            "the pod's memory limit and the cgroup mount; media resumes by itself.",
+            details=state,
+        )
+    return _check(
+        "media.brakes",
+        "pass",
+        f"Media brakes on: anonymous memory {state['anon_bytes']} B against an "
+        f"admission ceiling of {state['ceiling_bytes']} B (cgroup, read now).",
+        details=state,
+    )
+
+
+def _check_media_engines() -> DoctorCheck:
+    """Each media engine as enabled, disabled or unavailable (EXOMEM_MEDIA_ENGINES)."""
+    from . import media_engines
+
+    states = media_engines.status()
+    summary = ", ".join(f"{engine} {state}" for engine, state in states.items())
+    unavailable = [engine for engine, state in states.items() if state == media_engines.UNAVAILABLE]
+    # Only a deployment that names its engines expects them all installed; a personal
+    # install's default set covers profiles without the media extra.
+    if unavailable and os.environ.get(media_engines.ENGINES_ENV) is not None:
+        return _check(
+            "media.engines",
+            "warn",
+            f"Media engines: {summary}.",
+            f"Install the software for {', '.join(unavailable)}, or switch the engine off "
+            f"in {media_engines.ENGINES_ENV}.",
+            details=states,
+        )
+    return _check("media.engines", "pass", f"Media engines: {summary}.", details=states)
 
 
 #: How long the process census may take before the check gives up on it.
@@ -2215,21 +2300,31 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
     from . import recall_space
 
     recall = recall_space.recall_model()
-    if serving is None:
+    initial = serving is None or bool(building and building.get("same_space_as_serving"))
+    if initial:
         if state.get("paths_total", 0) == 0:
             return _check(
                 "embeddings.reembed", "pass", "No eligible pages need a dense index.", details=state,
             )
         if state.get("reembed") == "off":
             return None
+        if serving is not None and not building.get("resumes"):
+            return _check(
+                "embeddings.reembed",
+                "warn",
+                f"{building['sidecar']} is left over from an initial dense index build that "
+                f"will not resume: {serving['sidecar']} covers the vault and serves recall, "
+                "and nothing reads the leftover sidecar.",
+                details=state,
+            )
         built = building["paths_done"] if building else 0
         phase = "in progress" if building else "pending"
         return _check(
             "embeddings.reembed",
             "warn",
             f"The initial dense index build for {recall} is {phase}: "
-            f"{built}/{state.get('paths_total', 0)} pages built; lexical recall serves "
-            "until the service cuts over.",
+            f"{built}/{state.get('paths_total', 0)} pages built; dense recall covers only "
+            "the built pages until the service cuts over.",
             details=state,
         )
     if recall_space.cell_mode() and serving["model"] != recall:
@@ -2253,7 +2348,11 @@ def _check_recall_reembed(vault_root: Path | None) -> DoctorCheck | None:
             "embeddings.reembed",
             "warn",
             f"This cell encodes with {recall} and refuses its {serving['model']} sidecar; "
-            f"dense recall is off until the re-embed cuts over ({built}).",
+            + (
+                f"dense recall covers only the pages the re-embed has built until it cuts over ({built})."
+                if building
+                else f"dense recall is off until the re-embed builds its sidecar ({built})."
+            ),
             details=state,
         )
     if not building:
@@ -2395,7 +2494,7 @@ def _check_tesseract(*, required: bool = True) -> DoctorCheck:
     """Report what the RUNTIME will resolve, not a narrower guess.
 
     Doctor checked only `EXOMEM_TESSERACT_CMD` and PATH, while
-    `extract._ensure_tesseract_cmd` also probes the standard install locations.
+    `extract.resolve_tesseract_cmd` also probes the standard install locations.
     The UB-Mannheim Windows package installs to one of those and does not touch
     PATH, so doctor reported FAIL on a host where OCR demonstrably worked — and
     `scripts/upgrade.ps1 -Profile media` then refused a safe service restart
@@ -3633,12 +3732,19 @@ def doctor(
         check_graph_recovery_age(vault_root),
         _check_relation_census(vault_root),
     ]
+    collection_store = _check_collection_store(vault_root)
+    if collection_store is not None:
+        checks.append(collection_store)
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
         checks.append(runtime_processes)
     media_runtime = _check_media_runtime(vault_root)
     if media_runtime is not None:
         checks.append(media_runtime)
+    checks.append(_check_media_engines())
+    media_brakes_check = _check_media_brakes()
+    if media_brakes_check is not None:
+        checks.append(media_brakes_check)
 
     if profile in ("hybrid", "standard", "media"):
         extra, requirements = _embedding_requirements()
@@ -3666,7 +3772,7 @@ def doctor(
     if profile in ("standard", "media"):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
-            _check_dependency("pytesseract", "media"),
+            _check_dependency("pillow", "media", import_name="PIL"),
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),

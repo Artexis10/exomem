@@ -189,7 +189,7 @@ def test_the_served_block_reports_totals_and_bounded_top_references(vault: Path)
     assert len(block["top"]) == 2
     assert len(block["top"]) <= due_state_module.TOP_LIMIT
     first = block["top"][0]
-    assert set(first) == {"category", "ref", "due_since"}
+    assert set(first) == {"category", "ref", "fingerprint", "due_since"}
     assert first["category"] == "prediction_window"
     assert first["ref"].startswith("exomem://review/")
     # Most-overdue first: the older check date leads.
@@ -957,6 +957,133 @@ def test_the_fallback_does_not_move_a_default_union_items_identity(
     assert with_fallback.item_id == without_fallback.item_id
     assert with_fallback.fingerprint == without_fallback.fingerprint
     assert with_fallback.categories == without_fallback.categories
+
+
+def _published(vault: Path, category: str) -> dict:
+    """The one row the served block publishes for `category`, as an agent reads it."""
+    rows = [row for row in _served(vault)["top"] if row["category"] == category]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_a_bare_due_ref_is_the_item_the_review_surface_lists(vault: Path) -> None:
+    """A ref with no fingerprint resolves the fused item the review surface lists.
+
+    `exomem review dismiss <ref>` and the TUI send no fingerprint. When the due
+    signal alone answered a bare ref, the item view dropped the page's other
+    reasons, and the dismissal left the fused item open on the review surface.
+    """
+    from exomem import attention as attention_module
+    from exomem import commands
+
+    rel = _prediction(vault, "one", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    item = _review_surface_item(vault, rel)
+    _assert_fused(item)
+    ref = _published(vault, "prediction_window")["ref"]
+    assert ref == item.ref
+
+    viewed = commands.op_review_memory(vault, mode="item", ref=ref)
+    commands.op_triage_memory(vault, ref=ref, action="dismiss", why="known")
+
+    assert viewed["categories"] == item.categories
+    assert viewed["fingerprint"] == item.fingerprint
+    still_open = attention_module.attention(vault, limit=0, today=TODAY).items
+    assert rel not in [entry.path for entry in still_open], (
+        "a dismissal by the bare ref left the fused item open on the review surface"
+    )
+
+
+BOUNDED_CASES = [
+    OPT_IN_CASES[0],
+    (
+        "prediction_window",
+        lambda vault: _prediction(vault, "due-bounded", check_by="2026-08-01"),
+    ),
+]
+
+
+@pytest.mark.parametrize(("category", "make"), BOUNDED_CASES, ids=[c for c, _ in BOUNDED_CASES])
+def test_a_due_row_with_its_fingerprint_is_read_and_put_down_without_an_audit(
+    vault: Path, category: str, make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolving one due ref ran attention, then activation, then a wider
+    attention pass: whole-vault audits for one item. On the owner's vault that
+    outlived every client, so no agent could act on a due item at all."""
+    from exomem import audit as audit_module
+    from exomem import commands
+
+    make(vault)
+    due_state_module.reconcile(vault, today=TODAY)
+    row = _published(vault, category)
+    audits: list[object] = []
+    real = audit_module.audit
+    monkeypatch.setattr(
+        audit_module, "audit", lambda *a, **k: (audits.append(a), real(*a, **k))[1]
+    )
+
+    context = commands.op_review_item_context(
+        vault, ref=row["ref"], expected_fingerprint=row["fingerprint"]
+    )
+    commands.op_triage_memory(
+        vault, ref=row["ref"], action="dismiss", why="known",
+        expected_fingerprint=row["fingerprint"],
+    )
+
+    assert audits == []
+    assert context["item"]["categories"] == [category]
+    served = _served(vault)
+    assert served is None or category not in served["categories"], (
+        f"a dismissed {category} item is still being counted"
+    )
+
+
+def test_a_reopen_with_a_fingerprint_leaves_no_earlier_dismissal_behind(
+    vault: Path,
+) -> None:
+    """Studio and the TUI send `expected_fingerprint` on every triage. A reopen
+    that cleared only the sent fingerprint's records kept the dismissal from
+    before an edit, so reverting the edit brought the reopened item back
+    dismissed."""
+    from exomem import commands
+    from exomem import review_state as review_state_module
+
+    # An experiment's item id is its page, and its fingerprint is the page's
+    # content, so an edit moves the fingerprint and keeps the id.
+    rel = _experiment(vault, "pool-sizing", started="2026-01-01", duration="30 days")
+    original = (vault / rel).read_text(encoding="utf-8")
+    due_state_module.reconcile(vault, today=TODAY)
+    at_a = _published(vault, "unfinished_experiments")
+    commands.op_triage_memory(
+        vault, ref=at_a["ref"], action="dismiss", why="known",
+        expected_fingerprint=at_a["fingerprint"],
+    )
+
+    _write(vault, rel, original.replace("It will work.", "It will work at twice the load."))
+    due_state_module.reconcile(vault, today=TODAY)
+    at_b = _published(vault, "unfinished_experiments")
+    assert (at_b["ref"], at_b["fingerprint"]) != (at_a["ref"], at_a["fingerprint"])
+    assert at_b["ref"] == at_a["ref"]
+    commands.op_triage_memory(
+        vault, ref=at_b["ref"], action="dismiss", why="still known",
+        expected_fingerprint=at_b["fingerprint"],
+    )
+    commands.op_triage_memory(
+        vault, ref=at_b["ref"], action="reopen", expected_fingerprint=at_b["fingerprint"]
+    )
+
+    item_id = review_state_module.parse_review_ref(at_b["ref"])
+    records = review_state_module.ReviewStateStore(vault).load()["records"].values()
+    assert [record for record in records if record.get("item_id") == item_id] == [], (
+        "the reopen left an earlier dismissal of the item behind"
+    )
+    _write(vault, rel, original)
+    due_state_module.reconcile(vault, today=TODAY)
+    served = _served(vault)
+    assert served is not None and served["categories"].get("unfinished_experiments") == 1, (
+        "reverting the edit brought the reopened item back dismissed"
+    )
+    assert _published(vault, "unfinished_experiments")["fingerprint"] == at_a["fingerprint"]
 
 
 def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:

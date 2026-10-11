@@ -23,6 +23,11 @@ arithmetic; nothing in it reads a response from the product.
 The recipient reads metrics through authenticated MCP. The owner releases and
 revokes the invented location fields through REST on the same running writer.
 Field release never releases the preserved original.
+
+A second summary collection derives nested October/November samples from protected
+archive members. Its independent reference includes both occurrences of the autumn
+fold. Restart and restore must reproduce the exact rows; a missing member blocks row
+reads during rebuild while complete daily rollups remain available.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ import asyncio
 import contextlib
 import difflib
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -332,6 +339,266 @@ ROW_FIELDS = ["exercise_id", "calories", "local_date"]
 
 # --- harness --------------------------------------------------------------------
 
+SAMPLES_ID = "714e193a-a755-4fe4-98d9-301aa2c70647"
+SAMPLES_PATH = "Knowledge Base/Records/Telemetry/Samples/_collection.md"
+SAMPLE_ROWS = {"version": 1, "select": ["sample_id", "value", "at", "utc_offset", "local_date"],
+               "order_by": [{"field": "local_date"}]}
+SAMPLE_DAILY = {"version": 1, "group_by": [{"field": "local_date", "bucket": "day"}],
+                "aggregates": {"count": {"op": "count", "field": "value"},
+                               "sum": {"op": "sum", "field": "value"},
+                               "avg": {"op": "avg", "field": "value"}}}
+SAMPLE_MAPPING = {
+    "rows": "days[].samples[]",
+    "fields": {"sample_id": "id", "value": "value", "place": "place",
+               "place_label": "place.label", "extra": "extra"},
+    "coverage": {"id": {"classification": None}, "value": {"classification": None},
+                 "at": {"classification": None}, "place": {"classification": "location", "subtree": True}},
+    "time": {"from": [{"instant": "at", "zone": "Europe/Paris", "fold": "order"}],
+             "instant": "at", "offset": "utc_offset", "local_date": "local_date"},
+}
+
+
+def member_documents() -> tuple[dict[str, bytes], dict[str, dict[str, Any]]]:
+    """Invented ten-minute samples; expected UTC comes from explicit transition arithmetic.
+
+    Paris repeats 02:00–02:59 on 25 October 2026: +02:00 first, +01:00 second.
+    The reference uses those stated offsets, never the product or the host zone database.
+    """
+    documents, expected = {}, {}
+    for month, days in ((10, range(1, 32)), (11, range(1, 8))):
+        nested = []
+        for day in days:
+            clocks = [(minute, 120 if month == 10 and day < 25 else 60) for minute in range(0, 1440, 10)]
+            if (month, day) == (10, 25):
+                clocks = ([(minute, 120) for minute in range(0, 180, 10)]
+                          + [(minute, 60) for minute in range(120, 1440, 10)])
+            samples = []
+            for index, (minute, offset) in enumerate(clocks):
+                wall = datetime(2026, month, day) + timedelta(minutes=minute)
+                sample_id = f"sample-{month:02d}{day:02d}-{index:03d}"
+                value = day * 100 + index
+                samples.append({"id": sample_id, "value": value, "at": wall.isoformat(),
+                                "place": {"label": "Invented plateau"}, "extra": {"private": "unreviewed"}})
+                expected[sample_id] = {"sample_id": sample_id, "value": value,
+                                       "at": (wall - timedelta(minutes=offset)).isoformat() + "Z",
+                                       "utc_offset": _offset_text(offset), "local_date": wall.date().isoformat()}
+            nested.append({"date": f"2026-{month:02d}-{day:02d}", "samples": samples})
+        documents[f"telemetry/{month:02d}.json"] = json.dumps({"days": nested}).encode()
+    return documents, expected
+
+
+def sample_manifest() -> str:
+    return f"""---
+type: collection
+exomem_id: {SAMPLES_ID}
+title: Derived telemetry samples
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+view_mode: summary
+derived: true
+storage:
+  strategy: markdown-items
+  source: Items
+  format_version: 1
+item_schema:
+  natural_key: [sample_id]
+  fields:
+    sample_id: {{type: string, required: true}}
+    value: {{type: integer}}
+    at: {{type: datetime}}
+    utc_offset: {{type: string}}
+    local_date: {{type: date}}
+    place:
+      type: object
+      classification: location
+      properties:
+        label: {{type: string}}
+    place_label: {{type: string, depends_on: [place]}}
+    extra: {{type: object}}
+---
+"""
+
+
+def sample_import(journey: Journey) -> dict[str, Any]:
+    return {"source_ref": journey.member_receipt["path"], "format": "json-document",
+            "members": "telemetry/*", "mapping": SAMPLE_MAPPING}
+
+
+def member_blob(journey: Journey) -> Path:
+    manifest = journey.vault / journey.member_receipt["path"]
+    return manifest.parent / json.loads(manifest.read_bytes())["members"][1]["blob"]
+
+
+async def import_samples(journey: Journey) -> None:
+    """Installed upload → owner MCP preview → interrupted member import → exact derived rows."""
+    import httpx
+    import yaml
+
+    with journey.step("3a. preserve nested members, preview and interrupt their derived import"):
+        async with journey.recipient_service() as (base_url, _):
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+                for name, document in journey.documents.items():
+                    zipped.writestr(name, document)
+            async with httpx.AsyncClient(timeout=journey.timeout) as client:
+                uploaded = await client.post(
+                    f"{base_url}/upload", headers={"Authorization": f"Bearer {journey.rest_key}"},
+                    data={"scope": "telemetry", "category": "export", "archive": "members"},
+                    files={"file": ("invented-samples.zip", archive.getvalue(), "application/zip")},
+                )
+            expect(uploaded.status_code == 201, "the installed archive upload failed", uploaded.text)
+            journey.member_receipt = uploaded.json()
+            expect(journey.member_receipt["archive"]["sha256"] == hashlib.sha256(archive.getvalue()).hexdigest(),
+                   "the member receipt does not identify the uploaded bytes", journey.member_receipt)
+        async with journey.service("member-import") as service:
+            await service.mutate("record_memory", action="create", manifest_path=SAMPLES_PATH,
+                                 manifest_text=sample_manifest(), why="import the invented nested samples")
+            preview = await service.import_job(SAMPLES_ID, mode="preview", **sample_import(journey))
+            expect(preview["rows"]["sampled"] == 100 and not preview["mapping"]["findings"]
+                   and not preview["time"]["flagged"], "the nested preview misread the invented source", preview)
+            manifest = yaml.safe_load(sample_manifest().split("---\n")[1])
+            recommended = preview["recommended_declarations"]
+            for name, flags in recommended["fields"].items():
+                manifest["item_schema"]["fields"][name].update(flags)
+            manifest["rollups"] = recommended["rollups"]
+            inspected = await service.records(action="inspect", collection=SAMPLES_ID)
+            await service.mutate("record_memory", action="revise", collection=SAMPLES_ID,
+                                 manifest_text="---\n" + yaml.safe_dump(manifest, sort_keys=False) + "---\n",
+                                 why="declare daily sample totals", **inspected["lifecycle_guards"])
+            job = await service.import_job(SAMPLES_ID, mode="start", **sample_import(journey))
+
+            async def advanced():
+                status = await service.import_job(SAMPLES_ID, mode="status", continuation=job["continuation"])
+                expect(status["state"] == "running", "the member import ended before interruption", status)
+                return status if status["rows"]["imported"] > 0 else None
+
+            stopped = await until(advanced, within=60, what="a derived member batch to commit", pause=0.02)
+            expect(stopped["next_position"]["member"] == 0 and stopped["source_bytes"]["consumed"] == 0
+                   and stopped["rows"]["imported"] < len(journey.sample_reference),
+                   "the member import did not stop inside a member", stopped)
+    with journey.step("3b. resume nested import and prove every October instant and daily result"):
+        async with journey.service("member-resume") as service:
+            async def finished():
+                status = await service.import_job(SAMPLES_ID, mode="status", continuation=job["continuation"])
+                expect(status["state"] in ("running", "complete"), "the member import stopped", status)
+                return status if status["state"] == "complete" else None
+
+            done = await until(finished, within=90, what="the nested import to finish")
+            expect(done["rows"]["imported"] == len(journey.sample_reference)
+                   and done["rows"]["rejected"] == done["rows"]["duplicates"] == 0
+                   and done["source_bytes"]["consumed"] == sum(map(len, journey.documents.values())),
+                   "the resumed member import has incorrect counts", done)
+            await compare_samples(journey, service)
+            # Re-reading protected members stays an owner operation; cancel exercises the
+            # public continuation without changing the source or broadening its release.
+            replay = await service.import_job(SAMPLES_ID, mode="start", reimport="all", **sample_import(journey))
+            cancelled = await service.import_job(SAMPLES_ID, mode="cancel", continuation=replay["continuation"])
+            expect(cancelled["state"] == "partial" and cancelled["reason"] == "cancelled",
+                   "the owner could not cancel re-import", cancelled)
+
+
+async def samples_ready(journey: Journey, service: Session) -> None:
+    async def ready():
+        try:
+            return await service.query({**SAMPLE_ROWS, "page": {"limit": 1}}, SAMPLES_ID)
+        except Refused as refusal:
+            # These query protocol states mean the writer has not finished preparing rows.
+            expect(refusal.code in {"QUERY_REBUILDING", "QUERY_BUSY"},
+                   "derived recovery returned an unrelated refusal", str(refusal))
+            return None
+    await until(ready, within=90, what="derived rows to rebuild from protected members")
+
+
+async def compare_sample_days(journey: Journey, service: Session) -> None:
+    buckets: dict[str, list[int]] = {}
+    for row in journey.sample_reference.values():
+        buckets.setdefault(row["local_date"], []).append(row["value"])
+    expected = [{"local_date": day, "count": len(values), "sum": sum(values),
+                 "avg": sum(values) / len(values)} for day, values in sorted(buckets.items())]
+    groups, plans = await paged(service, SAMPLE_DAILY, "groups", 13, SAMPLES_ID)
+    expect(groups == expected, "derived daily count/sum/avg differs from the independent source reference",
+           {"groups": groups, "expected": expected})
+    expect(all(plan["strategy"] == "rollup" for plan in plans), "derived daily totals did not use rollups", plans)
+
+
+async def compare_samples(journey: Journey, service: Session) -> None:
+    rows, _ = await paged(service, SAMPLE_ROWS, "rows", 1000, SAMPLES_ID)
+    expect(len(rows) == len(journey.sample_reference)
+           and {row["sample_id"]: row for row in rows} == journey.sample_reference,
+           "derived rows differ from the independent source reference, including the October fold",
+           {"count": len(rows), "first": rows[:1]})
+    await compare_sample_days(journey, service)
+
+
+async def discover_and_plan(journey: Journey, service: Session) -> None:
+    """An installed client can discover and use each first-slice query lifecycle route."""
+    from exomem import tool_surface
+
+    await samples_ready(journey, service)
+    described = await service.records(action="describe")
+    expect(described.get("query", {}).get("grammar", {}).get("args", {}).get("name") == "collections"
+           and described.get("import", {}).get("zone_rules", {}).get("package") == "tzdata",
+           "store describe omitted query discovery or pinned import zone rules", described)
+    sizes = {}
+    for name in ("collections", "import"):
+        chapter = await service.call("schema_memory", subject="query-engine", operation="inspect", name=name)
+        sizes[name] = len(json.dumps(chapter, ensure_ascii=False, separators=(",", ":")).encode())
+        # The query-engine discovery contract fixes the chapter ceiling at 64 KiB.
+        expect(chapter["chapter"] == name and chapter["route"]["tool"] == "record_memory"
+               and sizes[name] <= 64 * 1024, "installed query grammar is absent or exceeds its byte bound", chapter)
+    for mode in ("compose", "explain", "preview", "dry_run"):
+        planned = await service.query({**SAMPLE_DAILY, "mode": mode, "execution_profile": "analytics"}, SAMPLES_ID)
+        expect(planned["mode"] == mode and planned["execution_profile"] == "analytics"
+               and "rows" not in planned and "groups" not in planned,
+               f"installed {mode} did not plan without returning values", planned)
+    analytical = await service.query({**SAMPLE_DAILY, "execution_profile": "analytics"}, SAMPLES_ID)
+    interactive = await service.query(SAMPLE_DAILY, SAMPLES_ID)
+    expect(analytical["groups"] == interactive["groups"] and analytical["execution_profile"] == "analytics",
+           "explicit analytics changed the daily answer", analytical)
+    tools = await service.client.list_tools()
+    measured = importlib.util.spec_from_file_location(
+        "measure_tool_schema_bytes", Path(__file__).with_name("measure-tool-schema-bytes.py"))
+    measure = importlib.util.module_from_spec(measured)
+    measured.loader.exec_module(measure)
+    wires = [tool.model_dump(mode="json", by_alias=True) for tool in tools]
+    schema_bytes = sum(row["total"] for row in measure.measure(
+        [tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools]))
+    bootstrap = await service.call("bootstrap", profile="compact")
+    journey.measurements = {"source": "installed stdio MCP discovery on the invented journey vault",
+                            "query_chapter_bytes": sizes, "zone_rules": described["import"]["zone_rules"],
+                            "installed_schema_bytes": schema_bytes,
+                            "installed_surface": tool_surface.discovery_contract(wires),
+                            "compact_core_bytes": len(json.dumps(bootstrap)),
+                            "derived_source_rows": len(journey.sample_reference)}
+
+
+async def protected_members(journey: Journey, owner: Session, recipient: Session) -> None:
+    """Metrics stay useful while archive handles, unknown fields and locations stay private."""
+    default = await recipient.query({"version": 1, "page": {"limit": 2}}, SAMPLES_ID)
+    expect(default["rows"] and all(not {"place", "place_label", "extra"}.intersection(row)
+                                   for row in default["rows"]),
+           "derived default rows disclosed a protected field or hid all metrics", default)
+    for field in ("place", "place_label", "extra", "absent_field"):
+        await recipient.refused("QUERY_FIELD_UNAVAILABLE", "record_memory", action="query",
+                                collection=SAMPLES_ID, query={"version": 1, "select": [field]})
+    preview = await owner.import_job(SAMPLES_ID, mode="preview", **sample_import(journey))
+    expect(preview["rows"]["sampled"] == 100, "the owner lost the protected re-import handle", preview)
+    for path in (journey.member_receipt["path"], journey.member_receipt["path"] + ".absent"):
+        await recipient.refused("IMPORT_SOURCE_NOT_FOUND", "record_memory", action="import",
+                                collection=SAMPLES_ID,
+                                import_request={"mode": "preview", **sample_import(journey), "source_ref": path})
+    for path in (journey.member_receipt["path"], member_blob(journey).relative_to(journey.vault).as_posix()):
+        for candidate in (path, path + ".absent"):
+            try:
+                await recipient.call("read_memory", path=candidate)
+            except Refused as refusal:
+                expect(refusal.message.removeprefix("Error calling tool 'read_memory': ") == "[withheld]",
+                       "the member read disclosed a protected path or existence", refusal.message)
+            else:
+                raise RuntimeError("the recipient read a protected member or manifest")
+
 LEASE_VAULT_ID = "s1-journey-vault"
 LEASE_TOKEN = "s1-journey-writer-token"
 OPERATOR_TOKEN = "s1-journey-operator-token"
@@ -371,7 +638,12 @@ class Session:
             # This checks the product's fixed refusal-code format, never the meaning of user text.
             code = re.search(r"\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b", text)
             raise Refused(tool, code.group(1) if code else "UNKNOWN", text)
-        data = loop._result_data(result)
+        data = getattr(result, "structured_content", None)
+        if data is None:
+            data = loop._result_data(result)
+        elif isinstance(data, dict) and set(data) == {"result"}:
+            # Unwrap only the SDK envelope; discovery chapters contain their own result grammar.
+            data = data["result"]
         error = data.get("error") if isinstance(data, dict) else None
         if isinstance(data, dict) and data.get("success") is False and isinstance(error, dict):
             raise Refused(tool, str(error.get("code")), str(error.get("message")))
@@ -433,6 +705,7 @@ class Journey:
         self.rows = export_rows()
         self.export = export_bytes(self.rows)
         self.timings: dict[str, float] = {}
+        self.measurements: dict[str, Any] = {}
         self.coordinator_url = ""
         self.lease_vault_id = LEASE_VAULT_ID
         self.replica_id = "service"
@@ -441,6 +714,8 @@ class Journey:
         self.lease_state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.file_collections: dict[str, Any] = {}
         self.source_receipt: dict[str, Any] = {}
+        self.member_receipt: dict[str, Any] = {}
+        self.documents, self.sample_reference = member_documents()
         self.rest_key = secrets.token_hex(32)
 
     @property
@@ -528,6 +803,7 @@ class Journey:
             "EXOMEM_GITHUB_USER_ID": str(RECIPIENT_ID),
             "EXOMEM_JWT_SIGNING_KEY": secrets.token_hex(32),
             "EXOMEM_REST_API_KEY": self.rest_key,
+            "EXOMEM_UPLOAD_TOKEN": self.rest_key,
             "EXOMEM_OAUTH_STORAGE_URL": self.coordinator_url,
             "EXOMEM_OAUTH_STORAGE_NAMESPACE": self.lease_vault_id,
             "EXOMEM_OAUTH_STORAGE_TOKEN": LEASE_TOKEN,
@@ -605,6 +881,7 @@ class Journey:
         child.replica_id = label
         child.file_collections = self.file_collections
         child.source_receipt = self.source_receipt
+        child.member_receipt = self.member_receipt
         return child
 
     def installed_helper(self, option: str, target: Path, **extra: str) -> dict[str, Any]:
@@ -1031,11 +1308,12 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
     )
 
 
-async def paged(service: Session, query: dict[str, Any], key: str, size: int) -> tuple[list, list]:
+async def paged(service: Session, query: dict[str, Any], key: str, size: int,
+                collection: str = WORKOUTS_ID) -> tuple[list, list]:
     """Every row or group of a query across its cursor pages, with each page's plan."""
     items, plans, after = [], [], None
     while True:
-        page = await service.query({**query, "page": {"limit": size, **({"after": after} if after else {})}})
+        page = await service.query({**query, "page": {"limit": size, **({"after": after} if after else {})}}, collection)
         items.extend(page[key])
         plans.append(page.get("plan"))
         after = page.get("next_cursor")
@@ -1125,6 +1403,9 @@ async def field_release_journey(journey: Journey) -> None:
         async with journey.recipient_service() as (base_url, recipient):
             owner = RestOwner(base_url, journey)
             await recipient.call("bootstrap")
+            await samples_ready(journey, recipient)
+            await compare_samples(journey, recipient)
+            await protected_members(journey, owner, recipient)
             await compare_queries(journey, recipient)
             await file_collections_unchanged(journey, recipient, "before the field release")
             # S1 fixes this managed summary page name; this is the fixture's declared Items source.
@@ -1291,6 +1572,8 @@ async def copy_and_restore(journey: Journey) -> None:
         copied = journey.fork("copy", copied_root)
         adopt_fresh(copied)
         async with copied.service("copied") as service:
+            await samples_ready(copied, service)
+            await compare_samples(copied, service)
             await compare_queries(copied, service)
             await file_collections_unchanged(copied, service, "after fresh-root copy")
     with journey.step("6. export, stage and activate the snapshot restore"):
@@ -1306,7 +1589,27 @@ async def copy_and_restore(journey: Journey) -> None:
         expect((restored.vault / STORE_FILES[1]).read_bytes() == (journey.vault / STORE_FILES[1]).read_bytes(),
                "the staged restore changed the routing marker")
         adopt_fresh(restored)
+        # Hold one source blob outside the restored vault, so startup cannot finish
+        # rebuilding before the first MCP read observes its truthful unavailable state.
+        blob = member_blob(restored)
+        held = restored.work / "held-member.gz"
+        blob.replace(held)
         async with restored.service("restored") as service:
+            async def rebuilding():
+                try:
+                    result = await service.query(SAMPLE_ROWS, SAMPLES_ID)
+                except Refused as refusal:
+                    if refusal.code == "QUERY_BUSY":
+                        return None  # The writer is still attaching its derived file.
+                    expect(refusal.code == "QUERY_REBUILDING", "restore hid its rebuild state", str(refusal))
+                    return True
+                raise RuntimeError(f"restore answered rows before its missing member was recovered: {result}")
+
+            await until(rebuilding, within=60, what="restore to report its missing-member rebuild")
+            await compare_sample_days(restored, service)
+            held.replace(blob)
+            await samples_ready(restored, service)
+            await compare_samples(restored, service)
             await compare_queries(restored, service)
             await file_collections_unchanged(restored, service, "after snapshot restore")
 
@@ -1347,6 +1650,7 @@ async def narrowing_rollback(journey: Journey) -> None:
     """Disable this vault through its public route, then prove retained data and paused work."""
     with journey.step("6. narrow the vault capability and keep A/B usable"):
         async with journey.service("before-rollback") as service:
+            await discover_and_plan(journey, service)
             # Identical starts return the completed job; a distinct source gives rollback live work to stop.
             stoppable_export = journey.export + b"\n"
             receipt = await service.mutate(
@@ -1410,6 +1714,8 @@ def snapshot_restore(args: argparse.Namespace) -> int:
                "the archive omitted the routing marker or published replica", members)
         expect(not any(member.endswith(("collections.sqlite-wal", "collections.sqlite-shm")) for member in members),
                "the archive carried live SQLite companions", members)
+        expect(not any("collections-derived.sqlite" in member for member in members),
+               "the portable archive carried derivable rows", members)
     secret = secrets.token_urlsafe(32)
     bundle = CredentialBundle({"s1-fixture": secret})
 
@@ -1587,6 +1893,7 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(released_phase_enrol(journey))
         continuation, imported = asyncio.run(create_and_start_import(journey))
         asyncio.run(resume_import(journey, continuation, imported))
+        asyncio.run(import_samples(journey))
         asyncio.run(field_release_journey(journey))
         asyncio.run(copy_and_restore(journey))
         asyncio.run(unsupported_launcher(journey))
@@ -1598,7 +1905,8 @@ def run(args: argparse.Namespace) -> int:
         loop._terminate(coordinator, 10)
         handle.close()
     total = round(time.monotonic() - started, 1)
-    print(json.dumps({"success": True, "journey": "s1-summary", "seconds": total, "steps": journey.timings}))
+    print(json.dumps({"success": True, "journey": "s1-summary", "seconds": total,
+                      "steps": journey.timings, "measurements": journey.measurements}))
     return 0
 
 

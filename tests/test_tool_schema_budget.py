@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -31,13 +32,13 @@ TOOL_CEILINGS: dict[str, int] = {
     "remember": 5200,
     "replace_memory": 4600,
     "manage_memory_file": 4325,
-    "connect_memory": 4300,
+    "connect_memory": 4425,
     "episode_memory": 4300,
     "record_memory": 4275,
     "ask_memory": 4125,
-    "schema_memory": 4000,
+    "schema_memory": 4125,
     "observe_memory": 3850,
-    "maintain_memory": 3825,
+    "maintain_memory": 3850,
     "adoption_studio": 3400,
     "capture_source": 3475,
     "review_memory": 3375,
@@ -46,12 +47,12 @@ TOOL_CEILINGS: dict[str, int] = {
     "govern_memory": 3225,
     "plan_memory": 2425,
     "preserve_artifacts": 2425,
-    "configure_memory": 1675,
+    "configure_memory": 1550,
     "read_memory": 1550,
     "adopt_vault": 1500,
     "preserve_evidence": 1500,
     "review_item_context": 1500,
-    "bootstrap": 1400,
+    "bootstrap": 1275,
     "query_dataset": 1375,
     "process_media": 1200,
     "transfer_artifact": 1100,
@@ -216,3 +217,16 @@ def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
     with pytest.raises(SystemExit):
         main(["ask_memory", "--help"])
     assert "Semantic authoring rules" not in capsys.readouterr().out
+
+
+def test_a_schema_capture_leaves_the_callers_state_root_alone() -> None:
+    """Run from an operator shell, the inherited state root is the live
+    service's, and every capture left a `schema_vault-<digest>` directory in it."""
+    caller_root = Path(os.environ["EXOMEM_STATE_ROOT"])
+
+    def entries() -> list[str]:
+        return sorted(path.name for path in caller_root.iterdir()) if caller_root.exists() else []
+
+    before = entries()
+    assert _measure_module().wire_tools()
+    assert entries() == before

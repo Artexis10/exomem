@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote
 
 from . import memory_refs, reserved_paths, vault
 from .collection_profiles import profile_for
+from .planning_values import PlanningValues, Unavailable
 
 COLLECTION_VERSION = 1
 STORAGE_FORMAT_VERSION = 1
@@ -951,6 +952,8 @@ class CollectionManifest:
     claim_match: Mapping[str, tuple[str, ...]] | None = None
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
+    #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
+    derived: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1051,9 +1054,10 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
     # personal vault, re-parsing fifteen manifests' YAML on every due-state
     # serve was 0.6 s of every recall.
     key = (str(root), rel, digest)
+    planning_values = PlanningValues(root)
     cached = _MANIFEST_PARSE_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and planning_values.matches(cached[1]):
+        return cached[0]
     audit_name = _profile_owned_audit_name(text)
     if audit_name is not None:
         _validate_audit_source(text, audit_name)
@@ -1068,17 +1072,20 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         rel,
         frontmatter,
         SourceVersion(path=rel, hash=digest),
+        planning_values,
         manifest_stable_hash=_manifest_stable_hash(text),
     )
     if len(_MANIFEST_PARSE_CACHE) >= _MANIFEST_PARSE_CACHE_CAP:
         _MANIFEST_PARSE_CACHE.pop(next(iter(_MANIFEST_PARSE_CACHE)), None)
-    _MANIFEST_PARSE_CACHE[key] = manifest
+    _MANIFEST_PARSE_CACHE[key] = (manifest, planning_values.dependency)
     return manifest
 
 
-#: Parsed manifests by (vault, path, content digest); bounded, never invalidated
-#: by anything but the bytes changing, because the key IS the bytes.
-_MANIFEST_PARSE_CACHE: dict[tuple[str, str, str], CollectionManifest] = {}
+#: Parsed manifests by (vault, path, content digest), each with the Planning
+#: values it read; bounded. An entry is reused only while those values match.
+_MANIFEST_PARSE_CACHE: dict[
+    tuple[str, str, str], tuple[CollectionManifest, tuple[str, str]]
+] = {}
 _MANIFEST_PARSE_CACHE_CAP = 256
 
 
@@ -1117,9 +1124,10 @@ def parse_manifest_bytes(
     # reader version) returning an immutable value. One Records append re-resolves
     # its manifest a dozen times from the same held bytes.
     key = (str(root), rel, f"{digest}:{records_reader_version}")
+    planning_values = PlanningValues(root)
     cached = _MANIFEST_PARSE_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and planning_values.matches(cached[1]):
+        return cached[0]
     audit_name = _profile_owned_audit_name(text)
     if audit_name is not None:
         _validate_audit_source(text, audit_name)
@@ -1134,12 +1142,13 @@ def parse_manifest_bytes(
         rel,
         frontmatter,
         SourceVersion(path=rel, hash=digest),
+        planning_values,
         manifest_stable_hash=_manifest_stable_hash(text),
         records_reader_version=records_reader_version,
     )
     if len(_MANIFEST_PARSE_CACHE) >= _MANIFEST_PARSE_CACHE_CAP:
         _MANIFEST_PARSE_CACHE.pop(next(iter(_MANIFEST_PARSE_CACHE)), None)
-    _MANIFEST_PARSE_CACHE[key] = manifest
+    _MANIFEST_PARSE_CACHE[key] = (manifest, planning_values.dependency)
     return manifest
 
 
@@ -1303,7 +1312,7 @@ def discover_collections_with_errors(
         except CollectionError as error:
             unreadable.append(UnreadableManifest(rel, error.code, error.reason))
     if reject_duplicates:
-        _raise_duplicate_ids(manifests)
+        raise_duplicate_ids(manifest.collection_id for manifest in manifests)
     return tuple(manifests), tuple(unreadable)
 
 
@@ -1386,7 +1395,7 @@ def resolve_collection(
         ]
         if not matches:
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        _raise_duplicate_ids(matches)
+        raise_duplicate_ids(manifest.collection_id for manifest in matches)
         return matches[0]
 
     root = Path(vault_root)
@@ -1695,6 +1704,7 @@ def _manifest_from_frontmatter(
     manifest_rel: str,
     frontmatter: Mapping[str, Any],
     manifest_version: SourceVersion,
+    planning_values: PlanningValues,
     manifest_stable_hash: str = "",
     records_reader_version: int = RECORDS_READER_VERSION,
 ) -> CollectionManifest:
@@ -1784,13 +1794,14 @@ def _manifest_from_frontmatter(
         _require_records_reader_version(frontmatter, records_reader_version)
     templates = _parse_templates(root, manifest_rel, frontmatter.get("templates", []))
     views, normalized_views, view_diagnostics = _parse_saved_views(
-        frontmatter.get("views", {}), schema, storage, profile, presentation
+        frontmatter.get("views", {}), schema, storage, profile, planning_values, presentation
     )
     links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
                                  presentation or item_filename or item_presentation, links)
+    derived = _parse_derived(frontmatter.get("derived", False), view_mode)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1815,7 +1826,23 @@ def _manifest_from_frontmatter(
         claims=claims,
         claim_match=claim_match,
         view_mode=view_mode,
+        derived=derived,
     )
+
+
+def _parse_derived(value: object, view_mode: str) -> bool:
+    """`derived: true` keeps a summary collection's rows outside the store, rebuilt from its imports."""
+    if type(value) is not bool:
+        raise CollectionError(
+            "INVALID_DERIVED_COLLECTION", "derived must be true or false",
+            {"field": "derived", "received": value, "allowed": [True, False], "example": "derived: true"},
+        )
+    if value and view_mode != "summary":
+        raise CollectionError(
+            "INVALID_DERIVED_COLLECTION", "a derived collection needs view_mode: summary",
+            {"field": "derived", "received": value, "example": "view_mode: summary"},
+        )
+    return value
 
 
 def _parse_view_mode(
@@ -1897,6 +1924,7 @@ def _parse_saved_views(
     schema: ItemSchema,
     storage: StorageSpec,
     semantic_profile: str,
+    planning_values: PlanningValues,
     presentation: RecordPresentation | None = None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], tuple[CollectionDiagnostic, ...]]:
     views = _mapping(value, "views")
@@ -1919,7 +1947,9 @@ def _parse_saved_views(
             normalized_view = _freeze_mapping(
                 _normalize_saved_view(definition, fields, child_shapes)
             )
-            _validate_saved_view_literals(normalized_view, schema, semantic_profile)
+            _validate_saved_view_literals(
+                normalized_view, schema, semantic_profile, planning_values
+            )
             accepted[name] = definition
             normalized[name] = normalized_view
         except CollectionError as error:
@@ -1935,6 +1965,7 @@ def _validate_saved_view_literals(
     definition: Mapping[str, Any],
     schema: ItemSchema,
     semantic_profile: str,
+    planning_values: PlanningValues,
 ) -> None:
     query = definition.get("query")
     if not isinstance(query, Mapping):
@@ -1942,7 +1973,6 @@ def _validate_saved_view_literals(
     filters = query.get("filters")
     if not isinstance(filters, list | tuple):
         return
-    planning_horizons = frozenset({"inbox", "week", "month", "quarter", "year", "multi-year"})
     for predicate in filters:
         if not isinstance(predicate, Mapping):
             continue
@@ -1951,22 +1981,27 @@ def _validate_saved_view_literals(
         if type(field_name) is not str or operator not in {"eq", "ne", "in", "nin"}:
             continue
         field = schema.fields.get(field_name)
-        allowed = (
-            planning_horizons
-            if semantic_profile == "planning" and field_name == "horizon"
-            else frozenset(field.enum)
-            if field is not None and field.enum
-            else frozenset()
-        )
-        if not allowed:
-            continue
         raw = predicate.get("value")
         candidates = raw if operator in {"in", "nin"} and isinstance(raw, list | tuple) else (raw,)
-        if any(candidate not in allowed for candidate in candidates):
+        if semantic_profile == "planning" and field_name == "horizon":
+            valid = all(_registered_horizon(planning_values, item) for item in candidates)
+        elif field is not None and field.enum:
+            valid = all(item in field.enum for item in candidates)
+        else:
+            continue
+        if not valid:
             raise CollectionError(
                 "INVALID_SAVED_VIEW",
                 f"saved view {field_name} literal is outside the profile vocabulary",
             )
+
+
+def _registered_horizon(planning_values: PlanningValues, value: Any) -> bool:
+    """A saved view may name any registered horizon, deprecated ones included."""
+    try:
+        return planning_values.find("horizon", value) is not None
+    except Unavailable:
+        return False
 
 
 def _saved_view_fields(
@@ -3470,10 +3505,11 @@ def _validate_item_key(value: object) -> None:
         raise ValueError("item key must be a bounded non-empty string")
 
 
-def _raise_duplicate_ids(manifests: Iterable[CollectionManifest]) -> None:
+def raise_duplicate_ids(collection_ids: Iterable[str]) -> None:
+    """Refuse a set of releasable manifests in which one collection identity appears twice."""
     seen: dict[str, int] = {}
-    for manifest in manifests:
-        seen[manifest.collection_id] = seen.get(manifest.collection_id, 0) + 1
+    for collection_id in collection_ids:
+        seen[collection_id] = seen.get(collection_id, 0) + 1
     duplicate_count = max(seen.values(), default=0)
     if duplicate_count > 1:
         raise CollectionError(

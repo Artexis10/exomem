@@ -13,7 +13,15 @@ Meanwhile this job builds a sidecar for the new space beside it
   current mtime, so a restart re-encodes nothing already built;
 - through the same chunking seam as live writes (`embeddings._chunks_for_page`);
 - with its catch-up in the same pass: a page written while the job ran has a
-  newer mtime than its new rows, or none, and is encoded again.
+  newer mtime than its new rows, or none, and is encoded again;
+- copying, never encoding again, each text whose vector the serving sidecar
+  already holds in the new space.
+
+An initial build is due while no pointer is published and the serving
+sidecar does not cover every eligible page, even when that sidecar holds the
+recall encoder's space: a live write gives it that space, so an imported vault
+saved to before this job plans looks built when it is not. The copy keeps that
+rule cheap: a legacy sidecar with a few stale pages costs only those pages.
 
 The cutover is one atomic replacement of the active pointer
 (`index_paths.publish_active_sidecar`), after a final catch-up pass; one more
@@ -25,19 +33,38 @@ of this job retires it, so a failed or regretted cutover can fall back to it.
 its own encoder.
 
 A hosted or cloud cell holds one encoder, so it never serves the old sidecar
-with the model that wrote it: that sidecar is refused (the vector lane reports
-`vector_space_mismatch` and the lexical lanes answer) until this job cuts over
+with the model that wrote it: that sidecar is refused until this job cuts over
 to the sidecar it builds with the cell's own encoder. A write meanwhile cannot
 land in the refused sidecar and is built by the job's catch-up.
+
+Until the cutover, the vector lane reads the new sidecar whenever the
+recall encoder cannot answer from the serving one (`building_sidecar`): on an
+initial build, whose serving sidecar holds nothing or does not cover the vault
+(the vector lane joins it when it holds the build's space); on a
+cell, whose serving sidecar is refused; and on a personal server whose serving
+sidecar another build of the same model wrote. The query is then encoded for
+the new sidecar. A failed build keeps serving the pages it built; a restart
+retries it. A page the build encoded and that changed since does not answer
+from it (`current_in_build`) until a catch-up pass encodes it again. Only a
+personal server migrating from another model keeps reading the old, complete
+sidecar with that model's encoder.
+
+Before the job first plans, a vault with no active pointer has nothing that
+says its serving sidecar covers it (`coverage_unchecked`). A server records
+the job as starting when it commits to its workers (`will_start`), before it
+admits a request, so until the plan its recall is marked warming and a fresh
+vault's empty sidecar does not answer as complete.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -170,9 +197,13 @@ def _eligible_pages(vault_root: Path) -> Iterator[tuple[Path, Any]]:
             yield md, page
 
 
-def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, Any]]) -> bool:
-    """A live write's model identity does not prove the preloaded corpus was built."""
+def _coverage_incomplete(vault_root: Path, active: Any, pages: Iterable[tuple[Path, Any]]) -> bool:
+    """A live write's model identity does not prove the preloaded corpus was built.
+
+    Stops at the first page the sidecar does not cover.
+    """
     from . import semantic_index
+    from .embedding_index import expected_parent_state
 
     stored = active.file_mtimes()
     stored_units = active.semantic_unit_parent_states()
@@ -183,12 +214,24 @@ def _coverage_incomplete(vault_root: Path, active: Any, pages: list[tuple[Path, 
             state = semantic_index.build_parent_index_state(vault_root, md)
         except (OSError, UnicodeError, ValueError):
             state = None
-        if state is not None:
-            refs = frozenset(unit.unit_ref for unit in state.document.units if unit.unit_ref is not None)
-            have = stored_units.get(page.rel_path)
-            if (have is not None or refs) and have != (frozenset({state.parent_generation}), refs):
-                return True
+        if state is not None and stored_units.get(page.rel_path) != expected_parent_state(state):
+            return True
     return False
+
+
+def _initial_build_due(
+    vault_root: Path, active: Any, pages: Iterable[tuple[Path, Any]] | None = None
+) -> bool:
+    """Whether a serving sidecar in the recall encoder's own space still waits for
+    the initial build: no pointer is published and it does not cover the vault.
+
+    Walks the vault only while no pointer is published. Loads no model.
+    """
+    if index_paths.active_sidecar_name(vault_root) is not None:
+        return False
+    if pages is None:
+        pages = _eligible_pages(vault_root)
+    return _coverage_incomplete(vault_root, active, pages)
 
 
 def plan(vault_root: Path) -> MigrationPlan | None:
@@ -203,23 +246,70 @@ def plan(vault_root: Path) -> MigrationPlan | None:
         return None
     active = embeddings.get_embedding_index(vault_root)
     serving = active.identity
-    published = index_paths.active_sidecar_name(vault_root) is not None
     if serving is None and not list(_eligible_pages(vault_root)):
         return None  # No encoder is needed until eligible content exists.
     target = _target_identity()
     key = target.fingerprint or f"{target.model}|{target.dim}"
     shadow_path = active.path.parent / index_paths.space_sidecar_name(key)
     if serving is not None and serving.accepts(target.model, target.fingerprint):
-        if published or shadow_path == active.path or not shadow_path.exists():
+        if not _initial_build_due(vault_root, active):
             return None
-        # Only a separate target-space shadow is evidence of an interrupted
-        # initial build. Ordinary legacy drift belongs to incremental reconcile.
-        if not _coverage_incomplete(vault_root, active, list(_eligible_pages(vault_root))):
-            return None
-        serving = None  # Resume the initial shadow build despite live writes to legacy.
+        serving = None  # An initial build, whatever live writes reached legacy first.
     if serving is not None and shadow_path == active.path:
         return None
     return MigrationPlan(serving, target, shadow_path)
+
+
+def building_sidecar(vault_root: Path) -> Path | None:
+    """The sidecar this process's job is building, or failed to finish, that the
+    vector lane reads now.
+
+    None when no build ran here, when the active pointer already names the
+    build's sidecar, or on a personal server whose serving sidecar another
+    model wrote: that sidecar is complete and its own encoder serves it. Every
+    other build (an initial one, one on a cell whose serving sidecar is
+    refused, or one for another build of the same model) is in the recall
+    encoder's own space, which the serving sidecar cannot answer for. A failed build keeps
+    serving what it built. Read from the job's status and two `stat` calls; it
+    never walks the vault.
+    """
+    key = _key(vault_root)
+    with _LOCK:
+        current = _STATUS.get(key) or {}
+        target, serving = current.get("target"), current.get("serving")
+    if not isinstance(target, dict) or not target.get("sidecar"):
+        return None
+    if isinstance(serving, dict) and not _hosted() and serving.get("model") != recall_space.recall_model():
+        return None
+    active = index_paths.sidecar_path(vault_root)
+    shadow = active.parent / str(target["sidecar"])
+    # The job records the target before its first write creates the file.
+    return shadow if shadow != active and shadow.exists() else None
+
+
+def coverage_unchecked(vault_root: Path) -> bool:
+    """Whether this process's job has not yet planned, and no active pointer
+    says an earlier build covered the vault.
+
+    Until then nothing says the serving sidecar covers the vault: on a fresh
+    or imported vault it holds nothing, and the build has not begun. Read from
+    the job's status and, only while the job is starting, one `stat`.
+    """
+    with _LOCK:
+        state = (_STATUS.get(_key(vault_root)) or {}).get("state")
+    return state == "starting" and index_paths.active_sidecar_name(vault_root) is None
+
+
+def current_in_build(vault_root: Path, index: Any, rel_paths: AbstractSet[str]) -> set[str]:
+    """The pages among `rel_paths` whose rows in the build's sidecar still say what
+    the page says.
+
+    The build keeps a changed page's old rows until a catch-up pass encodes it
+    again. A row is current by the rule that decides what the build has done: it
+    carries the page's mtime now. One read of the sidecar and one `stat` per page.
+    """
+    built = index.file_mtimes(rel_paths)
+    return {rel for rel, at in built.items() if _mtime(Path(vault_root) / rel) == at}
 
 
 def preload_serving_encoder(vault_root: Path) -> bool:
@@ -258,8 +348,20 @@ def _pass(
     """One pass over the vault into the new sidecar: `(finished, paths encoded)`."""
     from . import access, embeddings, semantic_index
     from . import find as find_module
+    from .embedding_index import expected_parent_state
 
     shadow = embeddings.get_embedding_index(vault_root, path=plan_.shadow_path)
+    serving = embeddings.get_embedding_index(vault_root)
+    serving_identity = serving.identity
+    # Only a sidecar in the build's own space can give it vectors; a refused
+    # or other-model sidecar never can.
+    donor = (
+        serving
+        if serving.path != shadow.path
+        and serving_identity is not None
+        and serving_identity.accepts(plan_.target.model, plan_.target.fingerprint)
+        else None
+    )
     stored = shadow.file_mtimes()
     stored_units = shadow.semantic_unit_parent_states()
     pending: list[tuple[str, Path, list[str], float]] = []
@@ -279,11 +381,8 @@ def _pass(
             unit_state = None
         if unit_state is not None:
             units_seen.add(page.rel_path)
-            refs = frozenset(
-                unit.unit_ref for unit in unit_state.document.units if unit.unit_ref is not None
-            )
-            have = stored_units.get(page.rel_path)
-            if have != (frozenset({unit_state.parent_generation}), refs) and (have is not None or refs):
+            # Every parsed parent owes a coverage record, even with no occurrence.
+            if stored_units.get(page.rel_path) != expected_parent_state(unit_state):
                 pending_units.append((unit_state, md, page.mtime))
         chunks = embeddings._chunks_for_page(vault_root, page)
         if not chunks:
@@ -319,8 +418,9 @@ def _pass(
             return False, encoded_paths
         started = time.monotonic()
         flat = [chunk for _rel, _md, chunks, _mtime in batch for chunk in chunks]
+        held = _held_vectors(donor, [rel for rel, _md, _chunks, _mtime in batch], units=False)
         with shadow.encoding():
-            vectors = _encode_one_by_one(flat)
+            vectors = _encode_one_by_one(flat, held)
         offset = 0
         for rel, md, chunks, mtime in batch:
             count = len(chunks)
@@ -331,24 +431,19 @@ def _pass(
             offset += count
         _note_progress(vault_root, len(flat), time.monotonic() - started, done=len(batch))
 
-    for batch in batches(
-        pending_units,
-        lambda item: sum(unit.unit_ref is not None for unit in item[0].document.units),
-    ):
+    for batch in batches(pending_units, lambda item: len(item[0].occurrences)):
         if should_stop():
             _update(vault_root, state="paused")
             return False, encoded_paths
-        texts = [
-            unit.content
-            for state, _md, _mtime in batch
-            for unit in state.document.units
-            if unit.unit_ref is not None
-        ]
-        with shadow.encoding():
-            vectors = _encode_one_by_one(texts)
+        occurrences = [state.occurrences for state, _md, _mtime in batch]
+        texts = [occurrence.content for items in occurrences for occurrence in items]
+        held = _held_vectors(donor, [state.path for state, _md, _mtime in batch], units=True)
+        # Coverage records alone need no model.
+        with shadow.encoding() if texts else contextlib.nullcontext():
+            vectors = _encode_one_by_one(texts, held)
         offset = 0
-        for state, md, mtime in batch:
-            count = sum(unit.unit_ref is not None for unit in state.document.units)
+        for (state, md, mtime), items in zip(batch, occurrences, strict=True):
+            count = len(items)
             if _mtime(md) == mtime:
                 shadow.upsert_semantic_units(state, vectors[offset : offset + count], mtime)
             offset += count
@@ -358,8 +453,21 @@ def _pass(
     return True, encoded_paths
 
 
-def _encode_one_by_one(texts: list[str]) -> Any:
-    """Passage vectors for `texts`, one text per encode.
+def _held_vectors(donor: Any | None, rel_paths: list[str], *, units: bool) -> dict[str, Any]:
+    """The vectors `donor` holds for these pages, keyed by the exact text each
+    was encoded from: chunk vectors, or unit vectors when `units`."""
+    from . import embeddings
+
+    held: dict[str, Any] = {}
+    if donor is not None:
+        for rel in rel_paths:
+            held.update(embeddings._stored_text_vectors(donor, rel)[1 if units else 0])
+    return held
+
+
+def _encode_one_by_one(texts: list[str], held: dict[str, Any]) -> Any:
+    """Passage vectors for `texts`, one text per encode, except the texts `held`
+    already has a vector for in this space.
 
     A served int8 model computes each text alone anyway (a shared batch would
     move its vectors with its neighbours'); encoding one text per call also
@@ -370,10 +478,21 @@ def _encode_one_by_one(texts: list[str]) -> Any:
 
     from . import embeddings
 
-    return np.vstack([embeddings.embed_texts([text], is_query=False) for text in texts])
+    if not texts:
+        # A batch of coverage records alone writes no vectors; vstack refuses an
+        # empty list, which would fail every later start at this batch.
+        return np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+    return np.vstack(
+        [
+            held[text] if text in held else embeddings.embed_texts([text], is_query=False)
+            for text in texts
+        ]
+    )
 
 
 def _note_progress(vault_root: Path, chunks: int, seconds: float, *, done: int) -> None:
+    """Count `chunks` written, encoded or copied, against the time they took, so
+    the rate and estimate describe the build as it actually runs."""
     with _LOCK:
         status = _STATUS.setdefault(_key(vault_root), {})
         status["chunks_encoded"] = int(status.get("chunks_encoded") or 0) + chunks
@@ -558,19 +677,40 @@ def run(vault_root: Path, stop: threading.Event) -> str:
 
 
 def _run_logged(vault_root: Path, stop: threading.Event) -> None:
+    from . import runtime_resources
+
     try:
-        run(vault_root, stop)
+        # Bulk work: on a service cell's fair model gate a query's encode goes
+        # ahead of the build's next passage, so it waits for at most one.
+        with runtime_resources.model_work("bulk"):
+            run(vault_root, stop)
     except Exception as error:  # noqa: BLE001 - the job must never take the service down
         log.warning("recall re-embed stopped: %s", error, exc_info=True)
         _update(vault_root, state="failed", error=type(error).__name__)
 
 
+def will_start(vault_root: Path) -> None:
+    """Record that this process will run the job for `vault_root`.
+
+    A server calls it when it commits to its workers, before it admits a
+    request: the job starts last of them, and `coverage_unchecked` holds from
+    here until the job plans.
+    """
+    _update(vault_root, state="starting")
+
+
 def start(vault_root: Path, stop: threading.Event) -> threading.Thread:
     """Run the job on a daemon thread of its own; `stop` ends it between batches."""
+    will_start(vault_root)
     thread = threading.Thread(
         target=_run_logged, args=(vault_root, stop), name=THREAD_NAME, daemon=True
     )
-    thread.start()
+    try:
+        thread.start()
+    except Exception as error:
+        # No job will plan, so "starting" must not mark recall for the process's life.
+        _update(vault_root, state="failed", error=type(error).__name__)
+        raise
     return thread
 
 
@@ -603,10 +743,16 @@ def disk_status(vault_root: Path) -> dict[str, Any]:
         identity = shadow.identity
         if identity is None:
             continue
+        pages = list(_eligible_pages(vault_root))
         described = _space(identity, candidate)
         described["paths_done"] = len(shadow.file_mtimes())
+        # Live writes give an initial build's serving sidecar the build's own
+        # space; the job resumes that build only by plan()'s rule.
+        described["same_space_as_serving"] = identity == serving
+        if described["same_space_as_serving"]:
+            described["resumes"] = _initial_build_due(vault_root, active, pages)
         result["building"] = described
-        result["paths_total"] = sum(1 for _page in _eligible_pages(vault_root))
+        result["paths_total"] = len(pages)
         break
     return result
 
@@ -618,10 +764,10 @@ def status(vault_root: Path) -> dict[str, Any]:
     """
     with _LOCK:
         current = dict(_STATUS.get(_key(vault_root), {}))
-    if not current:
+    if "serving" not in current:  # no job has run, or it has not planned yet
         from . import embeddings
 
         active = embeddings.get_embedding_index(vault_root)
-        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None}
+        current = {"state": "idle", "serving": _space(active.identity, active.path), "target": None, **current}
     current["reembed"] = "on" if reembed_enabled() else "off"
     return current

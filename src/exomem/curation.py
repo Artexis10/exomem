@@ -1191,14 +1191,8 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             from .vault import parse_frontmatter
 
             frontmatter, _body, _raw = parse_frontmatter(preimage, strict=True)
-            if str(frontmatter.get("type") or "") not in {
-                "research-note",
-                "insight",
-                "failure",
-                "pattern",
-                "experiment",
-                "production-log",
-            }:
+            # Compensation replays through the typed writer, which places only its own types.
+            if str(frontmatter.get("type") or "") not in note_module.NOTE_TYPES:
                 raise _error(
                     "CURATION_COMPENSATION_UNAVAILABLE",
                     "edit target has no history-preserving compensation leaf",
@@ -3663,23 +3657,14 @@ def compensation_descriptors(
 def _compensation_supersession_args(
     *, current_path: str, preimage: str, step_id: str
 ) -> dict[str, Any]:
+    from . import note as note_module
     from .vault import parse_frontmatter
 
     frontmatter, body, _raw = parse_frontmatter(preimage, strict=True)
     note_type = str(frontmatter.get("type") or "")
     title = str(frontmatter.get("title") or "").strip()
-    if (
-        note_type
-        not in {
-            "research-note",
-            "insight",
-            "failure",
-            "pattern",
-            "experiment",
-            "production-log",
-        }
-        or not title
-    ):
+    # `replace_memory` replays through the typed writer, which places only its own types.
+    if note_type not in note_module.NOTE_TYPES or not title:
         raise _error(
             "CURATION_COMPENSATION_UNAVAILABLE",
             "sealed preimage cannot be restored through replace_memory",

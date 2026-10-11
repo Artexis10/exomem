@@ -98,7 +98,8 @@ def test_hidden_units_do_not_spend_the_admitted_support_bound(vault, monkeypatch
     write_scope(vault, paths="Notes/Restricted/**")
     write_rule(vault, ceiling=0)
     _ready(vault, monkeypatch)
-    assert len(lexstore.get_store(vault).units_of([SUBJECT])) == 202
+    with request_scope(owner_principal(surface="library")):
+        assert len(lexstore.get_store(vault).units_of([SUBJECT])) == 202
     packet = _activate(vault)
     assert packet["generation"].get("carried_by") == "conversation"
     assert any(unit["text"] == SUPPORT and unit["ref"].endswith("#z-support") for unit in packet["units"])

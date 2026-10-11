@@ -29,6 +29,9 @@ from .kbdir import kb_dirname
 log = logging.getLogger(__name__)
 
 REGISTRY_VERSION = 1
+# Closed portable security artifact; its contents carry no connector authority.
+CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
+CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 #: A recall sidecar named for the vector space it holds (`index_paths.space_sidecar_name`).
@@ -369,6 +372,12 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 _REGISTRY = (
     InternalStateDescriptor(
+        CONNECTOR_BOUNDARY_DESCRIPTOR_ID,
+        "governance.connector_boundary",
+        StatePlacement.VAULT_CANONICAL,
+        exact=(CONNECTOR_BOUNDARY_REQUIREMENT_NAME,),
+    ),
+    InternalStateDescriptor(
         "governance-tree",
         "governance.tool",
         StatePlacement.VAULT_CANONICAL,
@@ -553,7 +562,8 @@ _REGISTRY = (
         # The live structured-collection store. Canonical, so it is not in
         # the machine-local migration set; its in-vault replica and mode
         # marker are vault-canonical and are reserved by their own phase.
-        exact=_sqlite_family("collections.sqlite"),
+        # Derived collections' rows sit beside it and rebuild from its import log.
+        exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
     ),
     InternalStateDescriptor(
         "collection-replica",

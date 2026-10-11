@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1074,6 +1074,160 @@ def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
     return len(events)
 
 
+#: The effect window. One week spans a working cycle and shows a change within
+#: days; the dispositions contract fixes it, so the response states it.
+EFFECT_WINDOW_DAYS = 7
+
+UNKNOWN = "unknown"
+
+
+def effect_window() -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
+    """The effect window: whole UTC days, today included, as `(since, until, stated)`.
+
+    Events count from `since` 00:00Z through `until`, the time of the read. The
+    block states only the dates, so its bytes change when a count does or at a
+    UTC midnight; a window stated to the second changed them every second.
+    """
+    until = dt.datetime.now(dt.UTC)
+    first_day = until.date() - dt.timedelta(days=EFFECT_WINDOW_DAYS - 1)
+    since = dt.datetime.combine(first_day, dt.time(), dt.UTC)
+    return since, until, {
+        "days": EFFECT_WINDOW_DAYS,
+        "since": first_day.isoformat(),
+        "through": until.date().isoformat(),
+    }
+
+
+def effect_counts(
+    payload: dict[str, Any] | None,
+    *,
+    since: dt.datetime,
+    until: dt.datetime,
+    current: Mapping[str, frozenset[str] | set[str]],
+    extra_surfaced: Iterable[tuple[str, str, str, dt.datetime]] = (),
+    unknown: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """What each family surfaced, and what became of it, over one window. Pure.
+
+    - `surfaced`: identities first stamped on the surfaced ledger in the window,
+      plus `extra_surfaced` rows `(family, item_id, fingerprint, first_at)` from
+      a ledger kept elsewhere (the dreamer's deliveries). An identity is one
+      family's item id, first stamped at its earliest row, so a fingerprint
+      change inside the window does not count it twice.
+    - `dismissed`, `snoozed`: items with a manual decision of that action and
+      family updated in the window.
+    - `cleared`: surfaced in the window, no decision on the item, and the item
+      id is no longer in the family's current set. It is not "acted": deleting
+      or withholding a page clears an item too.
+    - `open`: surfaced in the window, no decision, still in the current set.
+
+    `current` holds the item ids of each family whose current set can be read
+    without an audit; every other family's `cleared` and `open` are `unknown`.
+    `unknown` maps each family whose surfacings live in a ledger that could not
+    be read to the reason: it is always listed, its `surfaced`, `cleared` and
+    `open` are `unknown`, and its decisions are still counted.
+    Rows that carry no family (written before families were stamped, or a
+    fused item two families share) are counted under `unattributed`, unless
+    another row attributes the same item.
+    """
+    since = since.astimezone(dt.UTC)
+    until = until.astimezone(dt.UTC)
+    unknown = dict(unknown or {})
+    records = [
+        record
+        for record in ((payload or {}).get("records") or {}).values()
+        if isinstance(record, dict)
+    ]
+    decided = {str(record.get("item_id") or "") for record in records}
+    families: dict[str, dict[str, Any]] = {}
+    unattributed = {"surfaced": 0, "dismissed": 0, "snoozed": 0}
+
+    def row(family: str) -> dict[str, Any]:
+        if family in unknown:
+            return families.setdefault(
+                family,
+                {
+                    "surfaced": UNKNOWN,
+                    "dismissed": 0,
+                    "snoozed": 0,
+                    "cleared": UNKNOWN,
+                    "open": UNKNOWN,
+                    "unknown_reason": unknown[family],
+                },
+            )
+        known = family in current
+        return families.setdefault(
+            family,
+            {
+                "surfaced": 0,
+                "dismissed": 0,
+                "snoozed": 0,
+                "cleared": 0 if known else UNKNOWN,
+                "open": 0 if known else UNKNOWN,
+            },
+        )
+
+    def within(stamp: dt.datetime | None) -> bool:
+        return stamp is not None and since <= stamp <= until
+
+    first: dict[tuple[str | None, str], dt.datetime] = {}
+
+    def note(family: str | None, item_id: str, stamp: dt.datetime | None) -> None:
+        held = first.get((family, item_id))
+        if stamp is not None and (held is None or stamp < held):
+            first[(family, item_id)] = stamp
+
+    for key, entry in ((payload or {}).get("surfaced") or {}).items():
+        if isinstance(entry, dict):
+            note(
+                str(entry.get("family") or "") or None,
+                str(key).split(":", 1)[0],
+                _parse_stamp(entry.get("first_surfaced_at")),
+            )
+    for family, item_id, _fingerprint, at in extra_surfaced:
+        note(str(family or "") or None, str(item_id), at.astimezone(dt.UTC))
+    attributed_ids = {item_id for family, item_id in first if family is not None}
+    for family in unknown:
+        row(family)
+    for (family, item_id), stamp in first.items():
+        if not within(stamp):
+            continue
+        if family is None:
+            if item_id not in attributed_ids:
+                unattributed["surfaced"] += 1
+            continue
+        if family in unknown:
+            continue
+        counts = row(family)
+        counts["surfaced"] += 1
+        if family not in current or item_id in decided:
+            continue
+        counts["open" if item_id in current[family] else "cleared"] += 1
+
+    # Two of this store's own `VALID_ACTIONS`, a closed set it defines, named as
+    # the effect contract's columns.
+    for action, column in (("dismiss", "dismissed"), ("snooze", "snoozed")):
+        attributed: dict[str, set[str]] = {}
+        bare: set[str] = set()
+        for record in records:
+            if record.get("action") != action or record.get("origin", MANUAL) != MANUAL:
+                continue
+            if not within(_parse_stamp(record.get("updated_at"))):
+                continue
+            item_id = str(record.get("item_id") or "")
+            family = str(record.get("family") or "")
+            if family:
+                attributed.setdefault(family, set()).add(item_id)
+            else:
+                bare.add(item_id)
+        for family, items in attributed.items():
+            row(family)[column] = len(items)
+        # A fused record two families share has no family; its components do.
+        claimed = set().union(*attributed.values()) if attributed else set()
+        unattributed[column] = len(bare - claimed)
+    return {"families": dict(sorted(families.items())), "unattributed": unattributed}
+
+
 def quiet_offered_at(payload: dict[str, Any] | None, family: str) -> str | None:
     """When this family was offered a quiet, if it ever was."""
     row = ((payload or {}).get("dispositions") or {}).get(str(family or ""))
@@ -1098,32 +1252,6 @@ def _quiet_offer_due(payload: dict[str, Any] | None, family: str) -> bool:
     if disposition_for(family, payload=payload) != "normal":
         return False
     return manual_dismissal_events(payload, family) >= QUIET_OFFER_DISMISSALS
-
-
-def manual_dismissals_by_family(
-    payload: dict[str, Any] | None, families: dict[str, list[str]]
-) -> dict[str, int]:
-    """Per-family manual dismissal counts, from a caller-supplied key index.
-
-    The store keys records by `review_id:fingerprint` and knows nothing about
-    which family produced a signal, so the caller that CAN answer that supplies
-    the mapping. Guessing it here would put a second, weaker opinion about
-    signal identity in the one module that must have exactly one.
-    """
-    records = (payload or {}).get("records") or {}
-    out: dict[str, int] = {}
-    for family, keys in families.items():
-        count = 0
-        for key in keys:
-            record = records.get(key)
-            if (
-                isinstance(record, dict)
-                and record.get("action") == "dismiss"
-                and record.get("origin", MANUAL) == MANUAL
-            ):
-                count += 1
-        out[family] = count
-    return out
 
 
 # --------------------------------------------------------------------------

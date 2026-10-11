@@ -189,7 +189,7 @@ def _sanitize_health(health: Mapping[str, Any]) -> dict[str, Any]:
     it does not recognise is dropped or replaced by `UNKNOWN`.
     """
     out: dict[str, Any] = {}
-    for key in ("last_tick_at", "hour_cpu_used", "waiting_since", "failed_since"):
+    for key in ("last_tick_at", "hour_cpu_used", "waiting_since", "failed_since", "recorded_at"):
         value = health.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             out[key] = float(value)
@@ -1122,20 +1122,41 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+#: SQLite's own primary result codes for a database another connection holds,
+#: a closed set the library documents.
+_LOCK_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _failure(exc: sqlite3.Error) -> str:
+    code = getattr(exc, "sqlite_errorcode", None)
+    # An extended result code keeps its primary code in its low 8 bits.
+    return "locked" if isinstance(code, int) and (code & 0xFF) in _LOCK_CODES else "unreadable"
+
+
 def read_view(vault_root: Path) -> StoreView | None:
     """The current view, or None when the sidecar is missing, locked or unreadable.
 
     Never creates the file and never waits: a carrier that finds nothing to
     read attaches nothing.
     """
+    return read_view_or_refusal(vault_root)[0]
+
+
+def read_view_or_refusal(vault_root: Path) -> tuple[StoreView | None, str | None]:
+    """`read_view`, and when it refuses, why at that moment: `missing`,
+    `schema_mismatch`, `locked` or `unreadable`.
+
+    The reason is the failed read's own. A second probe would report a lock
+    released in between as damage.
+    """
     path = sidecar_path(Path(vault_root))
     if not path.is_file():
-        return None
+        return None, "missing"
     key = str(path)
     try:
         conn = _open_readonly(path)
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        return None, _failure(exc)
     try:
         meta = dict(
             conn.execute(
@@ -1144,13 +1165,13 @@ def read_view(vault_root: Path) -> StoreView | None:
             ).fetchall()
         )
         if meta.get("schema") != str(SCHEMA_VERSION):
-            return None
+            return None, "schema_mismatch"
         generation = int(meta.get("generation") or 0)
         instance = str(meta.get("instance") or "")
         with _MEMO_LOCK:
             held = _MEMO.get(key)
         if held is not None and held.generation == generation and held.instance == instance:
-            return held
+            return held, None
         conn.row_factory = sqlite3.Row
         candidates = tuple(
             _row_dict(row)
@@ -1182,10 +1203,12 @@ def read_view(vault_root: Path) -> StoreView | None:
             deliveries=deliveries,
             integrity=integrity,
         )
-    except (sqlite3.Error, ValueError, TypeError):
-        return None
+    except sqlite3.Error as exc:
+        return None, _failure(exc)
+    except (ValueError, TypeError):
+        return None, "unreadable"
     finally:
         conn.close()
     with _MEMO_LOCK:
         _MEMO[key] = view
-    return view
+    return view, None

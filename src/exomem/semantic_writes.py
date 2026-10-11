@@ -26,6 +26,7 @@ from . import (
     lifecycle_statuses,
     memory_schema,
     metrics,
+    note_types,
     origin_bindings,
     provenance,
     relation_registry,
@@ -52,16 +53,6 @@ log = logging.getLogger(__name__)
 # to prevent. Clients mid validate->commit re-validate once at the boundary.
 _TOKEN_VERSION = 3
 _MAX_TOKEN_BYTES = 12 * 1024
-_COMPILED_TYPES = frozenset(
-    {
-        "research-note",
-        "insight",
-        "failure",
-        "pattern",
-        "experiment",
-        "production-log",
-    }
-)
 _EXISTING_OPERATIONS = frozenset({"edit", "observe", "tier2_overwrite", "tier2_append"})
 _FEEDBACK_FINDING_LIMIT = 32
 _FEEDBACK_RELATION_FACT_LIMIT = 16
@@ -698,8 +689,12 @@ def evaluate_posthoc_batch(
     evaluations: list[PosthocPageEvaluation] = []
     for rel_path in selected:
         state = corpus.pages.get(rel_path)
+        # Each selected page is this operation's own; its eligibility needs its class.
+        semantic_contract.require_page_status(state)
         if state is None or not state.eligible_governed:
             continue
+        # A posthoc pass reads the page; it never refuses for a withheld definition.
+        state = semantic_contract.read_side(state)
         scope = (state.projects, state.page_type)
         contracts = contracts_by_scope.get(scope)
         if contracts is None:
@@ -1706,13 +1701,6 @@ def _existing_applicability(
 ) -> Literal["full", "structural", "not_semantic"]:
     if semantic_contract.requires_semantic_unit(after):
         return "full"
-    if (
-        before.page_type in _COMPILED_TYPES
-        or after.page_type in _COMPILED_TYPES
-        or before.page_type == "entity"
-        or after.page_type == "entity"
-    ):
-        return "structural"
     # This coordinator is entered only for governed Markdown. Untyped/arbitrary
     # Markdown still receives the structural/safety contract; non-Markdown
     # writers preserve their legacy path and never enter this seam.
@@ -1943,8 +1931,8 @@ def _preflight_existing(
 
     closure_required = bool(
         operation == "tier2_overwrite"
-        or source_closure.source_claims(before_source)
-        != source_closure.source_claims(after_source)
+        or source_closure.source_claims(before_source, note_types.Basis(root))
+        != source_closure.source_claims(after_source, note_types.Basis(root))
     )
     closure_plan = source_closure.prepare_source_closure(
         root,
@@ -2142,6 +2130,7 @@ def _preflight_existing(
             entry_generation,
             corpus_census=before_corpus_census,
             status_dependencies=after_corpus.status_dependencies,
+            definitions=semantic_contract.page_definitions_witnesses(before, after),
         )
     return ExistingPreflight(
         applicability,
@@ -2859,8 +2848,8 @@ def _commit_existing(
             prior_markdown=preflight.before_source,
             required=bool(
                 preflight.operation == "tier2_overwrite"
-                or source_closure.source_claims(preflight.before_source)
-                != source_closure.source_claims(preflight.after_source)
+                or source_closure.source_claims(preflight.before_source, note_types.Basis(root))
+                != source_closure.source_claims(preflight.after_source, note_types.Basis(root))
             ),
         )
         auxiliaries = source_closure.merge_backref_writes(
@@ -3100,9 +3089,14 @@ def _move_dependency_signature(
     )
 
     def fact_signature(fact: semantic_contract.RelationFact) -> tuple[Any, ...]:
-        qualification = semantic_contract.qualify_relation(
-            fact, registry=corpus.registry, corpus=corpus
-        )
+        try:
+            qualification = semantic_contract.qualify_relation(
+                fact, registry=corpus.registry, corpus=corpus
+            )
+            outcome: tuple[Any, ...] = (qualification.qualifies, qualification.reasons)
+        except lifecycle_statuses.ClassificationUnavailable:
+            # Unknown alike before and after; the fact's own fields still show a change.
+            outcome = ("status_unavailable",)
         return (
             fact.identity,
             fact.logical_source_path,
@@ -3112,8 +3106,7 @@ def _move_dependency_signature(
             fact.canonical_relation,
             fact.registry_status,
             fact.target_page_type,
-            qualification.qualifies,
-            qualification.reasons,
+            *outcome,
         )
 
     return (
@@ -3213,9 +3206,10 @@ def _move_evaluation_pairs(
                 after_corpus.vault_root, after_corpus.resolver_entries
             ),
         }
+    candidates = after_corpus.eligible_compiled_paths | after_corpus.status_unavailable_paths
     for _ in range(len(after_corpus.pages) + 1):
         added = False
-        for path in sorted(after_corpus.eligible_compiled_paths):
+        for path in sorted(candidates):
             if path in pairs or path not in before_corpus.pages:
                 continue
             if _move_dependency_signature(
@@ -3223,6 +3217,8 @@ def _move_evaluation_pairs(
             ) != _move_dependency_signature(
                 after_corpus, path, visible=visible, resolver=resolvers["after"]
             ):
+                # A dependent whose standing changes needs its own class to be judged.
+                semantic_contract.require_page_status(after_corpus.pages[path])
                 pairs[path] = path
                 added = True
         if not added:
@@ -3356,6 +3352,10 @@ def preflight_move(
     for before_path, after_path in pairs:
         before = before_corpus.pages[before_path]
         after = after_corpus.pages[after_path]
+        if before_path != old_path:
+            # The move only rewrites links in this page, so it is judged as a read.
+            before = semantic_contract.read_side(before)
+            after = semantic_contract.read_side(after)
         before_contracts = memory_schema.resolve_contracts(
             loaded_contracts,
             projects=before.projects,
@@ -4141,18 +4141,14 @@ def _evaluate_structural(
     """
     status_basis = status_basis or lifecycle_statuses.Basis(root)
     source = _place_origin_source(destination, source)
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, registry=registry, language_registry=language, status_basis=status_basis
+        root, status_basis=status_basis
     )
     candidate = semantic_contract.build_page_state(
         root,
         destination,
         source,
-        relation_registry=registry,
-        language_registry=language,
         status_basis=status_basis,
     )
     normalized_source = _normalize_origin_source(
@@ -4164,10 +4160,10 @@ def _evaluate_structural(
             root,
             destination,
             source,
-            relation_registry=registry,
-            language_registry=language,
             status_basis=status_basis,
         )
+    language = (candidate.definitions.snapshots["categories"].typed if candidate.definitions is not None
+                else semantic_language_registry.core_registry())
     resolved = memory_schema.resolve_contracts(
         contracts,
         projects=candidate.projects,
@@ -4268,6 +4264,7 @@ def preflight_creation(
             status_dependencies=tuple(
                 sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
             ),
+            definitions=semantic_contract.page_definitions_witnesses(state),
         )
         return CreationPreflight(
             "full",
@@ -4301,6 +4298,7 @@ def preflight_creation(
         status_dependencies=tuple(
             sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
         ),
+        definitions=semantic_contract.page_definitions_witnesses(state),
     )
     return CreationPreflight(
         applicability,
@@ -4339,6 +4337,7 @@ def _capture_validity_stamp(
     *,
     corpus_census: tuple | None = None,
     status_dependencies: tuple[tuple[str, str], ...] | None = None,
+    definitions: tuple[Any, ...] = (),
 ) -> tuple | None:
     """Assemble the preflight validity stamp WITHOUT a second corpus walk.
 
@@ -4359,6 +4358,7 @@ def _capture_validity_stamp(
     sc_token = semantic_contract.corpus_validity_token(
         root,
         status_dependencies=status_dependencies,
+        definitions=definitions,
         corpus_census=(
             corpus_census
             if corpus_census is not None

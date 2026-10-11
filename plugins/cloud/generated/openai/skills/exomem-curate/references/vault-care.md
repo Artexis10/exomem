@@ -160,6 +160,10 @@ The governed multi-step mode. The agent authors a closed typed plan from explici
 
 Lists tags that differ only by case, separator or plural, grouped with visible page counts and the most-used written form as canonical (a tie is listed, never rewritten). Preview is read-only; `apply=true` with the preview's `plan_id` and a one-line `why` rewrites one bounded batch of minority variants to the canonical tag and logs a rollback record. Only the `tags` key changes; Sources, Evidence, Records, Planning and other owned trees are untouched. Preview again for the next batch. `exclude_groups` keeps named groups out of preview and apply alike.
 
+### collections-store
+
+Reports whether each file Records and Planning collection would move into the collection store cleanly. It runs only with `dry_run=true`, is owner-only, and writes nothing. For each collection it gives the rows, the legacy audit status, the round-trip proof result and any blocker; a blocker names its code and, for a failed proof, the check letter. Datasets are skipped, and every copy of a duplicated collection identity is blocked. The vault verdict is `migratable`, `blocked` or `nothing_to_migrate`. Moving a vault is a separate offline upgrade step.
+
 ### Sidecar collapse (`fix`)
 
 `fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.

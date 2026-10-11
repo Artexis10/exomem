@@ -25,8 +25,9 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from . import hosted_transfer
-from .governance import principal as principal_module, raw_protection
+from . import archive_members, hosted_transfer
+from .governance import principal as principal_module
+from .governance import raw_protection
 from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedLifecycleError
 from .vault import VaultPathError, resolve_under_vault
 
@@ -52,6 +53,11 @@ _ADOPTION_STAGING_MAX_ENTRIES = 4096
 _ADOPTION_STAGING_MAX_TOTAL_BYTES = hosted_transfer.TRANSFER_UPLOAD_MAX_BYTES
 _ADOPTION_STAGING_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _ADOPTION_STAGING_COPY_CHUNK_BYTES = 1024 * 1024
+#: The shared zip checks refuse neutrally; staging answers with its own codes.
+_ARCHIVE_REFUSALS = {
+    archive_members.INVALID: "TRANSFER_REQUEST_INVALID",
+    archive_members.TOO_LARGE: "TRANSFER_TOO_LARGE",
+}
 
 _ERROR_CATALOG: dict[str, tuple[int, str, bool, bool]] = {
     "TRANSFER_REQUEST_INVALID": (400, "transfer request is invalid", False, False),
@@ -819,21 +825,24 @@ def _stage_adoption_zip(
             for info in zip_file.infolist():
                 if info.is_dir():
                     continue
-                if _zip_entry_is_symlink(info):
-                    raise PublicRequestError("TRANSFER_REQUEST_INVALID")
-                member = _validated_zip_member(info.filename, relative_prefix)
-                if member in seen:
-                    raise PublicRequestError("TRANSFER_REQUEST_INVALID")
-                seen.add(member)
-                if len(seen) > _ADOPTION_STAGING_MAX_ENTRIES:
-                    raise PublicRequestError("TRANSFER_TOO_LARGE")
-                if info.file_size > max_bytes:
-                    raise PublicRequestError("TRANSFER_TOO_LARGE")
-                target = _safe_join(extract_root, member)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                total_bytes += _extract_zip_member(
-                    zip_file, info, target, per_entry_limit=max_bytes
-                )
+                try:
+                    if archive_members.entry_is_symlink(info):
+                        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+                    member = archive_members.validated_member(info.filename, relative_prefix)
+                    if member in seen:
+                        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+                    seen.add(member)
+                    if len(seen) > _ADOPTION_STAGING_MAX_ENTRIES:
+                        raise PublicRequestError("TRANSFER_TOO_LARGE")
+                    if info.file_size > max_bytes:
+                        raise PublicRequestError("TRANSFER_TOO_LARGE")
+                    target = archive_members.safe_join(extract_root, member)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    total_bytes += archive_members.extract_member(
+                        zip_file, info, target, per_entry_limit=max_bytes
+                    )
+                except archive_members.ArchiveError as exc:
+                    raise PublicRequestError(_ARCHIVE_REFUSALS[exc.code]) from exc
                 # The signed grant's byte allowance bounds the AGGREGATE
                 # expansion too — otherwise a tiny compressed archive could
                 # expand entry-by-entry up to the global constant and bypass
@@ -861,45 +870,9 @@ def _staging_relative_prefix(description: Any) -> str:
     if not isinstance(description, str):
         raise PublicRequestError("TRANSFER_REQUEST_INVALID")
     parts = [part for part in description.replace("\\", "/").split("/") if part]
-    if any(not _valid_staging_component(part) for part in parts):
+    if any(not archive_members.valid_component(part) for part in parts):
         raise PublicRequestError("TRANSFER_REQUEST_INVALID")
     return "/".join(parts)
-
-
-def _validated_zip_member(name: Any, relative_prefix: str) -> str:
-    if not isinstance(name, str) or not name:
-        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
-    normalized = name.replace("\\", "/")
-    if normalized.startswith("/"):
-        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
-    parts = [part for part in normalized.split("/") if part]
-    if not parts or any(not _valid_staging_component(part) for part in parts):
-        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
-    if relative_prefix:
-        parts = relative_prefix.split("/") + parts
-    return "/".join(parts)
-
-
-def _valid_staging_component(part: str) -> bool:
-    return (
-        part not in {".", ".."}
-        and "\\" not in part
-        and unicodedata.normalize("NFC", part) == part
-        and not any(unicodedata.category(character) == "Cc" for character in part)
-    )
-
-
-def _zip_entry_is_symlink(info: zipfile.ZipInfo) -> bool:
-    return stat.S_ISLNK(info.external_attr >> 16)
-
-
-def _safe_join(base: Path, member: str) -> Path:
-    target = base / member
-    try:
-        target.resolve().relative_to(base.resolve())
-    except ValueError as exc:
-        raise PublicRequestError("TRANSFER_REQUEST_INVALID") from exc
-    return target
 
 
 def _resolve_staging_target(
@@ -937,31 +910,6 @@ def _copy_stream_to_path(stream: BinaryIO, dest: Path, *, limit: int) -> int:
                 break
             written += len(chunk)
             if written > limit:
-                raise PublicRequestError("TRANSFER_TOO_LARGE")
-            out.write(chunk)
-    return written
-
-
-def _extract_zip_member(
-    zip_file: zipfile.ZipFile,
-    info: zipfile.ZipInfo,
-    dest: Path,
-    *,
-    per_entry_limit: int,
-) -> int:
-    written = 0
-    descriptor = os.open(
-        dest,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-    with zip_file.open(info) as source, os.fdopen(descriptor, "wb") as out:
-        while True:
-            chunk = source.read(_ADOPTION_STAGING_COPY_CHUNK_BYTES)
-            if not chunk:
-                break
-            written += len(chunk)
-            if written > per_entry_limit:
                 raise PublicRequestError("TRANSFER_TOO_LARGE")
             out.write(chunk)
     return written

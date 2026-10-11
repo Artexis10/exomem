@@ -103,6 +103,29 @@ candidate that carries a worded contact. Two anchors the turn both named still
 corroborate each other, so the canonical "directly linked anchors are complementary"
 scenario is unchanged.
 
+### 3a. Partial-name dependence applies at the common carry boundary
+
+The resolver records each authored singleton partial-name contact before any
+retrieval hit, candidate cap, continuity qualification or conversation merge.
+The compiler retains those facts by page and excluded-term set for the request.
+The resolver and retrieval carry share one memo of the existing lexical check.
+Each check batches unchecked pages and keeps the original lexical budget,
+snapshot, Unicode units and strict-majority rule.
+
+The common `_carried_material` boundary filters dependent retrieval pages before
+it selects roles, reads current state or runs material lanes. This covers the
+ordinary carry, the rival carry and pages carried beside resolved anchors.
+An affected page needs two remaining matched units after excluding its own
+partial-name terms. An unavailable check withholds only affected material.
+Several anchors on one page retain separate excluded-term sets; the compiler
+requires every applicable check and never combines those sets into one query.
+
+Raw carry groups, namesake contests and title menus remain unchanged. Filtering
+material cannot turn competing pages into a unique domain. A rejected sole
+domain retains its canonical partial anchor in the unresolved choice menu.
+Explicit choice, full names, continuity and prior naming use their existing
+resolution routes. Pages without partial-name dependence need no extra query.
+
 ### 4. One rare word is contact
 At index build the index records, for each normalised term occurring in any anchor's
 title or aliases, how many anchors it names. A new kind, `rare_term`, is granted for one shared

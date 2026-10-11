@@ -32,6 +32,13 @@ if TYPE_CHECKING:
 STORE_FILENAME = "collections.sqlite"
 MINIMUM_SQLITE_VERSION = (3, 38, 0)
 BUSY_TIMEOUT_MS = 5000
+#: What `describe` and the doctor probe tell the owner about writers without the lease (design §15 item 5).
+UNSUPPORTED_WRITERS = (
+    "Store collections take every write under the vault's writer lease. Running more than one collection "
+    "writer on one vault without that lease, such as a Windows and a WSL service on one synced vault, is "
+    "unsupported: once one finds the other's replica, its collection writes refuse with "
+    "COLLECTION_STORE_DIVERGED until the owner runs adopt-local, while reads and knowledge writes continue."
+)
 
 #: Connection class used for every store connection (a test seam for engines
 #: whose journal mode does not take effect).
@@ -77,6 +84,7 @@ class CollectionStoreError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+        self.reason = message
 
 
 def busy(message: str):
@@ -149,6 +157,26 @@ def _writer_engine(database: str):
     return engine
 
 
+@contextmanager
+def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
+    """A private, unpublished store at ``path`` with the current schema, for a proof that never publishes.
+
+    It takes no writer lease: only its caller opens it, and the caller removes it.
+    """
+    check_sqlite_version()
+    load_store_libraries()
+    engine = _writer_engine(str(path))
+    try:
+        with engine.connect() as core:
+            conn = core.connection.driver_connection
+            conn.execute("PRAGMA recursive_triggers=ON")
+            conn.execute("PRAGMA foreign_keys=ON")
+            schema.ensure_schema(core)
+            yield conn
+    finally:
+        engine.dispose()
+
+
 def rollback(conn: Connection) -> None:
     """Clear both transaction states after an unsuccessful mutation."""
     conn.rollback()
@@ -197,10 +225,14 @@ class WriterConnection:
         self._release_cache = None
         self._inspection_identity = object()
         # Host-local import job facts (``importer``), keyed by job id: this handle's
-        # proofs of bound source bytes, and the store refusal blocking a running job.
-        # A new handle, as after a takeover, starts with neither.
+        # proofs of bound source bytes, the store refusal blocking a running job, and
+        # a streamed job's open reader. A new handle, as after a takeover, starts with none.
         self.import_proofs: dict[str, Any] = {}
         self.import_blocked: dict[str, str] = {}
+        self.import_readers: dict[str, Any] = {}
+        # This handle's connection to the derived-rows file (``derived_rows``), opened and
+        # reconciled on first use, so a new handle, as after a takeover, reconciles again.
+        self.derived: Any = None
 
     @property
     def release_cache(self):
@@ -275,9 +307,33 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
 
+    def checkpoint(self) -> bool:
+        """Copy every WAL commit into the store file and empty the WAL (design §11).
+
+        Closing the writer does this only as the last connection: another open reader,
+        even an idle one, keeps the commits in the WAL beside a store file that lacks
+        them. It never waits, so a release or shutdown keeps its deadline: a reader's
+        open read transaction holds the copy back at once, and it returns False with
+        every commit still in the WAL.
+        """
+        self.require_write_authority()
+        conn = self.connection
+        conn.execute("PRAGMA busy_timeout=0")
+        try:
+            blocked, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        return blocked == 0
+
     def close(self) -> None:
         if not self._closed:
             self._release_cache = None
+            for reader in self.import_readers.values():
+                reader.close()
+            self.import_readers.clear()
+            if self.derived is not None:
+                self.derived.close()
+                self.derived = None
             self.core.close()
             self.core.engine.dispose()
             self._closed = True

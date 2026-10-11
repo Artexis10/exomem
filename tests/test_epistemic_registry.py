@@ -24,11 +24,11 @@ PREREGISTRATION = REPO_ROOT / "benchmarks" / "epistemic" / "PREREGISTRATION.md"
 
 
 def test_registry_keys_equal_the_preregistered_section_two_list() -> None:
-    """The registry mirrors every receipted sequence through sequence six."""
+    """The registry mirrors every receipted sequence through sequence seven."""
 
     names = parse_preregistered_assertions(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(names) == 44
-    assert len(set(names)) == 44
+    assert len(names) == 48
+    assert len(set(names)) == 48
     assert set(ASSERTION_REGISTRY) == set(names)
     assert set(PREREGISTERED_ASSERTIONS) == set(names)
 
@@ -150,15 +150,15 @@ def test_family_registry_matches_preregistration_section_one() -> None:
     from epistemic.registry import PREREGISTERED_FAMILIES, parse_preregistered_families
 
     parsed = parse_preregistered_families(PREREGISTRATION.read_text(encoding="utf-8"))
-    assert len(parsed) == 32
-    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 33)]
+    assert len(parsed) == 33
+    assert [family_id for family_id, _name in parsed] == [f"f{n:02d}" for n in range(1, 34)]
     assert PREREGISTERED_FAMILIES == parsed
 
 
 def test_family_ids_are_exposed_for_load_time_validation() -> None:
     from epistemic.registry import PREREGISTERED_FAMILY_IDS
 
-    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 33))
+    assert PREREGISTERED_FAMILY_IDS == frozenset(f"f{n:02d}" for n in range(1, 34))
 
 
 def test_amendment_introduced_families_are_a_subset_of_the_registered_table() -> None:
@@ -176,6 +176,7 @@ def test_amendment_introduced_families_are_a_subset_of_the_registered_table() ->
     sequence_four = {"f28", "f29"}
     sequence_five = {"f30", "f31"}
     sequence_six = {"f32"}
+    sequence_seven = {"f33"}
     assert {
         family_id
         for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
@@ -201,6 +202,9 @@ def test_amendment_introduced_families_are_a_subset_of_the_registered_table() ->
     } == sequence_five
     assert {family_id for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
             if sequence == 6} == sequence_six
+    assert {family_id for family_id, sequence in AMENDMENT_INTRODUCED_FAMILIES.items()
+            if sequence == 7} == sequence_seven
     assert set(AMENDMENT_INTRODUCED_FAMILIES) == (
-        sequence_one | sequence_two | sequence_three | sequence_four | sequence_five | sequence_six
+        sequence_one | sequence_two | sequence_three | sequence_four | sequence_five
+        | sequence_six | sequence_seven
     )

@@ -25,12 +25,15 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from .. import structured_collections as collections
 from ..query_engine.indexes import IndexDeclarationError, IndexSpec, normalize_indexes
+
+if TYPE_CHECKING:
+    from ..planning import HierarchyWrite
 
 PACKAGE_DIRECTORY = "_collection_types"
 BUILTIN_TYPE_NAMES = ("records", "planning")
@@ -93,7 +96,8 @@ class NamedValidator:
     """One product-owned rule a declaration can opt into by name."""
 
     name: str
-    validate: Callable[[collections.CollectionManifest, Mapping[str, Mapping[str, Any]]], None]
+    #: `(manifest, plans, *, write)`; `write` is the item a write changes, None for a read.
+    validate: Callable[..., None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,11 +124,14 @@ class CollectionType:
 
 
 def _planning_hierarchy_v1(
-    manifest: collections.CollectionManifest, plans: Mapping[str, Mapping[str, Any]]
+    manifest: collections.CollectionManifest,
+    plans: Mapping[str, Mapping[str, Any]],
+    *,
+    write: HierarchyWrite | None,
 ) -> None:
     from .. import planning
 
-    planning.validate_hierarchy(manifest, plans)
+    planning.validate_hierarchy(manifest, plans, write=write)
 
 
 _NAMED_VALIDATORS: Mapping[str, NamedValidator] = MappingProxyType(

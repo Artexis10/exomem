@@ -22,6 +22,30 @@ and there is no gate that would notice if any of them regressed. The
 `accelerate-durable-write-acknowledgement` change (0.69.0) removed the write-side
 floor; this change removes the read-side one.
 
+On 2026-10-09 the owner set the target for every search mode (semantic, BM25,
+keyword): subsecond and well under, with 100 to 200 ms acceptable. The owner then
+asked why search cannot run under 100 ms. On 2026-10-10 the owner weighed the
+whole system: a user does not notice 100 against 200 ms, and CPU per cell and
+retrieval quality are not to be traded for search latency. The gating ceiling is
+therefore 200 ms at p95, and 100 ms at p95 stays as a reported target. The
+300/600 ms ceilings this change first set do not meet that, and the Cloud service
+gate (p95 at or below 3 s in `cloud-service-resource-policy`) is fifteen times
+looser. A
+reproduction on a 6,500-page synthetic vault in a process pinned to two CPUs
+measured warm hybrid `ask_memory` at p50 363-700 ms and p95 636-1,799 ms over
+three runs, and the `mixed` result level at p50 871 ms and p95 2,460 ms
+(`baseline.md`). Those runs were on a loaded laptop, with the owner path
+obtained by patching the authority check. The cost is not the ranking
+arithmetic. It is per-request work that the catalogue generation already
+determines: a parent-hint query whose plan scans the candidate list once per KB
+page, nine catalogue connections and six readiness proofs per request, 92 page
+hydrations and 126 Markdown file reads per request to rank 15 hits, and unit
+lanes that re-parse every candidate parent. No pull-request gate counts this
+work. Full CI run 37969875369 on 2026-10-09 found two linear-in-corpus
+regressions only after merge, in `activate_context` carry ranking and in
+semantic validate. Neither was in `ask_memory`, but `activate_context` shares
+its read entry points.
+
 ## What Changes
 
 - Structured-filter eligibility becomes index-backed for every supported filter:
@@ -40,24 +64,90 @@ floor; this change removes the read-side one.
   freshness change no longer discards the lexical corpus or the eligibility
   catalogue.
 - Span accounting is made complete and enforced: every stage that reports time
-  registers an interval, the sum of the root-level stages plus `unattributed_ms` stays within
-  `total_ms` for a
+  registers an interval, the time that the root-level stages cover, overlapping
+  intervals counted once, plus `unattributed_ms` stays within `total_ms` for a
   real `op_find`, and `unattributed_ms` is bounded.
-- A live-cell recall latency contract replaces the catastrophic-blowup backstop:
-  hybrid p50 at or below 300 ms and p95 at or below 600 ms on a quiescent cell
-  of at least 8,000 pages, keyword p50 at or below 120 ms, zero corpus walks on
-  the read path, measured by the existing timing diagnostics and checked by a
-  script that refuses to measure under load rather than reporting noise.
+- A recall latency contract replaces the catastrophic-blowup backstop: fixed
+  ceilings (first hybrid p50 300 ms and p95 600 ms on 8,000 pages, set again on
+  2026-10-10 as below), zero corpus walks on the read path, measured by the
+  existing timing diagnostics and checked by a script that refuses to measure
+  under load rather than reporting noise.
 - The graph rebuild's whole-vault optimistic check stays out of scope; it is
   owned by `converge-graph-incrementally`. This change only ensures a rebuild in
   flight cannot invalidate the read-side caches.
+- The latency contract tightens to warm hybrid search p95 at or below 200 ms
+  on a two-CPU cell of at least 6,500 pages, with a 100 ms p95 target and a
+  50 ms p50 target that gate nothing. It covers hybrid, filtered, temporal and
+  `mixed`/`unit` requests, measured as the elapsed time of the `ask_memory`
+  call. Keyword recall, which runs no query encode, holds p95 at or below
+  100 ms, which replaces its 120 ms p50 ceiling, with a 50 ms p95 target. Each
+  report records every target as met or missed. The empty-query browse stays
+  outside the ceilings and the targets.
+- The measured principal is the real vault owner, with nothing patched. An
+  admitted non-owner series is reported apart and gates once admission no
+  longer sizes the candidate pool.
+- Each stage of the request gets a p95 budget, named by its timing span keys.
+  The query encode runs beside the BM25, keyword and unit lanes, so the budgets
+  compose along the request's critical path: at most 95 ms for a request that
+  runs every stage, where the serial sum would be 133 ms. The budgets are the
+  plan toward the 100 ms target. A stage whose p95 exceeds twice its budget
+  fails its row, and the report names it. A failed row diagnoses where the
+  target is lost and fails neither the series nor the ceiling verdict. It reports wall time, CPU time and the
+  critical path per stage, and counts overlapping stages once. Query encode
+  keeps the bound that `multilingual-recall` already sets, and its stage budget
+  is a target. A measured encode floor above that target is recorded and moves
+  the encoder runtime, not the contract. The BM25 and keyword budgets are
+  targets until a replay on a new connection per request grounds them.
+- The design estimates that the served encoder cannot meet the 100 ms target
+  on two CPUs. With bge-m3 int8 on one intra-op thread, the estimated floor is
+  about 110 to 115 ms p95 for short queries, with every other stage on budget,
+  and likely higher for the whole query mix. 100 ms needs four or more CPUs or
+  a cheaper encoder. The owner chose on 2026-10-10 not to trade CPU or
+  retrieval quality for the 100 ms target. The change completes when a
+  quiet-workstation verdict against the 200 ms ceiling is recorded as passed.
+  A failed ceiling keeps it open. The summary records the target as met or
+  missed, with the measured floor, and a missed target never blocks
+  completion.
+- Search work is bounded per candidate and per matched row. Catalogue queries
+  keyed by the candidate set do work that does not grow with the corpus for a
+  fixed candidate set. BM25 and keyword do bounded work per matched row.
+  Ranking, temporal, graph-seed and unit stages read metadata from the catalogue
+  and sidecars of the current generation. Markdown reads track the candidate
+  count plus a fixed overfetch, and each derived store opens one connection and
+  runs one readiness proof per scope per request. Keyword recall reads every
+  matching page today (`find.py:4115`); it orders and limits its matches in SQL
+  before any page read, with identical results.
+- Timing diagnostics cover the whole `ask_memory` request, including the
+  due-state block that runs after retrieval, and an unreported duration is
+  shown as unknown, never as 0 ms.
+- Three instruments enforce it. A model-free structural gate in the
+  pull-request tier compares work per candidate and per matched row between
+  400- and 1,600-page generated corpora that hold the same candidates. In the
+  scheduled and dispatched full CI, a paired comparison runs head against the
+  most recent release tag, on one runner, and fails only when head is at least
+  10% slower with 95% confidence. That base is code only, so vault data and box
+  load cannot fire it. CI does not bound drift across releases: each release
+  can be up to 10% slower than the one before it. A quiet workstation run and
+  the live-cell series after each release record the absolute verdict on the
+  ceilings as passed, failed, refused or not measured, beside the targets and
+  the stage rows. The
+  workstation run links the SQLite that CI or a Cloud cell links, not a local
+  venv's newer one. The agent or
+  operator who rolls the live cell attaches that record to the release's GitHub
+  Release. The record never gates CI or a release, and a failed or refused
+  state opens follow-up work. The workstation record is this change's
+  acceptance check.
+- Out of scope: the cold-start index build, explicitly requested or
+  accelerator-driven reranking, and RAW admission candidate sizing for non-owner
+  callers, which `fix/admission-candidate-sizing` owns.
 
 ## Capabilities
 
 ### New Capabilities
-- `recall-latency-contract`: the live-cell recall latency ceilings, the
-  no-corpus-walk read-path invariant, the quiescence and attribution rules for
-  measuring them, and the regression gate that enforces them.
+- `recall-latency-contract`: the warm search latency ceilings, targets and
+  per-stage budgets, the no-corpus-walk invariant and the per-candidate work bounds, the
+  reference corpus, the quiescence and attribution rules for measuring them,
+  and the pull-request, full-CI and release instruments that enforce them.
 
 ### Modified Capabilities
 - `structured-retrieval-filters`: `Governed Unit Metadata Is Filterable` gains the
@@ -67,7 +157,7 @@ floor; this change removes the read-side one.
 - `find-recall-efficiency`: `Hot Find Cache With Freshness Invalidation` is
   narrowed from whole-scope invalidation to exact path custody; `Optional Find
   Timing Diagnostics` gains completeness (every material stage is an interval and
-  the sum bound holds); a new requirement makes `scope="kb"` widening opt-in and
+  the attribution bound holds); a new requirement makes `scope="kb"` widening opt-in and
   index-backed.
 - `recall-read-path`: `Server Recall Never Rebuilds Projection On The Reader
   Thread` is extended from the recall projection to the lexical corpus and the
@@ -92,5 +182,23 @@ floor; this change removes the read-side one.
   `accelerate-durable-write-acknowledgement`; the maintained FTS5 catalogue; the
   semantic-unit sidecar.
 - Operations: the live cell shares its box with test suites; the gate refuses to
-  run above a load average of 2.0 and records the load it ran under, so a
-  contended measurement is never mistaken for a regression.
+  run above a load average of 2.0 and records the load it ran under. During a
+  live-cell series it drops and counts each sample whose request thread waited
+  on a run queue, and reports the p95 with those samples included. The
+  operator who rolls the live cell adds one release-runbook step: run the
+  series and attach its summary to the GitHub Release.
+- Subsecond search slices (tasks section 6): `src/exomem/lexstore.py` (parent-hint
+  query, one catalogue read session per request), `src/exomem/find_candidates.py`,
+  `src/exomem/find_policy.py` and `src/exomem/find.py` (ranking metadata from
+  catalogue columns, unit-lane hydration), `src/exomem/embedding_index.py` (chunk
+  text after fusion, unit matrix per generation), `src/exomem/commands.py` and
+  `src/exomem/due_state.py` (response blocks inside the timings),
+  `src/exomem/find.py` and `src/exomem/find_candidates.py` (the query encode
+  beside the lexical lanes), `src/exomem/find.py` and `src/exomem/lexstore.py`
+  (keyword recall ordered and limited before page reads), `src/exomem/find_types.py` (`cpu_ms` per span,
+  overlapping spans counted once), `src/exomem/runtime_resources.py`
+  and `src/exomem/embedding_backend.py` (the cell thread policy),
+  `scripts/synth_vault.py` (reference corpus), `scripts/recall_latency_gate.py`
+  and its test (new ceilings and budgets, the paired mode), a new pull-request
+  structural test, `.github/workflows/ci.yml` (the `retrieval-latency` job) and
+  `docs/release.md` (the live-cell step). The tool surface does not move.

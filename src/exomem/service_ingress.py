@@ -44,8 +44,10 @@ _TRANSIT_HEADERS = frozenset({b"cf-ray", b"cf-connecting-ip"})
 #: Literal loopback only: `localhost` is a name /etc/hosts decides, and any
 #: other name is how a rebinding page would arrive.
 _LOOPBACK_HOST = re.compile(rb"(?:127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?")
-_LOCAL_EXACT_PATHS = frozenset({b"/mcp", b"/upload", b"/health"})
-_LOCAL_PREFIXES = frozenset({b"api", b"health"})
+#: The local listener's routes, fixed by the `local-client-ingress` spec.
+_LOCAL_EXACT_PATHS = frozenset({b"/mcp", b"/upload", b"/upload/sessions", b"/health"})  # nosemgrep: ep-word-set -- spec-fixed routes.
+#: Leading segments whose subpaths are routes: `/api/...`, `/health/...`, `/upload/sessions/...`.
+_LOCAL_PREFIXES = frozenset({(b"api",), (b"health",), (b"upload", b"sessions")})  # nosemgrep: ep-word-set -- spec-fixed routes.
 
 
 def _local_path_allowed(raw_path: bytes) -> bool:
@@ -64,7 +66,10 @@ def _local_path_allowed(raw_path: bytes) -> bool:
         return False
     if raw_path in _LOCAL_EXACT_PATHS:
         return True
-    return len(segments) >= 2 and segments[0] in _LOCAL_PREFIXES
+    return any(
+        len(segments) > len(prefix) and tuple(segments[: len(prefix)]) == prefix
+        for prefix in _LOCAL_PREFIXES
+    )
 
 
 def local_refusal(scope: ASGIMessage) -> str | None:

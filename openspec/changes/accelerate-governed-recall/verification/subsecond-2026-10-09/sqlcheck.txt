@@ -1,0 +1,12 @@
+sqlite 3.53.1 kb pages 6500
+plan as shipped: ['SEARCH p USING INDEX pages_kb (in_kb=?)', 'SCAN requested VIRTUAL TABLE INDEX 1:']
+plan json_each first: ['SCAN requested VIRTUAL TABLE INDEX 1:', 'SEARCH p USING INDEX sqlite_autoindex_pages_1 (path=?)']
+parent hints 100 paths: shipped 50.8 ms (100 rows), json_each first 0.06 ms (100 rows)
+parent hints 300 paths: shipped 135.2 ms (300 rows), json_each first 0.20 ms (300 rows)
+parent hints 1000 paths: shipped 488.1 ms (1000 rows), json_each first 0.99 ms (1000 rows)
+keyword (trigram+instr) / new connection per query   n=50 p50=    3.3 p95=    8.3 max=   18.4
+keyword (trigram+instr) / new connection + mmap 512 MiB n=50 p50=    3.5 p95=    7.5 max=    9.8
+keyword (trigram+instr) / one retained connection    n=50 p50=    2.6 p95=    6.5 max=   14.1
+bm25 (FTS5 bm25(), unstemmed tokens) / new connection per query n=50 p50=    6.3 p95=   10.8 max=   12.1
+bm25 (FTS5 bm25(), unstemmed tokens) / new connection + mmap 512 MiB n=50 p50=    5.7 p95=   12.0 max=   14.8
+bm25 (FTS5 bm25(), unstemmed tokens) / one retained connection n=50 p50=    3.7 p95=    7.6 max=    8.6

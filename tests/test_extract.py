@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -263,10 +264,11 @@ def test_extract_ics_pulls_vevent_fields(tmp_path) -> None:
     assert r.media_type == "calendar"
 
 
-def test_extract_document_soft_fails_on_bad_input(tmp_path) -> None:
-    # markitdown missing → ExtractionUnavailable; present but file missing → convert raises
-    # → still ExtractionUnavailable (wrapped). Either way, never a hard crash.
-    with pytest.raises(extract.ExtractionUnavailable):
+def test_unreadable_document_fails_as_the_file_not_as_a_missing_engine(tmp_path) -> None:
+    # automatic-media-processing: an unreadable artifact fails with its own reason. Read as
+    # a missing engine, it would block and requeue at every start once the engine exists.
+    pytest.importorskip("markitdown")
+    with pytest.raises(FileNotFoundError):
         extract._extract_document(tmp_path / "does-not-exist.docx", "docx")
 
 
@@ -794,3 +796,219 @@ def test_resolve_named_labels_prefers_explicit_vault_root(
     )
     assert out is None  # no profiles → anonymous
     assert seen == [tmp_path]
+
+
+_SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
+
+
+@pytest.mark.parametrize(
+    "name,library",
+    [
+        ("sample.epub", "markitdown"),
+        ("sample.odt", "odfdo"),
+        ("sample.ods", "odfdo"),
+        ("sample.odp", "odfdo"),
+        ("sample.rtf", "striprtf"),
+    ],
+)
+def test_new_document_formats_extract_their_text(name: str, library: str) -> None:
+    pytest.importorskip(library)
+    phrase = json.loads((_SAMPLES / "expected.json").read_text(encoding="utf-8"))[name]
+
+    result = extract.extract_text(_SAMPLES / name)
+
+    assert phrase.casefold() in " ".join(result.text.split()).casefold()
+    assert result.media_type == extract.media_type_for(name)
+
+
+def test_ocr_reads_a_script_with_its_own_models_only() -> None:
+    from exomem.ocr_models import Model, passes_for
+
+    def model(name: str, script: str) -> Model:
+        return Model(name, script, name[:1].isupper(), name.endswith("_vert"))
+
+    installed = (
+        model("Latin", "Latin"), model("Japanese", "Han"), model("Japanese_vert", "Han"),
+        model("HanS", "Han"), model("HanS_vert", "Han"), model("Hangul", "Hangul"),
+        model("eng", "Latin"), model("est", "Latin"), model("jpn", "Han"), model("jpn_vert", "Han"),
+    )
+
+    assert passes_for(installed, "Latin") == [("Latin+eng+est", "3")]
+    assert passes_for(installed, "Japanese") == [("Japanese+jpn", "3"), ("Japanese_vert+jpn_vert", "5")]
+    # Kanji-only text that OSD calls Han is read with the Japanese packs, not Hangul.
+    assert passes_for(installed, "Han") == [("HanS+jpn", "3"), ("HanS_vert+jpn_vert", "5")]
+
+
+def test_a_memory_error_inside_markitdown_is_a_memory_stop(monkeypatch) -> None:
+    # MarkItDown wraps a MemoryError under the child's data limit in its own exception.
+    # Read as a corrupt file, an oversized document would fail for good instead of
+    # counting towards "exceeds this deployment's processing budget".
+    pytest.importorskip("markitdown")
+    from markitdown.converters import HtmlConverter, PlainTextConverter
+
+    def exhausted(*_args, **_kwargs):
+        raise MemoryError
+
+    # Both converters that accept HTML run out, as each does on an oversized page.
+    monkeypatch.setattr(HtmlConverter, "convert", exhausted)
+    monkeypatch.setattr(PlainTextConverter, "convert", exhausted)
+
+    with pytest.raises(MemoryError):
+        extract.extract_text(_SAMPLES / "sample.html")
+
+
+def test_a_corrupt_pdf_in_a_folder_named_after_an_allocator_is_not_a_memory_stop(tmp_path) -> None:
+    # PyMuPDF's errors name the file, so a folder called realloc-notes must not turn a
+    # corrupt PDF into a memory stop that marks it over budget.
+    pytest.importorskip("fitz")
+    folder = tmp_path / "realloc-notes"
+    folder.mkdir()
+    (folder / "minutes.pdf").write_bytes(b"not a pdf at all")
+
+    with pytest.raises(Exception) as raised:
+        extract.extract_text(folder / "minutes.pdf")
+
+    assert not isinstance(raised.value, MemoryError)
+
+
+def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
+    # Tesseract runs under its own data limit beside the media child. A rendered A0 page
+    # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.
+    fitz = pytest.importorskip("fitz")
+    import gc
+    import weakref
+
+    from exomem import ocr_models
+
+    with fitz.open() as doc:
+        doc.new_page()  # no text layer, as a scanned page has none
+        doc.save(tmp_path / "scan.pdf")
+    rendered: list[weakref.ref] = []
+    render = fitz.Page.get_pixmap
+
+    def get_pixmap(page, *args, **kwargs):
+        pixmap = render(page, *args, **kwargs)
+        rendered.append(weakref.ref(pixmap))
+        return pixmap
+
+    alive_when_tesseract_starts: list[int] = []
+
+    def read_image(_cmd: str, image: Path) -> str:
+        gc.collect()
+        alive_when_tesseract_starts.append(sum(ref() is not None for ref in rendered))
+        return "harbour lantern was repaired"
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", get_pixmap)
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    result = extract.extract_text(tmp_path / "scan.pdf")
+
+    assert result.text == "harbour lantern was repaired"
+    assert alive_when_tesseract_starts == [0]
+
+
+def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_path, monkeypatch) -> None:
+    PIL = pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    from exomem import ocr_models
+
+    source = Image.new("RGBA", (200, 60), (0, 0, 0, 0))
+    ImageDraw.Draw(source).rectangle((20, 20, 60, 40), fill=(0, 0, 0, 255))
+    source.save(tmp_path / "label.png")
+    seen: dict[str, tuple[int, int, int]] = {}
+
+    def read_image(_cmd: str, image: Path) -> str:
+        with PIL.Image.open(image) as page:
+            rgb = page.convert("RGB")
+            seen["background"] = rgb.getpixel((150, 50))
+            seen["text"] = rgb.getpixel((40, 30))
+        return "label"
+
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    extract.extract_text(tmp_path / "label.png")
+
+    assert seen == {"background": (255, 255, 255), "text": (0, 0, 0)}
+
+
+_FAKE_TESSERACT = '''
+import pathlib, sys
+args = sys.argv[1:]
+if args == ["--list-langs"]:
+    print({listing!r})
+    sys.exit(0)
+if "--psm" in args and args[args.index("--psm") + 1] == "0":
+    sys.exit(1)  # OSD is not expected when the inventory is unreadable
+base = pathlib.Path(args[1])
+tab, newline = chr(9), chr(10)
+base.with_suffix(".txt").write_text("harbour lantern was repaired" + newline)
+rows = (("level", "conf", "text"), ("5", "91", "harbour"), ("5", "90", "lantern"))
+base.with_suffix(".tsv").write_text(newline.join(tab.join(row) for row in rows) + newline)
+'''
+
+
+def _fake_tesseract(tmp_path: Path, listing: str) -> str:
+    script = tmp_path / "tesseract"
+    script.write_text(f"#!{sys.executable}\n" + _FAKE_TESSERACT.format(listing=listing))
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
+def test_tesseract_4_without_a_tessdata_path_still_reads_the_image(tmp_path) -> None:
+    # Tesseract 4.1 (Ubuntu 22.04) lists its languages without their directory. Taken
+    # as "OCR unavailable", every image would block with install wording forever.
+    from exomem import ocr_models
+
+    tesseract = _fake_tesseract(tmp_path, "List of available languages (2):\neng\nosd")
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+
+    assert ocr_models.read_image(tesseract, image) == "harbour lantern was repaired"
+
+
+def _traineddata(path: Path, script: str) -> None:
+    """A minimal traineddata: an LSTM entry and an LSTM unicharset in `script`."""
+    import struct
+
+    unicharset = f"3\nNULL 0 Common 0\na 3 {script} 1\nb 3 {script} 2\n".encode()
+    header = 4 + 22 * 8
+    offsets = [-1] * 22
+    offsets[17] = header
+    offsets[21] = header + 4
+    path.write_bytes(struct.pack("<i", 22) + struct.pack("<22q", *offsets) + b"lstm" + unicharset)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
+def test_a_fresh_process_reads_the_ocr_inventory_from_its_cache(tmp_path) -> None:
+    # Every media child is fresh; re-reading each pack (hundreds of MB) per job is what
+    # the inventory cache avoids, while a changed pack set must still be seen.
+    import os
+    import subprocess
+
+    tessdata = tmp_path / "tessdata"
+    tessdata.mkdir()
+    _traineddata(tessdata / "eng.traineddata", "Latin")
+    env = {**os.environ, "EXOMEM_OCR_INVENTORY": str(tmp_path / "inventory.json")}
+    probe = "import sys; from exomem import ocr_models; print([(m.name, m.script) for m in ocr_models.installed_models(sys.argv[1])])"
+
+    def fresh_inventory(listing: str) -> str:
+        tesseract = _fake_tesseract(tmp_path, listing)
+        result = subprocess.run(
+            [sys.executable, "-c", probe, tesseract], env=env, capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+
+    listing = f'List of available languages in "{tessdata}/" (1):\neng'
+    assert fresh_inventory(listing) == "[('eng', 'Latin')]"
+    # Same name, size and mtime: a fresh process trusts the cache and reads no pack.
+    stat = (tessdata / "eng.traineddata").stat()
+    (tessdata / "eng.traineddata").write_bytes(b"\0" * stat.st_size)
+    os.utime(tessdata / "eng.traineddata", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert fresh_inventory(listing) == "[('eng', 'Latin')]"
+    # A pack added to the deployment changes the listing, so the inventory is read again.
+    _traineddata(tessdata / "est.traineddata", "Latin")
+    assert "('est', 'Latin')" in fresh_inventory(f'List of available languages in "{tessdata}/" (2):\neng\nest')

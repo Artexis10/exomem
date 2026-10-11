@@ -3,7 +3,7 @@
 This change is the programme's one home. S1 shipped in foundation merge `e844290a16b298fa30edfefea5e38d9951d54973` (PR #1623, CI `37762518836`).
 S2 guidance and S3 lifecycle consumers now share one meaning and form one cohesive delivery under `add-lifecycle-status-registry`.
 Their source checkpoint does not claim generated-carrier, runtime or delivery completion.
-Later slices remain sequenced here; S4 and S7 use their own OpenSpec changes, and Planning gets a small change when S10 starts.
+Later slices remain sequenced here; S4 and S7 use their own OpenSpec changes, and Planning gets `add-planning-value-registry`.
 After S1, the coupled S2/S3 batch, S5 and S10 can run in parallel; other dependencies remain unchanged.
 
 Base `118f377ab04c595db26f13024a682f05aca31fc0` has the foundation merge's exact tree.
@@ -34,7 +34,7 @@ Task 2.1 is delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/163
 The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, ingest, curate and review skills link it.
 
 - [x] 2.1 Add `references/vocabulary.md` and link it from SKILL.md and the capture, ingest, curate and review skills. Teach the loop: read the live set, reuse or alias, promote under a parent only when nothing fits, know it takes effect at once, report the promotion with its revert route.
-- [ ] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync.
+- [ ] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync. S4a (`add-note-type-registry`, task 1.10) delivers the `COMPILED_TYPES` sentence removal.
 
 ## S3. Lifecycle statuses (`add-lifecycle-status-registry`)
 
@@ -43,9 +43,13 @@ The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, inges
 
 ## S4a. Note types, read side (`add-note-type-registry`)
 
+Tasks 1.1 to 1.13 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4a. `folder`, `time_bounded` and `sources` join S4a there.
+
 - [ ] 4.1 Add the note-type registry with `role`, move the ranking multipliers into `ranking_config`, and move the semantic contract, audit, claims and the skills' role text onto role predicates. Proof: the suites pass unchanged; run the full suite.
 
-## S4b. Note types, write side and promotion
+## S4b. Note types, write side and promotion (`add-note-type-registry`)
+
+Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4b, including the type-key debt that S4a defers.
 
 - [ ] 4.2 Move `folder`, `partition`, `stem`, `required_fields`, `statuses`, typed fields, `sections`, `claim_sections`, `sources` and `time_bounded` into the registry for `note.py`, `create_file`, `indexes`, `adoption_proposals`, `hosted_plugins` and `commands`.
 - [ ] 4.3 Proof: promote `meeting-note` under `insight`; `note()` lands it in `Notes/Meetings` with compiled behaviour; `restore` removes it. Run the full suite at the completion boundary.
@@ -69,10 +73,11 @@ The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, inges
 ## S9. Nudges (after S3 and S4b)
 
 - [ ] 9.1 Use the `activate-agent-led-vocabulary-evolution` work-item queue as the nudge channel: "you used X, the vault calls it Y" in the advisory slot; Dreamer upkeep families for recurring unregistered values, near-duplicate entries and per-registry debt.
+  Complemented by `promote-referents-without-nudges` task 2.7, which adds `specific_options` for a generic edge between entities to the same relation-advisory slot. Variant nudges stay with this task.
 
-## S10. Planning
+## S10. Planning (`add-planning-value-registry`)
 
-- [ ] 10.1 Move Planning values into `_collection_types/planning.yaml` as enum values with `rank`, `parents`, `class` and `order` attributes, under a small Planning change.
+- [ ] 10.1 Move Planning values into the vocabulary substrate as the `planning-values` registry (pack `packs/core/planning-values.yaml`, overlay `_Schema/planning-values.yaml`), with `class` on statuses and `parents` on kinds, under `add-planning-value-registry`. The values do not go into `_collection_types/planning.yaml`: only the substrate has the overlay, history and restore a vault-added value needs, and a built-in collection type cannot change its bytes before P4. `rank` and `order` wait for a consumer.
 
 ## Closure
 

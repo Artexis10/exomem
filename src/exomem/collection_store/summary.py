@@ -44,11 +44,15 @@ def capacity() -> dict:
 
 
 def populated(conn: sqlite3.Connection, collection_id: str) -> bool:
-    """Rows, which are never deleted, or held state make a collection populated."""
+    """Rows, which are never deleted, held state or an imported member make a collection populated.
+
+    A derived collection's rows are outside the store, so its import log stands for them.
+    """
     return conn.execute(
         "SELECT EXISTS(SELECT 1 FROM items WHERE collection_id=?) "
-        "OR EXISTS(SELECT 1 FROM held_candidates WHERE collection_id=?)",
-        (collection_id, collection_id),
+        "OR EXISTS(SELECT 1 FROM held_candidates WHERE collection_id=?) "
+        "OR EXISTS(SELECT 1 FROM import_members WHERE collection_id=?)",
+        (collection_id, collection_id, collection_id),
     ).fetchone()[0] == 1
 
 
@@ -80,23 +84,31 @@ def mode_change_refused(current: str, requested: str, *, reason: str | None = No
 def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManifest,
                 view_stamp: Mapping[str, str | int]) -> str:
     """Render the overview page from the committed basis named in its stamp."""
-    rows = conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?",
-                        (manifest.collection_id,)).fetchone()[0]
     generation = view_stamp["v"]
+    if manifest.derived:
+        from .derived_rows import logged
+
+        # A derived collection's rows are outside the store; its import log records their count.
+        members, rows = logged(conn, manifest.collection_id)
+        source, line = "import log", f"{rows} imported rows after {members} imported members, as the import log records."
+    else:
+        rows = conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?",
+                            (manifest.collection_id,)).fetchone()[0]
+        source, line = "collection store", f"{rows} committed rows as of collection generation {generation}."
     frontmatter = {
         "type": "collection-summary",
         "collection_id": manifest.collection_id,
         "metric": "committed rows",
         "value": rows,
         "window": "all committed rows",
-        "source": "collection store",
+        "source": source,
         "basis": {"generation": generation, "release": "owner"},
         "completeness": "complete at basis",
         "exomem_view": dict(view_stamp),
     }
     text = (
         "---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n\n"
-        + f"# {manifest.title}: summary\n\n{rows} committed rows as of collection generation {generation}.\n\n"
+        + f"# {manifest.title}: summary\n\n{line}\n\n"
         + "Generated read-only from the collection store. Edits here are held, not applied, and "
         + "later commits appear when this page is next published.\n"
     )

@@ -20,6 +20,8 @@ For the guided ≤15-minute bring-up, start with
 [remote-quickstart.md](remote-quickstart.md); this document is the reference.
 For structured logs, metrics, and diagnosing a failure after the fact, see
 [observability.md](observability.md).
+For host-configured content ceilings between owner clients, see
+[connector boundaries](connector-boundaries.md).
 
 ## Architecture
 
@@ -105,7 +107,7 @@ cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
-#   --extra media pulls faster-whisper + pytesseract + pymupdf + markitdown for
+#   --extra media pulls faster-whisper + Pillow + pymupdf + markitdown for
 #   SERVER-SIDE media extraction (auto transcribe/OCR/parse uploaded binaries →
 #   searchable). On Windows the [media] extra also pins the CUDA-12 runtime
 #   (cublas/cudnn/cudart) that ctranslate2 needs alongside torch's cu132 build.
@@ -121,6 +123,24 @@ Media extraction needs two **system** tools (not pip-installable):
   works without a separate install.
 
 Verify the GPU media path: `uv run python scripts/verify-media-gpu.py`.
+
+The `media` extra reads PDF, Word, Excel, PowerPoint, HTML, EPUB, OpenDocument
+(text, spreadsheet, presentation) and RTF files. Plain text, email and calendar
+files need no extra.
+
+OCR detects each image's script with Tesseract's OSD model first. It then reads the
+image with the installed script models for that script and the installed language
+packs written in it. A page with too little text for detection reads with
+`EXOMEM_OCR_DEFAULT_LANGS` (for example `eng+jpn`), or with Tesseract's default
+English when the variable is unset. Tesseract 4.x does not name its model
+directory, so on it OCR skips script detection and reads each image once in
+Tesseract's default language. To read Japanese, install the `jpn` and
+`jpn_vert` packs and the Japanese script models (Debian: `tesseract-ocr-jpn`,
+`tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
+
+`EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
+Unset, a personal install runs every engine. HEIC photos are not decoded; see
+`docs/runbooks/cloud-media.md`.
 
 Lean / CPU-only boxes can skip all of this — set
 `EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
@@ -469,6 +489,17 @@ Dropbox, OneDrive, iCloud) has no index store, epoch file, lock, or rebuild
 scratch to hash, hold, or replace — the failure class that has caused
 whole-vault rebuild chains and warm-up stalls when live state synced between
 machines.
+
+The structured collection store checks this before it writes its live
+database. Store custody stays unverified while the vault or the state directory
+is inside a file-sync root. Custody recognizes a root from the evidence in the
+`sync-providers` vocabulary registry: client metadata files, cloud document
+paths, platform variables, Windows sync folder names and vault sync plugins.
+If your sync client is not in the shipped pack, add it with
+`schema_memory(subject="sync-providers", operation="save")` or in
+`_Schema/sync-providers.yaml`. You can also list sync roots as absolute paths
+in `EXOMEM_COLLECTION_STORE_SYNC_ROOTS`. A vault entry can only add evidence;
+it cannot change or remove a shipped entry.
 
 Ordinary service and stateful CLI startup is read-only at this boundary. It
 never creates the state root, copies or removes a legacy file, resumes an
@@ -1087,7 +1118,8 @@ so an upgrade pauses and drains them together.
 The local listener refuses, before anything reaches the worker, any request
 that came through Cloudflare (`cf-ray` or `cf-connecting-ip`), any request with
 an `Origin` header, any `Host` other than literal `127.0.0.1` or `[::1]` (not
-`localhost`), and every path except `/mcp`, `/api/*`, `/upload` and `/health*`.
+`localhost`), and every path except `/mcp`, `/api/*`, `/upload`, `/upload/sessions*`
+and `/health*`.
 It accepts only local tokens: an OAuth session, the REST key and the upload
 token are all refused there, and a local token is refused on the public path.
 
@@ -1122,12 +1154,118 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   with `--lane source`, `capture_source`). A held handle is redeemable once,
   within an hour, and only by a request using the same local token, so point
   the client's MCP connection at the local listener with that token.
+  `--raw-protection` keeps a directly preserved original owner-only until you
+  release the whole artifact; a held file takes that choice when its command
+  redeems it. A direct preserve on the local listener never crosses the proxy
+  edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
+  public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
+  file stays within what `preserve_artifacts` can fetch, which on this server is
+  the session maximum below. The held files of one local session together stay
+  within that same cap, so one file of the largest size always fits. The
+  listener refuses a hold that does not fit in free disk with
+  `HELD_UPLOAD_NO_SPACE`.
+- A file over 64 MiB, a file that the listener refuses as too large, or any
+  file with `--resumable` goes through a resumable upload session. The
+  listener's cap is in the service's environment, so `exomem attach` does not
+  read it; the listener's refusal tells it to use a session. `exomem attach`
+  keeps the session's address and secret in a private file under your state
+  directory. If the upload stops, run the same command again: it continues from
+  the last byte that the service holds. If the service holds every byte but
+  cannot preserve them yet, for example because the disk is full, the command
+  says so and keeps the session. Run it again to retry the commit without
+  sending the bytes again.
+- `--archive members` keeps a zip as its members. The service stores each
+  distinct member once per Evidence family, owner-only, and writes a manifest
+  last, so a later export writes only the members that changed. An archive
+  that the family already records answers `already_stored`.
+
+Other clients can use the same sessions at `/upload/sessions` on either
+listener through the tus 1.0 protocol, with one addition that a stock tus
+client does not make. The client must capture the `Exomem-Upload-Secret`
+header that creation returns and send it on every later request; the secret
+never goes in a URL. Create a session with the credential that `/upload` takes
+on that listener. Put `filename`, `sha256` (of the whole file), `scope` and
+`category` in `Upload-Metadata`, and optionally `raw_protection` and
+`archive`. One request carries at most 64 MiB, and one session holds at most
+`EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
+after its last part.
+
+The service preserves the file only when its SHA-256 matches. `GET` on the
+session returns its state and, after the commit, the receipt. The state
+`retryable` means that the service holds every byte but the commit failed for
+a reason other than the bytes; the next request on the session retries it.
+
+A deployment behind Cloudflare Access must let `HEAD`, `PATCH`, `GET` and
+`DELETE` requests to `/upload/sessions/*` through without an Access login.
+These requests carry only the session secret. Creation, a `POST` to
+`/upload/sessions`, still needs the upload credential.
 
 The owner REST key and the static upload token keep working on the public path.
 Their use on a Cloudflare-transited request is logged as
 `event=owner_credential_transit`, so a later release can refuse them there once
 no remote client uses them. It is kept out of `/metrics.json`, which is served
 without authentication.
+
+### Resumable uploads from a shell
+
+An agent with a shell, such as a coding agent, can send a file of several
+gigabytes through the public URL. The proxy edge caps one request at 100 MB, so
+the agent sends the file in parts through an upload session. For the Evidence
+lane, `transfer_artifact(operation="upload")` returns a `resumable` object
+beside `upload_url`. It names the session creation URL (`create_url`), the
+protocol, the header to resend, the most bytes per request (`max_part_bytes`)
+and per session (`max_bytes`), and the `Upload-Metadata` keys that creation
+requires. The minted `token` opens a session as it authorizes `/upload`. Later
+requests carry only the session secret, so an upload can outlast the token.
+
+1. Call `transfer_artifact(operation="upload")` and keep `token` and `resumable.create_url`.
+2. Save the script below as `exomem-upload.sh`.
+3. Run `CREATE_URL=<create_url> TOKEN=<token> SCOPE=Device CATEGORY=Exports sh exomem-upload.sh device_days.zip`.
+4. If the script stops, run the same command again. It continues from the offset that the service holds.
+5. Run it again until the state it prints is `committed`, then delete `device_days.zip.exomem-session`.
+
+The script prints the session state. Once the state is `committed`, the
+`receipt` names the stored path and the SHA-256 of the whole file.
+
+```sh
+#!/bin/sh
+# Send FILE to Evidence through an Exomem upload session; run it again to resume.
+set -eu
+FILE=$1 STATE=$1.exomem-session
+SIZE=$(wc -c < "$FILE" | tr -d ' ')
+header() { grep -i "^$1:" | tr -d '\r' | cut -d' ' -f2; }
+b64() { printf %s "$1" | base64 | tr -d '\n'; }
+if [ ! -s "$STATE" ]; then
+  SHA=$(sha256sum "$FILE" | cut -d' ' -f1)  # on macOS: shasum -a 256
+  CREATED=$(curl -sS -D - -o /dev/null -X POST "$CREATE_URL" \
+    -H "Authorization: Bearer $TOKEN" -H "Tus-Resumable: 1.0.0" -H "Upload-Length: $SIZE" \
+    -H "Upload-Metadata: filename $(b64 "${FILE##*/}"),sha256 $(b64 "$SHA"),scope $(b64 "$SCOPE"),category $(b64 "$CATEGORY")")
+  SECRET=$(printf %s "$CREATED" | header exomem-upload-secret)
+  [ -n "$SECRET" ] || { printf %s "$CREATED" | head -n 1; exit 1; }
+  LOCATION=$(printf %s "$CREATED" | header location)
+  (umask 077; echo "${CREATE_URL%/upload/sessions}$LOCATION $SECRET" > "$STATE")
+fi
+read -r SESSION SECRET < "$STATE"
+tus() { curl -sS -H "Tus-Resumable: 1.0.0" -H "Exomem-Upload-Secret: $SECRET" "$@"; }
+LAST=
+while OFFSET=$(tus -I "$SESSION" | header upload-offset) && [ -n "$OFFSET" ] && [ "$OFFSET" -lt "$SIZE" ]; do
+  # A part that kept no bytes: print the session's state and stop; run the script again later.
+  if [ "$OFFSET" = "$LAST" ]; then tus "$SESSION"; echo; exit 1; fi
+  LAST=$OFFSET
+  tail -c +"$((OFFSET + 1))" "$FILE" | head -c $((64 * 1024 * 1024)) | tus -o /dev/null -X PATCH "$SESSION" \
+    -H "Upload-Offset: $OFFSET" -H "Content-Type: application/offset+octet-stream" --data-binary @- || true
+done
+tus "$SESSION"; echo
+```
+
+A part that fails, for example because the connection drops, is sent again
+from the offset that the service reports. If a part keeps no bytes, the script
+prints the session's state and stops. The state `failed` names a code: for
+example, the bytes did not match their SHA-256. A session that has expired
+answers `UPLOAD_SESSION_EXPIRED`. In both cases, delete the `.exomem-session`
+file, call `transfer_artifact` for a new token and run the script again. To keep
+the original owner-only, or to keep a zip as its members, add `raw_protection 1`
+or `archive members` to `Upload-Metadata`, each value base64-encoded.
 
 ## Deploying a new version
 

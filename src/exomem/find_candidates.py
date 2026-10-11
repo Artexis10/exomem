@@ -204,11 +204,13 @@ def collect_candidates(
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
+    filtered: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
     shadow: Callable[[list[str]], list[str]] | None = None,
     status_basis: Any = None,
+    type_basis: Any = None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them.
 
@@ -218,6 +220,11 @@ def collect_candidates(
     frame collapsing, eligibility, graph seeding, fusion and every lane cap
     consume it. The keyword lane is excluded because it arrives from the
     caller's own provider already shadowed. Default None is a strict no-op.
+
+    `filtered` says `eligible_paths` holds the caller's own filters, so the pool
+    reaches their whole eligible set. Admission alone never deepens it: every
+    lane already ranks only `eligible_paths`, so each hands fusion its top
+    `candidate_k` admitted pages, as it would over a corpus without the rest.
     """
     from . import (
         bm25,
@@ -226,6 +233,7 @@ def collect_candidates(
         fusion,
         lexstore,
         readiness,
+        recall_migration,
         recall_space,
         runtime_resources,
     )
@@ -238,7 +246,7 @@ def collect_candidates(
     candidate_k = max(
         limit * config.candidate_multiplier,
         config.candidate_floor,
-        len(eligible_paths) if eligible_paths is not None else 0,
+        len(eligible_paths) if filtered and eligible_paths is not None else 0,
     )
     semantic_paths = (
         recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
@@ -280,22 +288,53 @@ def collect_candidates(
         try:
             with _span(timings, "vector"):
                 with _span(timings, "vector.index", source=find_types.SOURCE_INDEX):
-                    idx = embeddings.get_embedding_index(vault_root)
+                    idx = serving = embeddings.get_embedding_index(vault_root)
+                    building = recall_migration.building_sidecar(vault_root)
+                    if building is not None:
+                        # The recall encoder cannot answer from the serving
+                        # sidecar yet: read the build's sidecar, in its space.
+                        idx = embeddings.get_building_index(vault_root, building)
                 with _span(timings, "vector.embed"):
-                    if query_vector_provider is not None:
+                    # The shared vector is encoded for the serving sidecar; it
+                    # fits the build only when that sidecar is in the build's
+                    # space or empty (a refused one would refuse it unencoded).
+                    if query_vector_provider is not None and (
+                        building is None or serving.identity in (None, idx.identity)
+                    ):
                         encoded_for, query_vec = query_vector_provider()
                     else:
                         encoded_for = getattr(idx, "identity", None)
                         with recall_space.encoding_for(idx):
                             query_vec = embeddings.embed_texts([query], is_query=True)[0]
                 recall_space.require_same_space(idx, encoded_for, query_vec)
+                sources = [idx]
+                if building is not None:
+                    # Live writes since the build began are only in the serving
+                    # sidecar. It joins only when it records exactly the space
+                    # the query was encoded in, so two spaces never mix.
+                    if serving.identity is not None and serving.identity == (
+                        encoded_for or recall_space.current_identity(len(query_vec))
+                    ):
+                        sources.append(serving)
+                    if degraded_out is not None:
+                        degraded_out.append("embeddings")
+                elif degraded_out is not None and recall_migration.coverage_unchecked(vault_root):
+                    degraded_out.append("embeddings")
                 with _span(timings, "vector.search"):
-                    chunk_hits = idx.search(
-                        query_vec,
-                        k=candidate_k * 3,
-                        allowed_paths=semantic_paths,
-                        **({"encoded_for": encoded_for} if isinstance(idx, embeddings.EmbeddingIndex) else {}),
-                    )
+                    chunk_hits = []
+                    for source in sources:
+                        hits = source.search(
+                            query_vec,
+                            k=candidate_k * 3,
+                            allowed_paths=semantic_paths,
+                            **({"encoded_for": encoded_for} if isinstance(source, embeddings.EmbeddingIndex) else {}),
+                        )
+                        if building is not None and source is idx:
+                            # The build holds a changed page's old rows until its
+                            # catch-up pass: they answer for text it no longer has.
+                            current = recall_migration.current_in_build(vault_root, idx, {hit[0] for hit in hits})
+                            hits = [hit for hit in hits if hit[0] in current]
+                        chunk_hits.extend(hits)
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
                     existing = best_per_file.get(fp)
@@ -684,6 +723,10 @@ def collect_candidates(
                 "reason": "request_disabled",
             }
     if graph:
+        # A restricted caller resolves links over the pages it may see, as in a
+        # vault without the others; `recall_paths` is already that view. The
+        # owner keeps the whole-vault resolution and its cost.
+        link_view = recall_paths.__contains__ if admitted_paths is not None else None
         with _span(timings, "graph"):
             primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
             vector_set: set[str] = set(vector_ranking)
@@ -733,7 +776,21 @@ def collect_candidates(
                     indexed = graph_index.indexed_paths(graph_seeds)
                     typed_seeds = [s for s in graph_seeds if s in indexed]
                     legacy_seeds = [s for s in graph_seeds if s not in indexed]
-                    neighbors = graph_index.neighbors_for(typed_seeds) if typed_seeds else []
+                    # The view re-resolves typed links with the request's resolver.
+                    # Without one it cannot, so those seeds wait like legacy ones.
+                    view_resolver = None
+                    if link_view is not None and typed_seeds:
+                        view_resolver = get_query_resolver(
+                            vault_root, freshness=snapshot.projection_key("vault")
+                        )
+                        graph_resolver_deferred = view_resolver is None
+                    neighbors = (
+                        graph_index.neighbors_for(
+                            typed_seeds, keep=link_view, resolver=view_resolver
+                        )
+                        if typed_seeds and not graph_resolver_deferred
+                        else []
+                    )
 
                 # Family precedence MUST be decided BEFORE target dedup: when a
                 # target is reached by both a typed relation and a plain
@@ -779,8 +836,12 @@ def collect_candidates(
 
                     legacy_targets: list[str] = []
                     if legacy_seeds:
-                        resolver = get_query_resolver(
-                            vault_root, freshness=snapshot.projection_key("vault")
+                        resolver = (
+                            view_resolver
+                            if link_view is not None and typed_seeds
+                            else get_query_resolver(
+                                vault_root, freshness=snapshot.projection_key("vault")
+                            )
                         )
                         graph_resolver_deferred = resolver is None
                         # Passing None to the legacy helper would construct a
@@ -794,6 +855,7 @@ def collect_candidates(
                                 vault_root,
                                 resolver=resolver,
                                 allowed_paths=recall_paths,
+                                visible=link_view,
                             ):
                                 if target_rel not in recall_paths:
                                     continue
@@ -844,6 +906,7 @@ def collect_candidates(
                             vault_root,
                             resolver=resolver,
                             allowed_paths=recall_paths,
+                            visible=link_view,
                         ):
                             if target_rel not in recall_paths:
                                 continue
@@ -934,6 +997,7 @@ def collect_candidates(
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             status_basis=status_basis,
+            type_basis=type_basis,
             temporal=temporal,
             page_of=page_of,
             usage_map=usage_map,
