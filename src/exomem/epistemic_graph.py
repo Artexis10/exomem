@@ -7062,12 +7062,16 @@ class EpistemicGraphIndex:
         """
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _with_md(anchor) if anchor else None
+        # GraphView shares this operation's combined path and caller verdicts,
+        # so repeated edge endpoints do not repeat admission work.
         allowed_paths: dict[str, bool] = {}
 
         def _path_allowed(rel_path: str) -> bool:
             allowed = allowed_paths.get(rel_path)
             if allowed is None:
-                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                allowed = _recall_path_allowed(self.vault_root, rel_path) and (
+                    keep is None or keep(rel_path)
+                )
                 allowed_paths[rel_path] = allowed
             return allowed
 
@@ -7158,7 +7162,6 @@ class EpistemicGraphIndex:
                 (anchor_rel is not None and page == anchor_rel)
                 or not _path_allowed(str(page))
                 or not _path_allowed(str(counterpart))
-                or (keep is not None and not (keep(str(page)) and keep(str(counterpart))))
             ):
                 return
             paths.add(page)
