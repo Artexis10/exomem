@@ -50,6 +50,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -58,6 +59,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import tarfile
 import time
 import uuid
 import zipfile
@@ -516,9 +518,16 @@ def import_storage(k3s: K3sCluster, tmp_path: Path) -> Iterator[dict[str, Any]]:
 
 
 @pytest.mark.skipif(not RUN_LIVE, reason="set RUN_CELLCTL_K3S_TEST=1 for the real import workflow")
+# These fixed protocol cases cover acceptance and the three C5 refusal boundaries.
+@pytest.mark.parametrize(("case", "expected_error"), [
+    pytest.param("accepted", None, id="accepted"),
+    pytest.param("unsafe-member-after-valid", "ARCHIVE_MEMBER_REFUSED", id="unsafe-member-after-valid"),
+    pytest.param("wrong-age-recipient", "ARCHIVE_UNDECRYPTABLE", id="wrong-age-recipient"),
+    pytest.param("substituted-ciphertext", "ARCHIVE_DIGEST_MISMATCH", id="substituted-ciphertext"),
+])
 def test_protected_import_waits_for_real_cleanup_pod_gc(
     k3s: K3sCluster, cell_db: CellDatabase, import_storage: dict[str, Any],
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, expected_error: str | None,
 ) -> None:
     """A deleted Job with a terminating Pod cannot publish done or release import admission."""
     image = import_storage["image"]
@@ -569,6 +578,15 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
     declared = json.loads(_run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
                                "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=python3",
                                import_storage["tag"], "-c", envelope_source]).stdout)
+    if case == "unsafe-member-after-valid":
+        with tarfile.open(tmp_path / "envelope.tar", "a", format=tarfile.USTAR_FORMAT) as envelope:
+            content = b"Refused archive member.\n"
+            member = tarfile.TarInfo("../refused.txt")
+            member.size = len(content)
+            envelope.addfile(member, io.BytesIO(content))
+        with tarfile.open(tmp_path / "envelope.tar") as envelope:
+            members = envelope.getmembers()
+        declared = {"bytes": sum(member.size for member in members), "files": len(members)}
 
     async def sql(query: str, *args: object, role: str = "substrate_owner"):
         connection = await asyncpg.connect(cell_db.dsn(role=role))
@@ -613,6 +631,17 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
         asyncio.run(step())
         return import_row()["recipient"] is not None
 
+    def vault_manifest():
+        # The owned local-path fixture exposes its PV; reading it adds no inspection Pod.
+        result = subprocess.run(["docker", "exec", k3s.name, "tar", "cf", "-", "-C", f"{pvc_path}/vault", "."],
+                                check=True, capture_output=True)
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as snapshot:
+            return {member.name: {
+                "type": member.type.decode("ascii"), "mode": member.mode, "uid": member.uid,
+                "gid": member.gid, "size": member.size, "link": member.linkname,
+                "sha256": hashlib.sha256(snapshot.extractfile(member).read()).hexdigest() if member.isfile() else None,
+            } for member in snapshot}
+
     try:
         _wait_for(ready, timeout=360, description="actual cell-init and Cloud runtime Ready")
         statefulset = json.loads(_kubectl(k3s.name, ["get", "statefulsets", "--namespace", namespace,
@@ -623,6 +652,13 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
         assert runtime["resources"]["requests"]["memory"] == "512Mi"
         assert runtime["resources"]["limits"]["memory"] == "3Gi"
         assert runtime["startupProbe"]["periodSeconds"] * runtime["startupProbe"]["failureThreshold"] == 300
+        pvc = json.loads(_kubectl(k3s.name, ["get", "pvc", "cell-data", "--namespace", namespace, "--output=json"]).stdout)
+        pv = json.loads(_kubectl(k3s.name, ["get", "pv", pvc["spec"]["volumeName"], "--output=json"]).stdout)
+        assert pv["spec"]["claimRef"]["namespace"] == namespace
+        assert pv["spec"]["claimRef"]["name"] == pvc["metadata"]["name"] == "cell-data"
+        assert pv["spec"]["claimRef"]["uid"] == pvc["metadata"]["uid"]
+        assert pv["metadata"]["annotations"]["pv.kubernetes.io/provisioned-by"] == "rancher.io/local-path"
+        pvc_path = pv["spec"]["hostPath"]["path"]
         # Suppress the unrelated scheduled backup only after the real runtime has become ready.
         asyncio.run(sql("UPDATE exomem_cloud_cells SET last_backup_at=now() WHERE cell_id=$1", cell_id))
         import_id = asyncio.run(sql("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) "
@@ -630,11 +666,27 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
                                      declared["bytes"], declared["files"], role="substrate_app"))["import_id"]
         _wait_for(reconciled_key, timeout=120, description="actual prepare Job recipient")
         recipient = import_row()["recipient"]
+        _wait_for(ready, timeout=360, description="C1 and runtime Ready at key_ready before the digest")
+        assert import_row()["observed_state"] == "key_ready"
+        print(f"[import] {case}: C1 running/ready and Pod Ready at key_ready before the digest")
+        if case == "wrong-age-recipient":
+            _run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
+                  "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=age-keygen",
+                  import_storage["tag"], "-o", "/fixture/other.age"])
+            other_recipient = _run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
+                                   "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=age-keygen",
+                                   import_storage["tag"], "-y", "/fixture/other.age"]).stdout.strip()
+            assert other_recipient != recipient
+            recipient = other_recipient
         _run(["docker", "run", "--rm", "--network=none", "--user", f"{os.getuid()}:{os.getgid()}",
               "--mount", f"type=bind,src={tmp_path},dst=/fixture", "--entrypoint=age",
               import_storage["tag"], "-r", recipient, "-o", "/fixture/upload.age", "/fixture/envelope.tar"])
         ciphertext = (tmp_path / "upload.age").read_bytes()
         cipher_hash = hashlib.sha256(ciphertext).hexdigest()
+        uploaded = ciphertext
+        if case == "substituted-ciphertext":
+            uploaded = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+            assert len(uploaded) == len(ciphertext) and hashlib.sha256(uploaded).hexdigest() != cipher_hash
         asyncio.run(sql("UPDATE exomem_cloud_imports SET ciphertext_sha256=$2,ciphertext_bytes=$3 WHERE import_id=$1",
                         import_id, cipher_hash, len(ciphertext), role="substrate_app"))
         _wait_for(lambda: (asyncio.run(step()), import_row()["part_urls"] is not None)[1],
@@ -642,17 +694,38 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
         parts, offset = [], 0
         for part in json.loads(import_row()["part_urls"]):
             size = part["part_size_bytes"]
-            request = Request(part["url"], data=ciphertext[offset:offset + size], method="PUT")
+            request = Request(part["url"], data=uploaded[offset:offset + size], method="PUT")
             with urlopen(request, context=ssl.create_default_context(cafile=str(import_storage["ca"])), timeout=30) as response:
+                assert response.status == 200
                 parts.append({"part_number": part["part_number"], "etag": response.headers["ETag"]})
             offset += size
         assert offset == len(ciphertext)
+        _wait_for(ready, timeout=360, description="C1 and runtime Ready after actual PUT before completion")
+        assert import_row()["observed_state"] == "key_ready"
+        print(f"[import] {case}: C1 running/ready and Pod Ready after actual PUT before completion")
+        before = vault_manifest()
         asyncio.run(sql("UPDATE exomem_cloud_imports SET requested_state='uploaded',part_etags=$2 WHERE import_id=$1",
                         import_id, json.dumps(parts), role="substrate_app"))
-        _wait_for(lambda: (asyncio.run(step()), cluster.observe_import_jobs(namespace, str(import_id))["import"].succeeded)[1],
-                  timeout=180, description="actual encrypted protected import Job success")
+
+        def import_launched():
+            if not cluster.observe_import_jobs(namespace, str(import_id))["import"].exists:
+                asyncio.run(step())
+            return cluster.observe_import_jobs(namespace, str(import_id))["import"].exists
+
+        _wait_for(import_launched, timeout=120, description="controller-launched protected import Job")
+        # Observe without reconciliation so cleanup cannot delete a failed Job's termination report.
+        _wait_for(lambda: (job := cluster.observe_import_jobs(namespace, str(import_id))["import"]).succeeded or job.failed,
+                  timeout=180, description="actual protected import termination report")
         completed = cluster.observe_import_jobs(namespace, str(import_id))["import"]
-        assert completed.report == {"ok": True, "files": declared["files"], "bytes": declared["bytes"]}
+        if expected_error is None:
+            assert completed.succeeded and completed.report == {"ok": True, "files": declared["files"], "bytes": declared["bytes"]}
+        else:
+            assert completed.failed and completed.report == {"ok": False, "error": expected_error}
+            assert vault_manifest() == before
+        print(f"[import] {case}: actual termination {json.dumps(completed.report, sort_keys=True)}")
+        assert cluster.observe(cell_id, namespace).statefulset_replicas == 0
+        held = asyncio.run(sql("SELECT hold_kind,ready FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))
+        assert held["hold_kind"] == "import" and held["ready"] is False
         cleanup_name = job_name(str(import_id), "cleanup")
 
         def cleanup_launched():
@@ -663,6 +736,8 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
         _wait_for(cleanup_launched, timeout=60, description="controller-launched local cleanup Job")
         _wait_for(lambda: cluster.observe_import_jobs(namespace, str(import_id))["cleanup"].succeeded,
                   timeout=120, description="actual local cleanup Job success")
+        if expected_error is not None:
+            assert vault_manifest() == before
         cleanup_pod = json.loads(_kubectl(k3s.name, ["get", "pods", "--namespace", namespace,
                                   f"--selector=batch.kubernetes.io/job-name={cleanup_name}", "--output=json"]).stdout)["items"][0]
         pod_name = cleanup_pod["metadata"]["name"]
@@ -691,8 +766,9 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
                   for job in cluster.observe_import_jobs(namespace, str(import_id)).values()),
                   timeout=60, description="every import phase Job and Pod absent")
         asyncio.run(step())
-        assert import_row()["observed_state"] == "done" and import_row()["error_code"] is None
-        _wait_for(ready, timeout=360, description="done import and actual Cloud runtime Ready again")
+        terminal = "done" if expected_error is None else "failed"
+        assert import_row()["observed_state"] == terminal and import_row()["error_code"] == expected_error
+        _wait_for(ready, timeout=360, description="terminal import and actual Cloud runtime Ready again")
         assert asyncio.run(sql("SELECT hold_kind FROM exomem_cloud_cells WHERE cell_id=$1", cell_id))["hold_kind"] is None
         # C5 must admit a successor only after cleanup; roll back this admission probe.
         async def successor_admitted():
@@ -725,6 +801,13 @@ from exomem import archive_members, state_paths
 from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 vault = Path('/data/vault')
 receipt_path = state_paths.vault_state_dir(vault) / 'cloud-imports' / '{import_id}.json'
+assert Path('/data/host').is_dir() and os.getuid() == 10001
+assert not (vault / '_Imports' / '{import_id}').exists()
+assert not (vault.parent / '.import-keys' / '{import_id}').exists()
+assert not (vault.parent / '.import-{import_id}').exists()
+"""
+        if expected_error is None:
+            inspect += f"""
 receipt = json.loads(receipt_path.read_text())
 with request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface='proof', issuer_family='proof')):
     manifest = archive_members.read_manifest(vault, receipt['manifest'])
@@ -736,12 +819,12 @@ with request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface='proof',
 assert receipt['request'] == {{'import_id': '{import_id}', 'cell_id': '{cell_id}', 'kind': 'archive_members', 'ciphertext_sha256': '{cipher_hash}', 'ciphertext_bytes': {len(ciphertext)}, 'declared_bytes': {declared['bytes']}, 'declared_files': {declared['files']}}}
 assert receipt['result'] == {{'ok': True, 'files': {declared['files']}, 'bytes': {declared['bytes']}}}
 assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
-assert Path('/data/host').is_dir() and os.getuid() == 10001
-assert not (vault / '_Imports' / '{import_id}').exists()
-assert not (vault.parent / '.import-keys' / '{import_id}').exists()
-assert not (vault.parent / '.import-{import_id}').exists()
 print(json.dumps({{'receipt': True, 'raw_manifest': True, 'archive': manifest.archive, 'members': members, 'identity_staging_adoption_absent': True}}, sort_keys=True))
 """
+        else:
+            inspect += "assert not receipt_path.exists()\nprint('refusal receipt and import paths absent')\n"
+            assert vault_manifest() == before
+            print(f"[import] {case}: all {len(before)} canonical vault entries unchanged before/refusal/cleanup/restart")
         runtime_pod = json.loads(_kubectl(k3s.name, ["get", "pods", "--namespace", namespace,
                                       f"--selector=!{JOB_KIND_LABEL}", "--output=json"]).stdout)["items"][0]
         inspected = _exec_py(k3s.name, namespace, runtime_pod["metadata"]["name"], inspect)
@@ -755,7 +838,7 @@ print(json.dumps({{'receipt': True, 'raw_manifest': True, 'archive': manifest.ar
     finally:
         sa_client.close()
         _kubectl(k3s.name, ["delete", "namespace", namespace, "--ignore-not-found", "--wait=false"], check=False)
-        for path in (archive, tmp_path / "envelope.tar", tmp_path / "upload.age"):
+        for path in (archive, tmp_path / "envelope.tar", tmp_path / "upload.age", tmp_path / "other.age"):
             path.unlink(missing_ok=True)
 
 

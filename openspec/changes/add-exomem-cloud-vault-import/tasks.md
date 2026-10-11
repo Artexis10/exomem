@@ -61,7 +61,10 @@ The readiness correction passed a fresh accepted import. C1 reported running
 and ready after key preparation and after the presigned ciphertext upload.
 The controller kept admission occupied until all phase Jobs and Pods disappeared.
 
-Task 3.5 remains open for the refusal matrix in the maintained live suite.
+The maintained live suite now runs the accepted import and all three refusals
+through one workflow. All four cases passed against the reviewed controller
+and built Cloud image. Each refusal kept all 77 canonical vault entries
+unchanged through cleanup and restart. Task 3.5 awaits the integrated merge.
 Production OAuth registration, bucket lifecycle/CORS and production rollout
 also remain open. The one-node local storage rehearsal does not prove multi-node
 storage behavior, large multipart uploads or production bucket restrictions.
