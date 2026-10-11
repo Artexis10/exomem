@@ -297,6 +297,12 @@ def _dispatch_main(raw: list[str]) -> int:
         return _relations_main(raw[1:])
     if raw and raw[0] == "collections":
         return _collections_main(raw[1:])
+    if raw and raw[0] == "cloud":
+        from .cloud_import_client import main as cloud_main
+        return cloud_main(raw[1:])
+    if raw and raw[0] == "cell-import":
+        from .cloud_import_job import main as import_main
+        return import_main(raw[1:])
     if raw and raw[0] == "cell-init":
         return _cell_init_main(raw[1:])
     # `exomem activate "<turn>"` — the spelled-out contract for the context

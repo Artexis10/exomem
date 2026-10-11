@@ -1,0 +1,328 @@
+"""Stopped-cell import commands; C5 metadata grants one operation in one cell.
+
+The standalone tar validator stays dependency-free. This module owns age,
+protected preservation and the private receipt; only content-free results leave it.
+"""
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import BinaryIO, Literal
+from urllib.request import urlopen
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from . import archive_members, state_paths
+from .cell_init import _ensure_private_directory
+from .cloud_import import ArchiveRefused, unpack_stream
+from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
+
+CHUNK_BYTES = 1024 * 1024
+
+
+class CloudImportRequest(BaseModel):
+    """Immutable controller-created Job payload; no OAuth claims or caller owner flag."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    import_id: str
+    cell_id: str
+    # C5 fixes these operation tokens; they are not user vocabulary.
+    kind: Literal["adopt", "restore", "archive_members"]
+    ciphertext_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")  # SHA-256 wire format
+    ciphertext_bytes: int = Field(gt=0)
+    declared_bytes: int = Field(ge=0)
+    declared_files: int = Field(ge=0)
+
+
+def _id(value: str) -> str:
+    if str(uuid.UUID(value)) != value:
+        raise ValueError("noncanonical import UUID")
+    return value
+
+
+def _private_json(path: Path, value: dict) -> None:
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _check_cell(data_root: Path, cell_id: str) -> None:
+    from .cloud_cell import cloud_mode_enabled
+
+    # C1 defines a 16-character base32 cell identifier.
+    if not re.fullmatch(r"[a-z2-7]{16}", cell_id) or not cloud_mode_enabled() or os.environ.get("EXOMEM_CLOUD_CELL_ID") != cell_id:
+        raise ArchiveRefused("IMPORT_CELL_MISMATCH", "configuration")
+
+
+def prepare(data_root: Path, import_id: str, cell_id: str) -> str:
+    _check_cell(data_root, cell_id)
+    directory = data_root / ".import-keys" / _id(import_id)
+    _ensure_private_directory(directory.parent)
+    _ensure_private_directory(directory)
+    identity = directory / "identity"
+    if not identity.exists():
+        # A partial key never becomes the identity used on a later prepare retry.
+        temporary = directory / "identity.pending"
+        temporary.unlink(missing_ok=True)
+        try:
+            subprocess.run(["age-keygen", "-o", str(temporary)], check=True, capture_output=True)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, identity)
+            os.sync()
+        finally:
+            temporary.unlink(missing_ok=True)
+    result = subprocess.run(["age-keygen", "-y", str(identity)], check=True, capture_output=True)
+    return result.stdout.decode("ascii").strip()
+
+
+def receipt_directory(vault_root: Path) -> Path:
+    directory = state_paths.ensure_vault_state_dir(vault_root) / "cloud-imports"
+    _ensure_private_directory(directory)
+    return directory
+
+
+def _check_cipher(stream: BinaryIO, request: CloudImportRequest, sink=None) -> None:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := stream.read(CHUNK_BYTES):
+        size += len(chunk)
+        if size > request.ciphertext_bytes:
+            raise ArchiveRefused("ARCHIVE_DIGEST_MISMATCH", "bytes")
+        digest.update(chunk)
+        if sink is not None:
+            sink.write(chunk)
+    if size != request.ciphertext_bytes or digest.hexdigest() != request.ciphertext_sha256:
+        raise ArchiveRefused("ARCHIVE_DIGEST_MISMATCH", "digest")
+
+
+def _prove_manifest(vault_root: Path, reference: str) -> None:
+    manifest = archive_members.read_manifest(vault_root, reference)
+    if manifest is None:
+        raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "manifest")
+    for member in manifest.members:
+        path = vault_root / Path(reference).parent / member["blob"]
+        if path.is_symlink():
+            raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "blob")
+        digest = hashlib.sha256()
+        size = 0
+        with gzip.open(path, "rb") as stream:
+            while chunk := stream.read(CHUNK_BYTES):
+                size += len(chunk)
+                if size > member["bytes"]:
+                    raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "blob")
+                digest.update(chunk)
+        if size != member["bytes"] or digest.hexdigest() != member["sha256"]:
+            raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "blob")
+
+
+def run_import(
+    request: CloudImportRequest, vault_root: Path, source: Callable[[], BinaryIO],
+) -> dict:
+    """Prove both ciphertext reads and age EOF before the first canonical write."""
+    _id(request.import_id)
+    _check_cell(vault_root.parent, request.cell_id)
+    receipt_path = receipt_directory(vault_root) / f"{request.import_id}.json"
+    with request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="cloud-import",
+                                        issuer_family=f"cloud-cell:{request.cell_id}")):
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt["request"] != request.model_dump():
+                raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "request")
+            if request.kind == "archive_members":
+                _prove_manifest(vault_root, receipt["manifest"])
+            return receipt["result"]
+        with source() as stream:
+            _check_cipher(stream, request)
+        identity = vault_root.parent / ".import-keys" / request.import_id / "identity"
+        staging = vault_root.parent / f".import-{request.import_id}"
+        shutil.rmtree(staging, ignore_errors=True)
+        errors: list[BaseException] = []
+        process = subprocess.Popen(
+            ["age", "-d", "-i", str(identity)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        def feed() -> None:
+            try:
+                with source() as stream, process.stdin:
+                    _check_cipher(stream, request, process.stdin)
+            except BaseException as error:  # noqa: BLE001 -- the caller joins and converts feed errors
+                errors.append(error)
+                process.stdin.close()
+
+        worker = threading.Thread(target=feed, daemon=True)
+        worker.start()
+        try:
+            try:
+                with process.stdout:
+                    result = unpack_stream(
+                        process.stdout, staging, max_bytes=request.declared_bytes,
+                        expect_bytes=request.declared_bytes, expect_files=request.declared_files,
+                    )
+            except ArchiveRefused:
+                if process.poll() not in (None, 0):
+                    raise ArchiveRefused("ARCHIVE_UNDECRYPTABLE", "decrypt") from None
+                raise
+            worker.join()
+            if process.wait() != 0:
+                raise ArchiveRefused("ARCHIVE_UNDECRYPTABLE", "decrypt")
+            if errors:
+                raise ArchiveRefused("ARCHIVE_DIGEST_MISMATCH", "consumed")
+            public = {"ok": True, "files": result.files, "bytes": result.bytes}
+            receipt = {"request": request.model_dump(), "result": public}
+            if request.kind == "archive_members":
+                from . import cloud_import_envelope
+
+                envelope = cloud_import_envelope.read(staging)
+                from .writer_lease import LeaseConfig, LeaseManager
+
+                manager = LeaseManager(LeaseConfig.from_env())
+                with (staging / cloud_import_envelope.ARCHIVE_NAME).open("rb") as archive:
+                    saved, _created = archive_members.preserve_members(
+                        vault_root, guard=lambda: manager.mutation_guard(vault_root),
+                        scope=envelope.scope, category=envelope.category, filename=envelope.filename, stream=archive,
+                        max_bytes=request.declared_bytes, verified="upload",
+                    )
+                receipt["manifest"] = saved["path"]
+                _prove_manifest(vault_root, receipt["manifest"])
+            elif request.kind == "adopt":
+                destination = vault_root / "_Imports" / request.import_id
+                _ensure_private_directory(destination.parent)
+                if destination.exists():
+                    # A crash after rename is recoverable only with identical staged bytes.
+                    trees = []
+                    for directory in (staging, destination):
+                        hashes = {}
+                        for path in directory.rglob("*"):
+                            if path.is_symlink():
+                                raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "symlink")
+                            if path.is_file():
+                                with path.open("rb") as stream:
+                                    hashes[path.relative_to(directory)] = hashlib.file_digest(stream, "sha256").hexdigest()
+                        trees.append(hashes)
+                    if trees[0] != trees[1]:
+                        raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "committed")
+                else:
+                    os.rename(staging, destination)
+            else:
+                _restore(vault_root, staging, request)
+            os.sync()
+            receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _private_json(receipt_path, receipt)
+            return public
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            worker.join(timeout=35)
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> None:
+    from .vault import _is_vault
+
+    if not _is_vault(staging):
+        raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "vault")
+    prior = vault_root.parent / f".restore-prior-{request.import_id}"
+    _ensure_private_directory(prior)
+    marker = prior / "request.json"
+    if marker.exists():
+        if json.loads(marker.read_text()) != request.model_dump():
+            raise ArchiveRefused("IMPORT_RECEIPT_INVALID", "restore_request")
+    else:
+        if (prior / "vault").exists():
+            raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_prior")
+        _private_json(marker, request.model_dump())
+    state = state_paths.vault_state_dir(vault_root)
+    if not (prior / "vault").exists():
+        os.rename(vault_root, prior / "vault")
+    if not (prior / "state").exists() and state.exists():
+        os.rename(state, prior / "state")
+    # cell-init can prepare the mount directory, but refuses to initialize a vault during this swap.
+    if vault_root.is_dir() and not any(vault_root.iterdir()):
+        vault_root.rmdir()
+    if not vault_root.exists():
+        os.rename(staging, vault_root)
+    else:
+        # A replay after the final rename may acknowledge only this exact restored tree.
+        for directory in (staging, vault_root):
+            if any(path.is_symlink() for path in directory.rglob("*")):
+                raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_symlink")
+        def hashes(directory):
+            result = {}
+            for path in directory.rglob("*"):
+                if path.is_file():
+                    with path.open("rb") as stream:
+                        result[path.relative_to(directory)] = hashlib.file_digest(stream, "sha256").hexdigest()
+            return result
+        if hashes(staging) != hashes(vault_root):
+            raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_committed")
+
+
+def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) -> None:
+    """Remove transport/adoption material. Committed RAW sources remain governed data."""
+    _id(import_id)
+    if (vault_root / "_Imports").is_symlink() or (vault_root.parent / ".import-keys").is_symlink():
+        raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "symlink")
+    for path in [
+        vault_root.parent / ".import-keys" / import_id,
+        vault_root.parent / f".import-{import_id}",
+    ] + ([] if keep_adoption else [vault_root / "_Imports" / import_id]):
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="exomem cell-import")
+    parser.add_argument("operation", choices=("prepare", "import", "discard"))
+    parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
+    parser.add_argument("--import-id", required=True)
+    parser.add_argument("--request")
+    parser.add_argument("--url")
+    parser.add_argument("--keep-adoption", action="store_true")
+    parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
+    args = parser.parse_args(argv)
+    try:
+        cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
+        _check_cell(args.vault.parent, cell_id)
+        if args.operation == "prepare":
+            result = {"ok": True, "recipient": prepare(args.vault.parent, args.import_id, cell_id)}
+        elif args.operation == "discard":
+            discard(args.vault, args.import_id, keep_adoption=args.keep_adoption)
+            result = {"ok": True}
+        else:
+            request = CloudImportRequest.model_validate_json(args.request)
+            if request.import_id != args.import_id or not args.url.startswith("https://"):
+                raise ArchiveRefused("IMPORT_REQUEST_INVALID", "request")
+            result = run_import(request, args.vault, lambda: urlopen(args.url, timeout=30))
+    except ArchiveRefused as error:
+        result = {"ok": False, "error": error.code}
+    except Exception:  # noqa: BLE001 -- errors may contain member names or signed URLs
+        result = {"ok": False, "error": "IMPORT_FAILED"}
+    args.termination_log.write_text(json.dumps(result), encoding="ascii")
+    return 0 if result["ok"] else 1

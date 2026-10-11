@@ -89,6 +89,10 @@ class HostedCellTokenVerifier(TokenVerifier):
         )
 
 
+class CloudCellAccessToken(AccessToken):
+    """Verified C4 credential provenance; copying claims does not copy this type."""
+
+
 class CloudCellTokenVerifier(TokenVerifier):
     """FastMCP bearer verifier for one Exomem Cloud cell's per-cell bearer (D1).
 
@@ -97,8 +101,7 @@ class CloudCellTokenVerifier(TokenVerifier):
     comparison via `hmac.compare_digest`, mirroring
     `HostedCellConfig.matches_service_credential`). The resulting principal
     carries fixed claims that are never derived from the bearer or a key
-    version, and always resolve to a non-owner -- exactly like a remote OAuth
-    principal on the desktop.
+    version. The configured cell binds this concrete token type to its owner.
     """
 
     def __init__(
@@ -132,7 +135,7 @@ class CloudCellTokenVerifier(TokenVerifier):
     async def verify_token(self, token: str) -> AccessToken | None:
         if not token or not self._matches(token):
             return None
-        return AccessToken(
+        return CloudCellAccessToken(
             token="exomem-cloud-cell",
             client_id=self._cell_id,
             scopes=["cloud:cell"],

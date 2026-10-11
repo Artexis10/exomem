@@ -11,7 +11,7 @@
 ## 2. Cell-side import commands and adoption (D2, D6, D7, D8)
 
 - [ ] 2.1 Add a cell command that mints the import identity under `/data/.import-keys/<id>/` (mode `0600`) and writes only the public recipient to the termination message. Verify: unit tests for file mode, for the recipient format, for the path being outside the backup paths, and for no identity bytes in stdout, stderr or the message.
-- [ ] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<date>-<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
+- [ ] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
 - [ ] 2.3 Remove `adopt_vault` from `CLOUD_SURFACE_EXCLUSIONS`, reword `transfer_artifact`'s lifting condition so the batch import path does not meet it, and amend the tool-surface scenario in the active change `adopt-exomem-cloud-plain-cells`, coordinating with whichever change archives first. Verify: the tool-surface tests show `adopt_vault` present on cells, and OpenSpec strict validation passes.
 - [ ] 2.4 Add a cell command that discards an import: its identity, its staging directory, or a staged `_Imports/` folder, permanently. Verify: tests that each is gone, not in trash, and that nothing outside the named import is touched.
 - [ ] 2.5 Confirm the import commands' logs are content-free. Verify: the content-free logging tests cover every command, with a canary member name that must not appear.
@@ -36,3 +36,17 @@
 - [ ] 4.1 Open the Substrate change for C5 and the C1 `hold_kind` value: migrations and grants, a "Bring your notes" flow that tars and age-encrypts a chosen folder in the browser, uploads it in parts and reports the ETags and digest, import status on the Cloud home page, and a discard action. Verify: the Substrate change is merged and deployed, and its tests cover encryption round-trips, resumable parts and the reported ETags.
 - [ ] 4.2 Add `exomem cloud import <folder>` for technical tenants, on the same C5 flow. Verify: an end-to-end run against a rehearsal cell imports a folder into `_Imports/`.
 - [ ] 4.3 Import a friend-sized vault end to end in production with the owner's account, then adopt it through Adoption Studio and discard the staged folder. Verify: files are staged, adoption proposals appear, a filed note carries provenance to its original path, and nothing is left behind.
+
+## Implementation evidence (2026-10-11, pending integrated review)
+
+The source implements concrete Cloud owner binding, its persisted-job recheck,
+the protected encrypted envelope, private receipts, age commands, C5 controller
+Jobs and multipart transport, and a resumable OAuth CLI. Scoped tests exercise
+real age, protected member recovery, ciphertext substitution, exact multipart
+reports, cancellation precedence and disposable PostgreSQL split grants.
+
+The built Cloud image passed a real age roundtrip with networking disabled.
+Disposable PostgreSQL tests cover cleanup failure, controller restart, service
+recovery, bounded retry and eventual cleanup. Real-K3s/PKCE rehearsal, bucket
+lifecycle/CORS and production rollout remain separate evidence requirements. The owner restore was previously
+performed; unchecked historical tasks do not authorize repeating it.

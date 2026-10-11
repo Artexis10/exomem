@@ -140,7 +140,7 @@ def _ensure_vault(vault_root: Path, *, backed_up: bool) -> bool:
     if _is_vault(vault_root):
         return False
 
-    if backed_up:
+    if backed_up or any(vault_root.parent.glob(".restore-prior-*")):
         # Design D5: this cell's data exists in its backups, so an empty
         # volume here is a lost or recreated one. Serving a blank vault would
         # let the tenant write a second history over the real one; the cell

@@ -2112,6 +2112,10 @@ def _grant(writer, job: _Job, operation) -> None:
     exact bound source digest.
     """
     bound = job.binding
+    issuer = bound["principal"]["issuer_family"]
+    if issuer and issuer.startswith("cloud-cell:"):
+        if not principal_module.cloud_owner_binding_matches(issuer.removeprefix("cloud-cell:")):
+            raise _Lost
     session = bound["principal"]["session"]
     if session is not None and _now() > session["expires_at"]:
         raise _Lost

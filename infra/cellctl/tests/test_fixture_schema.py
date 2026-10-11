@@ -143,3 +143,56 @@ async def test_a_cell_row_needs_an_existing_tenant(cell_db: CellDatabase) -> Non
             )
     finally:
         await owner.close()
+
+
+async def test_c5_split_grants_and_prepared_tuple_are_enforced(cell_db):
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    tenant = await insert_tenant(owner, "import-tenant")
+    await owner.execute("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')", "abcdefghijklmnop", tenant)
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        import_id = await app.fetchval("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES('abcdefghijklmnop','archive_members',123,2) RETURNING import_id")
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await app.execute("UPDATE exomem_cloud_imports SET recipient='forged' WHERE import_id=$1", import_id)
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await controller.execute("UPDATE exomem_cloud_imports SET requested_state='uploaded' WHERE import_id=$1", import_id)
+        await controller.execute("UPDATE exomem_cloud_imports SET recipient='public-recipient',observed_state='key_ready' WHERE import_id=$1", import_id)
+        await app.execute("UPDATE exomem_cloud_imports SET ciphertext_sha256=$2,ciphertext_bytes=200 WHERE import_id=$1", import_id, "a" * 64)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await app.execute("UPDATE exomem_cloud_imports SET ciphertext_bytes=201 WHERE import_id=$1", import_id)
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await app.execute("INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES('abcdefghijklmnop','adopt',0,0)")
+    finally:
+        await app.close()
+        await controller.close()
+        await owner.close()
+
+
+async def test_c5_cleanup_and_terminal_discard_both_keep_the_open_import_slot(cell_db):
+    from cellctl import db
+
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        tenant = await insert_tenant(owner, "cleanup-slot")
+        await owner.execute("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')", "abcdefghijklmnop", tenant)
+        insert = "INSERT INTO exomem_cloud_imports(cell_id,kind,declared_bytes,declared_files) VALUES('abcdefghijklmnop','adopt',0,0) RETURNING import_id"
+        import_id = await app.fetchval(insert)
+        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='cleanup_pending' WHERE import_id=$1", import_id)
+        assert (await db.read_import(controller, "abcdefghijklmnop")).observed_state == "cleanup_pending"
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await app.fetchval(insert)
+        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='done' WHERE import_id=$1", import_id)
+        await app.execute("UPDATE exomem_cloud_imports SET requested_state='discard_requested' WHERE import_id=$1", import_id)
+        assert (await db.read_import(controller, "abcdefghijklmnop")).import_id == str(import_id)
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await app.fetchval(insert)
+        await controller.execute("UPDATE exomem_cloud_imports SET observed_state='discarded' WHERE import_id=$1", import_id)
+        assert await db.read_import(controller, "abcdefghijklmnop") is None
+        assert await app.fetchval(insert) != import_id
+    finally:
+        await owner.close()
+        await app.close()
+        await controller.close()

@@ -13469,18 +13469,8 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                     "(design Non-Goals)."
                 ),
                 lifted_when=(
-                    "a browser transfer or artifact-upload path is added to "
-                    "Exomem Cloud"
+                    "a live artifact-upload bridge is added for running Cloud cells"
                 ),
-            ),
-            HostedSurfaceExclusion(
-                command="adopt_vault",
-                reason=(
-                    "There is no upload-then-adopt staging flow for Exomem "
-                    "Cloud cells; a self-serve export/import UI is out of scope "
-                    "for Exomem Cloud (design Non-Goals)."
-                ),
-                lifted_when="an upload/import path is added to Exomem Cloud",
             ),
             HostedSurfaceExclusion(
                 command="process_media",

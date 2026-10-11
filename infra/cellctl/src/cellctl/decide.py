@@ -53,6 +53,9 @@ class ReconcileConfig:
     # D3 does not pin an exact first-boot init deadline; 10 minutes matches
     # the D6 upgrade-readiness deadline as the most defensible default.
     init_deadline: timedelta = timedelta(minutes=10)
+    import_deadline: timedelta = timedelta(hours=2)
+    import_cleanup_deadline: timedelta = timedelta(minutes=2)
+    import_cleanup_retry: timedelta = timedelta(hours=1)
     backup_deadline: timedelta = timedelta(minutes=15)
     upgrade_ready_deadline: timedelta = timedelta(minutes=10)
     # D6 step 5: an attempt whose target was never applied within this long
@@ -189,6 +192,11 @@ def decide(
             "observed_state": "failed", "ready": False, "last_error_code": VOLUME_MISSING,
             "observed_generation": row.generation,
         })
+    elif active_hold == "import":
+        # C5 reconciliation owns this hold. Routine convergence never restarts its volume.
+        decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
+                            hold_kind="import", hold_started_at=row.hold_started_at,
+                            row_updates={"ready": False, "observed_state": "stopping"})
     elif active_hold == SNAPSHOT_BACKUP:
         decision = _continue_snapshot_backup(
             row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room

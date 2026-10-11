@@ -1090,3 +1090,30 @@ def render_restore_job(
             },
         },
     }
+
+
+def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seconds: int, url: str | None = None) -> dict:
+    """A controller-authored immutable Job request, never reconstructed bearer claims."""
+    import json
+
+    from .imports import job_name
+
+    command = ["exomem", "cell-import", "discard" if phase == "cleanup" else phase,
+               "--import-id", item.import_id]
+    if phase == "cleanup":
+        command.append("--keep-adoption")
+    if phase == "import":
+        command += ["--request", json.dumps(item.request(), separators=(",", ":")), "--url", url]
+    pod = _job_pod_spec(spec, job_kind="import", command=[], data_read_only=False, repo="")
+    container = pod["containers"][0]
+    container["command"] = command
+    container["env"] = _init_env(spec)
+    labels = {**_selector_labels(spec), JOB_KIND_LABEL: "import"}
+    return {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": job_name(item.import_id, phase), "namespace": spec.namespace,
+                     "labels": {**_labels(spec), JOB_KIND_LABEL: "import"}},
+        "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
+                 # Completion observations must survive a controller outage until C5 is terminal.
+                 "template": {"metadata": {"labels": labels}, "spec": pod}},
+    }

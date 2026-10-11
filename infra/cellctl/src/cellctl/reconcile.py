@@ -38,6 +38,7 @@ from .decide import (
     DEFAULT_RECONCILE_CONFIG,
     ReconcileConfig,
     StorageRoom,
+    _identity_conflict,
     can_relocate,
     decide,
     hourly_backup_due,
@@ -61,6 +62,7 @@ from .manifests import (
     render_backup_job,
     render_cell_manifests,
     render_clone_claim,
+    render_import_job,
     render_restore_job,
     render_volume_snapshot,
 )
@@ -83,6 +85,7 @@ from .state import (
     TARGET_REJECTED,
     CellRow,
     ClusterObservation,
+    Decision,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
@@ -460,6 +463,7 @@ class ClusterGateway:
     def apply_all(self, manifests: list[dict]) -> None: ...  # pragma: no cover
     def delete_namespace(self, name: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
+    def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
     def retain_volume(self, name: str) -> None: ...  # pragma: no cover
     def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
@@ -1448,10 +1452,18 @@ async def _reconcile_row(
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
+    from .imports import ImportStorage, decide_import, job_name
+
+    item = await db.read_import(connection, row.cell_id)
+    import_decision = None
+    if item is not None and not _identity_conflict(row, observation, cluster_config.storage):
+        jobs = cluster.observe_import_jobs(namespace_name(row.cell_id), item.import_id)
+        import_decision = decide_import(row, item, observation, jobs, now=now, config=config)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
-        _active_hold(row, observation) is None
+        import_decision is None
+        and _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade
         and not is_render_digest_candidate
@@ -1498,7 +1510,7 @@ async def _reconcile_row(
             observation, row, cluster, object_storage, volume_provider, now, memory, storage=cluster_config.storage
         )
 
-    decision = decide(
+    decision = import_decision or decide(
         row,
         rollout,
         observation,
@@ -1513,6 +1525,64 @@ async def _reconcile_row(
         start_relocation=start_relocation,
         storage_room=storage_room,
     )
+    import_storage = None
+    if import_decision is not None:
+        if decision.cleanup_import_transport and not decision.retry_import_cleanup and item.observed_state != "cleanup_pending":
+            # Journal the work outcome before ciphertext deletion can make multipart replay impossible.
+            await db.write_import(connection, item.import_id, {"observed_state": "cleanup_pending",
+                                  "error_code": decision.import_updates.get("error_code", item.error_code),
+                                  "part_urls": None, "urls_expire_at": None})
+        try:
+            if decision.prepare_import_upload or decision.cleanup_import_transport or decision.import_action == "import":
+                import boto3
+                from botocore.config import Config
+
+                key_id, key_secret, _version = await _resolve_object_storage_key(
+                    connection, row, secrets_config, object_storage, memory=memory, now=now,
+                    replace_allowed=False,
+                )
+                client = boto3.client("s3", endpoint_url=cluster_config.object_storage_endpoint,
+                                      aws_access_key_id=key_id, aws_secret_access_key=key_secret,
+                                      region_name="us-east-1", config=Config(signature_version="s3v4",
+                                      connect_timeout=10, read_timeout=30, retries={"max_attempts": 2}))
+                import_storage = ImportStorage(client, cluster_config.object_storage_bucket)
+            if decision.cleanup_import_transport:
+                await asyncio.wait_for(asyncio.to_thread(import_storage.cleanup, item),
+                                       timeout=config.import_cleanup_deadline.total_seconds())
+        except Exception:  # External cleanup failure must not postpone volume release.
+            if not decision.cleanup_import_transport:
+                raise
+            original_error = decision.import_updates.get("error_code", item.error_code)
+            pending = dataclass_replace(item, observed_state="cleanup_pending", error_code=original_error, updated_at=now)
+            decision = decide_import(row, pending, observation, jobs, now=now, config=config)
+            decision = decision or Decision()
+            decision.import_updates.update(observed_state="cleanup_pending", error_code=original_error,
+                                           part_urls=None, urls_expire_at=None)
+        else:
+            if decision.retry_import_cleanup:
+                decision = Decision(apply_manifests=True, replicas=0,
+                                    image=observation.statefulset_image or row.observed_image,
+                                    read_only=row.desired_state == "read_only", hold_kind="import", hold_started_at=now,
+                                    row_updates={"hold_kind": "import", "hold_started_at": now,
+                                                 "ready": False, "observed_state": "stopping"})
+                if not observation.pod_uses_volume:
+                    decision.import_action = "discard" if item.requested_state in ("cancelled", "discard_requested") else "cleanup"
+        if decision.prepare_import_upload:
+            try:
+                upload_id, parts = await asyncio.to_thread(import_storage.prepare, item)
+            except ValueError:
+                decision.import_updates["error_code"] = "IMPORT_UPLOAD_FAILED"
+            else:
+                decision.import_updates.update(upload_id=upload_id, part_urls=parts,
+                                               urls_expire_at=now + timedelta(hours=24))
+        await db.write_import(connection, item.import_id, decision.import_updates)
+        for phase in decision.stop_import_jobs:
+            cluster.delete_job(namespace_name(row.cell_id), job_name(item.import_id, phase))
+        # The row hold survives a crash before the StatefulSet has been stopped.
+        if decision.hold_kind == "import" and (row.hold_kind != "import" or row.hold_started_at != decision.hold_started_at):
+            await db.write_observed(connection, row.cell_id,
+                                    {"hold_kind": "import", "hold_started_at": decision.hold_started_at})
+
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
     if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
@@ -1720,12 +1790,24 @@ async def _reconcile_row(
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
-        steps = decision.run_backup_job or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone
+        steps = decision.import_action or decision.run_backup_job or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone
         local = cluster_config.storage.local
         if jobs_parked and steps:
             # A Job refused for this key waits out the backoff.
             job_refused.append(("Job", "parked"))
         else:
+            if decision.import_action:
+                url = None
+                if decision.import_action == "import":
+                    try:
+                        url = await asyncio.to_thread(import_storage.complete, item)
+                    except ValueError:
+                        await db.write_import(connection, item.import_id, {"error_code": "IMPORT_UPLOAD_FAILED"})
+                        return True
+                _run_cell_job(cluster, row.cell_id,
+                              render_import_job(spec, item, decision.import_action, url=url,
+                                                deadline_seconds=int((config.import_deadline if decision.import_action == "import"
+                                                                      else config.import_cleanup_deadline).total_seconds())), job_refused)
             if decision.create_snapshot and local is not None:
                 _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
                               job_refused)
@@ -1771,6 +1853,9 @@ async def _reconcile_row(
     if decision.delete_b2_key and row.b2_key_id:
         object_storage.delete_key(row.b2_key_id)
 
+    if item is not None and decision.row_updates.get("observed_state") == "deleted":
+        await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
+                              "upload_id": None, "part_urls": None, "urls_expire_at": None})
     row_updates: dict[str, object] = dict(decision.row_updates)
     if refused:
         # D4: the StatefulSet landed but another object was refused. The

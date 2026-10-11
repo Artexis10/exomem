@@ -1,0 +1,286 @@
+"""C5 import decisions and S3 multipart transport, scoped to one immutable cell."""
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+from botocore.exceptions import ClientError
+
+from .state import CellRow, ClusterObservation, Decision
+
+# C5 fixes these state tokens; they are not tenant vocabulary.
+TERMINAL = frozenset({"done", "failed", "expired", "discarded"})
+PHASES = ("prepare", "import", "cleanup", "discard")
+UPLOAD_DEADLINE = timedelta(hours=24)
+PART_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ImportRow:
+    import_id: str
+    cell_id: str
+    kind: str
+    declared_bytes: int
+    declared_files: int
+    requested_state: str
+    created_at: datetime
+    ciphertext_sha256: str | None = None
+    ciphertext_bytes: int | None = None
+    part_etags: list[dict] | None = None
+    recipient: str | None = None
+    upload_id: str | None = None
+    part_urls: list[dict] | None = None
+    urls_expire_at: datetime | None = None
+    observed_state: str | None = None
+    error_code: str | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self):
+        if str(uuid.UUID(self.import_id)) != self.import_id:
+            raise ValueError("invalid import UUID")
+
+    def request(self) -> dict:
+        return {name: getattr(self, name) for name in (
+            "import_id", "cell_id", "kind", "declared_bytes", "declared_files",
+            "ciphertext_sha256", "ciphertext_bytes",
+        )}
+
+    @property
+    def key(self) -> str:
+        return f"cells/{self.cell_id}/imports/{self.import_id}.age"
+
+
+@dataclass(frozen=True)
+class ImportJob:
+    exists: bool = False
+    active: bool = False
+    succeeded: bool = False
+    failed: bool = False
+    report: dict = field(default_factory=dict)
+    pods_present: bool = False
+
+
+def job_name(import_id: str, phase: str) -> str:
+    return f"import-{uuid.UUID(import_id).hex}-{phase}"
+
+
+def decide_import(row: CellRow, item: ImportRow, observation: ClusterObservation,
+                  jobs: dict[str, ImportJob], *, now: datetime, config=None) -> Decision | None:
+    """Separate work completion, volume release and eventual cleanup."""
+    from .decide import DEFAULT_RECONCILE_CONFIG
+
+    config = config or DEFAULT_RECONCILE_CONFIG
+    active_hold = observation.statefulset_hold_kind or row.hold_kind
+    if active_hold not in (None, "import"):
+        return None
+    if item.cell_id != row.cell_id:
+        raise ValueError("import cell mismatch")
+    image = observation.statefulset_image or row.observed_image
+    remaining = [phase for phase, job in jobs.items() if job.exists or job.pods_present or job.active]
+    start = row.hold_started_at or observation.statefulset_hold_started_at or now
+
+    def held():
+        return Decision(apply_manifests=bool(image), replicas=0, image=image,
+                        read_only=row.desired_state == "read_only", hold_kind="import", hold_started_at=start,
+                        row_updates={"hold_kind": "import", "hold_started_at": start,
+                                     "ready": False, "observed_state": "stopping"})
+
+    def release():
+        decision = held()
+        decision.stop_import_jobs = remaining
+        if remaining:
+            decision.row_updates["last_error_code"] = "IMPORT_STOP_PENDING"
+        else:
+            decision.hold_kind = None
+            decision.hold_started_at = None
+            decision.replicas = 0 if row.desired_state in ("stopped", "deleted") else 1
+            decision.row_updates.update(hold_kind=None, hold_started_at=None, last_error_code=None)
+        return decision
+
+    def terminal():
+        if item.requested_state in ("cancelled", "discard_requested"):
+            return "discarded"
+        if item.error_code in ("IMPORT_EXPIRED", "IMPORT_HOLD_EXPIRED"):
+            return "expired"
+        return "failed" if item.error_code else "done"
+
+    def finish(decision):
+        decision.import_updates.update(observed_state=terminal(), recipient=None, upload_id=None,
+                                       part_urls=None, urls_expire_at=None)
+        decision.stop_import_jobs = remaining
+        # A later observation, never this delete request, permits runtime restart.
+        if not remaining:
+            released = release()
+            released.import_updates = decision.import_updates
+            released.cleanup_import_transport = decision.cleanup_import_transport
+            return released
+        return decision
+
+    if row.desired_state == "deleted":
+        # Namespace/PVC and verified prefix deletion supersede import cleanup.
+        if remaining:
+            decision = held()
+            decision.stop_import_jobs = remaining
+            return decision
+        return None
+    if item.observed_state in TERMINAL and (item.requested_state != "discard_requested" or item.observed_state == "discarded"):
+        return release() if active_hold == "import" or remaining else None
+    if image is None:
+        return None  # Ordinary first provisioning must produce the cell image and claim.
+    pending = item.observed_state == "cleanup_pending"
+    cleanup_phase = "discard" if item.requested_state in ("cancelled", "discard_requested") else "cleanup"
+    cleanup_job = jobs.get(cleanup_phase, ImportJob())
+    if pending:
+        updated = item.updated_at or item.created_at
+        if active_hold == "import" and updated >= start:
+            return release()  # A persisted failed attempt still has Jobs to stop.
+        if active_hold != "import":
+            if remaining:
+                return release()
+            if now - updated < config.import_cleanup_retry:
+                return None
+            # Object cleanup runs without a volume hold. Success starts one bounded attempt.
+            return Decision(cleanup_import_transport=True, retry_import_cleanup=True)
+        decision = held()
+        if now - start >= config.import_cleanup_deadline or cleanup_job.failed:
+            decision.import_updates.update(observed_state="cleanup_pending", part_urls=None, urls_expire_at=None)
+            decision.stop_import_jobs = remaining
+            return decision
+        if cleanup_job.succeeded:
+            return finish(decision)
+        if not observation.pod_uses_volume and not cleanup_job.active and not cleanup_job.exists:
+            decision.import_action = cleanup_phase
+        return decision
+
+    imported = jobs.get("import", ImportJob())
+    prepared = jobs.get("prepare", ImportJob())
+    cleanup_started = cleanup_job.exists or cleanup_job.active or cleanup_job.succeeded or cleanup_job.failed
+    failure = item.error_code
+    if not cleanup_started:
+        if row.desired_state == "stopped" and not imported.succeeded:
+            failure = failure or "IMPORT_INTERRUPTED"
+        elif active_hold == "import" and now - start >= config.import_deadline:
+            failure = failure or "IMPORT_HOLD_EXPIRED"
+        elif now - item.created_at > UPLOAD_DEADLINE:
+            failure = failure or "IMPORT_EXPIRED"
+        if not failure and (imported.failed or prepared.failed):
+            reported = (imported if imported.failed else prepared).report.get("error")
+            # The trusted cell command emits fixed uppercase error tokens, never exception text.
+            failure = reported if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported) else "IMPORT_FAILED"
+    cancelled = item.requested_state in ("cancelled", "discard_requested")
+    if cancelled or failure or imported.succeeded or cleanup_started:
+        decision = held()
+        decision.import_updates.update(part_urls=None, urls_expire_at=None)
+        if failure != item.error_code:
+            decision.import_updates["error_code"] = failure
+        decision.stop_import_jobs = [phase for phase in remaining if phase != cleanup_phase and
+                                     (jobs[phase].active or cancelled or failure)]
+        if cleanup_job.failed or (active_hold == "import" and now - start >= config.import_deadline):
+            decision.import_updates["observed_state"] = "cleanup_pending"
+            decision.stop_import_jobs = remaining
+            return decision
+        if decision.stop_import_jobs or observation.pod_uses_volume:
+            return decision
+        if cleanup_job.succeeded:
+            decision.cleanup_import_transport = True
+            # Original outcome is already durable before terminal cleanup succeeds.
+            return finish(decision)
+        if not cleanup_job.active and not cleanup_job.exists:
+            decision.import_action = cleanup_phase
+        return decision
+
+    decision = held()
+    if item.recipient is None:
+        if prepared.succeeded:
+            recipient = prepared.report.get("recipient")
+            # age validates the recipient; this checks its fixed X25519 wire shape.
+            if not isinstance(recipient, str) or not recipient.startswith("age1") or len(recipient) != 62:
+                decision.import_updates["error_code"] = "IMPORT_KEY_INVALID"
+                return decision
+            decision = release()
+            decision.import_updates.update(recipient=recipient, observed_state="key_ready")
+        elif not observation.pod_uses_volume and not prepared.active and not prepared.exists:
+            decision.import_action = "prepare"
+        return decision
+    if item.requested_state == "uploaded":
+        if not observation.pod_uses_volume and not imported.active and not imported.exists:
+            decision.import_action = "import"
+            decision.import_updates["observed_state"] = "importing"
+        return decision
+    # Uploading ciphertext requires no mounted volume or hold.
+    decision = release()
+    decision.apply_manifests = active_hold == "import" or bool(remaining)
+    if active_hold != "import" and not remaining:
+        decision.row_updates = {}
+    decision.prepare_import_upload = item.ciphertext_bytes is not None and item.upload_id is None
+    return decision
+
+
+class ImportStorage:
+    """Use the maintained S3 SDK with the cell's prefix-restricted credential."""
+    def __init__(self, client, bucket: str):
+        self.client, self.bucket = client, bucket
+
+    def prepare(self, item: ImportRow) -> tuple[str, list[dict]]:
+        # Recover an upload created before cellctl crashed ahead of its C5 write.
+        size = item.ciphertext_bytes
+        if not size or size > 10000 * PART_BYTES:
+            raise ValueError("ciphertext size exceeds multipart capacity")
+        uploads = [entry for page in self.client.get_paginator("list_multipart_uploads").paginate(
+            Bucket=self.bucket, Prefix=item.key
+        ) for entry in page.get("Uploads", []) if entry["Key"] == item.key]
+        if uploads:
+            upload_id = uploads[0]["UploadId"]
+        else:
+            upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=item.key)["UploadId"]
+        parts = []
+        for number, offset in enumerate(range(0, size, PART_BYTES), 1):
+            part_size = min(PART_BYTES, size - offset)
+            url = self.client.generate_presigned_url("upload_part", Params={
+                "Bucket": self.bucket, "Key": item.key, "UploadId": upload_id,
+                "PartNumber": number, "ContentLength": part_size,
+            }, ExpiresIn=86400, HttpMethod="PUT")
+            parts.append({"part_number": number, "url": url, "part_size_bytes": part_size})
+        return upload_id, parts
+
+    def complete(self, item: ImportRow) -> str:
+        expected = [part["part_number"] for part in item.part_urls or []]
+        if not expected or [part["part_number"] for part in item.part_etags or []] != expected:
+            raise ValueError("incomplete part report")
+        try:
+            self.client.complete_multipart_upload(Bucket=self.bucket, Key=item.key, UploadId=item.upload_id,
+                MultipartUpload={"Parts": [{"PartNumber": part["part_number"], "ETag": part["etag"]}
+                                           for part in item.part_etags]})
+        except ClientError as error:
+            code = error.response["Error"]["Code"]
+            # S3 fixes these multipart integrity errors; network/service failures retry normally.
+            if code in ("InvalidPart", "InvalidPartOrder", "EntityTooSmall"):
+                raise ValueError("multipart completion refused") from None
+            if code != "NoSuchUpload":
+                raise
+            # Completion may have committed before the controller's next row write.
+        head = self.client.head_object(Bucket=self.bucket, Key=item.key)
+        if head["ContentLength"] != item.ciphertext_bytes:
+            raise ValueError("ciphertext size mismatch")
+        params = {"Bucket": self.bucket, "Key": item.key}
+        if head.get("VersionId"):
+            params["VersionId"] = head["VersionId"]
+        return self.client.generate_presigned_url("get_object", Params=params, ExpiresIn=7200)
+
+    def cleanup(self, item: ImportRow) -> None:
+        for page in self.client.get_paginator("list_multipart_uploads").paginate(Bucket=self.bucket, Prefix=item.key):
+            for upload in page.get("Uploads", []):
+                if upload["Key"] == item.key:
+                    self.client.abort_multipart_upload(Bucket=self.bucket, Key=item.key, UploadId=upload["UploadId"])
+        for page in self.client.get_paginator("list_object_versions").paginate(Bucket=self.bucket, Prefix=item.key):
+            for version in page.get("Versions", []) + page.get("DeleteMarkers", []):
+                if version["Key"] == item.key:
+                    self.client.delete_object(Bucket=self.bucket, Key=item.key, VersionId=version["VersionId"])
+        for page in self.client.get_paginator("list_multipart_uploads").paginate(Bucket=self.bucket, Prefix=item.key):
+            if any(upload["Key"] == item.key for upload in page.get("Uploads", [])):
+                raise RuntimeError("import transport cleanup remains pending")
+        for page in self.client.get_paginator("list_object_versions").paginate(Bucket=self.bucket, Prefix=item.key):
+            if any(version["Key"] == item.key for version in page.get("Versions", []) + page.get("DeleteMarkers", [])):
+                raise RuntimeError("import transport cleanup remains pending")

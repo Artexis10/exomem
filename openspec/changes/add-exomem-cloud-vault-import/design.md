@@ -132,11 +132,11 @@ The staging directory is committed only when all of these hold:
 
 - the decryptor exited 0. age authenticates its final chunk only at the end of the stream, so the unpacker reads its input to EOF;
 - the tar end-of-archive block was read. Python's `tarfile` reads a stream that stops between members as a clean end, so the unpacker tracks the end block itself;
-- the file and byte counts match what the sender declared, and the ciphertext's SHA-256 matched before decryption.
+- the file and byte counts match what the sender declared, and the ciphertext's SHA-256 matched both before decryption and on the consumed second read.
 
 Where the committed result goes depends on the path:
 
-- **Tenant import.** One `rename` moves the staging directory to `/data/vault/_Imports/<date>-<import-id>/`. Nothing existing is touched.
+- **Tenant import.** One `rename` moves the staging directory to `/data/vault/_Imports/<import-id>/`. Nothing existing is touched.
 - **Restore.** The current vault and the vault's derived-state directory are moved into `/data/.restore-prior-<import-id>/`, and the staging directory is renamed to `/data/vault`. The runtime rebuilds derived state on start. The custody directory beside the derived state stays where it is.
 
 The two restore renames are not atomic together. While a `/data/.restore-prior-*` directory exists, `cell-init` refuses to create a vault, so a cell started in that window fails visibly instead of initialising an empty vault. That guard ships with the cell commands (section 2). The owner restore runs on an image without it, and relies on cellctl staying paused until the swap is done (D9).
@@ -159,7 +159,7 @@ When an import ends, whether `done`, `failed`, `cancelled` or `expired`, cellctl
 
 A tenant can also discard a staged import folder completely. Exomem's own deletes only move files to trash, and a mistaken import, such as a folder holding secrets, must not stay in the vault and in every nightly backup. A `discard_requested` row makes cellctl run the discard Job for that folder. Backups age the folder out under their normal retention.
 
-A failed import leaves the vault exactly as it was. Error codes are typed and content-free:
+A refused import preserves existing canonical content. Interrupted ZIP preservation can leave orphaned RAW-protected blobs. Error codes are typed and content-free:
 
 - `ARCHIVE_UNDECRYPTABLE`;
 - `ARCHIVE_DIGEST_MISMATCH`;
@@ -234,5 +234,77 @@ Until step 4 ships, an operator can run the same tenant pipeline by hand: prepar
 ## Open Questions
 
 - The per-import size and member-count caps, and whether storage allowance can grow automatically for a declared import within a plan's limit. These are values; the mechanism does not change.
-- The staging folder name (`_Imports/`), to be settled against the vault layout conventions when section 2 lands.
 - Whether B2's CORS accepts the rule for the web app's origin as written. Task 3.6 runs a real preflight and part upload against a disposable prefix before section 4 relies on it.
+
+## Protected large-import amendment (2026-10-11)
+
+Plain Cloud cells bind the concrete `CloudCellAccessToken` from their C4 verifier
+to the configured cell owner. The issuer family is `cloud-cell:<cell-id>`;
+local-owner and desktop remote-owner flags remain false. Copied claims, another
+cell ID, disabled Cloud mode and missing serving credentials grant no owner
+access. Persisted collection imports recheck this binding before each batch.
+Legacy non-owner jobs keep their original principal and source grants.
+
+C5 separates key preparation from upload preparation. After `key_ready`, the
+client encrypts once, then reports its ciphertext digest and size through
+`prepare-upload`. The immutable tuple fixes the exact part count and sizes.
+The controller publishes each part's size with its signed PUT URL. Completion
+accepts exactly the issued part set and the prepared tuple. Exact retries are
+idempotent; conflicting reports fail.
+
+An `archive_members` request wraps a ZIP in an encrypted tar envelope. Version 1
+contains exactly two regular files: `import.json` and `archive.zip`. The metadata
+is UTF-8 JSON with exactly `schema_version: 1`, `scope`, `category` and `filename`.
+It rejects duplicate keys and metadata larger than 8 KiB. Scope and category
+pass the existing preservation destination checks without normalization. The
+filename is a safe basename used for preservation metadata, never extraction.
+C5 contains none of these filing values. Its declared counts cover both wrapper
+files and the sum of their bytes, excluding tar framing and expanded ZIP members.
+
+The stopped-cell Job consumes an immutable typed C5 request and checks its cell
+ID against the controller-rendered `EXOMEM_CLOUD_CELL_ID`. It does not reconstruct
+OAuth claims or require a serving bearer. This accepted operation can finish
+after OAuth expiry; later API calls still require current authorization.
+Cancellation and cell lifecycle changes stop active Jobs before cleanup starts.
+
+The Job checks the first ciphertext read before decryption, and checks the bytes
+actually consumed on the second read before preservation. It also requires age
+success, complete tar validation and exact declared counts. It keeps the ZIP in
+private volume staging, then calls `archive_members.preserve_members` inside the
+explicit Cloud owner scope. No readable ZIP lands in `_Imports`.
+
+The protected manifest is the commit point. A private atomic receipt under the
+vault state directory binds the complete immutable C5 tuple and retains its
+manifest reference. Replay proves the manifest and all member blobs before
+returning the saved content-free result, including after identity cleanup. A
+crash between manifest and receipt retries through existing member deduplication.
+Partial preservation can leave unreferenced RAW-protected blobs; existing
+canonical content remains intact, but the pool need not remain byte-identical.
+Cancel and discard remove transport or staged adoption material. They never
+silently delete committed RAW sources.
+
+The CLI keeps OAuth tokens in memory and reauthorizes after restart. Its private
+checkpoint retains the import ID, ciphertext and completed part receipts, so it
+never encrypts again during resume. Its separate storage HTTP client carries no
+API bearer. Terminal completion removes local ciphertext; failures retain only
+the resumable material until the next authenticated terminal observation.
+
+Cleanup failure uses the explicit C5 state `cleanup_pending`. It retains the
+original work outcome and occupies the cell's single open import slot. Entering
+cleanup clears upload URLs. A failed attempt removes every import Job and waits
+for every corresponding pod to disappear before releasing the runtime hold.
+Kubernetes deletion failures remain visible as `IMPORT_STOP_PENDING`.
+
+The controller retries pending cleanup after a configurable one-hour delay.
+It first deletes and verifies object versions and multipart uploads without a
+volume hold. It then takes one configurable two-minute hold for local cleanup.
+C5's update timestamp records a failed or deferred attempt; starting or polling
+a retry does not refresh it. The controller journals pending cleanup before
+final object deletion, so a crash cannot restart multipart completion afterward.
+Both cleanup stages must finish before the controller publishes a terminal state.
+
+Suspension interrupts unfinished work with `IMPORT_INTERRUPTED` and keeps the
+runtime stopped. Deletion stops import Jobs, then uses ordinary verified cell
+deletion instead of recurring cleanup. Committed RAW sources and receipts survive
+import cleanup. A successful import retains its outcome across cleanup retries,
+even when the original upload deadline has passed.

@@ -416,10 +416,37 @@ def _local_ingress_owner() -> bool:
     return local_ingress.is_local_grant_token(_verified_access_token())
 
 
+def cloud_owner_binding_matches(cell_id: str) -> bool:
+    """Whether this process currently serves the immutable cell that granted authority."""
+    from ..cloud_cell import CloudCellCredentials, CloudConfigError, cloud_mode_enabled
+
+    if not cloud_mode_enabled():
+        return False
+    try:
+        configured = CloudCellCredentials.from_env()
+    except CloudConfigError:
+        return False
+    return configured.cell_id == cell_id
+
+
+def cloud_owner_principal(cell_id: str, *, surface: str) -> RequestPrincipal:
+    """Bind an authenticated Cloud operation after checking the current cell configuration."""
+    if not cloud_owner_binding_matches(cell_id):
+        return most_restrictive_principal(surface=surface)
+    return RequestPrincipal(
+        audience_id=OWNER_AUDIENCE, surface=surface, issuer_family=f"cloud-cell:{cell_id}"
+    )
+
+
 def resolve_mcp_principal() -> RequestPrincipal:
     """MCP boundary: OAuth principal, bearer credential, or local-stdio owner."""
     if _local_ingress_owner():
         return local_owner_principal(surface="mcp")
+    from ..server_auth import CloudCellAccessToken
+
+    token = _verified_access_token()
+    if type(token) is CloudCellAccessToken and cloud_owner_binding_matches(token.client_id):
+        return cloud_owner_principal(token.client_id, surface="mcp")
     claims, expectation = _mcp_identity_claims()
     if claims is not None:
         audience = normalize_audience(subject=claims.get("sub"), issuer=claims.get("iss"))

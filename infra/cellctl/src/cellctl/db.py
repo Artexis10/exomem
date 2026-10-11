@@ -308,3 +308,39 @@ async def write_capacity_snapshot(
             await write_capacity(connection, node=node, cell_slots=capacity.cell_slots,
                                  attachments_used=capacity.attachments_used, observed_at=observed_at)
         await zero_absent_capacity(connection, present_nodes=list(capacities), observed_at=observed_at)
+
+
+async def read_import(connection: asyncpg.Connection, cell_id: str):
+    from .imports import ImportRow
+
+    record = await connection.fetchrow(
+        "SELECT * FROM exomem_cloud_imports WHERE cell_id=$1 AND "
+        "(observed_state IS NULL OR observed_state IN ('key_ready','importing','cleanup_pending') OR "
+        "(requested_state='discard_requested' AND observed_state <> 'discarded') OR "
+        "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import')) "
+        "ORDER BY created_at DESC LIMIT 1", cell_id,
+    )
+    if record is None:
+        return None
+    fields = {name: record[name] for name in ImportRow.__dataclass_fields__}
+    fields["import_id"] = str(fields["import_id"])
+    for name in ("part_etags", "part_urls"):
+        if isinstance(fields[name], str):
+            fields[name] = json.loads(fields[name])
+    return ImportRow(**fields)
+
+
+async def write_import(connection: asyncpg.Connection, import_id: str, updates: dict) -> None:
+    import uuid
+
+    # C5 column grants fix this controller-owned subset.
+    allowed = {"recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code"}
+    if not updates:
+        return
+    if set(updates) - allowed:
+        raise ValueError("not an import observation column")
+    values = {name: json.dumps(value) if name == "part_urls" and value is not None else value
+              for name, value in updates.items()}
+    assignments, parameters = _assignments(values, start=2)
+    await connection.execute(f"UPDATE exomem_cloud_imports SET {assignments} WHERE import_id=$1",
+                             uuid.UUID(import_id), *parameters)
