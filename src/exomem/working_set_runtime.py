@@ -969,28 +969,21 @@ def lexical_evidence(
     they match. `selection`, when given, receives how many units were kept
     and dropped — counts only, never the turn's words.
     """
-    from . import find_types, lexstore
+    from . import find_types
 
     by_path = {row.path: row for row in rows if row.path}
     if not by_path:
         return [], "available"
     turn = working_set_index.subject_text(turn)
     try:
-        # A full-page match on the same single name word is not a second fact.
-        # Require two distinct content units (words or unspaced runs); exact
-        # aliases still resolve alone.
-        result = lexstore.search_bm25_result(
+        result = _lexical_query(
             vault_root,
-            content_words(turn),
-            min(limit, len(by_path)),
-            scope="kb",
+            turn,
+            set(by_path),
+            limit=limit,
             freshness=freshness,
-            allowed_paths=set(by_path),
-            allow_delta=False,
-            min_matched_terms=2,
             recall_checkpoint=recall_checkpoint,
-            term_budget=lexical_term_budget(),
-            term_selection=selection,
+            selection=selection,
         )
         if not result.readiness.complete:
             return [], result.readiness.status
@@ -1011,6 +1004,86 @@ def lexical_evidence(
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical evidence unavailable", exc_info=True)
         return [], "unavailable"
+
+
+def _lexical_query(
+    vault_root: Path,
+    words: str,
+    paths: set[str],
+    *,
+    limit: int,
+    freshness=None,
+    recall_checkpoint=None,
+    selection: dict | None = None,
+    excluded_corroboration_stems: frozenset[str] | None = None,
+):
+    """The activation lexical query: `paths` ranked by the content words of
+    `words`, each hit matching at least two distinct content units.
+    Units containing `excluded_corroboration_stems` cannot corroborate."""
+    from . import lexstore
+
+    # A full-page match on the same single name word is not a second fact.
+    # Require two distinct content units (words or unspaced runs); exact
+    # aliases still resolve alone.
+    return lexstore.search_bm25_result(
+        vault_root,
+        content_words(words),
+        min(limit, len(paths)),
+        scope="kb",
+        freshness=freshness,
+        allowed_paths=paths,
+        allow_delta=False,
+        min_matched_terms=2,
+        recall_checkpoint=recall_checkpoint,
+        term_budget=lexical_term_budget(),
+        term_selection=selection,
+        excluded_corroboration_stems=excluded_corroboration_stems,
+    )
+
+
+def lexical_hits_without(
+    vault_root: Path,
+    turn: str,
+    pages: frozenset[str],
+    left_out: frozenset[str],
+    *,
+    freshness=None,
+    recall_checkpoint=None,
+) -> frozenset[str]:
+    """Which of `pages` the activation lexical query still reaches for `turn`
+    when the stems of the `left_out` words are not counted
+    (`working_set_resolve.candidates_for`'s dependence check).
+
+    Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
+    bring "hedge" back unless its stem is what is left out. The query keeps
+    the first pass's budget and unit grouping: a word or unspaced run counts
+    once, and a run needs a strict majority of its content stems. A unit
+    containing a left-out stem cannot corroborate.
+    Empty when the catalogue cannot answer: the anchors then stay leads, as
+    they do when nothing is asked.
+    """
+    from . import bm25 as bm25_module
+
+    turn = working_set_index.subject_text(turn)
+    dropped = frozenset(bm25_module.tokenize(" ".join(left_out), query=True))
+    if not pages:
+        return frozenset()
+    try:
+        result = _lexical_query(
+            vault_root,
+            turn,
+            set(pages),
+            limit=len(pages),
+            freshness=freshness,
+            recall_checkpoint=recall_checkpoint,
+            excluded_corroboration_stems=dropped,
+        )
+    except Exception:  # noqa: BLE001 - one optional evidence lane
+        log.debug("activation lexical dependence check unavailable", exc_info=True)
+        return frozenset()
+    if not result.readiness.complete:
+        return frozenset()
+    return frozenset(path for path, _score in result.value or ()) & pages
 
 
 #: The floor on how many scored hits the carry recall asks for. The real

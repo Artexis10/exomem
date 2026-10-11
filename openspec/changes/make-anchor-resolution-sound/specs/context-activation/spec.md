@@ -20,6 +20,12 @@ granted only when the anchor's own page is among the recall hits for the turn in
 own right; a page that recall admitted only by graph expansion from another hit, and a
 recall hit elsewhere in the anchor's link neighbourhood, SHALL NOT be contact. A
 project-key anchor has no page and SHALL never carry `retrieval`.
+A singleton partial-name contact and a lexical hit that needs that term SHALL count
+as one contact. When the term is no complete registered title, alias or file name of
+any visible anchor, the hit SHALL require two distinct remaining content units after
+excluding every counted unit that contains a stem of that term. The check SHALL retain
+the lexical budget, ranking query and strict-majority matching for unspaced runs.
+Casing SHALL NOT determine whether this dependence check applies.
 `graph_corroboration` SHALL be granted to a candidate only when it is typed-linked to
 another candidate that carries a worded contact, and SHALL count such an edge even when
 both candidates already appear in ordinary recall. The turn SHALL be
@@ -152,8 +158,60 @@ routing.
 - **THEN** it is `partial`
 
 #### Scenario: A rare word and the anchor's own page in recall resolve
-- **WHEN** an anchor carries `rare_term` and its own page is among the recall hits
+- **WHEN** an anchor carries `rare_term`, its own page is among the recall hits, and
+  the shared word is a complete registered title, alias or file name of a visible anchor
 - **THEN** it resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: A partial name and a hit that needs it stay one contact
+- **WHEN** a turn shares one rare term with an anchor's name, the term is no complete
+  registered title, alias or file name of any visible anchor, and its own lexical hit
+  lacks two matched units after excluding every unit that contains that term's stems
+- **THEN** the anchor carries `rare_term` without `retrieval` and stays `partial`,
+  regardless of casing, because that recall hit counts the same contact
+
+#### Scenario: A page that still matches the turn without the shared word keeps its hit
+- **WHEN** such an anchor's own page matches two distinct remaining content units under
+  the same lexical budget after excluding units containing stems of the shared term
+- **THEN** the anchor keeps `retrieval` and resolves with evidence `[rare_term, retrieval]`
+
+#### Scenario: Unspaced runs preserve independent corroboration
+- **WHEN** the remaining matches are two Japanese runs, or one Japanese run and one
+  spaced word, and each run matches a strict majority of its content stems
+- **THEN** the anchor keeps `retrieval`
+- **AND** one run alone counts only once, however many of its stems match
+
+#### Scenario: Repetitions and inflections cannot restore the excluded contact
+- **WHEN** the turn repeats or inflects the shared partial-name term beside one matched
+  content unit
+- **THEN** none of those forms supplies a second remaining unit and the anchor stays `partial`
+
+#### Scenario: Hyphenated content retains its lexical units
+- **WHEN** a turn says "kitchen-renovation budget" and the budget term is a singleton
+  partial-name contact, while the page also matches kitchen and renovation
+- **THEN** the two remaining lexical units preserve `retrieval`
+
+#### Scenario: Budget-dropped words cannot restore a dependent hit
+- **WHEN** a long turn reaches an anchor by one partial-name term and one other selected
+  unit, while another matching unit falls outside the lexical budget
+- **THEN** that dropped unit cannot corroborate and the anchor stays `partial`
+
+#### Scenario: Each anchor excludes only its own partial-name term
+- **WHEN** two anchors share different partial-name terms with the same turn
+- **THEN** each dependence check excludes only its own term's units
+- **AND** one anchor's term can still corroborate the other anchor's page
+
+#### Scenario: A first name that two people share stays a question
+- **WHEN** two people share a first name, one of them is stored under that name, and a
+  turn writes that name
+- **THEN** both people retain their name contact and the turn is `ambiguous`
+
+#### Scenario: A surname lead remains available to the conversation agent
+- **WHEN** a turn asks what a partial surname said about one topic and its lexical hit
+  depends on that surname, in any casing
+- **THEN** the person stays a visible `partial` lead with no served identity material
+- **AND** `activate_context(anchor=...)`, full-name `conversation.focus`, continuity or
+  prior naming can resolve that lead through the existing rules
+- **AND** those routes admit no page withheld from the caller
 
 #### Scenario: One common word is no contact
 - **WHEN** a turn shares exactly one term with an anchor and that term names more than

@@ -2380,6 +2380,7 @@ def search_bm25_result(
     min_matched_terms: int = 1,
     corroboration_tokens: list[str] | None = None,
     corroboration_groups: list[list[str]] | None = None,
+    excluded_corroboration_stems: frozenset[str] | None = None,
     recall_checkpoint: Any | None = None,
     exclude_navigation: bool = False,
     exclude_raw_material: bool = False,
@@ -2396,6 +2397,10 @@ def search_bm25_result(
     the predicate then answers the sharper question "did several of the
     turn's DISTINCTIVE words occur here" while the ranking still sees the
     whole query. `None` keeps the existing behaviour exactly.
+
+    `excluded_corroboration_stems` removes whole counted units containing any
+    of those stems after budget selection. Ranking still uses the same units;
+    the remaining units keep their grouping and run-match thresholds.
 
     `exclude_navigation` and `exclude_raw_material` leave those rows out
     inside the query (see `_excluded_rows_clause`), so `k` counts only rows a
@@ -2434,12 +2439,13 @@ def search_bm25_result(
         min_matched_terms=min_matched_terms,
         corroboration_tokens=corroboration_tokens,
         corroboration_groups=[group for group in groups if group],
+        excluded_corroboration_stems=excluded_corroboration_stems,
         recall_checkpoint=recall_checkpoint,
         term_units=_term_units(units),
         exclude_navigation=exclude_navigation,
         exclude_raw_material=exclude_raw_material,
         term_budget=term_budget,
-        query_units=units if term_budget is not None else None,
+        query_units=units if term_budget is not None or excluded_corroboration_stems else None,
         term_selection=term_selection,
     )
 
@@ -7162,6 +7168,7 @@ class LexicalStore:
         min_matched_terms: int = 1,
         corroboration_tokens: list[str] | None = None,
         corroboration_groups: list[list[str]] | None = None,
+        excluded_corroboration_stems: frozenset[str] | None = None,
         recall_checkpoint: Any | None = None,
         term_units: list[list[object]] | None = None,
         exclude_navigation: bool = False,
@@ -7181,6 +7188,7 @@ class LexicalStore:
                 term_units=term_units,
                 corroboration_tokens=corroboration_tokens,
                 corroboration_groups=corroboration_groups,
+                excluded_corroboration_stems=excluded_corroboration_stems,
                 exclude_navigation=exclude_navigation,
                 exclude_raw_material=exclude_raw_material,
                 term_budget=term_budget,
@@ -7529,6 +7537,7 @@ class LexicalStore:
         term_units: list[list[object]] | None = None,
         corroboration_tokens: list[str] | None = None,
         corroboration_groups: list[list[str]] | None = None,
+        excluded_corroboration_stems: frozenset[str] | None = None,
         exclude_navigation: bool = False,
         exclude_raw_material: bool = False,
         term_budget: QueryTermBudget | None = None,
@@ -7545,6 +7554,7 @@ class LexicalStore:
             if admitted_paths is not None
             else None
         )
+        counted = query_units
         if term_budget is not None and query_units is not None:
             from . import bm25 as bm25_module
 
@@ -7576,6 +7586,13 @@ class LexicalStore:
                 return []
             tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
             term_units = _term_units(counted)
+        if excluded_corroboration_stems and counted is not None:
+            # A unit sharing the partial name's stem is the same contact,
+            # even when other stems in that unit match the page.
+            term_units = _term_units([
+                unit for unit in counted
+                if excluded_corroboration_stems.isdisjoint(unit.stems)
+            ])
         # Tokens are runs of letters, numbers and marks: no quote or other FTS5
         # syntax can hide in them, but quote anyway; OR mirrors get_scores()
         # membership (any-term match).
