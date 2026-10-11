@@ -405,7 +405,8 @@ def test_a_live_write_before_the_first_plan_does_not_hide_the_imported_vault(
     assert set(active.file_mtimes()) == {
         f"{kb_dirname()}/{rel}" for rel in [*_PAGES, "Notes/live-write.md"]
     }
-    assert len(active.semantic_unit_parent_states()) == len(_PAGES)
+    # Every parsed parent has a coverage record, the live write's included.
+    assert set(active.semantic_unit_parent_states()) == set(active.file_mtimes())
     assert index_paths.active_sidecar_name(vault) == active.path.name
     encoded = _passages_by(log, NEW)
     assert all(encoded.count(text) == 1 for text in live)
@@ -679,7 +680,12 @@ def test_a_legacy_sidecar_with_one_stale_page_encodes_only_that_page(preseeded_w
     active = embeddings.get_embedding_index(vault)
     assert active.stored_chunks_for(page.rel_path) == (page_chunks, page.mtime)
     units = active.semantic_unit_parent_states()
-    assert page.rel_path not in units and len(units) == len(_PAGES) - 1
+    from exomem import semantic_index
+
+    # The page lost its one observation, so its coverage record holds no occurrence.
+    state = semantic_index.build_parent_index_state(vault, edited)
+    assert state is not None and not state.occurrences
+    assert units[page.rel_path] == expected_parent_state(state) and len(units) == len(_PAGES)
 
 
 def test_published_current_sidecar_plans_without_enumerating_pages(
