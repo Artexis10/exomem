@@ -140,7 +140,9 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         raise ValueError("export cell mismatch")
     annotation = observation.statefulset_hold_kind if observation.statefulset_exists else None
     if row.hold_kind not in (None, HOLD) or annotation not in (None, HOLD):
-        return None  # Another hold owns the volume; the export waits for it.
+        # Another hold owns the volume. Waiting prevents stopping a cell mid-backup or
+        # mid-upgrade; it costs the owner the length of that hold.
+        return None
     held = HOLD in (annotation, row.hold_kind)
     image = observation.statefulset_image or row.observed_image
     # C1 owns the deadline; an older hold belongs to a predecessor.
@@ -261,7 +263,9 @@ class ExportStorage:
             parts = [part for page in self.client.get_paginator("list_parts").paginate(
                 Bucket=self.bucket, Key=item.key, UploadId=item.upload_id) for part in page.get("Parts", [])]
         except ClientError as error:
-            # A missing upload cannot be re-verified, so it is never accepted.
+            # A missing upload cannot be re-verified, so it is never accepted: a forged
+            # completion is refused, and a controller crash between completion and its
+            # C6 write costs the owner one new export.
             if error.response["Error"]["Code"] == "NoSuchUpload":
                 raise ValueError("export upload is gone") from None
             raise

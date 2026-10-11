@@ -30,6 +30,7 @@ EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
 # A part PUT is idempotent, so a transient failure is retried this often.
 UPLOAD_ATTEMPTS = 3
+# A socket idle this long fails the part; a 64 MiB part has minutes on a slow link.
 UPLOAD_TIMEOUT_SECONDS = 300
 
 
@@ -81,6 +82,8 @@ def upload_parts(archive: Path, part_urls: list[str], part_bytes: int) -> list[s
 
     count = max(1, -(-archive.stat().st_size // part_bytes))
     if count > len(part_urls):
+        # Uploading what fits would complete a truncated archive. The report's
+        # fresh use sizes the parts of the owner's next request.
         raise ExportRefused(EXPORT_TOO_LARGE)
     with archive.open("rb") as stream:
         return [_put(url, stream.read(part_bytes)) for url in part_urls[:count]]
@@ -134,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         _check_cell(args.vault.parent, cell_id)
+        # A plain-HTTP part URL would carry the owner's plaintext archive unencrypted;
+        # refusing it costs an export only when the storage endpoint is misconfigured.
         if (str(uuid.UUID(args.export_id)) != args.export_id or args.part_bytes <= 0 or not args.part_urls
                 or not all(url.startswith("https://") for url in args.part_urls)):
             raise ExportRefused(EXPORT_FAILED)
