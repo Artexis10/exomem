@@ -1904,14 +1904,14 @@ def op_bootstrap(
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
                 "due_state": (
-                    "Advisory totals, category counts and up to five dated refs cover overdue authored items. Absent when none are due."
+                    "Counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated refs. Absent when none are due."
                     if profile == "compact" and not frozen_profile
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Judge relevance; mention at most one item per conversation in the user's language. "
+                    "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
-                    "Do not poll or interrupt. Dismissed/snoozed fingerprints wait for change. "
+                    "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
                     "Absent advice proves nothing; prefer silence."
                     if profile == "compact" and not frozen_profile
                     else
@@ -1923,8 +1923,8 @@ def op_bootstrap(
                 ),
                 "relevant_due_handling": (
                     "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
-                    "Audit beyond bounded context if needed. Resolve with unit fingerprint and parent hash, "
-                    "not due fingerprint; no extra triage. triage_memory dismisses presentation only. "
+                    "Audit wider if needed. Resolve with unit fingerprint and parent hash, "
+                    "not due fingerprint; no extra triage. triage_memory only dismisses advice. "
                     "Keep write authority."
                     if profile == "compact" and not frozen_profile
                     else
@@ -1946,7 +1946,7 @@ def op_bootstrap(
                     "MCP cannot observe tool-free turns"
                 ),
                 "due_state_authority": (
-                    "The runtime measures authored state; it never resolves, writes or changes retrieval order."
+                    "Advisory counts of authored state; runtime never resolves, writes or reorders retrieval."
                     if profile == "compact" and not frozen_profile
                     else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
                 ),
@@ -6523,21 +6523,20 @@ def op_activate_context(
 ) -> dict:
     """Compile authorized stored context for the user's current turn.
 
-    Use for initial context when live engagement policy calls for recall; bootstrap
-    reports unknown/changed settings. Pass the current turn verbatim to resolve
-    its subjects. For a known information gap, use ask_memory; read_memory opens
-    selected refs. Neither tool writes the user's answer.
-    Read-only: returns bounded recent_context, anchored units, provenance,
-    pointers and governed current_state. Abstains rather than guesses.
-    On ambiguous or unresolved candidates, choose a ref and retry with anchor.
+    Use when live policy calls for initial recall; bootstrap reports unknown/changed
+    settings. Pass the turn verbatim. For known gaps, ask_memory recalls and
+    read_memory opens selected refs; neither writes the user's answer.
+    Read-only: bounded recent_context, anchored units, provenance, pointers and
+    governed current_state. Abstains rather than guesses.
+    For ambiguous or unresolved candidates, choose a ref and retry with anchor.
     episode_due, upkeep and relevant_due_refs are advisory, never mutation authority.
-    Judge due relevance; raise at most one due item per maintained client conversation.
+    Raise at most one relevant due item per maintained client conversation.
     Details: bootstrap(profile="full") reference index, references/recall.md.
 
-    If needed, also pass `conversation`: optional `focus`, `refs`, `recent`
-    for subject or attachment cues. Returned `origin` labels their contribution,
-    not the user's words; activation reads no attachment. See the engagement reference.
-    If a hook missed the subject, retry with `conversation.focus`.
+    Use `conversation` only for subject or attachment cues: `focus`, `refs`, `recent`.
+    Returned `origin` labels their contribution, not the user's words.
+    Activation reads no attachment. If a hook missed the subject, retry with
+    `conversation.focus`. See the engagement reference.
 
     Args:
         turn: Current user message verbatim, not a rewritten query. Empty abstains.
