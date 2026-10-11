@@ -166,9 +166,19 @@ def sweep_stale_scratch_roots(
     return swept
 
 
+#: The variables that choose where Exomem keeps per-vault state. A tool run
+#: from an operator shell inherits the live service's, and a scratch vault's
+#: state written there lands beside the real vault's.
+_STATE_VARIABLES = ("EXOMEM_STATE_ROOT", "XDG_STATE_HOME")
+
+
 @contextmanager
 def scratch_root(prefix: str, *, keep: bool = False) -> Iterator[Path]:
     """A fresh scratch root for one run, swept in and removed on the way out.
+
+    The run's Exomem state lives inside the root as well: `EXOMEM_STATE_ROOT`
+    and `XDG_STATE_HOME` point into it until the block exits, then return to
+    what they were, so no scratch vault writes into the caller's state root.
 
     `keep=True` retains it for a post-mortem and says where it is, so a
     retained tree is a decision someone can see rather than a leak.
@@ -180,9 +190,17 @@ def scratch_root(prefix: str, *, keep: bool = False) -> Iterator[Path]:
             flush=True,
         )
     path = Path(tempfile.mkdtemp(prefix=prefix))
+    inherited = {name: os.environ.get(name) for name in _STATE_VARIABLES}
+    os.environ["EXOMEM_STATE_ROOT"] = str(path / "state")
+    os.environ["XDG_STATE_HOME"] = str(path / "xdg-state")
     try:
         yield path
     finally:
+        for name, value in inherited.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         if keep:
             print(f"scratch: kept working directory {path}", flush=True)
         else:

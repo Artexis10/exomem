@@ -323,6 +323,10 @@ class AssertionContext:
     #: Neither is delivered to an actor or inferred from its answer text.
     utility_world_snapshot: Mapping[str, Any] | None = None
     utility_oracle: Any | None = None
+    #: f33: the final answer of the fresh owner-anchored session, captured from
+    #: the native client stream. Read only for the key's exact value, through
+    #: the single matching rule; ``None`` means the capture is missing.
+    fresh_answer: str | None = None
 
     @property
     def absence_surfaces(self) -> tuple[str, ...]:
@@ -4195,5 +4199,272 @@ def _collection_replay_extras(ctx: AssertionContext, name: str) -> AssertionResu
         name,
         "fail" if extras else "pass",
         "; ".join(extras) or "0 extra structured writes",
+        ctx.subject,
+    )
+
+
+# --------------------------------------------------------------------------
+# Sequence 7: referent capture (f33)
+# --------------------------------------------------------------------------
+
+
+def _referent_case(
+    ctx: AssertionContext, name: str, polarity: str
+) -> tuple[Mapping[str, Any] | None, AssertionResult | None]:
+    """The digest-verified key entry for ``ctx.subject``, or the blocked result."""
+
+    from .journeys.referent_capture import ReferentCaseError, case_key
+
+    try:
+        case = case_key(ctx.subject)
+    except ReferentCaseError as error:
+        return None, _result(name, "blocked", str(error), ctx.subject)
+    if case["polarity"] != polarity:
+        return None, _result(
+            name,
+            "blocked",
+            f"{ctx.subject} is a {case['polarity']} case; {name} scores {polarity} cases",
+            ctx.subject,
+        )
+    return case, None
+
+
+def _names_referent(item: StateItem, name: str) -> bool:
+    stem = (item.locator or item.id).rsplit("/", 1)[-1].removesuffix(".md")
+    return states_value(name, item.title) or states_value(name, stem)
+
+
+def _referent_entities(
+    snapshot: EpistemicStateSnapshot, case: Mapping[str, Any]
+) -> tuple[StateItem, ...]:
+    """Entity pages that are the case's referent: the seeded page, or one naming it."""
+
+    seeded = case["referent"].get("seeded_ref")
+    name = case["referent"]["name"]
+    return tuple(
+        item
+        for item in snapshot.items
+        if item.raw.get("type", "").strip().casefold() == "entity"
+        and (item.id == seeded or _names_referent(item, name))
+    )
+
+
+def _link_refers(endpoint: str, item_id: str) -> bool:
+    """A relation endpoint names ``item_id`` by full id or by a vault-relative tail."""
+
+    return endpoint == item_id or item_id.endswith("/" + endpoint)
+
+
+def _lineage(item: StateItem) -> tuple[tuple[str, ...], frozenset[str]] | None:
+    if "entity_type_lineage" not in item.raw:
+        return None
+    lineage = tuple(part for part in item.raw["entity_type_lineage"].split(",") if part)
+    core = frozenset(part for part in item.raw.get("entity_type_core", "").split(",") if part)
+    return lineage, core
+
+
+def _type_fits(item: StateItem, rule: Mapping[str, Any]) -> bool:
+    """The key's accepted types, or a vault-declared type when the key allows one.
+
+    The key, not this code, names the accepted types. An unregistered type has
+    an empty lineage and never fits: the vault's registry is the authority.
+    """
+
+    resolved = _lineage(item)
+    if resolved is None:
+        return False
+    lineage, core = resolved
+    if set(lineage) & set(rule["accepted"]):
+        return True
+    return bool(rule["vault_declared"] and lineage and not core)
+
+
+def _unprojected_lineage(
+    name: str, ctx: AssertionContext, entities: tuple[StateItem, ...]
+) -> AssertionResult | None:
+    if any(_lineage(item) is None for item in entities):
+        return _result(
+            name,
+            "unsupported",
+            "entity type lineage was not projected; the f33 snapshot needs the "
+            "entity-graph projection",
+            ctx.subject,
+        )
+    return None
+
+
+def referent_entity_typed(ctx: AssertionContext) -> AssertionResult:
+    """f33: the referent is an entity page whose type fits the answer key."""
+
+    name = "referent_entity_typed"
+    case, blocked = _referent_case(ctx, name, "positive")
+    if case is None:
+        return blocked  # type: ignore[return-value]
+    referent = case["referent"]["name"]
+    entities = _referent_entities(ctx.snapshot, case)
+    if not entities:
+        return _result(name, "fail", f"no entity page is the referent {referent}", ctx.subject)
+    unprojected = _unprojected_lineage(name, ctx, entities)
+    if unprojected is not None:
+        return unprojected
+    fitting = [item.id for item in entities if _type_fits(item, case["entity_type"])]
+    if fitting:
+        return _result(name, "pass", f"typed referent entity: {_listed(fitting)}", ctx.subject)
+    seen = [f"{item.id} ({item.raw.get('entity_type') or 'untyped'})" for item in entities]
+    return _result(
+        name, "fail", f"referent entity type does not fit the key: {_listed(seen)}", ctx.subject
+    )
+
+
+def referent_key_edge_present(ctx: AssertionContext) -> AssertionResult:
+    """f33: a typed edge of a key family joins the person and the referent."""
+
+    name = "referent_key_edge_present"
+    case, blocked = _referent_case(ctx, name, "positive")
+    if case is None:
+        return blocked  # type: ignore[return-value]
+    entities = _referent_entities(ctx.snapshot, case)
+    if not entities:
+        return _result(name, "fail", "no referent entity, so no key edge", ctx.subject)
+    unprojected = _unprojected_lineage(name, ctx, entities)
+    if unprojected is not None:
+        return unprojected
+    owner = case["owner"]["ref"]
+    families = frozenset(case["edge_families"])
+    # Either direction: the family is what the key measures, not which page
+    # carries the bullet.
+    joining = [
+        edge
+        for edge in ctx.snapshot.typed_relations
+        if any(
+            (_link_refers(edge.subject, owner) and _link_refers(edge.object, entity.id))
+            or (_link_refers(edge.subject, entity.id) and _link_refers(edge.object, owner))
+            for entity in entities
+        )
+    ]
+    keyed = [edge for edge in joining if edge.family in families]
+    if keyed:
+        edge = keyed[0]
+        return _result(
+            name,
+            "pass",
+            f"key edge {edge.subject} {edge.relation} {edge.object} ({edge.family})",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "fail",
+        f"no edge of family {_listed(families)} joins {owner} and the referent; joining "
+        "edges: "
+        + (
+            _listed(f"{e.relation} ({e.family or 'unregistered'})" for e in joining)
+            or "none"
+        ),
+        ctx.subject,
+    )
+
+
+def referent_used_in_fresh_session(ctx: AssertionContext) -> AssertionResult:
+    """f33: the fresh session's packet serves the referent and the answer uses it.
+
+    Deterministic where it can be: a packet that does not serve the referent's
+    ref fails, and a served ref with the key's exact value in the answer passes.
+    The one remaining case is ``unsupported`` and goes to the blind judge
+    fallback, which never overturns either deterministic result.
+    """
+
+    name = "referent_used_in_fresh_session"
+    case, blocked = _referent_case(ctx, name, "positive")
+    if case is None:
+        return blocked  # type: ignore[return-value]
+    if ctx.served_items is None or ctx.fresh_answer is None:
+        return _result(
+            name,
+            "blocked",
+            "the fresh session's activation packet or answer was not captured",
+            ctx.subject,
+        )
+    entities = _referent_entities(ctx.snapshot, case)
+    served = set(ctx.served_items)
+    refs = [
+        item.id
+        for item in entities
+        if served & {item.id, item.locator or "", item.raw.get("exomem_id", "")} - {""}
+    ]
+    if not refs:
+        return _result(
+            name, "fail", "the activation packet does not serve the referent's ref", ctx.subject
+        )
+    if states_value(case["answer_value"], ctx.fresh_answer):
+        return _result(
+            name, "pass", f"packet served {refs[0]}; the answer states the key value", ctx.subject
+        )
+    return _result(
+        name,
+        "unsupported",
+        f"judge_fallback: packet served {refs[0]}, but the answer lacks the key's exact "
+        "value; only the blind judge fallback decides this case",
+        ctx.subject,
+    )
+
+
+@claims_absence()
+def twin_left_no_referent(ctx: AssertionContext) -> AssertionResult:
+    """f33 twin: the run left no entity, edge or notice for the twin's name.
+
+    Compared with this arm's seeded snapshot, so a seeded entity the twin only
+    mentions in passing is not counted against it. Composes the anti-vacuity
+    meta-predicate, so an unprojected notice surface blocks rather than passes.
+    """
+
+    name = "twin_left_no_referent"
+    case, blocked = _referent_case(ctx, name, "twin")
+    if case is None:
+        return blocked  # type: ignore[return-value]
+    if ctx.prior is None or ctx.prior.phase != ctx.snapshot.phase:
+        return _result(name, "blocked", "requires this arm's seeded snapshot", ctx.subject)
+    referent = case["referent"]["name"]
+    meta = signal_absence_checked_across_all_surfaces(
+        ctx.replace(subject=referent), on_behalf_of=name
+    )
+    if meta.outcome != "pass":
+        return meta.model_copy(update={"name": name, "subject": ctx.subject})
+    prior_ids = {item.id for item in ctx.prior.items}
+    entities = _referent_entities(ctx.snapshot, case)
+    offenders = [f"entity {item.id}" for item in entities if item.id not in prior_ids]
+    # Every edge counts, typed or neutral: a generic `relates_to` to the twin's
+    # name is as much an edge as a typed one.
+    def edges(snapshot: EpistemicStateSnapshot) -> set[tuple[str, str, str]]:
+        return {(edge.subject, edge.relation, edge.object) for edge in snapshot.typed_relations} | {
+            (edge.subject, edge.predicate, edge.object) for edge in snapshot.relations
+        }
+
+    for subject, relation, target in sorted(edges(ctx.snapshot) - edges(ctx.prior)):
+        ends = (subject, target)
+        if any(_link_refers(end, item.id) for end in ends for item in entities) or any(
+            states_value(referent, end.rsplit("/", 1)[-1]) for end in ends
+        ):
+            offenders.append(f"edge {subject} {relation} {target}")
+    vocabulary = ABSENCE_CLAIM_CLASSES[name]
+    prior_signals = {(item.id, _signal_targets(item)) for item in ctx.prior.items}
+    for item in ctx.snapshot.items:
+        if _raw_states(item, SIGNAL_CLASS_RAW_KEYS, vocabulary) is None:
+            continue
+        targets = _signal_targets(item)
+        if (item.id, targets) in prior_signals:
+            continue
+        if any(
+            states_value(referent, target) or any(_link_refers(target, e.id) for e in entities)
+            for target in targets
+        ):
+            offenders.append(f"notice {item.id}")
+    if offenders:
+        return _result(
+            name, "fail", f"the twin left {_listed(offenders)} for {referent}", ctx.subject
+        )
+    return _result(
+        name,
+        "pass",
+        f"no new entity, edge or notice for {referent}; {meta.evidence}",
         ctx.subject,
     )

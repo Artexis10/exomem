@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -216,3 +217,16 @@ def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
     with pytest.raises(SystemExit):
         main(["ask_memory", "--help"])
     assert "Semantic authoring rules" not in capsys.readouterr().out
+
+
+def test_a_schema_capture_leaves_the_callers_state_root_alone() -> None:
+    """Run from an operator shell, the inherited state root is the live
+    service's, and every capture left a `schema_vault-<digest>` directory in it."""
+    caller_root = Path(os.environ["EXOMEM_STATE_ROOT"])
+
+    def entries() -> list[str]:
+        return sorted(path.name for path in caller_root.iterdir()) if caller_root.exists() else []
+
+    before = entries()
+    assert _measure_module().wire_tools()
+    assert entries() == before

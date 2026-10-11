@@ -190,7 +190,17 @@ def test_local_refusal_rejects_transit_browsers_and_non_literal_hosts(headers, r
 
 @pytest.mark.parametrize("host", [b"127.0.0.1", b"127.0.0.1:8764", b"[::1]", b"[::1]:8764"])
 @pytest.mark.parametrize(
-    "path", ["/mcp", "/api/ask_memory", "/api/openapi.json", "/upload", "/health", "/health/ready"]
+    "path",
+    [
+        "/mcp",
+        "/api/ask_memory",
+        "/api/openapi.json",
+        "/upload",
+        "/upload/sessions",
+        "/upload/sessions/0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "/health",
+        "/health/ready",
+    ],
 )
 def test_local_refusal_admits_the_allowlist_on_literal_loopback(host, path) -> None:
     assert local_refusal(_scope(path=path, headers=[(b"host", host)])) is None
@@ -211,6 +221,10 @@ def test_local_refusal_admits_the_allowlist_on_literal_loopback(host, path) -> N
         b"/api/",
         b"/healthz",
         b"/uploads",
+        b"/upload/held",
+        b"/upload/session",
+        b"/upload/sessions/",
+        b"/upload/sessions/../../control/promote",
         b"/api/../control/promote",
         b"/api/./ask_memory",
         b"/api//ask_memory",

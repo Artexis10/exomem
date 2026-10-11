@@ -283,7 +283,6 @@ def run(
     common: bool = False,
 ) -> dict:
     with scratch_root.scratch_root("exomem-activation-lexical-") as base:
-        os.environ["EXOMEM_STATE_ROOT"] = str(base / "state")
         os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(base / "state" / "writer-lease")
         os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
         from exomem import find as find_module

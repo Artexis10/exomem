@@ -975,7 +975,7 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
     assert _run(vault)[0].outcome == "published"
 
     [advisory] = _resolve(vault, ref)["advisories"]
-    before = _carrier_bytes(vault)
+    before = json.loads(_carrier_bytes(vault))
     decision = corpus_aware.triage_write_advisory(
         vault,
         ref=advisory["ref"],
@@ -986,7 +986,14 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
 
     assert decision["state"] == "dismissed"
     assert decision["ref"] == advisory["ref"]
-    assert _carrier_bytes(vault) == before
+    # The dispositions view's effect block counts the owner's dismissal by
+    # contract; every other carrier byte stays as it was.
+    after = json.loads(_carrier_bytes(vault))
+    counted = after["dispositions"]["effect"]["families"]["near-duplicate"]
+    held = before["dispositions"]["effect"]["families"]["near-duplicate"]
+    assert counted["dismissed"] == held["dismissed"] + 1
+    counted["dismissed"] = held["dismissed"]
+    assert after == before
 
     # The existing suppression still consumes that exact decision.
     suppressed = corpus_aware.emit_write_advisory_groups(

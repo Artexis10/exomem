@@ -1,0 +1,242 @@
+{
+  "cases": [
+    {
+      "answer_value": "41",
+      "case_id": "f33-pet-owner-v1",
+      "category": "pet_and_owner",
+      "edge_families": [
+        "ownership"
+      ],
+      "entity_type": {
+        "accepted": [],
+        "vault_declared": true
+      },
+      "owner": {
+        "name": "Lotte Brandvold",
+        "ref": "Knowledge Base/Entities/People/Lotte Brandvold"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Bartholomew",
+        "seeded_ref": null
+      },
+      "twin": "f33-pet-owner-twin-v1"
+    },
+    {
+      "case_id": "f33-pet-owner-twin-v1",
+      "category": "pet_and_owner",
+      "owner": {
+        "name": "Lotte Brandvold",
+        "ref": "Knowledge Base/Entities/People/Lotte Brandvold"
+      },
+      "polarity": "twin",
+      "positive": "f33-pet-owner-v1",
+      "referent": {
+        "name": "Bartholomew",
+        "seeded_ref": null
+      }
+    },
+    {
+      "answer_value": "12 February",
+      "case_id": "f33-person-kin-v1",
+      "category": "person_and_kin",
+      "edge_families": [
+        "kinship"
+      ],
+      "entity_type": {
+        "accepted": [
+          "person"
+        ],
+        "vault_declared": false
+      },
+      "owner": {
+        "name": "Casimir Oduya",
+        "ref": "Knowledge Base/Entities/People/Casimir Oduya"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Ingeborg",
+        "seeded_ref": null
+      },
+      "twin": "f33-person-kin-twin-v1"
+    },
+    {
+      "case_id": "f33-person-kin-twin-v1",
+      "category": "person_and_kin",
+      "owner": {
+        "name": "Casimir Oduya",
+        "ref": "Knowledge Base/Entities/People/Casimir Oduya"
+      },
+      "polarity": "twin",
+      "positive": "f33-person-kin-v1",
+      "referent": {
+        "name": "Ingeborg",
+        "seeded_ref": null
+      }
+    },
+    {
+      "answer_value": "WF-2210",
+      "case_id": "f33-equipment-consumable-v1",
+      "category": "equipment_and_consumable",
+      "edge_families": [
+        "ownership",
+        "use",
+        "operation"
+      ],
+      "entity_type": {
+        "accepted": [],
+        "vault_declared": true
+      },
+      "owner": {
+        "name": "Henrike Abernathy",
+        "ref": "Knowledge Base/Entities/People/Henrike Abernathy"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Corvane Duo",
+        "seeded_ref": null
+      },
+      "twin": "f33-equipment-consumable-twin-v1"
+    },
+    {
+      "case_id": "f33-equipment-consumable-twin-v1",
+      "category": "equipment_and_consumable",
+      "owner": {
+        "name": "Henrike Abernathy",
+        "ref": "Knowledge Base/Entities/People/Henrike Abernathy"
+      },
+      "polarity": "twin",
+      "positive": "f33-equipment-consumable-v1",
+      "referent": {
+        "name": "Corvane Duo",
+        "seeded_ref": null
+      }
+    },
+    {
+      "answer_value": "25",
+      "case_id": "f33-supplier-operator-v1",
+      "category": "supplier_and_operator",
+      "edge_families": [
+        "supply"
+      ],
+      "entity_type": {
+        "accepted": [
+          "organization"
+        ],
+        "vault_declared": false
+      },
+      "owner": {
+        "name": "Wendell Marsh",
+        "ref": "Knowledge Base/Entities/People/Wendell Marsh"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Thistlecombe Mill",
+        "seeded_ref": null
+      },
+      "twin": "f33-supplier-operator-twin-v1"
+    },
+    {
+      "case_id": "f33-supplier-operator-twin-v1",
+      "category": "supplier_and_operator",
+      "owner": {
+        "name": "Wendell Marsh",
+        "ref": "Knowledge Base/Entities/People/Wendell Marsh"
+      },
+      "polarity": "twin",
+      "positive": "f33-supplier-operator-v1",
+      "referent": {
+        "name": "Thistlecombe Mill",
+        "seeded_ref": null
+      }
+    },
+    {
+      "answer_value": "4471",
+      "case_id": "f33-community-membership-v1",
+      "category": "community_and_membership",
+      "edge_families": [
+        "membership",
+        "affiliation"
+      ],
+      "entity_type": {
+        "accepted": [
+          "organization"
+        ],
+        "vault_declared": true
+      },
+      "owner": {
+        "name": "Rosalind Quaye",
+        "ref": "Knowledge Base/Entities/People/Rosalind Quaye"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Wrenfield Night Swimmers",
+        "seeded_ref": null
+      },
+      "twin": "f33-community-membership-twin-v1"
+    },
+    {
+      "case_id": "f33-community-membership-twin-v1",
+      "category": "community_and_membership",
+      "owner": {
+        "name": "Rosalind Quaye",
+        "ref": "Knowledge Base/Entities/People/Rosalind Quaye"
+      },
+      "polarity": "twin",
+      "positive": "f33-community-membership-v1",
+      "referent": {
+        "name": "Wrenfield Night Swimmers",
+        "seeded_ref": null
+      }
+    },
+    {
+      "answer_value": "1974",
+      "case_id": "f33-sparse-existing-v1",
+      "category": "sparse_existing_entity",
+      "edge_families": [
+        "operation",
+        "ownership"
+      ],
+      "entity_type": {
+        "accepted": [
+          "organization"
+        ],
+        "vault_declared": false
+      },
+      "owner": {
+        "name": "Tobias Hallworth",
+        "ref": "Knowledge Base/Entities/People/Tobias Hallworth"
+      },
+      "polarity": "positive",
+      "question_ref": "q01",
+      "referent": {
+        "name": "Quillfeather Bindery",
+        "seeded_ref": "Knowledge Base/Entities/Organizations/Quillfeather Bindery"
+      },
+      "twin": "f33-sparse-existing-twin-v1"
+    },
+    {
+      "case_id": "f33-sparse-existing-twin-v1",
+      "category": "sparse_existing_entity",
+      "owner": {
+        "name": "Tobias Hallworth",
+        "ref": "Knowledge Base/Entities/People/Tobias Hallworth"
+      },
+      "polarity": "twin",
+      "positive": "f33-sparse-existing-v1",
+      "referent": {
+        "name": "Quillfeather Bindery",
+        "seeded_ref": "Knowledge Base/Entities/Organizations/Quillfeather Bindery"
+      }
+    }
+  ],
+  "corpus_id": "f33-referent-capture-v1",
+  "family_id": "f33",
+  "schema_version": 1,
+  "seed": "benchmarks/epistemic/fixtures/sequence7/f33-seed-vault.v1.json"
+}

@@ -666,6 +666,7 @@ dependencies = [
     { name = "rank-bm25" },
     { name = "snowballstemmer" },
     { name = "sqlalchemy" },
+    { name = "tzdata" },
     { name = "watchdog" },
 ]
 
@@ -782,6 +783,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'nli'", specifier = ">=2.12" },
     { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
+    { name = "tzdata", specifier = ">=2026.2" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
 provides-extras = ["embeddings", "embeddings-onnx", "nli", "media-cpu", "media", "media-mlx", "diarization", "vision", "tui"]

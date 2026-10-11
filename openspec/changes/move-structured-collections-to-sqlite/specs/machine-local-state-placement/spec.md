@@ -15,7 +15,9 @@ It SHALL live under the same state root and resolve through the same seam, so
 no file-sync agent sees a live database. Unlike `external-state`, it is
 canonical: index maintenance and rebuild SHALL NEVER delete, rebuild or reset
 it, state migration SHALL move it only losslessly, and backups and
-portability exports SHALL include a consistent snapshot of it. Its in-vault
+portability exports SHALL include a consistent snapshot of it,
+except the rows of derived import collections, which rebuild from their
+preserved sources. Its in-vault
 replica SHALL be a single-file consistent snapshot, published by atomic
 rename and never written in place. It SHALL be classified `vault-canonical`
 and SHALL NOT count as persistent machine-local state under the vault. The

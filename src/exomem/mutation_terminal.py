@@ -1137,8 +1137,9 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                 break
             category = row.get("category")
             ref = row.get("ref")
+            fingerprint = row.get("fingerprint")
             due_since = row.get("due_since")
-            if not _due_state_token(category):
+            if not _due_state_token(category) or not _due_state_token(fingerprint):
                 break
             if (
                 not isinstance(ref, str)
@@ -1148,7 +1149,14 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                 break
             if not _iso_date(due_since):
                 break
-            rows.append({"category": category, "ref": ref, "due_since": due_since})
+            rows.append(
+                {
+                    "category": category,
+                    "ref": ref,
+                    "fingerprint": fingerprint,
+                    "due_since": due_since,
+                }
+            )
         else:
             hint = value.get("_vault")
             return (
@@ -2419,7 +2427,9 @@ IMPORT_JOB_OPERATIONS = frozenset({
 })
 #: Content-free control transitions a collection-store txn may record. Each changes no
 #: item, manifest or container hash, and its receipt carries counts and ids only.
-CONTROL_OPERATIONS = frozenset({"store_reconcile", *IMPORT_JOB_OPERATIONS})
+#: ``import_member`` records one export member an import completed (its import log row).
+# nosemgrep: ep-word-set -- the store's closed set of control operations, each implemented here.
+CONTROL_OPERATIONS = frozenset({"store_reconcile", "import_member", *IMPORT_JOB_OPERATIONS})
 CONTROL_RECEIPT_MARKER = "exomem.collection-control"
 #: Identifiers one control receipt may carry; a larger transition is recorded in parts.
 CONTROL_RECEIPT_MAX_IDS = 4096
@@ -2438,6 +2448,8 @@ CONTROL_ID_PATTERNS = {
     "skipped_collection_absent": _ITEM_REF,
     "skipped_no_committed_row": _ITEM_REF,
     "import_job_ids": re.compile(r"[0-9a-f]{32}"),
+    "member_sha256": _HEX64,
+    "rows_digest": _HEX64,
 }
 
 

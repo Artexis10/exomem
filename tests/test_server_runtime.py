@@ -1026,6 +1026,56 @@ def test_dreamer_starts_last_and_only_when_enabled(
         readiness.reset()
 
 
+def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The managed service is upgraded in place and rarely restarted. A worker
+    that only the boot-time setting could start never started at all: the
+    owner's `exomem dreamer on` changed nothing, and no tick ever created the
+    sidecar."""
+    import time
+
+    import dreamer_fixture as fx
+
+    from exomem import dreamer, dreamer_policy, dreamer_store, freshness, mode
+
+    vault = fx.build(tmp_path)
+    monkeypatch.delenv("EXOMEM_DREAMER", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MODE_WATCH", raising=False)
+    monkeypatch.setattr(dreamer_policy, "IDLE_SECONDS", 0.0)
+    monkeypatch.setattr(dreamer_policy, "settle_seconds", lambda _last: 0.0)
+    _quiet_starters(monkeypatch, [])
+    # `fx.build` seeded freshness as the watcher does; a stand-in that says so
+    # keeps activation from revoking it.
+    watcher = SimpleNamespace(wait_until_seeded=lambda timeout: True, stop=lambda: None)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: watcher)
+    # The compute runtime's own config poll, at a test interval.
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root: mode.start_config_watch(interval=0.05),
+    )
+    try:
+        activation = server_runtime.LocalRuntimeActivation(vault)
+        activation.start()
+        activation._thread.join(5)
+        assert not dreamer.running()
+        assert not dreamer_store.sidecar_path(vault).exists()
+
+        dreamer.write_setting("on")
+        deadline = time.monotonic() + 15
+        while dreamer.status()["ticks"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert dreamer.status()["ticks"] >= 1
+        assert dreamer_store.sidecar_path(vault).is_file()
+    finally:
+        mode.stop_config_watch()
+        dreamer.reset_for_tests()
+        freshness.clear()
+        readiness.reset()
+
+
 def test_standby_defers_the_dreamer_until_release(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

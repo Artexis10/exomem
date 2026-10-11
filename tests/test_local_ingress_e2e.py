@@ -10,6 +10,9 @@ All tokens and ids are synthetic.
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import hashlib
 import os
 import re
 import signal
@@ -75,6 +78,7 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
             # The public cap stands for the proxy edge's; loopback never crosses it.
             "EXOMEM_UPLOAD_MAX_BYTES": "64",
             "EXOMEM_LOCAL_UPLOAD_MAX_BYTES": "4096",
+            "EXOMEM_UPLOAD_SESSION_MAX_BYTES": "65536",
             "EXOMEM_LOG_DIR": str(tmp_path / "logs"),
             "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "leases"),
             INGRESS_KEY_ENV: KEY,
@@ -83,26 +87,40 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
     for name in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_WRITER_LEASE_URL"):
         env.pop(name, None)
     log = (tmp_path / "worker.log").open("w")
-    worker = subprocess.Popen(
-        [
-            sys.executable,
-            "-I",
-            "-m",
-            "exomem.service_manager",
-            "worker",
-            "--socket",
-            str(socket_path),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8765",
-        ],
-        env=env,
-        stdout=log,
-        stderr=log,
-        start_new_session=True,
-    )
+
+    def start_worker() -> subprocess.Popen:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "exomem.service_manager",
+                "worker",
+                "--socket",
+                str(socket_path),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8765",
+            ],
+            env=env,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+
+    def stop(worker: subprocess.Popen) -> None:
+        if worker.poll() is None:
+            worker.terminate()
+            try:
+                worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(worker.pid, signal.SIGKILL)
+                worker.wait()
+
+    workers = [start_worker()]
     identity = SessionIdentity(github_user_id=OWNER_ID, github_login="fixture-owner")
+    session_secrets: list[str] = []
 
     async def scenario() -> None:
         local_authority = SessionAuthority.local(
@@ -129,16 +147,20 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
             trust_env=False,
             timeout=None,
         ) as upstream:
-            async with asyncio.timeout(60):
-                while True:
-                    if worker.poll() is not None:
-                        pytest.fail((tmp_path / "worker.log").read_text()[-5000:])
-                    try:
-                        if (await upstream.get("/health", timeout=0.5)).status_code == 200:
-                            break
-                    except httpx.HTTPError:
-                        pass
-                    await asyncio.sleep(0.05)
+
+            async def healthy() -> None:
+                async with asyncio.timeout(60):
+                    while True:
+                        if workers[-1].poll() is not None:
+                            pytest.fail((tmp_path / "worker.log").read_text()[-5000:])
+                        try:
+                            if (await upstream.get("/health", timeout=0.5)).status_code == 200:
+                                return
+                        except httpx.HTTPError:
+                            pass
+                        await asyncio.sleep(0.05)
+
+            await healthy()
             ingress = ServiceIngress(ingress_key=KEY)
             ingress.resume(upstream)
             async with (
@@ -252,6 +274,96 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
                 )
                 assert public_upload.status_code == 413, public_upload.text
 
+                # R8: a file over both single-request caps goes in parts, and a
+                # dropped part resumes at the offset the server reports.
+                async def open_session(
+                    client, credential: str, filename: str, data: bytes
+                ) -> tuple[str, dict]:
+                    metadata = {
+                        "filename": filename,
+                        "scope": "Local",
+                        "category": "Sessions",
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                    created = await client.post(
+                        "/upload/sessions",
+                        headers={
+                            "authorization": f"Bearer {credential}",
+                            "tus-resumable": "1.0.0",
+                            "upload-length": str(len(data)),
+                            "upload-metadata": ",".join(
+                                f"{k} {base64.b64encode(v.encode()).decode()}" for k, v in metadata.items()
+                            ),
+                        },
+                    )
+                    assert created.status_code == 201, created.text
+                    session_secrets.append(created.headers["exomem-upload-secret"])
+                    return created.headers["location"], {
+                        "authorization": f"Bearer {credential}",
+                        "tus-resumable": "1.0.0",
+                        "exomem-upload-secret": created.headers["exomem-upload-secret"],
+                    }
+
+                async def send(client, location: str, headers: dict, offset: int, body) -> httpx.Response:
+                    return await client.patch(
+                        location,
+                        headers={
+                            **headers,
+                            "upload-offset": str(offset),
+                            "content-type": "application/offset+octet-stream",
+                        },
+                        content=body,
+                    )
+
+                async def committed(client, location: str, headers: dict) -> dict:
+                    async with asyncio.timeout(30):
+                        while True:
+                            state = (await client.get(location, headers=headers)).json()
+                            if state["state"] in ("committed", "failed"):
+                                assert state["state"] == "committed", state
+                                return state["receipt"]
+                            await asyncio.sleep(0.05)
+
+                export = bytes((n * 7) % 251 for n in range(12_000))
+                location, headers = await open_session(local, local_token, "samples.bin", export)
+                first = await send(local, location, headers, 0, export[:4000])
+                assert first.status_code == 204, first.text
+                assert first.headers["upload-offset"] == "4000"
+
+                async def dropped():
+                    yield export[4000:7000]
+                    raise ConnectionResetError("the client's connection dropped")
+
+                with contextlib.suppress(httpx.HTTPError, ConnectionError):
+                    await send(local, location, headers, 4000, dropped())
+                # The service restarts before the client returns: the new worker
+                # re-reads the session and re-hashes the bytes it holds.
+                ingress.pause()
+                stop(workers[-1])
+                workers.append(start_worker())
+                await healthy()
+                ingress.resume()
+                held = await local.head(location, headers=headers)
+                assert held.status_code == 200, held.text
+                offset = int(held.headers["upload-offset"])
+                assert 4000 <= offset <= 7000
+                rest = await send(local, location, headers, offset, export[offset:])
+                assert rest.status_code == 204, rest.text
+                receipt = await committed(local, location, headers)
+                assert receipt["hash"] == hashlib.sha256(export).hexdigest()
+                assert (vault / receipt["path"]).read_bytes() == export
+
+                # The public listener takes the same session with its upload token.
+                small = b"public session bytes " * 10
+                location, headers = await open_session(
+                    public, "e2e-static-upload-token", "public-samples.bin", small
+                )
+                for start in range(0, len(small), 60):
+                    part = await send(public, location, headers, start, small[start : start + 60])
+                    assert part.status_code == 204, part.text
+                receipt = await committed(public, location, headers)
+                assert (vault / receipt["path"]).read_bytes() == small
+
                 # R5: revocation closes the local door on the next request.
                 await public_authority.tombstone(
                     local_record.session_id, reason="operator-revocation"
@@ -263,19 +375,15 @@ def test_threat_scenarios_hold_through_a_real_worker_behind_the_real_ingress(
     try:
         asyncio.run(scenario())
     finally:
-        if worker.poll() is None:
-            worker.terminate()
-            try:
-                worker.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(worker.pid, signal.SIGKILL)
-                worker.wait()
+        for worker in workers:
+            stop(worker)
         log.close()
     logs = [(tmp_path / "worker.log").read_text()] + [
         path.read_text(errors="replace")
         for path in (tmp_path / "logs").rglob("*")
         if path.is_file()
     ]
-    for secret in (KEY, "e2e-owner-rest-key", "exo_s1."):
+    assert len(session_secrets) == 2
+    for secret in (KEY, "e2e-owner-rest-key", "exo_s1.", *session_secrets):
         assert all(secret not in text for text in logs)
     assert any(re.search(r'ingress"?\s*[:=]\s*"?local', text) for text in logs)

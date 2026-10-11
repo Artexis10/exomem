@@ -1,0 +1,82 @@
+scenario_id: f33-sparse-existing-v1
+family_id: f33
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-seed
+  - op: agent_turn
+    ref: t01
+    detail: Tobias Hallworth is taking over Quillfeather Bindery from its founder, who retires at the
+      end of the month.
+  - op: agent_turn
+    ref: t02
+    detail: Quillfeather Bindery was founded in 1974 and has stayed in the same workshop ever since.
+  - op: agent_turn
+    ref: t03
+    detail: From next month Tobias will run Quillfeather Bindery day to day and take the bookbinding commissions
+      himself.
+  - op: snapshot
+    ref: s-hookless-end
+  - op: fresh_agent
+    ref: q01
+    detail: In which year was the bindery that Tobias Hallworth runs founded?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-sparse-existing-v1
+  - assert: referent_key_edge_present
+    subject: f33-sparse-existing-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-sparse-existing-v1
+- phase_id: hooked
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-seed
+  - op: agent_turn
+    ref: t01
+    detail: Tobias Hallworth is taking over Quillfeather Bindery from its founder, who retires at the
+      end of the month.
+  - op: agent_turn
+    ref: t02
+    detail: Quillfeather Bindery was founded in 1974 and has stayed in the same workshop ever since.
+  - op: agent_turn
+    ref: t03
+    detail: From next month Tobias will run Quillfeather Bindery day to day and take the bookbinding commissions
+      himself.
+  - op: snapshot
+    ref: s-hooked-end
+  - op: fresh_agent
+    ref: q01
+    detail: In which year was the bindery that Tobias Hallworth runs founded?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-sparse-existing-v1
+  - assert: referent_key_edge_present
+    subject: f33-sparse-existing-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-sparse-existing-v1
+fairness:
+  why_neutral: Ordinary conversation about people and the things around them, with no turn naming a store;
+    state is read from canonical pages and the fresh session's delivered packet and answer.
+  public_coverage_subtraction: No public suite covers referent capture followed by owner-anchored activation.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Canonical entity pages, typed relation bullets and the fresh-session activation packet
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only canonical pages, registries and delivered client responses
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Both surfaces are visible to the client.
+    competitor_surface: Documented file and client response
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-seven referent-capture predicates.
