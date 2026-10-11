@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from exomem.activation_result import project_block
+from exomem.activation_result import validate_stored_result
 
 
 def _timestamp(value: str) -> float:
@@ -59,14 +59,9 @@ def summarize_rows(rows: list[dict]) -> dict:
             if "activation_result" not in row:
                 activation_observations["unknown"] += 1
         if "activation_result" in row:
-            observation = project_block(row["activation_result"])
-            if (
-                observation is None or observation != row["activation_result"]
-                or row["tool"] != "activate_context" or row.get("outcome") == "error"
-                or (row.get("outcome") in {"ok", "abstained"} and row["outcome"] != (
-                    "abstained" if observation["abstained"] else "ok"
-                ))
-            ):
+            try:
+                validate_stored_result(row)
+            except ValueError:
                 invalid.append({"row": index, "reason": "invalid_activation_result"})
                 if row["tool"] == "activate_context":
                     activation_observations["invalid"] += 1

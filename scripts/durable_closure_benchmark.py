@@ -536,7 +536,7 @@ def attach_ledger_measurements(
     server interval. An unexpected count or tool ordering invalidates the
     measurement rather than guessing from a similarly named row.
     """
-    from exomem.activation_result import project_block
+    from exomem.activation_result import validate_stored_result
 
     joined: list[dict[str, Any]] = []
     if len(calls) != len(ledger_rows):
@@ -552,16 +552,7 @@ def attach_ledger_measurements(
             row = ledger_rows[row_index]
             if "outcome" not in row or "error_code" not in row:
                 raise ValueError("ledger outcome/error fields are missing")
-            observation = None
-            if "activation_result" in row:
-                observation = project_block(row["activation_result"])
-                if observation is None or observation != row["activation_result"]:
-                    raise ValueError("invalid ledger activation result")
-                if row.get("tool") != "activate_context" or row.get("outcome") == "error":
-                    raise ValueError("unexpected ledger activation result")
-                observed_outcome = "abstained" if observation["abstained"] else "ok"
-                if row.get("outcome") in {"ok", "abstained"} and row["outcome"] != observed_outcome:
-                    raise ValueError("ledger activation result disagrees with outcome")
+            observation = validate_stored_result(row)
             legacy_activation = (
                 row.get("tool") == "activate_context"
                 and "activation_result" not in row

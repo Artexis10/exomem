@@ -28,6 +28,21 @@ def project_block(value: object) -> dict[str, object] | None:
     }
 
 
+def validate_stored_result(row: Mapping[str, object]) -> dict[str, object] | None:
+    """Validate a stored observation; an absent key means historical unknown."""
+    if "activation_result" not in row:
+        return None
+    observation = project_block(row["activation_result"])
+    if observation is None or observation != row["activation_result"]:
+        raise ValueError("invalid ledger activation result")
+    if row.get("tool") != "activate_context" or row.get("outcome") == "error":
+        raise ValueError("unexpected ledger activation result")
+    observed_outcome = "abstained" if observation["abstained"] else "ok"
+    if row.get("outcome") in {"ok", "abstained"} and row["outcome"] != observed_outcome:
+        raise ValueError("ledger activation result disagrees with outcome")
+    return observation
+
+
 @dataclass
 class Observation:
     """One request's shared cell; never retains the packet or its material."""
