@@ -223,7 +223,7 @@ def _wait_for(predicate, *, timeout: float, interval: float = 1.0, description: 
 
 
 def _exec_py(k3s_name: str, namespace: str, pod: str, source: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return _kubectl(k3s_name, ["exec", "--namespace", namespace, pod, "--", "python3", "-c", source], check=check)
+    return _kubectl(k3s_name, [*BREAK_GLASS, "exec", "--namespace", namespace, pod, "--", "python3", "-c", source], check=check)
 
 
 def _print_job_diagnostics(k3s_name: str, namespace: str, job_kind: str) -> None:
@@ -376,6 +376,8 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
             # always exists in production; the chart puts namespaced objects
             # there (cellctl's alert-delivery Role and RoleBinding).
             _run(["docker", "exec", name, "kubectl", "create", "namespace", "exomem-platform"])
+            # Positive exec probes need normal break-glass RBAC even when selected alone.
+            _kubectl(name, ["apply", "--filename=-"], documents=_render_platform("templates/operator-access.yaml"))
             yield K3sCluster(
                 name=name,
                 kubeconfig=kubeconfig_path,
@@ -520,8 +522,7 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
 ) -> None:
     """A deleted Job with a terminating Pod cannot publish done or release import admission."""
     image = import_storage["image"]
-    documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml",
-                                 "templates/operator-access.yaml", settings=(
+    documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml", settings=(
                                      "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
                                      "--set-json", "cells.jobEgressExcept=[]"))
     storage_class = next(document for document in documents if document["kind"] == "StorageClass")
@@ -743,8 +744,7 @@ print(json.dumps({{'receipt': True, 'raw_manifest': True, 'archive': manifest.ar
 """
         runtime_pod = json.loads(_kubectl(k3s.name, ["get", "pods", "--namespace", namespace,
                                       f"--selector=!{JOB_KIND_LABEL}", "--output=json"]).stdout)["items"][0]
-        inspected = _kubectl(k3s.name, [*BREAK_GLASS, "exec", "--namespace", namespace,
-                              runtime_pod["metadata"]["name"], "--", "python3", "-c", inspect])
+        inspected = _exec_py(k3s.name, namespace, runtime_pod["metadata"]["name"], inspect)
         print(f"[import] final PVC proof: {inspected.stdout.strip()}")
     except BaseException:
         _print_job_diagnostics(k3s.name, namespace, "import")
@@ -1982,7 +1982,7 @@ def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> 
     for crd in traefik_crds + cert_manager_crds:
         _kubectl(k3s.name, ["wait", "--for=condition=Established", f"crd/{crd['metadata']['name']}", "--timeout=60s"])
 
-    print("[edge] applying the chart's namespaces, Traefik, Cloud route, gateway policy and operator RBAC")
+    print("[edge] applying the chart's namespaces, Traefik, Cloud route and gateway policy")
     api_server_ip = _kubectl(
         k3s.name, ["get", "endpoints", "kubernetes", "--output=jsonpath={.subsets[0].addresses[0].ip}"]
     ).stdout.strip()
@@ -1991,7 +1991,6 @@ def edge_platform(k3s: K3sCluster, tmp_path_factory: pytest.TempPathFactory) -> 
         "templates/namespaces.yaml",
         "templates/cloud-ingress.yaml",
         "templates/cloud-gateway.yaml",
-        "templates/operator-access.yaml",
         *(f"charts/traefik/templates/{template}" for template in (
             "rbac/serviceaccount.yaml", "rbac/role.yaml", "rbac/rolebinding.yaml",
             "rbac/clusterrole.yaml", "rbac/clusterrolebinding.yaml",
@@ -2230,7 +2229,7 @@ def test_only_the_edge_namespace_may_name_the_cloud_cluster_issuer(k3s: K3sClust
 
 
 # harden-exomem-cloud-operator-access tasks 2.2 and 2.3: the chart's D5
-# ValidatingAdmissionPolicy (operator-access.yaml, applied by edge_platform)
+# ValidatingAdmissionPolicy (operator-access.yaml, applied by k3s)
 # on the CONNECT operations it matches. It shipped because this probe showed
 # the API server enforcing it; a failure here means D4 must stand alone.
 BREAK_GLASS = ["--as=break-glass-probe", "--as-group=exomem:break-glass"]
