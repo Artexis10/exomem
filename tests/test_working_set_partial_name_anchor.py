@@ -29,6 +29,8 @@ PERSON = f"{KB}/Entities/People/Nora.md"
 NAMESAKE = f"{KB}/Entities/People/Nora Quill.md"
 PROJECT = f"{KB}/Entities/Projects/Kelvane Rollout.md"
 RENOVATION = f"{KB}/Entities/Projects/Tessaly Renovation.md"
+GARDENER = f"{KB}/Entities/People/Oskar.md"
+GARDENER_IDENTITY = "Keeps the 剪定計画書 for the estate"
 PLACE = f"{KB}/Entities/Places/Allotment.md"
 IDENTITY = "Former engineering colleague from the payments team"
 NAMESAKE_IDENTITY = "Runs the payments audit for the regional office"
@@ -182,3 +184,16 @@ def test_one_anchors_word_still_counts_for_another_anchors_page(garden_vault: Pa
     assert _statuses(packet, RENOVATION) == ["resolved"], packet["anchors"]
     assert "resolved" not in _statuses(packet, PERSON), packet["anchors"]
     assert IDENTITY not in json.dumps(packet), "the person's identity was served"
+
+
+def test_one_shared_unspaced_phrase_is_not_two_more_matches(garden_vault: Path) -> None:
+    """An unspaced phrase yields several bigram stems; it is one match."""
+    _entity(garden_vault, GARDENER, "Oskar Thorn", f"{GARDENER_IDENTITY}.", person=True)
+    _reindex(garden_vault)
+
+    packet = commands.op_activate_context(
+        garden_vault, turn="The thorn bush needs the 剪定計画書 before spring"
+    )
+
+    assert "resolved" not in _statuses(packet, GARDENER), packet["anchors"]
+    assert GARDENER_IDENTITY not in json.dumps(packet, ensure_ascii=False)

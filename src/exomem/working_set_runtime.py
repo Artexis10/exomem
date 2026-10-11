@@ -1055,15 +1055,19 @@ def lexical_hits_without(
     (`working_set_resolve.candidates_for`'s dependence check).
 
     Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
-    bring "hedge" back unless its stem is what is left out. Empty when the
-    catalogue cannot answer: the anchors then stay leads, as they do when
-    nothing is asked.
+    bring "hedge" back unless its stem is what is left out. Only spaced words
+    count (`pairable_stems`): an unspaced run yields several bigram stems,
+    and one shared phrase would count as two matches. The turn's stems are
+    counted without the first pass's term budget, so on a long turn this
+    answers "would an unbounded pass without the word still reach the page".
+    Empty when the catalogue cannot answer: the anchors then stay leads, as
+    they do when nothing is asked.
     """
     from . import bm25 as bm25_module
 
     turn = working_set_index.subject_text(turn)
     dropped = frozenset(bm25_module.tokenize(" ".join(left_out), query=True))
-    counted = [stem for stem in content_stems(turn) if stem not in dropped]
+    counted = [stem for stem in pairable_stems(turn) if stem not in dropped]
     if not pages or len(counted) < 2:
         return frozenset()
     try:
