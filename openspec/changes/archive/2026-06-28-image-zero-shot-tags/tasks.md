@@ -34,7 +34,7 @@
 - [ ] 5.4 Desk-side smoke (GPU box, real CLIP): enable `KB_MCP_IMAGE_TAGS`, extract a few real
       images (an invoice scan, a whiteboard photo, a UI screenshot), confirm sensible `Tags:` lines
       and that `find` surfaces them by the tag words; tune `KB_MCP_IMAGE_TAGS_THRESHOLD` if needed.
-      **(Hugo runs — needs GPU + the CLIP model on real images.)**
+      **(the operator runs — needs GPU + the CLIP model on real images.)**
 
 ## 6. Follow-ups (post-merge, non-blocking)
 - [ ] 6.1 Share the CLIP image vector between the do_ocr tag pass and the do_clip `ClipIndex` pass

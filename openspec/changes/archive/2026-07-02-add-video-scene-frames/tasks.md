@@ -78,7 +78,7 @@
 - [x] 8.4 Desk-side smoke (GPU box, media extra, gate on): upload a real screen recording →
       `.frames/` JPEGs + sidecars appear → after OCR, `find("<on-slide text>")` returns ONE
       video hit with `scene_frame`/`scene_match_at` → `/download` renders the frame; tune
-      thresholds on real recordings. **(Hugo runs — needs GPU + real videos.)**
+      thresholds on real recordings. **(the operator runs — needs GPU + real videos.)**
 
 ## 9. Follow-ups (post-merge, non-blocking)
 - [ ] 9.1 Semantic/transcript-topic segmentation fused with visual events (phase 2).

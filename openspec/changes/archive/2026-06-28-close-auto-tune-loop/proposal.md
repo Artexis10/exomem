@@ -98,5 +98,5 @@ the live vault; anything touching diarization.
 - Env knobs: `KB_MCP_RANKING_CONFIG` (override the adopted-file path),
   `KB_MCP_DISABLE_RANKING_CONFIG` (force `DEFAULT_RANKING`; set in the test suite).
 - Pure-substrate: no server-side reasoning LLM anywhere; relevance labels derive
-  only from recorded usage (Hugo's real citations); the evaluator is deterministic
+  only from recorded user citations; the evaluator is deterministic
   metrics and the tuner is deterministic coordinate descent.
