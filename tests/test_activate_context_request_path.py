@@ -12,6 +12,7 @@ span.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import pytest
@@ -538,7 +539,6 @@ def countdown_budget():
 # insertion order and `packet["roles"]`: six lanes run in the order
 # identity, constraints, resources, current_state, active_plans, location.
 _CALLS_THROUGH_RESOLVE = 6
-_CALLS_THROUGH_FIRST_LANE = 9  # 8 pre-lane checks + the first lane's own check
 
 
 def test_budget_exhausted_after_freshness_skips_readiness_onward(
@@ -654,7 +654,7 @@ def test_budget_exhausted_after_resolve_skips_roles_onward(
 
 
 def test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_work(
-    activation_vault: Path, countdown_budget, monkeypatch: pytest.MonkeyPatch
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem.governance import egress as egress_module
 
@@ -668,9 +668,21 @@ def test_budget_exhausted_between_two_role_lanes_discards_the_first_lanes_work(
     monkeypatch.setattr(egress_module, "guard_working_set", _spy_guard)
 
     working_set_runtime.reset_caches_for_tests()
-    budget = countdown_budget(_CALLS_THROUGH_FIRST_LANE)
+    budget = request_budget.RequestBudget(seconds=50)
+    original_lane = working_set._lane
 
-    packet = commands.op_activate_context(activation_vault, turn=TURN, include_timings=True)
+    def expire_after_identity(root, role, **kwargs):
+        result = original_lane(root, role, **kwargs)
+        if role.id == "identity":
+            budget.deadline = time.monotonic() - 1
+        return result
+
+    monkeypatch.setattr(working_set, "_lane", expire_after_identity)
+    token = request_budget.set_current(budget)
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN, include_timings=True)
+    finally:
+        request_budget.reset_current(token)
 
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "unavailable"}
