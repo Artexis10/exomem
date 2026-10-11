@@ -6572,7 +6572,7 @@ def owner_only_aggregate(
             return None
     if raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who):
         return None
-    if connector_boundary.unrestricted(vault_root, who) and (raw_admitted or not raw_protection.applies_to(who)) and _file_policy_empty(
+    if connector_boundary.unrestricted(vault_root, who) and raw_admitted and _file_policy_empty(
         vault_root, policy_module.load(Path(vault_root))
     ):
         return None

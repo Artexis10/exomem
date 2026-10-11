@@ -92,8 +92,7 @@ commit; that API flag is not a stored receipt marker.
 On Windows, that local state SHALL use only the bounded local SQLite binary
 DPAPI `CurrentUser` BLOB and attempt/token-bound entropy defined by
 `graph-rebuild-availability`, under its protected inheritable DACL for the
-current service identity, `LocalSystem`, and `Administrators`. The hosted
-service SHALL reject reparse-point or unsafe-DACL runtime paths before SQLite or
+current service identity, `LocalSystem`, and `Administrators`. The service SHALL reject reparse-point or unsafe-DACL runtime paths before SQLite or
 unpickle, plus truncated/trailing/unknown-version/provider BLOBs; account/profile
 changes, copied BLOBs, failed unprotect, and raw legacy rows SHALL be
 `outcome_unknown`, not recovery authority.
@@ -111,7 +110,7 @@ leaf result or content.
 Receipt v2 verification SHALL use the versioned HMAC input and closed canonical
 JSON field set defined by `graph-rebuild-availability`, reject duplicate,
 missing, surplus, malformed, or noncanonical fields before authentication, and
-compare the recomputed HMAC in constant time. No boundary or hosted recovery
+compare the recomputed HMAC in constant time. No boundary or runtime recovery
 path may substitute a looser receipt parse.
 
 The HMAC-covered v2 `canonical_disposition` SHALL be exactly `success` or

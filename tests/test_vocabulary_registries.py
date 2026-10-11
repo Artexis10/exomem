@@ -391,10 +391,8 @@ def test_absent_or_unresolved_principal_cannot_save(vault: Path, bound: bool) ->
     assert not entity_types.extension_registry_path(vault).exists()
 
 
-def test_hosted_raw_exemption_does_not_grant_owner_writes(vault: Path) -> None:
-    from exomem.governance import raw_protection
+def test_remote_principal_does_not_grant_owner_writes(vault: Path) -> None:
     from exomem.governance.principal import (
-        HOSTED_GATEWAY_ISSUER_FAMILY,
         RequestPrincipal,
         library_scope,
         request_scope,
@@ -402,10 +400,9 @@ def test_hosted_raw_exemption_does_not_grant_owner_writes(vault: Path) -> None:
 
     who = RequestPrincipal(
         audience_id="tenant",
-        surface="hosted",
-        issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
+        surface="mcp",
+        issuer_family="mcp-oauth:external",
     )
-    assert not raw_protection.applies_to(who)
     with request_scope(who), library_scope():
         saved = commands.op_schema_memory(
             vault,
@@ -629,19 +626,18 @@ def test_taxonomy_restore_reports_both_axes_it_removes(vault):
     }
 
 
-def test_legacy_relation_inference_save_queues_a_hosted_nonowner(vault):
-    """The legacy save flag must not bypass the owner rule on an exempt hosted cell."""
+def test_legacy_relation_inference_save_queues_a_remote_nonowner(vault):
+    """The legacy save flag must not bypass the owner rule for a remote audience."""
     from exomem import relation_registry
     from exomem.governance.principal import (
-        HOSTED_GATEWAY_ISSUER_FAMILY,
         RequestPrincipal,
         request_scope,
     )
 
     who = RequestPrincipal(
         audience_id="tenant",
-        surface="hosted",
-        issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
+        surface="mcp",
+        issuer_family="mcp-oauth:external",
     )
     with request_scope(who):
         result = commands.op_schema_memory(
@@ -808,11 +804,10 @@ def test_taxonomy_saves_cannot_redirect_registered_keys_or_aliases(
 
 
 @pytest.mark.parametrize("subject", ["entity-types", "context-roles"])
-def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(
+def test_admitted_remote_nonowners_cannot_read_owner_history_fields(
     vault: Path, subject: str
 ) -> None:
     from exomem.governance.principal import (
-        HOSTED_GATEWAY_ISSUER_FAMILY,
         RequestPrincipal,
         library_scope,
         request_scope,
@@ -838,16 +833,16 @@ def test_admitted_hosted_nonowners_cannot_read_owner_history_fields(
     from exomem.governance import egress
 
     with request_scope(RequestPrincipal(
-        audience_id="tenant", surface="hosted", issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
+        audience_id="tenant", surface="mcp", issuer_family="mcp-oauth:external",
     )):
-        hosted = commands.op_schema_memory(vault, subject=subject, operation="history")
-        hosted = egress.postfilter("schema_memory", hosted, vault)
-    assert hosted["content_hash"] == owner["content_hash"]
-    assert hosted["versions"] == [
+        remote = commands.op_schema_memory(vault, subject=subject, operation="history")
+        remote = egress.postfilter("schema_memory", remote, vault)
+    assert remote["content_hash"] == owner["content_hash"]
+    assert remote["versions"] == [
         {key: value for key, value in owner["versions"][0].items()
          if key not in {"why", "principal", "principal_kind"}}
     ]
-    assert hosted["withheld"]["reason"] == "audience_restricted"
+    assert remote["withheld"]["reason"] == "audience_restricted"
 
 
 @pytest.mark.usefixtures("owner_scope")

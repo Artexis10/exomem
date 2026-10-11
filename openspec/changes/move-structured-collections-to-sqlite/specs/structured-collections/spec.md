@@ -389,7 +389,7 @@ A collection type saved through `schema_memory` SHALL be usable by the very next
 - one audit transition per mutation, with a rendered history page;
 - row-level governance with its default audience, with withheld indistinguishable from absent;
 - Markdown views under its placement layer, with governed edit-back and held corrections;
-- recall exclusion and hosted placement pinning as a structured layer;
+- recall exclusion and current Cloud placement as a structured layer;
 - bulk upsert, query with saved views, snapshots and migration;
 
 Lifecycle transitions SHALL be validated against the declared state machine, per-state constraints and named validators.

@@ -1,3 +1,5 @@
+Retirement removes Hosted adapters, profile selection, and gateway work. The current connector, vocabulary, and offline import contracts retain their obligations and evidence.
+
 ## Why
 
 One owner can use several connectors with different content permissions. Owner identity currently risks bypassing that separation, which prevents safe consolidation of managed vaults.
@@ -40,4 +42,4 @@ Delivery B follows the vocabulary registry foundation. Delivery C follows both e
 
 The retired eleven-action signed-source saga is no longer the design. Existing reconciliation, fingerprint, preimage, and recovery code may be salvaged against this contract. The old stack is not an integration or verification target.
 
-Delivery A is independently useful. It does not complete T16 or authorize combining real vaults. Hosted end-client provenance requires gateway work outside this repository; shared-cell identity alone cannot provide it.
+Delivery A is independently useful. It does not complete T16 or authorize combining real vaults. A shared-cell identity alone cannot provide end-client provenance.

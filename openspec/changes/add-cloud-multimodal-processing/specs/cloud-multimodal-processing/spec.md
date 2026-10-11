@@ -17,7 +17,7 @@ An Exomem Cloud cell SHALL extract documents, images, audio and video only in it
 
 ### Requirement: Cloud engines are pre-baked in a Cloud-only build stage and load offline
 
-Every engine model, OCR model and decoder that a Cloud cell uses SHALL be part of the cell image, and SHALL load with network access off. The engines and their dependencies SHALL be installed in a build stage that only the Cloud image uses, so that the Hosted image carries only the runtime it serves with. The image build SHALL fail unless each shipped engine loads offline and extracts a real sample of each format it serves; that build gate SHALL be the proof that Cloud supports the format. Each engine's model SHALL meet the rule of the `shared-model-runtime` capability. The Cloud image SHALL carry every script model that the OCR engine publishes, plus the language packs that the image build configures. That set SHALL be an image build parameter, never a list in code.
+Every engine model, OCR model and decoder that a Cloud cell uses SHALL be part of the cell image, and SHALL load with network access off. The engines and their dependencies SHALL be installed in a build stage that only the Cloud image uses. The image build SHALL fail unless each shipped engine loads offline and extracts a real sample of each format it serves; that build gate SHALL be the proof that Cloud supports the format. Each engine's model SHALL meet the rule of the `shared-model-runtime` capability. The Cloud image SHALL carry every script model that the OCR engine publishes, plus the language packs that the image build configures. That set SHALL be an image build parameter, never a list in code.
 
 #### Scenario: A missing model fails the build
 
@@ -34,11 +34,6 @@ Every engine model, OCR model and decoder that a Cloud cell uses SHALL be part o
 - **WHEN** the image build parameter adds an OCR language pack
 - **THEN** the built image carries that pack and OCR uses it
 - **AND** no source file changes
-
-#### Scenario: The Hosted image gains no media engine
-
-- **WHEN** the Hosted and Cloud images are built from one source revision
-- **THEN** only the Cloud image carries the media engines and their dependencies
 
 ### Requirement: Media memory brakes derive from the cell's own cgroup
 

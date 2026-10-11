@@ -202,10 +202,20 @@ def test_global_policy_operations_are_unavailable_before_private_observations(co
             assert result.value.code == "GOVERNANCE_OPERATION_UNAVAILABLE"
 
 
-def test_unknown_and_hosted_clients_cannot_borrow_configured_owner_access(configured_boundary, vault):
+def test_unknown_and_shared_cell_clients_cannot_borrow_configured_owner_access(configured_boundary, vault, monkeypatch):
+    from exomem.server_auth import CloudCellTokenVerifier
+
     _, authenticate = configured_boundary
-    callers = (authenticate("re-registered-client"), principal.resolve_hosted_principal("tenant-owner"),
-               principal.RequestPrincipal("owner", surface="transfer"))
+    unknown = authenticate("re-registered-client")
+    cell_id, bearer = "shared-cloud-cell", "temporary-cloud-cell-token" * 2
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", cell_id)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", bearer)
+    token = asyncio.run(CloudCellTokenVerifier(cell_id=cell_id, token=bearer).verify_token(bearer))
+    monkeypatch.setattr(dependencies, "get_access_token", lambda: token)
+    cell_owner = principal.resolve_mcp_principal()
+    assert cell_owner.audience_id == principal.OWNER_AUDIENCE
+    callers = (unknown, cell_owner, principal.RequestPrincipal("owner", surface="transfer"))
     for who in callers:
         assert egress.quick_page_visible(vault, PUBLIC, principal=who)
         assert not egress.quick_page_visible(vault, PRIVATE, principal=who)

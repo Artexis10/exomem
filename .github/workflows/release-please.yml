@@ -14,11 +14,6 @@ on:
         required: false
         default: false
         type: boolean
-      records_rollback_runtime_target_json:
-        description: Optional reviewed six-field runtime target to sign this image as a Records reader-v2 rollback unit
-        required: false
-        default: ""
-        type: string
 
 # Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
@@ -40,7 +35,6 @@ env:
   IMAGE_CACHE_LEAN: exomem-lean
   IMAGE_CACHE_ML: exomem-ml
   IMAGE_CACHE_CUDA: exomem-cuda
-  IMAGE_CACHE_HOSTED: exomem-hosted
   IMAGE_CACHE_CLOUD: exomem-cloud
   IMAGE_CACHE_CELLCTL: cellctl
 
@@ -69,14 +63,13 @@ jobs:
           manifest-file: .release-please-manifest.json
 
   # Cloud packages bind the current version, skill contract and corpus digest;
-  # rebuild them on every release update. Legacy hosted descriptors need a
-  # rebuild only when their contract changes. No `extra-files` updater can
+  # rebuild them on every release update. No `extra-files` updater can
   # recompute these archive bytes and hash locks.
   #
   # Without the GitHub App token this push uses GITHUB_TOKEN, which does not
   # retrigger the PR's checks -- the amended branch is correct but shows the
   # pre-amendment run, so re-run checks before merging.
-  sync-hosted-artifacts:
+  sync-cloud-artifacts:
     needs: release-please
     if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_branch != '' }}
     runs-on: ubuntu-latest
@@ -103,81 +96,19 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Regenerate hosted plugin artifacts
-        run: |
-          uv run --frozen python scripts/hosted-plugin.py regenerate --platform claude
-          openai_app_id="$(python - <<'PY'
-          import json
-          from pathlib import Path
-
-          app = json.loads(
-              Path("plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json").read_text(
-                  encoding="utf-8"
-              )
-          )
-          print(app["apps"]["exomem"]["id"])
-          PY
-          )"
-          parity_candidate="$(uv run --frozen python - <<'PY'
-          from exomem.hosted_plugins import PARITY_CANDIDATE
-
-          print(PARITY_CANDIDATE)
-          PY
-          )"
-          baseline_candidate="$(uv run --frozen python - <<'PY'
-          from exomem.hosted_plugins import BASELINE_CANDIDATE
-
-          print(BASELINE_CANDIDATE)
-          PY
-          )"
-          uv run --frozen python scripts/hosted-plugin.py render --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
-          uv run --frozen python scripts/hosted-plugin.py render --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
-          uv run --frozen python scripts/hosted-plugin.py render --candidate "$baseline_candidate" --platform all --openai-app-id "$openai_app_id"
-
       - name: Regenerate current Cloud packages for the source release
         run: uv run --frozen python scripts/cloud-plugin.py build
-
-      - name: Verify the regenerated artifacts are current
-        run: |
-          uv run --frozen python scripts/hosted-plugin.py check --platform claude
-          openai_app_id="$(python - <<'PY'
-          import json
-          from pathlib import Path
-
-          app = json.loads(
-              Path("plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json").read_text(
-                  encoding="utf-8"
-              )
-          )
-          print(app["apps"]["exomem"]["id"])
-          PY
-          )"
-          parity_candidate="$(uv run --frozen python - <<'PY'
-          from exomem.hosted_plugins import PARITY_CANDIDATE
-
-          print(PARITY_CANDIDATE)
-          PY
-          )"
-          baseline_candidate="$(uv run --frozen python - <<'PY'
-          from exomem.hosted_plugins import BASELINE_CANDIDATE
-
-          print(BASELINE_CANDIDATE)
-          PY
-          )"
-          uv run --frozen python scripts/hosted-plugin.py check --candidate hosted-alpha-agent-v2 --platform all --openai-app-id "$openai_app_id"
-          uv run --frozen python scripts/hosted-plugin.py check --candidate "$parity_candidate" --platform all --openai-app-id "$openai_app_id"
-          uv run --frozen python scripts/hosted-plugin.py check --candidate "$baseline_candidate" --platform all --openai-app-id "$openai_app_id"
 
       - name: Commit the resync onto the release PR
         run: |
           if git diff --quiet; then
-            echo "hosted artifacts already current for this release"
+            echo "Cloud packages already current for this release"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/hosted plugins/cloud/generated
-          git commit -m "chore(hosted): regenerate plugin artifacts for the release"
+          git add plugins/cloud/generated
+          git commit -m "chore(cloud): regenerate Cloud packages for the release"
           git push
 
   # Every run finds the release it serves and checks which of its artifacts are
@@ -219,7 +150,6 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.tag }}
           DRY_RUN: ${{ inputs.dry_run == true }}
-          RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}
           PYPI_ENABLED: ${{ vars.PYPI_PUBLISH_ENABLED == 'true' }}
           MCP_ENABLED: ${{ vars.MCP_REGISTRY_PUBLISH_ENABLED == 'true' }}
           GHCR_ENABLED: ${{ vars.GHCR_PUBLISH_ENABLED == 'true' }}
@@ -320,7 +250,6 @@ jobs:
             "lean ghcr.io/artexis10/exomem:$version latest"
             "ml ghcr.io/artexis10/exomem:$version-ml ml"
             "cuda ghcr.io/artexis10/exomem:$version-cuda cuda"
-            "hosted ghcr.io/artexis10/exomem:$version-hosted hosted"
             "cloud ghcr.io/artexis10/exomem:$version-cloud cloud"
             "cellctl ghcr.io/artexis10/exomem-cellctl:$version -"
           )
@@ -388,8 +317,8 @@ jobs:
               action="held: $failed publish runs on $tag failed; fix the cause, then dispatch this workflow with tag=$tag"
               echo "::warning::$action"
             else
-              body=$(jq -cn --arg tag "$tag" --arg records "$RECORDS_TARGET" \
-                '{ref: $tag, inputs: {tag: $tag, dry_run: "false", records_rollback_runtime_target_json: $records}}')
+              body=$(jq -cn --arg tag "$tag" \
+                '{ref: $tag, inputs: {tag: $tag, dry_run: "false"}}')
               code=$(curl -sS -o "$RUNNER_TEMP/dispatch.json" -w '%{http_code}' -X POST \
                 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
                 "$api/actions/workflows/$workflow/dispatches" -d "$body") || true
@@ -634,8 +563,8 @@ jobs:
         if: ${{ needs.plan.outputs.dry_run != 'true' }}
         run: ./mcp-publisher publish
 
-  # Builds only the images the plan found missing. A dry run builds all six and
-  # pushes, attests and records nothing.
+  # Builds only the images the plan found missing. A dry run builds every
+  # supported image and pushes, attests and records nothing.
   publish-image:
     # Shared floating tags require one publisher across releases. A build can delay
     # the next release; dry runs have separate groups and never occupy this queue.
@@ -655,7 +584,6 @@ jobs:
     env:
       IMAGES: ${{ needs.plan.outputs.images }}
       DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-      RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -828,166 +756,6 @@ jobs:
           path: image-evidence/exomem-image-cuda-*.sigstore.json
           if-no-files-found: error
           retention-days: 30
-
-      - name: Build and push hosted image (linux/amd64)
-        id: hosted-build
-        if: ${{ fromJSON(env.IMAGES).hosted.publish }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: hosted
-          platforms: linux/amd64
-          build-args: |
-            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
-          provenance: mode=min,version=v0.2
-          outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=${{ env.IMAGE_CACHE_HOSTED }}
-          cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_HOSTED) || '' }}
-
-      - name: Attest the exact hosted runtime image
-        id: hosted-attestation
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-name: ghcr.io/artexis10/exomem
-          subject-digest: ${{ steps.hosted-build.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Record the hosted runtime candidate
-        id: runtime-candidate
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        env:
-          TAG: ${{ needs.plan.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
-          SOURCE_REF: ${{ steps.meta.outputs.source_ref }}
-          HOSTED_DIGEST: ${{ steps.hosted-build.outputs.digest }}
-          ATTESTATION_BUNDLE: ${{ steps.hosted-attestation.outputs.bundle-path }}
-          RECORDS_RUNTIME_TARGET_JSON: ${{ inputs.records_rollback_runtime_target_json }}
-        run: |
-          set -euo pipefail
-          digest_hex=${HOSTED_DIGEST#sha256:}
-          evidence_stem="exomem-hosted-runtime-${SOURCE_COMMIT}-${digest_hex}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          candidate="${evidence_stem}.candidate-v1.json"
-          bundle="${evidence_stem}.sigstore.json"
-          cp "$ATTESTATION_BUNDLE" "$bundle"
-          immutable_image="ghcr.io/artexis10/exomem@${HOSTED_DIGEST}"
-          discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"
-          storage_uri="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}"
-          records_compatibility_args=()
-          if [[ -n "$RECORDS_RUNTIME_TARGET_JSON" ]]; then
-            records_issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            records_expires_at="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
-            records_compatibility_args=(
-              --records-profile hosted-alpha-agent-v1
-              --records-reader-version 2
-              --lifecycle-actions-enabled false
-              --records-issued-at "$records_issued_at"
-              --records-expires-at "$records_expires_at"
-              --records-runtime-target-json "$RECORDS_RUNTIME_TARGET_JSON"
-            )
-          fi
-          python3 infra/scripts/hosted_image_candidate.py record \
-            --component runtime \
-            --source-repository "$GITHUB_REPOSITORY" \
-            --source-ref "$SOURCE_REF" \
-            --source-commit "$SOURCE_COMMIT" \
-            --release "$VERSION" \
-            --image "$immutable_image" \
-            --discovery-tag "$discovery_tag" \
-            --producer-repository "$GITHUB_REPOSITORY" \
-            --producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml" \
-            --producer-workflow-commit "$GITHUB_WORKFLOW_SHA" \
-            --producer-oidc-source-ref "$GITHUB_REF" \
-            --producer-oidc-source-commit "$GITHUB_SHA" \
-            --producer-event "$GITHUB_EVENT_NAME" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --bundle "$bundle" \
-            --storage-kind github-release \
-            --storage-uri "$storage_uri" \
-            "${records_compatibility_args[@]}" \
-            --output "$candidate"
-          {
-            echo "candidate=$candidate"
-            echo "bundle=$bundle"
-            echo "immutable_image=$immutable_image"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Attest the exact hosted runtime candidate
-        id: runtime-candidate-attestation
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
-        with:
-          subject-path: ${{ steps.runtime-candidate.outputs.candidate }}
-          create-storage-record: false
-
-      - name: Verify the hosted runtime image and signed candidate
-        id: runtime-candidate-proof
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.meta.outputs.source_commit }}
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          IMAGE_BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_ATTESTATION_BUNDLE: ${{ steps.runtime-candidate-attestation.outputs.bundle-path }}
-          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
-        run: |
-          set -euo pipefail
-          candidate_bundle="${CANDIDATE%.candidate-v1.json}.candidate.sigstore.json"
-          cp "$CANDIDATE_ATTESTATION_BUNDLE" "$candidate_bundle"
-          python3 infra/scripts/hosted_image_candidate.py verify \
-            --candidate "$CANDIDATE" \
-            --bundle "$IMAGE_BUNDLE" \
-            --candidate-bundle "$candidate_bundle"
-          docker pull "$IMMUTABLE_IMAGE"
-          observed_version=$(docker run --rm --network=none "$IMMUTABLE_IMAGE" --version)
-          test "$observed_version" = "exomem ${VERSION}"
-          observed_revision=$(docker image inspect \
-            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-            "$IMMUTABLE_IMAGE")
-          test "$observed_revision" = "$SOURCE_COMMIT"
-          echo "candidate_bundle=$candidate_bundle" >> "$GITHUB_OUTPUT"
-
-      - name: Upload bounded runtime candidate workflow evidence
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: hosted-runtime-candidate-${{ steps.meta.outputs.source_commit }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ steps.runtime-candidate.outputs.candidate }}
-            ${{ steps.runtime-candidate.outputs.bundle }}
-            ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Stage the verified runtime candidate
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        env:
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-        run: cp "$CANDIDATE" "$BUNDLE" "$CANDIDATE_BUNDLE" image-evidence/
-
-      - name: Record the runtime candidate inputs
-        if: ${{ fromJSON(env.IMAGES).hosted.publish && env.DRY_RUN != 'true' }}
-        env:
-          IMMUTABLE_IMAGE: ${{ steps.runtime-candidate.outputs.immutable_image }}
-          CANDIDATE: ${{ steps.runtime-candidate.outputs.candidate }}
-          BUNDLE: ${{ steps.runtime-candidate.outputs.bundle }}
-          CANDIDATE_BUNDLE: ${{ steps.runtime-candidate-proof.outputs.candidate_bundle }}
-        run: |
-          {
-            echo "Hosted runtime image: ${IMMUTABLE_IMAGE}"
-            echo "Candidate asset: ${CANDIDATE}"
-            echo "Image attestation bundle asset: ${BUNDLE}"
-            echo "Candidate attestation bundle asset: ${CANDIDATE_BUNDLE}"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build and push Exomem Cloud cell image (linux/amd64)
         id: cloud-build

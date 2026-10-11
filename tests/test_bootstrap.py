@@ -834,3 +834,24 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     payload = json.loads(captured.out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert payload["data"]["contract_version"]
+
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_unavailable_action_reason_follows_the_active_surface(cloud: bool) -> None:
+    """A withheld action must not explain a desktop omission as a Cloud limitation."""
+    exclusion = commands.CLOUD_SURFACE_EXCLUSIONS["adopt_vault"]
+    reason = f"{exclusion.reason} Lifted when {exclusion.lifted_when}."
+    descriptor = ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="product-cloud" if cloud else "product",
+        tier2_enabled=True,
+        product_commands=(),
+        unavailable_reasons=(("adopt_vault", reason),) if cloud else (),
+    )
+    with active_surface(descriptor):
+        action = commands.simple_action_catalog(available_tools=set())["adopt"]
+    assert action["available"] is False
+    if cloud:
+        assert action["unavailable_reason"] == reason
+    else:
+        assert action["unavailable_reason"] == "No route for this action is exported by the active surface."

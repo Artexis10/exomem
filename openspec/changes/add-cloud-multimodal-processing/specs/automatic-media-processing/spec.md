@@ -36,11 +36,6 @@ On an Exomem Cloud cell, the next action SHALL NOT be an instruction to install 
 - **WHEN** the ASR backend cannot be loaded on a personal install
 - **THEN** the job remains blocked with retryability and installation/remediation guidance
 
-#### Scenario: A Hosted cell keeps its current guidance
-- **WHEN** the ASR backend cannot be loaded in a Hosted cell
-- **THEN** the job remains blocked and retryable, with the remediation guidance it receives today
-- **AND** whether the cell runs media at all still follows its Hosted media entitlement
-
 #### Scenario: A Cloud engine cannot load
 - **WHEN** a Cloud cell's enabled engine cannot be loaded
 - **THEN** the job remains blocked and retryable

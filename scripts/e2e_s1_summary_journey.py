@@ -1564,8 +1564,8 @@ def adopt_fresh(journey: Journey) -> None:
     expect(result["status"] == "admitted", "copy adoption did not admit the store", result)
 
 
-async def copy_and_restore(journey: Journey) -> None:
-    """Step 6: fresh-state adoption and actual staged restore of the mixed vault."""
+async def copy_and_adopt(journey: Journey) -> None:
+    """Step 6: fresh-state adoption of a copy of the mixed vault."""
     with journey.step("6. copy the stopped vault and adopt its published replica"):
         copied_root = journey.work / "copied-vault"
         shutil.copytree(journey.vault, copied_root)
@@ -1576,42 +1576,6 @@ async def copy_and_restore(journey: Journey) -> None:
             await compare_samples(copied, service)
             await compare_queries(copied, service)
             await file_collections_unchanged(copied, service, "after fresh-root copy")
-    with journey.step("6. export, stage and activate the snapshot restore"):
-        parent = journey.work / "restore"
-        result = journey.installed_helper("--snapshot-restore", parent)
-        expect(result["code"] == "HOSTED_RESTORE_CANDIDATE_READY"
-               and result["journal_phase"] == "complete" and result["credential_revision"] > 0,
-               "installed staged restore did not finish", result)
-        restored = journey.fork("restore-client", parent / "vault")
-        restored.state_root = parent / "state" / "vault-state"
-        expect((restored.vault / journey.export_path).read_bytes() == journey.export,
-               "the restored preservation changed the raw bytes")
-        expect((restored.vault / STORE_FILES[1]).read_bytes() == (journey.vault / STORE_FILES[1]).read_bytes(),
-               "the staged restore changed the routing marker")
-        adopt_fresh(restored)
-        # Hold one source blob outside the restored vault, so startup cannot finish
-        # rebuilding before the first MCP read observes its truthful unavailable state.
-        blob = member_blob(restored)
-        held = restored.work / "held-member.gz"
-        blob.replace(held)
-        async with restored.service("restored") as service:
-            async def rebuilding():
-                try:
-                    result = await service.query(SAMPLE_ROWS, SAMPLES_ID)
-                except Refused as refusal:
-                    if refusal.code == "QUERY_BUSY":
-                        return None  # The writer is still attaching its derived file.
-                    expect(refusal.code == "QUERY_REBUILDING", "restore hid its rebuild state", str(refusal))
-                    return True
-                raise RuntimeError(f"restore answered rows before its missing member was recovered: {result}")
-
-            await until(rebuilding, within=60, what="restore to report its missing-member rebuild")
-            await compare_sample_days(restored, service)
-            held.replace(blob)
-            await samples_ready(restored, service)
-            await compare_samples(restored, service)
-            await compare_queries(restored, service)
-            await file_collections_unchanged(restored, service, "after snapshot restore")
 
 
 async def unsupported_launcher(journey: Journey) -> None:
@@ -1690,72 +1654,6 @@ async def narrowing_rollback(journey: Journey) -> None:
 
 
 # --- entry point --------------------------------------------------------------
-
-
-def snapshot_restore(args: argparse.Namespace) -> int:
-    """Run the installed export and candidate restore with real private credential state."""
-    from exomem import __version__, hosted_portability, hosted_restore, state_migration
-    from exomem.hosted_runtime import HOSTED_PROTOCOL_VERSION
-    from exomem.hosted_security import CredentialBundle, HostedSecurityAuthority
-
-    parent = args.snapshot_restore.resolve()
-    parent.mkdir(mode=0o700, parents=True)
-    exported = hosted_portability.export_quiesced_vault(
-        Path(args.vault), parent / "artifacts", context=hosted_portability.PortabilityContext(
-            cell_id="s1-source", vault_id="s1-vault", operation_id="s1-export",
-            created_at=datetime.now(UTC).isoformat(), operator_authorized=True,
-            lifecycle_state="quiesced", routing_stopped=True, active_mutations=0,
-            background_writers_stopped=True, reads_allowed=True,
-        ),
-    )
-    with zipfile.ZipFile(exported.archive_path) as archive:
-        members = archive.namelist()
-        expect(all(any(member.endswith(path) for member in members) for path in STORE_FILES),
-               "the archive omitted the routing marker or published replica", members)
-        expect(not any(member.endswith(("collections.sqlite-wal", "collections.sqlite-shm")) for member in members),
-               "the archive carried live SQLite companions", members)
-        expect(not any("collections-derived.sqlite" in member for member in members),
-               "the portable archive carried derivable rows", members)
-    secret = secrets.token_urlsafe(32)
-    bundle = CredentialBundle({"s1-fixture": secret})
-
-    def security(binding):
-        return HostedSecurityAuthority(
-            binding.state_root, cell_id=binding.cell_id, vault_id=binding.vault_id,
-            expected_uid=binding.runtime_uid, expected_gid=binding.runtime_gid, bundle_loader=lambda: bundle,
-        )
-
-    def bootstrap_security(*, binding, active_credential_version, operation_id, request_digest):
-        return security(binding).bootstrap(active_version=active_credential_version,
-                                          operation_id=operation_id, request_digest=request_digest)
-
-    request = {
-        "request_id": "351a1841-716e-45c7-a4f8-6f54654c2b1e", "operation_id": "s1-restore",
-        "artifact_reference": exported.artifact_reference, "archive_path": str(exported.archive_path),
-        "expected_archive_sha256": exported.archive_sha256,
-        "source_cell_id": "s1-source", "source_vault_id": "s1-vault",
-        "target_cell_id": "s1-target", "target_vault_id": "s1-vault",
-        "target_vault_root": str(parent / "vault"), "target_state_root": str(parent / "state"),
-        "target_log_root": str(parent / "logs"), "expected_release": __version__,
-        "expected_protocol": HOSTED_PROTOCOL_VERSION, "runtime_uid": os.getuid(), "runtime_gid": os.getgid(),
-        "active_credential_version": "s1-fixture", "routing_stopped": True, "workload_stopped": True,
-    }
-    code, result = hosted_restore.execute_restore_candidate(request, bootstrap_security=bootstrap_security)
-    from exomem.hosted_runtime import HostedBindingV2
-
-    binding = HostedBindingV2(
-        cell_id="s1-target", vault_id="s1-vault", vault_root=parent / "vault",
-        state_root=parent / "state", log_root=parent / "logs", runtime_uid=os.getuid(), runtime_gid=os.getgid(),
-    )
-    credential = security(binding).authenticate(secret)
-    expect(credential is not None and credential.security_revision == result["credential_revision"],
-           "the restored credential did not authenticate at the reported revision")
-    os.environ["EXOMEM_STATE_ROOT"] = str(parent / "state" / "vault-state")
-    os.environ["EXOMEM_HOSTED_STATE_ROOT"] = str(parent / "state")
-    state_migration.require_vault_state_ready(parent / "vault")
-    print(json.dumps({"code": code, "journal_phase": result["journal_phase"],
-                      "credential_revision": credential.security_revision}))
-    return 0
 
 
 def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
@@ -1895,7 +1793,7 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(resume_import(journey, continuation, imported))
         asyncio.run(import_samples(journey))
         asyncio.run(field_release_journey(journey))
-        asyncio.run(copy_and_restore(journey))
+        asyncio.run(copy_and_adopt(journey))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
     except BaseException:
@@ -1920,14 +1818,11 @@ def main() -> int:
     parser.add_argument("--home", required=True)
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--issue-recipient-session", type=Path, help=argparse.SUPPRESS)
-    parser.add_argument("--snapshot-restore", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--unsupported-launcher", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--snapshot-state", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.issue_recipient_session:
         return issue_recipient_session(args.issue_recipient_session)
-    if args.snapshot_restore:
-        return snapshot_restore(args)
     if args.unsupported_launcher:
         return inspect_unsupported_launcher(args)
     if args.snapshot_state:

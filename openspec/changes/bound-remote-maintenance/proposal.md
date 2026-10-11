@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes the Hosted adapter cases. MCP/REST maintenance admission and every surviving unchecked task remain in scope.
+
 ## Why
 
 A request-bound MCP, REST, or hosted call can start write-mode vault maintenance,

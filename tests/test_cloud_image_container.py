@@ -8,6 +8,11 @@ bearer, the same protocol the gateway uses. No `EXOMEM_LOG_DIR` override is
 passed, so the image's own default (design D1.2, `/tmp/exomem-logs`) is what
 gets tested.
 
+Server containers use two CPUs, 3 GiB of memory, and an internal bridge.
+HTTP uses each container's inspected bridge address without publishing ports.
+Run this test on a native Linux Docker host with direct bridge access.
+Helper containers have no network.
+
 Gated on Docker and an explicit opt-in, like this repo's other disposable
 infrastructure drills (`RUN_K3S_GOVERNANCE_DRILL_TEST`,
 `RUN_HOSTED_RELEASE_IMAGE_TEST`): there is no existing plain-`docker run`
@@ -50,9 +55,9 @@ BUILD_IMAGE = "CLOUD_IMAGE_TAG" not in os.environ
 
 RUN_ID = uuid.uuid4().hex[:8]
 VOLUME = f"lanea-r2-vol-{RUN_ID}"
+NETWORK = f"lanea-r2-net-{RUN_ID}"
 CELL_ID = f"lanea-r2-cell-{RUN_ID}"
 TOKEN = secrets.token_urlsafe(32)  # noqa: S105 - disposable test bearer, well past the 32-char floor
-HOST_PORT = int(os.environ.get("CLOUD_IMAGE_TEST_PORT", "38765"))
 LEGACY_PROTOCOL_VERSION = "2025-11-25"
 
 # Distinctive phrases (task 2.8 step 9): one carried by a `remember` title,
@@ -80,13 +85,19 @@ def _docker(args: list[str], *, check: bool = True) -> subprocess.CompletedProce
     return result
 
 
-def _start_server(name: str, *, port: int) -> None:
+def _start_server(name: str) -> str:
     _docker(
         [
             "run",
             "-d",
             "--name",
             name,
+            "--network",
+            NETWORK,
+            "--cpus",
+            "2",
+            "--memory",
+            "3g",
             "--read-only",
             "--tmpfs",
             "/tmp",
@@ -96,8 +107,6 @@ def _start_server(name: str, *, port: int) -> None:
             "10001:10001",
             "-v",
             f"{VOLUME}:/data",
-            "-p",
-            f"{port}:8765",
             "-e",
             "EXOMEM_CLOUD_CELL=1",
             "-e",
@@ -109,6 +118,11 @@ def _start_server(name: str, *, port: int) -> None:
             IMAGE_TAG,
         ]
     )
+    inspection = _docker(
+        ["inspect", "--format", "{{json .NetworkSettings.Networks}}", name]
+    )
+    address = json.loads(inspection.stdout)[NETWORK]["IPAddress"]
+    return f"http://{address}:8765"
 
 
 def _run_cell_init() -> dict:
@@ -116,6 +130,8 @@ def _run_cell_init() -> dict:
         [
             "run",
             "--rm",
+            "--network",
+            "none",
             "--read-only",
             "--tmpfs",
             "/tmp",
@@ -145,6 +161,8 @@ def _stat_modes(paths: list[str]) -> dict[str, str]:
         [
             "run",
             "--rm",
+            "--network",
+            "none",
             "-u",
             "0:0",
             "-v",
@@ -170,7 +188,7 @@ def _wait_for_http(url: str, *, timeout: float) -> tuple[bool, list[int]]:
     """Poll `url`; returns whether it ever reached 200, and every status seen."""
     deadline = time.monotonic() + timeout
     statuses: list[int] = []
-    with httpx.Client(timeout=5.0) as client:
+    with httpx.Client(timeout=5.0, trust_env=False) as client:
         while time.monotonic() < deadline:
             try:
                 response = client.get(url)
@@ -307,6 +325,8 @@ def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
         [
             "run",
             "--rm",
+            "--network",
+            "none",
             "-u",
             "0:0",
             "-v",
@@ -328,6 +348,8 @@ def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
         [
             "run",
             "--rm",
+            "--network",
+            "none",
             "-u",
             "0:0",
             "-v",
@@ -356,6 +378,7 @@ def _assert_no_phrase_leak(server_container: str, phrases: list[str]) -> None:
 
 def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
     containers: list[str] = []
+    network_created = False
     try:
         # ---- image: build (default) or reuse (CLOUD_IMAGE_TAG) ----
         if BUILD_IMAGE:
@@ -374,12 +397,17 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             )
             assert build.returncode == 0, build.stdout + build.stderr
 
+        _docker(["network", "create", "--driver", "bridge", "--internal", NETWORK])
+        network_created = True
+
         # ---- volume, chmod'd 2770 the way a Kubernetes fsGroup leaves it ----
         _docker(["volume", "create", VOLUME])
         _docker(
             [
                 "run",
                 "--rm",
+                "--network",
+                "none",
                 "-u",
                 "0:0",
                 "-v",
@@ -402,27 +430,33 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
         # ---- step 2: first start, only the D1 environment ----
         server_1 = f"lanea-r2-server1-{RUN_ID}"
         containers.append(server_1)
-        _start_server(server_1, port=HOST_PORT)
+        base_url = _start_server(server_1)
 
         # `docker run -d` returns once the container is created, not once
         # uvicorn is actually accepting connections -- poll rather than
         # assume the first request lands after the port is bound.
         health_ok, health_statuses = _wait_for_http(
-            f"http://127.0.0.1:{HOST_PORT}/health", timeout=30.0
+            f"{base_url}/health", timeout=30.0
         )
-        assert health_ok, f"liveness never came up: {health_statuses}"
+        if not health_ok:
+            state = _docker(
+                ["inspect", "--format", "{{json .State}}", server_1], check=False
+            )
+            logs = _docker(["logs", "--tail", "20", server_1], check=False)
+            log_tail = (logs.stdout + logs.stderr).replace(TOKEN, "<redacted>")
+            raise AssertionError(
+                f"liveness never came up: {health_statuses}\n"
+                f"State: {state.stdout.strip()}\nLogs:\n{log_tail}"
+            )
 
-        # step 8: /health/ready is not ready until retrieval is admitted.
+        # The deterministic readiness test proves rejection before admission;
+        # this workflow requires the actual image to become ready in time.
         ready_ok, ready_statuses = _wait_for_http(
-            f"http://127.0.0.1:{HOST_PORT}/health/ready", timeout=90.0
+            f"{base_url}/health/ready", timeout=90.0
         )
         assert ready_ok, f"never became ready: {ready_statuses}"
-        assert any(code != 200 for code in ready_statuses), (
-            f"/health/ready was 200 on the very first poll, so this run gives "
-            f"no evidence it ever gated on retrieval admission: {ready_statuses}"
-        )
 
-        with httpx.Client(base_url=f"http://127.0.0.1:{HOST_PORT}", timeout=30.0) as client:
+        with httpx.Client(base_url=base_url, timeout=30.0, trust_env=False) as client:
             assert _mcp_initialize(client).status_code == 200
 
             # ---- step 3: a governed write ----
@@ -447,9 +481,9 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
 
         server_2 = f"lanea-r2-server2-{RUN_ID}"
         containers.append(server_2)
-        _start_server(server_2, port=HOST_PORT)
+        base_url = _start_server(server_2)
         ready_ok, _ = _wait_for_http(
-            f"http://127.0.0.1:{HOST_PORT}/health/ready", timeout=90.0
+            f"{base_url}/health/ready", timeout=90.0
         )
         assert ready_ok
 
@@ -458,7 +492,7 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
         assert modes["/data/vault"] == "700", modes
         assert modes["/data/host"] == "700", modes
 
-        with httpx.Client(base_url=f"http://127.0.0.1:{HOST_PORT}", timeout=30.0) as client:
+        with httpx.Client(base_url=base_url, timeout=30.0, trust_env=False) as client:
             assert _mcp_initialize(client).status_code == 200
 
             # ---- step 6: exact and paraphrased recall of the write ----
@@ -467,14 +501,26 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             )
             assert PHRASE_REMEMBER in json.dumps(exact["structuredContent"]), exact
 
-            paraphrase = _mcp_call_tool(
-                client,
-                name="ask_memory",
-                arguments={
-                    "query": "what does the container test note say happened here"
-                },
-                request_id=3,
-            )
+            # Retrieval admission permits lexical recall while embeddings warm.
+            # Retry only that documented component, within a bounded deadline.
+            semantic_deadline = time.monotonic() + 90.0
+            while True:
+                paraphrase = _mcp_call_tool(
+                    client,
+                    name="ask_memory",
+                    arguments={
+                        "query": "what does the container test note say happened here"
+                    },
+                    request_id=3,
+                )
+                recall_result = paraphrase["structuredContent"]["result"]
+                if isinstance(recall_result, list):
+                    break
+                components = recall_result.get("warming", {}).get("components", [])
+                if "embeddings" not in components:
+                    break
+                assert time.monotonic() < semantic_deadline, paraphrase
+                time.sleep(1.0)
             assert PHRASE_REMEMBER in json.dumps(paraphrase["structuredContent"]), paraphrase
 
             # ---- step 7: a further governed write ----
@@ -500,5 +546,7 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
         for name in containers:
             _docker(["rm", "-f", name], check=False)
         _docker(["volume", "rm", "-f", VOLUME], check=False)
+        if network_created:
+            _docker(["network", "rm", NETWORK], check=False)
         if BUILD_IMAGE:
             _docker(["image", "rm", "-f", IMAGE_TAG], check=False)

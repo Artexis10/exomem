@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and historical-profile gates. Shared baseline doctrine and client acceptance remain in scope. Pending client traces and closure still require surviving implementation and merge evidence.
+
 ## 1. Red-first semantic fixtures
 
 - [x] 1.1 Add the generic versioned baseline contribution input at `tests/fixtures/hosted_v5_contributions/personal_baselines.json`, covering stable preferences, recurring routines, historical baselines, durable affiliations, and their fleeting, one-off, incidental, trivial, or tentative twins.
@@ -18,21 +20,18 @@
 - [x] 3.2 Update the generic scaffold, capture workflow, relevant operations reference, prominence renderer, documentation blocks, and structural reminder coherently.
 - [x] 3.3 Regenerate defined Claude Code plugin copies from the scaffold and verify privacy, byte-parity, and sync gates.
 
-## 4. Hosted v5 candidate
+## 4. Current client acceptance
 
-- [x] 4.1 Establish one Hosted implementation lane as owner of every v5 source, fixture, profile, render, lock, archive, and promotion file; sibling lanes may edit only their generic inputs under `tests/fixtures/hosted_v5_contributions/`.
-- [x] 4.2 Add v5 profile and candidate-owned resolution for every shipped skill and pin v1-v4 to their historical command schemas so mutable canonical command objects cannot change their descriptors or actual-wire admission.
-- [x] 4.3 Validate and canonicalise the four contribution inputs, freeze their snapshot into one candidate-owned combined fixture, and bind its digest through compatibility, package, locks, archives, and promotion evidence before the first v5 render or lock.
-- [x] 4.4 Render one v5 package and lock set, prove the package carries the exact combined-fixture digest, add a mutation/freshness test proving fixture drift invalidates package verification, and prove one complete v1-v4 manifest remains identical across source bytes, definitions, fixtures, promotion records, resolved command schemas, and actual-wire identities; generated packages, locks and archives are release-owned -- `release-please` regenerates them on every schema-contract move -- and are covered by the release parity gate and the `hosted-plugin.py check` freshness tests instead.
-- [ ] 4.5 Capture clean supported-client traces for all four changes' positive and negative fixtures and require the combined bound evidence for promotion.
-- [x] 4.6 Add rollback tests proving pre-lock candidate rebuild is allowed, promoted v5 is immutable, and any post-promotion correction requires v6.
+Hosted candidate tasks 4.1–4.4 and 4.6 are superseded, not current release obligations.
+
+- [ ] 4.5 Capture clean supported-client traces for all four behavior families and their positive and negative fixtures.
 
 ## 5. Verification and delivery
 
-- [x] 5.1 Run focused fixture, carrier, bootstrap-budget, Hosted profile/package/promotion, plugin sync, public-input, and scaffold leak tests. Evidence: tests/test_personal_baseline_contract.py, carrier and bootstrap-budget suites, tests/test_hosted_v5_candidate.py, tests/test_plugin_sync.py, tests/test_scaffold_no_leak.py green on the delivered tip.
+- [x] 5.1 Run focused fixture, carrier, bootstrap-budget, Hosted profile/package/promotion, plugin sync, public-input, and scaffold leak tests. Evidence: tests/test_personal_baseline_contract.py, carrier and bootstrap-budget suites,, tests/test_plugin_sync.py, tests/test_scaffold_no_leak.py green on the delivered tip.
 - [x] 5.2 Run required mutation tests and record killed-mutant evidence.
 - [x] 5.3 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict`. Evidence: ruff clean; full lean suite on the delivered tip; openspec validate --all --strict 182/182 with the CI-pinned validator.
 - [x] 5.4 Report false-positive results separately and do not claim comparative no-nudge benchmark evidence without its governed amendment. Evidence: PR body reports the false-positive twins per fixture separately and claims no comparative no-nudge benchmark result; f21 stays withheld.
 - [x] 5.5 Run delegation-envelope fixtures proving baseline writes never bypass the mapped class disposition or confirmation.
-- [ ] 5.6 After all four changes are implemented, independently reviewed, merged, and represented in promoted v5 evidence, refresh each delta against the then-current canonical specs and archive in this exact order: `add-governed-curation-lane`, `complete-recurring-entity-lifecycle`, `preserve-adopted-generated-artifacts`, `capture-durable-personal-baselines`; preserve requirements introduced by earlier archives and run `openspec validate --all --strict` before and after every archive.
+- [ ] 5.6 After all four surviving changes are implemented, independently reviewed, merged, and supported by current client evidence, refresh each delta against the then-current canonical specs and archive in this exact order: `add-governed-curation-lane`, `complete-recurring-entity-lifecycle`, `preserve-adopted-generated-artifacts`, `capture-durable-personal-baselines`; preserve requirements introduced by earlier archives and run `openspec validate --all --strict` before and after every archive.
   Pointer: `promote-referents-without-nudges` amends this change's `delegation-envelope` delta (O2, ruling R3): affiliation acceptance means accepting a queue suggestion, and an affiliation edge that the owner's agent authors follows `proactive_capture`. That change's task 1.1 rewrites the served copy.

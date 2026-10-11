@@ -171,17 +171,11 @@ It SHALL list the shipped compiled types and folders from the pack.
 The workflow skills SHALL say that a vault may register more and name `schema_memory(subject="note-types", operation="inspect")` as the source of the live set.
 The bootstrap vocabulary summary SHALL NOT list note-type keys, because the authoring contract and search guidance already list the shipped types. It SHALL still report the registry's findings, new keys and a refusal.
 No published guidance SHALL claim that the shipped list is complete.
-Released hosted profiles SHALL keep their frozen contracts and descriptors.
 
 #### Scenario: Current guidance points to the live set
 - **WHEN** a client reads the current authoring contract and a workflow skill
 - **THEN** the contract gives the role rule and the shipped list, and the skill also names the registry route
 - **AND** no sentence says that the compiled type list is exact
-
-#### Scenario: Released profiles keep their bytes
-- **WHEN** a v1 to v4 hosted profile serves bootstrap after a vault registers a compiled type
-- **THEN** it serves its frozen authoring contract unchanged
-- **AND** the vault-defined type does not appear in it
 
 #### Scenario: Search guidance matches ranking
 - **WHEN** bootstrap serves search guidance
@@ -203,14 +197,8 @@ A restore SHALL remove a promoted type without changing page bytes.
 Typed creation SHALL place a page of a registered compiled type in its declared folder.
 It SHALL apply the type's required fields, statuses, sections and typed fields from the registry.
 The notes index SHALL count each compiled folder, including a new one.
-Type-specific values SHALL reach `remember` and `replace_memory` through one generic `fields` parameter on the current tool surfaces, including hosted v5.
-Released hosted profiles v1 to v4 SHALL keep their parameters.
+Type-specific values SHALL reach `remember` and `replace_memory` through one generic `fields` parameter on the current local and Cloud tool surfaces.
 
 #### Scenario: A new compiled folder enters the notes index
 - **WHEN** typed creation writes the first page of a vault-defined compiled type
 - **THEN** the notes index gains an entry and a count for its folder
-
-#### Scenario: Released profiles keep their parameters
-- **WHEN** a v1 to v4 hosted profile lists `remember` and `replace_memory`
-- **THEN** their parameters and descriptors are unchanged
-- **AND** only the current surfaces, including hosted v5, accept `fields`

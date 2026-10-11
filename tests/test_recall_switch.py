@@ -1,8 +1,7 @@
 """Recall runs one multilingual encoder on a personal server.
 
 A personal server encodes recall (and, sharing the instance, activation) with
-`BAAI/bge-m3`, and so does a cloud cell. A hosted cell keeps
-`BAAI/bge-base-en-v1.5`: its runtime runs no re-embed. What a trace or doctor reports as the model is the one
+`BAAI/bge-m3`, and so does a Cloud cell. What a trace or doctor reports as the model is the one
 whose vectors actually served: while a re-embed has not cut over, that is the
 model that wrote the serving sidecar.
 """
@@ -14,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import cloud_cell, embeddings, hosted_runtime, readiness, recall_space
+from exomem import cloud_cell, embeddings, readiness, recall_space
 from exomem import find as find_module
 from exomem.embedding_index import EmbeddingIndex
 from exomem.kbdir import kb_dirname
@@ -27,16 +26,11 @@ BASE = "BAAI/bge-base-en-v1.5"
     ("env", "model"),
     [
         ({}, M3),
-        ({"EXOMEM_HOSTED_CELL": "0"}, M3),
         ({"EXOMEM_CLOUD_CELL": "1"}, M3),
         ({"EXOMEM_CLOUD_CELL": "true"}, M3),
-        ({"EXOMEM_HOSTED_CELL": "1"}, BASE),
-        ({"EXOMEM_HOSTED_CELL": "off", "EXOMEM_CLOUD_CELL": "yes"}, M3),
         # A malformed flag is read as a cell, as content-private logging reads it.
-        ({"EXOMEM_HOSTED_CELL": "maybe"}, BASE),
         # An explicit model wins over the deployment's default, either way.
         ({"EXOMEM_RECALL_MODEL": BASE}, BASE),
-        ({"EXOMEM_RECALL_MODEL": M3, "EXOMEM_HOSTED_CELL": "1"}, M3),
         ({"EXOMEM_RECALL_MODEL": BASE, "EXOMEM_CLOUD_CELL": "1"}, BASE),
     ],
 )
@@ -46,9 +40,7 @@ def test_the_recall_encoder_follows_the_deployment(env: dict[str, str], model: s
 
 @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "1", "true", "yes", "on"])
 def test_the_cell_flags_read_as_the_runtime_reads_them(value: str) -> None:
-    hosted = {"EXOMEM_HOSTED_CELL": value}
     cloud = {"EXOMEM_CLOUD_CELL": value}
-    assert recall_space.cell_mode(hosted) == hosted_runtime.hosted_mode_enabled(hosted)
     assert recall_space.cell_mode(cloud) == cloud_cell.cloud_mode_enabled(cloud)
 
 

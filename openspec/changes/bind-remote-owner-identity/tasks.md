@@ -12,7 +12,9 @@
 
 - [ ] 3.1 Cover the consumers: the default-deny scope, owner-only governance, cross-audience inspection, shared owner results for local and bound remote, no owner results for an unbound principal, issuer-family separation of authorization sessions, unchanged retry and capture-sweep scopes, and the `library_scope()` no-op.
 - [ ] 3.2 Record `principal_kind` in the call ledger for all four kinds. The activation log adds the same field in whichever of this change and the episode-capture change merges second.
-- [ ] 3.3 Clear the binding in the legacy hosted runtime and prove hosted and loopback principals are never the owner with it set.
+- [ ] 3.3 Prove loopback and cell service credentials never acquire owner authority from a planted personal binding.
+
+  The legacy Hosted clearing branch is retired; current Cloud identity remains governed by its own binding contract.
 
 ## 4. Operator surfaces
 

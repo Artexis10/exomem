@@ -27,11 +27,9 @@ import mimetypes
 import os
 import re
 import time
-import typing
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from dataclasses import replace as dataclass_replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -89,7 +87,6 @@ from . import (
 )
 from . import freshness as freshness_module
 from . import get_page as get_page_module
-from . import hosted_legacy_schemas as hosted_legacy_schemas_module
 from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
 from . import link_summary as link_summary_module
@@ -877,34 +874,18 @@ def op_bootstrap(
         capture_gate=engagement_policy["contract"]["effective_capture"],
     )
     active_descriptor = _active_bootstrap_descriptor()
-    # A released hosted profile is a published identity: it keeps the complete
-    # compact payload and its pinned parameter list, which has no `section`.
-    frozen_profile = (
-        active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS
-    )
-    if frozen_profile:
-        # Released Hosted payloads predate service resource diagnostics.
-        compute_policy = {
-            key: value
-            for key, value in compute_policy.items()
-            if key not in {"resource_profile", "resource_profile_source"}
-        }
-    if frozen_profile and section is not None:
-        raise ValueError("bootstrap: section is not available on this surface profile")
     # Where the compact core points for the vocabulary workflow's full contract: it is
-    # served on demand in a section, and a released profile keeps its published text.
+    # served on demand in a section.
     vocabulary_workflow_home = (
-        " (section vocabulary)" if profile == "compact" and not frozen_profile else ""
+        " (section vocabulary)" if profile == "compact" else ""
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     # The recall contract opens with a line that names `activate_context`. Where the
-    # surface does not export it (hosted), the filter below would drop the WHOLE recall
-    # contract; carry the same instruction through `ask_memory` instead. A released
-    # profile keeps its published payload.
+    # surface does not export it, the filter below would drop the WHOLE recall
+    # contract; carry the same instruction through `ask_memory` instead.
     recall = engagement_policy["contract"].get("recall")
     if (
-        not frozen_profile
-        and isinstance(recall, str)
+        isinstance(recall, str)
         and "activate_context" not in active_descriptor.callable_commands
     ):
         engagement_policy["contract"]["recall"] = recall.replace(
@@ -1112,37 +1093,12 @@ def op_bootstrap(
     relation_registry = relation_registry_module.load_registry(
         None if relation_registry_refusal else vault_root
     )
-    legacy_commands = None
-    if active_descriptor.profile in hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS:
-        legacy_commands = {
-            command.name: command
-            for command in product_commands_for_profile(active_descriptor.profile, "rest")
-        }
-
-    def vocabulary_operation(
-        tool: str, args: dict[str, str], *, required: tuple[str, ...] = ()
-    ) -> dict:
+    def vocabulary_operation(tool: str, args: dict[str, str]) -> dict:
         if tool not in active_descriptor.callable_commands:
             return {
                 "available": False,
                 "unavailable_reason": "This operation is not exported by the active surface.",
             }
-        if legacy_commands is not None:
-            command = legacy_commands.get(tool)
-            if command is None:
-                return {
-                    "available": False,
-                    "unavailable_reason": "This operation is not admitted by the active surface.",
-                }
-            params = {param.name: param for param in command.params}
-            if any(name not in params for name in (*args, *required)) or any(
-                params[name].choices and value not in params[name].choices
-                for name, value in args.items()
-            ):
-                return {
-                    "available": False,
-                    "unavailable_reason": "This operation is not admitted by the active surface.",
-                }
         return {"available": True, "route": {"tool": tool, "args": args}}
 
     relation_vocabulary_projection = relation_registry_refusal or {
@@ -1156,7 +1112,7 @@ def op_bootstrap(
             "Resolve truthfully: specific, relates_to or no edge. Propose durable recurring "
             "meaning, never automatically from questions. Hash-guard saves. New meaning uses a "
             "new canonical key; deprecate replaced key."
-            if profile == "compact" and not frozen_profile else
+            if profile == "compact" else
             (
                 "resolve: specific truthful, relates_to generic/no edge. "
                 "propose-relation only for durable recurring meaning; explicit question is "
@@ -1167,15 +1123,11 @@ def op_bootstrap(
     }
     from .vocabulary import bootstrap as vocabulary_bootstrap_module
 
-    # The live registries by use. A released profile keeps its published payload.
-    vocabulary_projection = (
-        None
-        if frozen_profile
-        else vocabulary_bootstrap_module.block(
-            vault_root,
-            # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
-            inspect_route="schema_memory(operation=inspect, subject=<registry>)",
-        )
+    # The live registries by use.
+    vocabulary_projection = vocabulary_bootstrap_module.block(
+        vault_root,
+        # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
+        inspect_route="schema_memory(operation=inspect, subject=<registry>)",
     )
     vocabulary_workflow_projection = {
         "version": "v1",
@@ -1184,22 +1136,13 @@ def op_bootstrap(
             "entity-type/v1",
             "relation-type/v1",
         ],
-        # The live wording is shorter to fund the `vocabulary` block; a released
-        # profile keeps the wording it was published with.
+        # The live wording is shorter to fund the `vocabulary` block.
         "consideration": (
             "Choose reuse/enrich/propose-new or generic/no-edge/defer from source evidence; no quota."
-            if profile == "compact" and not frozen_profile else
+            if profile == "compact" else
             (
-                (
-                    "Actively choose reuse/enrich/propose-new from ordinary source evidence; "
-                    "generic/no-edge/defer when appropriate. No quota. Resolvers leave the "
-                    "choice and any new definition to the active agent."
-                )
-                if frozen_profile
-                else (
-                    "Choose reuse, enrich or propose-new from source evidence; generic, "
-                    "no-edge and defer stay valid. No quota; the active agent decides."
-                )
+                "Choose reuse, enrich or propose-new from source evidence; generic, "
+                "no-edge and defer stay valid. No quota; the active agent decides."
             )
         ),
         "cadence": (
@@ -1207,22 +1150,12 @@ def op_bootstrap(
             "Anchor a question on a source page/entity; "
             "relation_question uses both current endpoints. Record a typed decision before "
             "structural writes."
-            if profile == "compact" and not frozen_profile else
+            if profile == "compact" else
             (
-                (
-                    "At a durable capture boundary, use the available review route and inspect "
-                    "relevant items with context. If a useful identity or meaning question is "
-                    "missing, use a source-page or existing-entity anchor. For a selected edge, "
-                    "use relation_question with the current relation-queue candidate so both "
-                    "endpoints are reviewed. Record the typed decision before its structural write."
-                )
-                if frozen_profile
-                else (
-                    "At a capture boundary, review items with context; anchor a missing identity "
-                    "or meaning question on a source page or entity, and an edge question on the "
-                    "current relation-queue candidate (relation_question). Record the typed "
-                    "decision before its structural write."
-                )
+                "At a capture boundary, review items with context; anchor a missing identity "
+                "or meaning question on a source page or entity, and an edge question on the "
+                "current relation-queue candidate (relation_question). Record the typed "
+                "decision before its structural write."
             )
         ),
         "review_route": {"default_limit": 4, **vocabulary_operation("review_memory", {"mode": "vocabulary"})},
@@ -1249,7 +1182,6 @@ def op_bootstrap(
             **vocabulary_operation(
                 "triage_memory",
                 {"action": "decide-vocabulary", "ref": "exomem://review/vocabulary/<item>"},
-                required=("decision",),
             ),
             "fields": [
                 "item_ref",
@@ -1275,21 +1207,11 @@ def op_bootstrap(
             "rule": (
                 "Bind ref/fingerprint via supported writers; keep retry identity (REST: "
                 "Idempotency-Key); read receipts. Types do not apply proposed entities/edges."
-                if profile == "compact" and not frozen_profile else
+                if profile == "compact" else
                 (
-                    (
-                        "On a supported canonical writer, pass the reviewed ref and fingerprint "
-                        "to bind the result to its decision. Use one stable transport idempotency "
-                        "identity for the operation (REST: Idempotency-Key header), retain it on "
-                        "retry, and inspect the canonical receipt. A saved type alone does not "
-                        "complete a separately proposed entity or edge."
-                    )
-                    if frozen_profile
-                    else (
-                        "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
-                        "idempotency identity (REST: Idempotency-Key) across retries and read the "
-                        "receipt. A saved type does not complete a separately proposed entity or edge."
-                    )
+                    "Pass the reviewed ref and fingerprint to a supported writer; reuse one "
+                    "idempotency identity (REST: Idempotency-Key) across retries and read the "
+                    "receipt. A saved type does not complete a separately proposed entity or edge."
                 )
             ),
         },
@@ -1372,13 +1294,8 @@ def op_bootstrap(
     # Project the semantic authoring contract ONCE at the selected profile and
     # reuse it everywhere in the payload. A compact bootstrap must stay compact
     # through the whole payload, so the nested authoring_contract projection can
-    # never fall back to the full profile and leak the rich example. A released
-    # profile teaches the contract it was released with, not the live one.
-    authoring_contract = (
-        hosted_legacy_schemas_module.LEGACY_AUTHORING_CONTRACTS[active_descriptor.profile]
-        if frozen_profile
-        else semantic_authoring_module.AUTHORING_CONTRACT
-    )
+    # never fall back to the full profile and leak the rich example.
+    authoring_contract = semantic_authoring_module.AUTHORING_CONTRACT
     semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
         authoring_contract, profile=profile
     )
@@ -1477,8 +1394,8 @@ def op_bootstrap(
         }
     from .planning_values import PlanningValues
 
-    # A released profile keeps its published lists; the live surface adds the vault's.
-    planning_values = PlanningValues(None if frozen_profile else vault_root)
+    # The live surface adds the vault's lists.
+    planning_values = PlanningValues(vault_root)
     planning_contract = {
         "available": "plan_memory" in active_product_names,
         "route": {
@@ -1511,20 +1428,12 @@ def op_bootstrap(
             "plan_memory before treating them as observed Records."
         ),
         "inventory": (
-            (
-                "inspect without a collection lists Planning collections and creates "
-                "nothing; resolve one item with query on title or a natural-key field "
-                "plus lifecycle and status."
-            )
-            if frozen_profile
-            else (
-                "Discover collections with browse_memory; inspect requires collection. "
-                "Query by title or natural key plus lifecycle/status. For update/triage, "
-                "use inspect/query snapshot as expected_container_hash and the chosen "
-                "query row's plan_id and item_version as plan_id and expected_item_version. "
-                "Send changes for update or transition for triage, with why. "
-                "After a stale refusal, inspect/query again before retrying."
-            )
+            "Discover collections with browse_memory; inspect requires collection. "
+            "Query by title or natural key plus lifecycle/status. For update/triage, "
+            "use inspect/query snapshot as expected_container_hash and the chosen "
+            "query row's plan_id and item_version as plan_id and expected_item_version. "
+            "Send changes for update or transition for triage, with why. "
+            "After a stale refusal, inspect/query again before retrying."
         ),
         "evidence_execution_boundary": (
             "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
@@ -1681,24 +1590,13 @@ def op_bootstrap(
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
-                (
-                    "Use as short-term or behavioural memory for user preferences, working "
-                    "rules, routing instructions, and current working context."
-                )
-                if frozen_profile
-                else (
-                    "Assistant-native memory is separate, host-managed storage for "
-                    "preferences, working rules, routing, and working context. "
-                    "Exomem neither reads nor configures it."
-                )
+                "Assistant-native memory is separate, host-managed storage for "
+                "preferences, working rules, routing, and working context. "
+                "Exomem neither reads nor configures it."
             ),
             "exomem": (
-                (
-                    "Use as long-term governed memory for durable governed knowledge: "
-                    if frozen_profile
-                    else "Exomem stores long-term durable governed knowledge: "
-                )
-                + "sources, proof/evidence, history, decisions, records, review, and "
+                "Exomem stores long-term durable governed knowledge: "
+                "sources, proof/evidence, history, decisions, records, review, and "
                 "compiled conclusions."
             ),
         },
@@ -1785,7 +1683,7 @@ def op_bootstrap(
                 *([
                     "when recall is warranted and context is not already injected, "
                     "activate_context with the user's turn before extra recall"
-                ] if not frozen_profile and "activate_context" in active_product_names else []),
+                ] if "activate_context" in active_product_names else []),
                 "ask_memory for cheap product recall",
                 "read_memory or reasoning_lookup for more context",
                 MEMORY_CITATION_GUIDANCE,
@@ -1794,7 +1692,7 @@ def op_bootstrap(
                     "Before saving: vocabulary_workflow (section vocabulary); resolve "
                     "recurring identities/relations, enrich entities. Add types only if "
                     "current types distort evidence; skip incidental names."
-                    if profile == "compact" and not frozen_profile else
+                    if profile == "compact" else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
                     "a missing type when existing types would distort the evidence. Keep "
@@ -1803,7 +1701,7 @@ def op_bootstrap(
                 (
                     "Follow vocabulary_workflow.cadence; bind writes through "
                     "vocabulary_workflow.application."
-                    if profile == "compact" and not frozen_profile else
+                    if profile == "compact" else
                     "follow vocabulary_workflow.cadence: review relevant pending work, "
                     "anchor a missing meaning question, record the typed decision, then "
                     "bind its supported canonical write through vocabulary_workflow.application"
@@ -1811,7 +1709,7 @@ def op_bootstrap(
                 (
                     "Address post-write link/duplicate warnings. write_feedback needs "
                     "response_detail='full'; suggestions need remember(suggestions=true)."
-                    if profile == "compact" and not frozen_profile else
+                    if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
@@ -1820,7 +1718,7 @@ def op_bootstrap(
                 (
                     "Inspect vocabulary_sync; if warming/unavailable, use its recovery route "
                     "once; preserve writes/retry identity; never repeat writes."
-                    if profile == "compact" and not frozen_profile else
+                    if profile == "compact" else
                     "also inspect vocabulary_sync: if guidance is warming or unavailable, "
                     "follow its recovery route for one bounded review pass. Preserve the "
                     "committed write and its retry identity; recovery does not repeat it."
@@ -1877,7 +1775,7 @@ def op_bootstrap(
                 "write_feedback": "structural feedback from remember(): semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; reachable via response_detail='full' under diagnostics",
                 "structure_suggestion": (
                     "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
@@ -1905,12 +1803,12 @@ def op_bootstrap(
                 # would silently vanish.
                 "due_state": (
                     "Advisory counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated references. They cover predictions past authored check dates, experiments past their window without results, long-unanswered questions and broken supersession chains. Absent when nothing is due."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
                     "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
                 ),
                 "artifact_role_state_handling": (
@@ -1924,7 +1822,7 @@ def op_bootstrap(
                 ),
                 "due_state_authority": (
                     "Advisory counts measure authored state. The runtime never judges, resolves, closes, archives or writes for them, or changes retrieval ordering."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
                 ),
                 # Command-free for the same reason as the due-state lines above,
@@ -1936,14 +1834,14 @@ def op_bootstrap(
                 # comparison or continuation); it is not repeated here.
                 "capture_sweep_handling": (
                     "On the first durable write after a quiet interval, `capture_sweep` calls for one bounded pass over recent conversation. `consider` gives examples; `written_recently` prevents duplicates; `unpaged_mentions` names references without pages. Save what qualifies in the user's language; otherwise stay silent."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
                 ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": (
                     "A quiet family stays reviewable and audited; omission never proves nothing is due. review_memory(mode='dispositions') lists registered families, quiet state, reasons and the delegation envelope."
-                    if profile == "compact" and not frozen_profile
+                    if profile == "compact"
                     else "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due"
                 ),
                 # Carried by EVERY profile. It was full-only while compact sat 24
@@ -2272,7 +2170,7 @@ def op_bootstrap(
                 ),
             },
         ]
-    if profile == "full" and not frozen_profile:
+    if profile == "full":
         payload["references"] = {
             name: "https://github.com/Artexis10/exomem/blob/main/src/exomem/_scaffold/_Schema/" + name
             for name, _path in workflow_skills_module.contract_sources()
@@ -2329,7 +2227,7 @@ def op_bootstrap(
         **{key: compact_payload[key] for key in first if key in compact_payload},
         **compact_payload,
     }
-    if frozen_profile or profile != "compact":
+    if profile != "compact":
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
@@ -2357,7 +2255,7 @@ def op_bootstrap(
         )
     else:
         result = core_payload if core_payload is not None else compact_payload
-    # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
+    # A surface that serves no core (`full`, `diagnostics`)
     # keeps today's shape: absent when healthy, appended after the projection so the
     # session whitelist cannot drop it.
     if latency_block is not None and core_payload is None:
@@ -2366,7 +2264,7 @@ def op_bootstrap(
     # session repeats the identical block, the nagging the governor exists to prevent;
     # with it on a summary, the list is never delivered at all. So: only a response
     # that carries the full block records it (a session, `all`, `epistemics`, `full`,
-    # `diagnostics` and the released profiles), never the core or another section.
+    # and `diagnostics`), never the core or another section.
     if due_block is not None and result.get("due_state") == due_block:
         try:
             due_state_module.mark_emitted(due_block, vault_root=vault_root)
@@ -3736,14 +3634,7 @@ def _unattended_capture() -> bool:
     """Whether an explicit human adapter bound this capture, without a wire flag."""
     from . import source_taxonomy
 
-    if source_taxonomy.is_human_capture():
-        return True
-    surface = capabilities_module.current_active_surface()
-    return (
-        surface is not None
-        and surface.surface == "hosted"
-        and surface.profile == capabilities_module.HOSTED_PRIVATE_ROUTER_PROFILE
-    )
+    return source_taxonomy.is_human_capture()
 
 
 def _add_source(
@@ -10478,84 +10369,6 @@ def op_maintain_memory(
     )
 
 
-def _hosted_v4_maintain_memory(
-    vault_root: Path,
-    mode: str = "audit",
-    categories: list[str] | None = None,
-    dry_run: bool | None = None,
-    rebuild_embeddings: bool = False,
-    rebuild_graph: bool = False,
-    detail: Literal["actionable", "full"] = "actionable",
-    legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
-    collection: str | None = None,
-    apply: bool | None = None,
-    plan_id: str | None = None,
-    source_snapshot: str | None = None,
-    why: str | None = None,
-) -> dict:
-    """Maintain vault health with explicit write-capable modes.
-
-    Default mode is read-only audit. `mode="fix"` and `mode="backfill-ids"`
-    rewrite content (wikilinks, frontmatter, stable IDs) and default to
-    dry-run here as a safety net. `mode="reconcile"` only heals index-count
-    and sidecar drift from out-of-band edits — the same canonical default as
-    `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
-    writing; pass `dry_run=true` to preview instead.
-
-    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
-    write-mode maintenance is operator-only: run `exomem maintain --fix` or
-    `exomem maintain --reconcile` on the host. Remote write attempts return
-    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
-
-    `mode="structured-files"` is the exception: it previews one Planning or
-    Records collection's manifest-declared human filenames and managed readable
-    bodies, including governed inbound-link rewrites. Preview is read-only;
-    apply requires its exact plan and source snapshot and commits atomically.
-    Durable identity and mutable state stay in frontmatter, not filenames.
-
-    `mode="fix"` also collapses media sidecars that accumulated nested copies of
-    themselves (audit category `duplicated_sidecar`, reportable on its own via
-    `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
-    surviving `## Extracted text` — for a sidecar whose top-level block was
-    blanked by a re-render, that is the one buried in a nested copy — and refuses
-    any rewrite that would leave less transcript than it found. Frontmatter is
-    untouched, so a still-`pending` sidecar is re-extracted normally and the
-    recovered text is only the fallback.
-
-    Args:
-        mode: audit, fix, reconcile, backfill-ids, or structured-files.
-        categories: Optional audit category filter.
-        dry_run: Report without writing when true. Defaults to true for
-            fix/backfill-ids (safety net) and false for reconcile (matches
-            `op_reconcile`'s own default). Pass explicitly to override either way.
-        rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
-        rebuild_graph: For reconcile only, quarantine unavailable derived graph
-            lineage and rebuild it from canonical Markdown. Default false.
-        detail: Audit output detail: actionable (default) or full.
-        legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
-        collection: One Planning or Records collection for structured-files.
-        apply: Omit for preview; true applies the exact reviewed plan.
-        plan_id: Exact structured-files preview identity required for apply.
-        source_snapshot: Exact structured-files preview snapshot required for apply.
-        why: Bounded audit reason required for structured-files apply.
-    """
-    return op_maintain_memory(
-        vault_root,
-        mode=mode,
-        categories=categories,
-        dry_run=dry_run,
-        rebuild_embeddings=rebuild_embeddings,
-        rebuild_graph=rebuild_graph,
-        detail=detail,
-        legacy_sample_limit=legacy_sample_limit,
-        collection=collection,
-        apply=apply,
-        plan_id=plan_id,
-        source_snapshot=source_snapshot,
-        why=why,
-    )
-
-
 def op_schema_memory(
     vault_root: Path,
     operation: str,
@@ -13331,21 +13144,12 @@ PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.name for c in PRODUCT_COMMANDS)
 PRODUCT_ROUTE_HELPERS: frozenset[str] = frozenset({"transfer_token"})
 HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 
-HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
-HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
-HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
-HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
-HOSTED_ALPHA_AGENT_V5_PROFILE = "hosted-alpha-agent-v5"
-
-
 @dataclass(frozen=True, slots=True)
-class HostedSurfaceExclusion:
-    """One product command withheld from hosted, and what would lift it.
+class SurfaceExclusion:
+    """One product command withheld from a served surface, and what would lift it.
 
-    v1's membership was a hand-maintained allowlist, which drifts by default:
-    every command added since is absent from hosted until somebody remembers.
-    Inverting it -- hosted *is* the product surface, absence is the exception --
-    makes the default correct and forces each exception to say why.
+    The surface is the product surface and absence is the exception, so the
+    default is correct and each exception has to say why.
 
     `reason` states what is technically broken, not what has not been reviewed.
     `lifted_when` names the condition that ends the exclusion, so an entry
@@ -13357,110 +13161,11 @@ class HostedSurfaceExclusion:
     lifted_when: str
 
 
-HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
-    {
-        exclusion.command: exclusion
-        for exclusion in (
-            HostedSurfaceExclusion(
-                command="configure_memory",
-                reason=(
-                    "The existing hosted profiles pin their ordered command membership; "
-                    "v5 explicitly retains v4's membership. Adding this command would "
-                    "change the hosted command-surface digest under the same profile ID."
-                ),
-                lifted_when=(
-                    "a new hosted profile admits identity-scoped preference mutations, "
-                    "verifies principal and cell isolation, and carries its own candidate digest"
-                ),
-            ),
-            HostedSurfaceExclusion(
-                command="activate_context",
-                reason=(
-                    "The hosted profiles pin their ordered command membership, and v5 "
-                    "retains v4's. Publishing this tool on hosted would move both "
-                    "profiles' command_surface_sha256 under an unchanged profile ID, "
-                    "invalidating the promotion records taken off those bytes. The "
-                    "capability is complete and reachable on the self-hosted MCP, CLI "
-                    "and REST surfaces; hosted adoption is a profile decision, not a "
-                    "side effect of adding a tool."
-                ),
-                lifted_when=(
-                    "a new hosted profile admits the context compiler and carries its "
-                    "own command-surface digest and candidate definition"
-                ),
-            ),
-            HostedSurfaceExclusion(
-                command="episode_memory",
-                reason=(
-                    "The hosted profiles pin their ordered command membership, and v5 "
-                    "retains v4's. Publishing this tool on hosted would move both "
-                    "profiles' command_surface_sha256 under an unchanged profile ID. Its "
-                    "reader, activate_context, is itself excluded from hosted, so a "
-                    "hosted recap would be written where no hosted client reads it back."
-                ),
-                lifted_when=(
-                    "a new hosted profile admits the context compiler together with "
-                    "episode recording and carries its own command-surface digest"
-                ),
-            ),
-            HostedSurfaceExclusion(
-                command="transfer_artifact",
-                reason=(
-                    "The hosted runtime intercepts this leaf with "
-                    "HOSTED_TRANSFER_INTERCEPT_REQUIRED; publishing it as a tool would "
-                    "hand an agent a call that returns an interception error instead of "
-                    "moving an artifact. The capability itself is reachable through the "
-                    "gateway transfer flow."
-                ),
-                lifted_when="the tool call is bridged to the gateway transfer flow",
-            ),
-            HostedSurfaceExclusion(
-                command="adopt_vault",
-                reason=(
-                    "The hosted runtime intercepts this leaf with "
-                    "HOSTED_IMPORT_INTERCEPT_REQUIRED. Adoption on hosted is "
-                    "upload-then-adopt: bytes are staged under _Staging/adoption/<run_id>/ "
-                    "by the verified transfer grant and never land under Knowledge Base/ "
-                    "unadopted. The capability is reachable through the gateway lifecycle "
-                    "flow."
-                ),
-                lifted_when="the tool call is bridged to the gateway lifecycle flow",
-            ),
-            HostedSurfaceExclusion(
-                command="process_media",
-                reason=(
-                    "The hosted image is built from the `hosted` Dockerfile stage, which "
-                    "installs only the `embeddings-onnx` extra and gates the build on "
-                    "torch being absent. Media extraction is additionally gated per cell "
-                    "by the `media` feature grant, which no alpha cell carries, so the "
-                    "tool would refuse on every cell it was published to."
-                ),
-                lifted_when=(
-                    "a media-capable hosted image ships and the cell carries the `media` "
-                    "feature grant"
-                ),
-            ),
-            HostedSurfaceExclusion(
-                command="read_media",
-                reason=(
-                    "Sampling video frames needs the same decoding dependencies the "
-                    "hosted image omits, under the same `media` feature grant."
-                ),
-                lifted_when=(
-                    "a media-capable hosted image ships and the cell carries the `media` "
-                    "feature grant"
-                ),
-            ),
-        )
-    }
-)
-
-
 CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
     {
         exclusion.command: exclusion
         for exclusion in (
-            HostedSurfaceExclusion(
+            SurfaceExclusion(
                 command="transfer_artifact",
                 reason=(
                     "An Exomem Cloud cell has no browser transfer or "
@@ -13472,11 +13177,10 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                     "a live artifact-upload bridge is added for running Cloud cells"
                 ),
             ),
-            HostedSurfaceExclusion(
+            SurfaceExclusion(
                 command="process_media",
                 reason=(
-                    "The `cloud` image is built from the `hosted` runtime "
-                    "stage, which installs only the `embeddings-onnx` extra "
+                    "The `cloud` image installs only the `embeddings-onnx` extra "
                     "and gates the build on torch being absent, so media "
                     "extraction has no dependencies in the image."
                 ),
@@ -13485,7 +13189,7 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                     "decoding dependencies"
                 ),
             ),
-            HostedSurfaceExclusion(
+            SurfaceExclusion(
                 command="read_media",
                 reason=(
                     "Sampling video frames needs the same decoding "
@@ -13501,408 +13205,6 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
 )
 
 
-def hosted_complete_surface_names() -> tuple[str, ...]:
-    """The product command surface minus the recorded hosted exclusions.
-
-    Derived rather than restated so that adding a product command without
-    deciding its hosted status is a test failure rather than a silent subset.
-    Published profile membership stays pinned as a literal -- a profile whose
-    membership moved with the registry would change its own
-    `command_surface_sha256` under an unchanged identifier.
-    """
-    return tuple(
-        command.name
-        for command in PRODUCT_COMMANDS
-        if command.name not in HOSTED_SURFACE_EXCLUSIONS
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class ProductSurfaceProfile:
-    """One immutable, ordered exposure policy over canonical product commands."""
-
-    name: str
-    command_names: tuple[str, ...]
-    #: Whether this profile may expose tier-2 commands. Default closed: the
-    #: resolver refuses a tier-2 member unless the profile opted in, so a
-    #: command promoted to tier 2 later cannot leak onto a profile that never
-    #: decided to carry it. v1-v3 are tier-1 only and unaffected.
-    expose_tier2: bool = False
-
-    def __post_init__(self) -> None:
-        names = tuple(self.command_names)
-        if not self.name:
-            raise ValueError("product surface profile name must be non-empty")
-        if not names or any(not isinstance(name, str) or not name for name in names):
-            raise ValueError("product surface profile commands must be non-empty strings")
-        if len(names) != len(set(names)):
-            raise ValueError("product surface profile contains duplicate commands")
-        object.__setattr__(self, "command_names", names)
-
-
-PRODUCT_SURFACE_PROFILES = MappingProxyType(
-    {
-        HOSTED_ALPHA_AGENT_PROFILE: ProductSurfaceProfile(
-            name=HOSTED_ALPHA_AGENT_PROFILE,
-            command_names=(
-                "bootstrap",
-                "ask_memory",
-                "read_memory",
-                "browse_memory",
-                "remember",
-                "observe_memory",
-                "capture_source",
-                "compile_source",
-                "preserve_evidence",
-                "review_memory",
-                "review_item_context",
-                "triage_memory",
-                "connect_memory",
-            ),
-        ),
-        HOSTED_ALPHA_AGENT_V2_PROFILE: ProductSurfaceProfile(
-            name=HOSTED_ALPHA_AGENT_V2_PROFILE,
-            command_names=(
-                "bootstrap",
-                "ask_memory",
-                "read_memory",
-                "browse_memory",
-                "remember",
-                "observe_memory",
-                "capture_source",
-                "compile_source",
-                "preserve_evidence",
-                "review_memory",
-                "review_item_context",
-                "triage_memory",
-                "connect_memory",
-                "record_memory",
-            ),
-        ),
-        # v3 completes the epistemic loop. v1 and v2 can only accumulate: they
-        # can capture, recall, review and connect, but they cannot supersede a
-        # conclusion, state an intent, or correct a page in place. The three
-        # additions are appended after the full v2 membership so v3's command
-        # order -- and therefore its `command_surface_sha256` -- extends v2's as
-        # a prefix rather than reshuffling it.
-        HOSTED_ALPHA_AGENT_V3_PROFILE: ProductSurfaceProfile(
-            name=HOSTED_ALPHA_AGENT_V3_PROFILE,
-            command_names=(
-                "bootstrap",
-                "ask_memory",
-                "read_memory",
-                "browse_memory",
-                "remember",
-                "observe_memory",
-                "capture_source",
-                "compile_source",
-                "preserve_evidence",
-                "review_memory",
-                "review_item_context",
-                "triage_memory",
-                "connect_memory",
-                "record_memory",
-                "replace_memory",
-                "plan_memory",
-                "edit_memory",
-            ),
-        ),
-        # v4 is the first hosted profile that is not an allowlist. Its membership
-        # is the product command surface minus HOSTED_SURFACE_EXCLUSIONS, in
-        # canonical registry order, and `hosted_complete_surface_names()` returns
-        # exactly this tuple -- asserted by a gate, so a command added to the
-        # registry without a hosted decision fails the build.
-        #
-        # It does not extend v3 as a prefix, unlike v2 -> v3. Registry order is
-        # what the rule can state and keep true; a hand-ordered extension would
-        # need re-deciding on every addition, which is the property being removed.
-        #
-        # Tier 2 is included. Every tier-2 command operates inside the calling
-        # tenant's own vault -- the blast radius a local operator already has --
-        # so withholding it bought no safety, only a smaller product.
-        HOSTED_ALPHA_AGENT_V4_PROFILE: ProductSurfaceProfile(
-            name=HOSTED_ALPHA_AGENT_V4_PROFILE,
-            command_names=(
-                "coordination_status",
-                "bootstrap",
-                "ask_memory",
-                "read_memory",
-                "browse_memory",
-                "remember",
-                "edit_memory",
-                "observe_memory",
-                "replace_memory",
-                "capture_source",
-                "compile_source",
-                "preserve_evidence",
-                "preserve_artifacts",
-                "review_memory",
-                "review_item_context",
-                "triage_memory",
-                "connect_memory",
-                "adoption_studio",
-                "maintain_memory",
-                "schema_memory",
-                "govern_memory",
-                "manage_memory_file",
-                "record_memory",
-                "plan_memory",
-                "query_dataset",
-            ),
-            expose_tier2=True,
-        ),
-        # v5 carries the durable-baseline, generated-artifact adoption,
-        # recurring-entity lifecycle and governed-curation doctrine. Its
-        # membership is v4's, unchanged and in v4's order: those four changes
-        # add arguments and skills, not commands, and `transfer_artifact` stays
-        # withheld until its gateway bridge exists rather than being published
-        # as a call that returns an interception error.
-        #
-        # What v5 does not have is a pinned schema. It is the release those new
-        # arguments were cut for, so it discovers them through the registry --
-        # which is exactly what v1-v4 must no longer do.
-        HOSTED_ALPHA_AGENT_V5_PROFILE: ProductSurfaceProfile(
-            name=HOSTED_ALPHA_AGENT_V5_PROFILE,
-            command_names=hosted_complete_surface_names(),
-            expose_tier2=True,
-        ),
-    }
-)
-
-
-def _legacy_enum(schema: Mapping[str, Any]) -> tuple[str, ...]:
-    """Read a directly-declared historic string enum for CLI metadata."""
-    values = schema.get("enum")
-    if isinstance(values, (list, tuple)) and all(isinstance(value, str) for value in values):
-        return tuple(values)
-    return ()
-
-
-def _legacy_mode_choices(description: str) -> tuple[str, ...]:
-    """Read the historical mode vocabulary from its published first sentence."""
-    first_sentence = description.partition(".")[0]
-    return tuple(re.findall(r"[a-z][a-z0-9-]*", first_sentence))
-
-
-def _legacy_param(
-    published: Mapping[str, object], schema: Mapping[str, Any]
-) -> Param:
-    """Project the descriptor's parameter metadata onto the current command."""
-    default = schema.get("default", inspect.Parameter.empty)
-    name = str(published["name"])
-    choices = _legacy_enum(schema)
-    if name == "mode" and not choices:
-        choices = _legacy_mode_choices(str(published["description"]))
-    return Param(
-        name=name,
-        type=str(published["type"]),
-        required=bool(published["required"]),
-        help=str(published["description"]),
-        choices=choices,
-        schema=hosted_legacy_schemas_module.json_value(schema),
-        schema_description=str(schema.get("description", "")),
-        schema_default=hosted_legacy_schemas_module.json_value(default),
-    )
-
-
-def _pinned_legacy_leaf(
-    command: Command,
-    keep: frozenset[str],
-    contract: hosted_legacy_schemas_module.LegacyCommandContract | None = None,
-) -> Any:
-    """Return `command`'s leaf with only the pinned parameters visible.
-
-    Trimming `Command.params` alone pins the REST wire, because `cli_ops.coerce`
-    validates against it -- but not the MCP tool schema, which `bind_vault`
-    derives from the leaf's own signature. Both have to narrow together or the
-    published descriptor and the admitted call disagree.
-    """
-    leaf = command.leaf
-    injected = 2 if command.needs_schema else 1
-    signature = inspect.signature(leaf)
-    parameters = list(signature.parameters.values())
-    properties: Mapping[str, Any] = {}
-    required: frozenset[str] = frozenset()
-    if contract is not None:
-        raw_properties = contract.input_schema.get("properties")
-        raw_required = contract.input_schema.get("required", ())
-        if not isinstance(raw_properties, Mapping) or not isinstance(raw_required, tuple):
-            raise RuntimeError(f"{command.name}: pinned input schema is invalid")
-        properties = raw_properties
-        required = frozenset(str(name) for name in raw_required)
-
-    leaf_parameter_names = {parameter.name for parameter in parameters[injected:]}
-    legacy_defaults = {
-        name: hosted_legacy_schemas_module.json_value(schema["default"])
-        for name, schema in properties.items()
-        if (
-            name in leaf_parameter_names
-            and name not in required
-            and isinstance(schema, Mapping)
-            and "default" in schema
-        )
-    }
-    legacy_selectors = {
-        name: _legacy_enum(schema)
-        for name, schema in properties.items()
-        if name in leaf_parameter_names and isinstance(schema, Mapping) and _legacy_enum(schema)
-    }
-    for param in contract.params if contract is not None else ():
-        name = str(param["name"])
-        if name == "mode" and name not in legacy_selectors:
-            legacy_selectors[name] = _legacy_mode_choices(str(param["description"]))
-
-    retained = []
-    for index, parameter in enumerate(parameters):
-        if index < injected:
-            retained.append(parameter)
-            continue
-        if parameter.name not in keep:
-            continue
-        if contract is None:
-            retained.append(parameter)
-            continue
-        schema = properties.get(parameter.name)
-        if not isinstance(schema, Mapping):
-            raise RuntimeError(f"{command.name}: pinned parameter schema is missing for {parameter.name}")
-        default = inspect.Parameter.empty if parameter.name in required else schema.get(
-            "default", inspect.Parameter.empty
-        )
-        retained.append(
-            parameter.replace(
-                default=hosted_legacy_schemas_module.json_value(default),
-                annotation=Annotated[
-                    Any,
-                    WithJsonSchema(hosted_legacy_schemas_module.json_value(schema)),
-                ],
-            )
-        )
-
-    def pinned(*args: Any, **kwargs: Any) -> Any:
-        unexpected = sorted(set(kwargs) - keep)
-        if unexpected:
-            raise TypeError(
-                f"{command.name}() got unexpected keyword argument(s) "
-                f"{', '.join(unexpected)} for a pinned Hosted profile"
-            )
-        historical = {**legacy_defaults, **kwargs}
-        for name, choices in legacy_selectors.items():
-            if choices and historical.get(name) not in choices:
-                raise ValueError(
-                    f"INVALID_MODE: {command.name} {name} must be one of {', '.join(choices)}"
-                )
-        # Released profiles offered selected relations before vocabulary review
-        # bindings existed. Preserve that contract only inside their pinned leaf;
-        # current callers still have to supply the exact review binding.
-        legacy_selected_relation = (
-            contract is not None
-            and command.name == "connect_memory"
-            and historical.get("operation") == "accept-relation"
-            and "requested_relation" in keep
-            and not {"vocabulary_ref", "vocabulary_fingerprint"} & keep
-        )
-        token = _legacy_selected_relation.set(legacy_selected_relation)
-        try:
-            return leaf(*args, **historical)
-        finally:
-            _legacy_selected_relation.reset(token)
-
-    pinned.__name__ = getattr(leaf, "__name__", command.name)
-    pinned.__qualname__ = getattr(leaf, "__qualname__", command.name)
-    pinned.__module__ = getattr(leaf, "__module__", __name__)
-    pinned.__doc__ = leaf.__doc__
-    pinned.__signature__ = signature.replace(parameters=retained)  # type: ignore[attr-defined]
-    retained_names = {parameter.name for parameter in retained} | {"return"}
-    # Resolve in the *leaf's* namespace and hand on the resolved objects. The
-    # wrapper is defined here, so its `__globals__` are this module's; copying
-    # the leaf's string annotations across would make `typing.get_type_hints`
-    # look them up in the wrong namespace and fall back silently to an
-    # unannotated parameter for any leaf that lives somewhere else.
-    try:
-        resolved = typing.get_type_hints(leaf, include_extras=True)
-    except Exception:  # noqa: BLE001 - fall back to the raw annotations
-        resolved = dict(getattr(leaf, "__annotations__", {}))
-    pinned.__annotations__ = {
-        name: (
-            next(parameter.annotation for parameter in retained if parameter.name == name)
-            if contract is not None and any(parameter.name == name for parameter in retained)
-            else annotation
-        )
-        for name, annotation in resolved.items()
-        if name in retained_names
-    }
-    return pinned
-
-
-def apply_legacy_profile_pin(
-    command: Command,
-    pinned: tuple[str, ...] | hosted_legacy_schemas_module.LegacyCommandContract,
-) -> Command:
-    """Narrow one command to the parameter names a released profile published.
-
-    A pinned name that no longer exists, or one that moved, is raised rather
-    than tolerated: both are breaking changes to a published descriptor, and a
-    pin that absorbed them would bless the very drift it exists to catch.
-    """
-    contract = pinned if isinstance(pinned, hosted_legacy_schemas_module.LegacyCommandContract) else None
-    names = (
-        tuple(param["name"] for param in contract.params)
-        if contract is not None
-        else pinned
-    )
-    current = tuple(param.name for param in command.params)
-    missing = [name for name in names if name not in current]
-    if missing:
-        raise RuntimeError(
-            f"{command.name}: pinned parameter(s) no longer exist: {', '.join(missing)}"
-        )
-    keep = frozenset(names)
-    if tuple(name for name in current if name in keep) != names:
-        raise RuntimeError(f"{command.name}: pinned parameter order changed")
-    if contract is None and current == names:
-        return command
-    if contract is not None:
-        properties = contract.input_schema.get("properties")
-        if not isinstance(properties, Mapping):
-            raise RuntimeError(f"{command.name}: pinned input schema has no properties")
-        if command.name == "review_memory":
-            historical_modes = next(
-                (
-                    _legacy_param(param, properties["mode"]).choices
-                    for param in contract.params if param["name"] == "mode"
-                ),
-                (),
-            )
-            # The published wrapper enforces these finite modes and rejects
-            # extra arguments. It cannot reach question submission, unlike
-            # the current write-capable tool. Never relax the general pin guard.
-            if (
-                historical_modes
-                and "vocabulary" not in historical_modes
-                and "family" not in keep
-            ):
-                command = dataclass_replace(command, cli_writes=False, response_detail=None)
-        # Historical metadata is fixed by its published descriptor, not today's
-        # hint classification. A changed write capability still breaks the pin.
-        if contract.annotations.get("readOnlyHint") is not command.read_only:
-            raise RuntimeError(f"{command.name}: pinned read-only classification changed")
-        published = {str(param["name"]): param for param in contract.params}
-        params = tuple(
-            _legacy_param(published[param.name], properties[param.name])
-            for param in command.params
-            if param.name in keep
-        )
-    else:
-        params = tuple(param for param in command.params if param.name in keep)
-    return dataclass_replace(
-        command,
-        leaf=_pinned_legacy_leaf(command, keep, contract),
-        params=params,
-        description=contract.description if contract is not None else command.description,
-        mcp_annotation_pin=contract.annotations if contract is not None else command.mcp_annotation_pin,
-    )
-
-
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
     """Canonical implementation commands exposed by the old primitive registry."""
     return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
@@ -13913,50 +13215,6 @@ def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Co
     return tuple(
         c for c in PRODUCT_COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
-
-
-def product_commands_for_profile(
-    profile: str,
-    surface: str,
-) -> tuple[Command, ...]:
-    """Resolve a pinned surface profile to its canonical command objects."""
-
-    definition = PRODUCT_SURFACE_PROFILES.get(profile)
-    if definition is None:
-        raise ValueError(f"unsupported product surface profile: {profile!r}")
-
-    canonical = {command.name: command for command in PRODUCT_COMMANDS}
-    pinned_schema = hosted_legacy_schemas_module.LEGACY_PROFILE_CONTRACTS.get(profile)
-    selected: list[Command] = []
-    for name in definition.command_names:
-        command = canonical.get(name)
-        if command is None:
-            raise RuntimeError(
-                f"product surface profile {profile!r} references missing command {name!r}"
-            )
-        if (command.tier != 1 and not definition.expose_tier2) or (surface not in command.surfaces):
-            raise RuntimeError(
-                f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
-            )
-        if profile == HOSTED_ALPHA_AGENT_V4_PROFILE and name == "maintain_memory":
-            response_detail = next(
-                param for param in command.params if param.name == "response_detail"
-            )
-            command = dataclass_replace(
-                command,
-                leaf=_hosted_v4_maintain_memory,
-                params=(*_derive_params(_hosted_v4_maintain_memory, skip=1), response_detail),
-                description=_hosted_v4_maintain_memory.__doc__ or "",
-            )
-        if pinned_schema is not None:
-            published = pinned_schema.get(name)
-            if published is None:
-                raise RuntimeError(
-                    f"released profile {profile!r} has no pinned schema for {name!r}"
-                )
-            command = apply_legacy_profile_pin(command, published)
-        selected.append(command)
-    return tuple(selected)
 
 
 def validate_product_registry() -> dict:
@@ -14155,16 +13413,10 @@ def _unavailable_route_reason(tool: str) -> str:
     An agent told only "no route is exported" learns that the action failed,
     not whether the capability exists by another path. Where the surface
     withholds the command under a recorded exclusion, the recorded reason and
-    its lifting condition are the useful answer -- `adopt` on hosted is not
-    absent, it runs through the gateway lifecycle flow.
+    its lifting condition are the useful answer.
     """
-    exclusion = HOSTED_SURFACE_EXCLUSIONS.get(tool)
-    if exclusion is None:
-        return "No route for this action is exported by the active surface."
-    return (
-        f"The active surface withholds `{tool}`. {exclusion.reason} "
-        f"Lifted when {exclusion.lifted_when}."
-    )
+    reasons = dict(_active_bootstrap_descriptor().unavailable_reasons)
+    return reasons.get(tool, "No route for this action is exported by the active surface.")
 
 
 def simple_action_names() -> tuple[str, ...]:

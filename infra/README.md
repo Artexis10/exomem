@@ -17,9 +17,9 @@ The lifecycle domains are deliberately split:
   foundation, durability, and disposable proof workspaces; never run from the
   normal apply path.
 - `ansible`: idempotent host hardening and pinned K3s bootstrap.
-- `helm/platform`: cluster-wide CSI, Tunnel, policy, scheduler, and provisioner.
-- `helm/cell`: the fixed one-vault StatefulSet/PVC/Secret/Service contract.
-- `provisioner`: durable external control-plane worker and API.
+- `helm/platform`: cluster-wide CSI, ingress, policy, scheduler, cellctl and the
+  Exomem Cloud gateway.
+- `cellctl`: the Exomem Cloud cell controller.
 - `scripts`: non-printing validation, saved-plan, and secret handoff tooling.
 
 No production apply is implicit. Planning produces a mode `0600` saved plan,
@@ -60,6 +60,5 @@ plans, plan JSON, generated inventory, `.tfvars`, decrypted SOPS material, and
 age keys are ignored by Git.
 
 The versioned non-printing secret workflow is documented in
-`docs/runbooks/hosted/secrets.md`. Its destination matrix keeps Access in
-Vercel, Tunnel in K3s, the hosted scheduler in its exact two peers, and global
-`CRON_SECRET` out of K3s.
+`docs/runbooks/cloud-secrets.md`. Its destination matrix keeps the hosted
+scheduler in its exact two peers and global `CRON_SECRET` out of K3s.
