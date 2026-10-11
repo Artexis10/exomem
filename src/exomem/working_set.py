@@ -2233,7 +2233,12 @@ def _carry_by_retrieval(
 
 
 def _lexical_hits_without(
-    vault_root: Path, pages: frozenset[str], words: str, *, freshness_snapshot: Any = None
+    vault_root: Path,
+    turn: str,
+    pages: frozenset[str],
+    words: frozenset[str],
+    *,
+    freshness_snapshot: Any = None,
 ) -> frozenset[str]:
     """`working_set_resolve.candidates_for`'s dependence check, read on the
     snapshot the request's first lexical pass read. Empty when that snapshot
@@ -2250,7 +2255,7 @@ def _lexical_hits_without(
     from . import working_set_runtime
 
     return working_set_runtime.lexical_hits_without(
-        vault_root, pages, words, freshness=freshness, recall_checkpoint=recall_checkpoint
+        vault_root, turn, pages, words, freshness=freshness, recall_checkpoint=recall_checkpoint
     )
 
 
@@ -3570,7 +3575,7 @@ def _compile_packet(
                     retrieval_without=(
                         (
                             lambda pages, words: _lexical_hits_without(
-                                root, pages, words, freshness_snapshot=freshness_snapshot
+                                root, turn, pages, words, freshness_snapshot=freshness_snapshot
                             )
                         )
                         if retrieval_paths

@@ -28,6 +28,7 @@ KB = "Knowledge Base"
 PERSON = f"{KB}/Entities/People/Nora.md"
 NAMESAKE = f"{KB}/Entities/People/Nora Quill.md"
 PROJECT = f"{KB}/Entities/Projects/Kelvane Rollout.md"
+RENOVATION = f"{KB}/Entities/Projects/Tessaly Renovation.md"
 PLACE = f"{KB}/Entities/Places/Allotment.md"
 IDENTITY = "Former engineering colleague from the payments team"
 NAMESAKE_IDENTITY = "Runs the payments audit for the regional office"
@@ -113,6 +114,19 @@ def test_a_capital_that_only_opens_a_sentence_does_not_make_the_word_a_name(
     assert IDENTITY not in json.dumps(packet), "the person's identity was served"
 
 
+def test_an_inflected_form_of_the_word_does_not_count_as_another_match(
+    garden_vault: Path,
+) -> None:
+    """The lexical lane matches by stem: "hedging" is "hedge" again."""
+    packet = commands.op_activate_context(
+        garden_vault,
+        turn="The hedge needs hedging before the garden party, it is taller than the shed now",
+    )
+
+    assert "resolved" not in _statuses(packet, PERSON), packet["anchors"]
+    assert IDENTITY not in json.dumps(packet), "the person's identity was served"
+
+
 def test_the_file_name_in_lower_case_still_reaches_the_person(garden_vault: Path) -> None:
     packet = commands.op_activate_context(garden_vault, turn="What did nora say about payments?")
 
@@ -147,3 +161,24 @@ def test_a_page_that_matches_the_turn_without_the_shared_word_still_resolves(
     )
 
     assert _statuses(packet, PROJECT) == ["resolved"], packet["anchors"]
+
+
+def test_one_anchors_word_still_counts_for_another_anchors_page(garden_vault: Path) -> None:
+    """Each check leaves out only its own anchor's word. "hedge" is one word
+    of the person's name, and it is also on the project's page."""
+    _entity(
+        garden_vault,
+        RENOVATION,
+        "Tessaly Renovation",
+        "The renovation is waiting on the skip; the hedge must be cut back first.",
+    )
+    _reindex(garden_vault)
+
+    packet = commands.op_activate_context(
+        garden_vault,
+        turn="The renovation is stalled because the hedge blocks the skip by the garden",
+    )
+
+    assert _statuses(packet, RENOVATION) == ["resolved"], packet["anchors"]
+    assert "resolved" not in _statuses(packet, PERSON), packet["anchors"]
+    assert IDENTITY not in json.dumps(packet), "the person's identity was served"

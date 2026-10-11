@@ -158,14 +158,14 @@ routing.
 #### Scenario: One word of a longer name written as an ordinary word stays a lead
 - **WHEN** a turn whose casing carries a signal writes one rare word in lower case and
   never capitalises it after a sentence's first word, the word is only part of an
-  anchor's names and is no whole name (title, alias or file name) of any anchor, and the
-  anchor's own page is among the recall hits
+  anchor's names and is no whole name (title, alias or file name) of any anchor, the
+  anchor's own page is among the recall hits, and the page is not a hit without the word
 - **THEN** the anchor carries `rare_term` without `retrieval` and stays `partial`,
   because that recall hit counts the same word
 
 #### Scenario: A page that still matches the turn without the shared word keeps its hit
-- **WHEN** such an anchor's own page is still a lexical hit for the turn with the shared
-  word left out
+- **WHEN** such an anchor's own page is still a lexical hit for the turn when no form of
+  the shared word that stems like it is counted
 - **THEN** the anchor keeps `retrieval` and resolves with evidence `[rare_term, retrieval]`
 
 #### Scenario: A hyphenated word that covers more of the name keeps the hit

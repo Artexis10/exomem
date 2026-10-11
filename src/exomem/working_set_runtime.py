@@ -1015,9 +1015,11 @@ def _lexical_query(
     freshness=None,
     recall_checkpoint=None,
     selection: dict | None = None,
+    counted: list[str] | None = None,
 ):
     """The activation lexical query: `paths` ranked by the content words of
-    `words`, each hit matching at least two distinct content units."""
+    `words`, each hit matching at least two distinct content units, or two
+    distinct stems of `counted` when it is given."""
     from . import lexstore
 
     # A full-page match on the same single name word is not a second fact.
@@ -1035,34 +1037,44 @@ def _lexical_query(
         recall_checkpoint=recall_checkpoint,
         term_budget=lexical_term_budget(),
         term_selection=selection,
+        corroboration_tokens=counted,
     )
 
 
 def lexical_hits_without(
     vault_root: Path,
+    turn: str,
     pages: frozenset[str],
-    words: str,
+    left_out: frozenset[str],
     *,
     freshness=None,
     recall_checkpoint=None,
 ) -> frozenset[str]:
-    """Which of `pages` the activation lexical query still reaches with
-    `words`, the turn with some of its words left out
+    """Which of `pages` the activation lexical query still reaches for `turn`
+    when the stems of the `left_out` words are not counted
     (`working_set_resolve.candidates_for`'s dependence check).
 
-    Empty when the catalogue cannot answer: the anchors then stay leads, as
-    they do when nothing is asked.
+    Stems, not spellings: the lane matches by stem, so "hedging" and "hedged"
+    bring "hedge" back unless its stem is what is left out. Empty when the
+    catalogue cannot answer: the anchors then stay leads, as they do when
+    nothing is asked.
     """
-    if not pages:
+    from . import bm25 as bm25_module
+
+    turn = working_set_index.subject_text(turn)
+    dropped = frozenset(bm25_module.tokenize(" ".join(left_out), query=True))
+    counted = [stem for stem in content_stems(turn) if stem not in dropped]
+    if not pages or len(counted) < 2:
         return frozenset()
     try:
         result = _lexical_query(
             vault_root,
-            words,
+            turn,
             set(pages),
             limit=len(pages),
             freshness=freshness,
             recall_checkpoint=recall_checkpoint,
+            counted=counted,
         )
     except Exception:  # noqa: BLE001 - one optional evidence lane
         log.debug("activation lexical dependence check unavailable", exc_info=True)

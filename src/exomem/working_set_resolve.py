@@ -1418,15 +1418,17 @@ def candidates_for(
     rare_term_max_anchors: int = RARE_TERM_MAX_ANCHORS,
     eligible_categories: frozenset[str] = frozenset(),
     row_lexicons: Mapping[str, RowLexicon] | None = None,
-    retrieval_without: Callable[[frozenset[str], str], frozenset[str]] | None = None,
+    retrieval_without: Callable[[frozenset[str], frozenset[str]], frozenset[str]] | None = None,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
 
     `retrieval_without(pages, words)` answers which of `pages` are still
-    lexical hits for `words`, the turn with some of its words left out. It is
-    asked at most once, only when an anchor's recall hit may rest on the one
-    word it shares with the turn (`ordinary_name_word`), and those anchors
-    keep `retrieval` only for the pages it returns. Without it they lose it.
+    lexical hits for the turn when `words` (folded lexical terms) and every
+    form that stems like them are not counted. It is asked only when an
+    anchor's recall hit may rest on the one word it shares with the turn
+    (`ordinary_name_word`), once for each distinct shared word, and those
+    anchors keep `retrieval` only for the pages it returns. Without it they
+    lose it.
 
     `row_lexicons` (anchor id -> `row_lexicon(row)`) lets a caller matching
     several turns against the same rows derive each row's names once
@@ -1554,10 +1556,9 @@ def candidates_for(
     # Pass 2 of 2: the ordinary per-row evidence assembly, reusing pass 1's
     # own matched phrases rather than recomputing them.
     out: list[CandidateFacts] = []
-    # Anchors whose recall hit may rest on the word they share (anchor id ->
-    # page), and those words: the dependence check after the loop reads both.
-    dependent: dict[str, str] = {}
-    left_out: set[str] = set()
+    # Anchors whose recall hit may rest on the word they share: anchor id ->
+    # (page, that word). The dependence check after the loop reads them.
+    dependent: dict[str, tuple[str, frozenset[str]]] = {}
     for row in rows:
         evidence: set[str] = set()
         matched_phrases = row_exact_phrases[row.anchor_id]
@@ -1685,8 +1686,7 @@ def candidates_for(
         # script say nothing, and the hit counts as before.
         if row.path and row.path in retrieval_paths:
             if ordinary_name_word:
-                dependent[row.anchor_id] = row.path
-                left_out.update(shared_name)
+                dependent[row.anchor_id] = (row.path, shared_name)
             else:
                 evidence.add("retrieval")
         # Qualifiers, applied only to an anchor the turn already reached. An
@@ -1733,6 +1733,9 @@ def candidates_for(
                 name_spans=name_spans,
                 entity_type=row.entity_type,
                 name_capitalised=bool(name_contact & analysis.capitalised),
+                # Capitals anywhere, sentence starts included: the band-yield
+                # and bare-name rules keep this older, stricter reading, not
+                # `_written_as_ordinary_words`.
                 name_lower_case=bool(
                     name_contact
                     and analysis.cased_turn
@@ -1742,17 +1745,18 @@ def candidates_for(
             )
         )
     if dependent and retrieval_without is not None:
-        # The dependence check: one query, run again without every left-out
-        # word, inside a hyphenated token too. A page that is still a hit
-        # matched the turn without the word it shares, so its `retrieval` is
-        # a second fact after all.
-        words = " ".join(
-            token
-            for token, fold in zip(analysis.tokens, token_folds, strict=True)
-            if fold not in left_out
-            and not left_out.intersection(map(_fold_lexical_term, hyphen_parts(token)))
-        )
-        independent = retrieval_without(frozenset(dependent.values()), words)
+        # The dependence check, one query for each distinct shared word, so
+        # one anchor's word never takes a match away from another's page. A
+        # page that is still a hit without its own word matched the turn
+        # apart from it, so its `retrieval` is a second fact after all.
+        pages_by_word: dict[frozenset[str], set[str]] = {}
+        for path, word in dependent.values():
+            pages_by_word.setdefault(word, set()).add(path)
+        independent = {
+            (path, word)
+            for word, pages in pages_by_word.items()
+            for path in retrieval_without(frozenset(pages), word)
+        }
         out = [
             replace(item, evidence=item.evidence | {"retrieval"})
             if dependent.get(item.anchor_id) in independent
