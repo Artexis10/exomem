@@ -1904,11 +1904,17 @@ def op_bootstrap(
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
                 "due_state": (
-                    "Advisory counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated references. They cover predictions past authored check dates, experiments past their window without results, long-unanswered questions and broken supersession chains. Absent when nothing is due."
+                    "Advisory totals, category counts and up to five dated refs cover overdue authored items. Absent when none are due."
                     if profile == "compact" and not frozen_profile
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
+                    "Judge relevance; mention at most one item per conversation in the user's language. "
+                    "Keep mentions through compaction and renewal; receipts are not mentions. "
+                    "Do not poll or interrupt. Dismissed/snoozed fingerprints wait for change. "
+                    "Absent advice proves nothing; prefer silence."
+                    if profile == "compact" and not frozen_profile
+                    else
                     "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
                     "Raise at most one due item per maintained client conversation in the user's language. "
                     "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
@@ -1916,6 +1922,12 @@ def op_bootstrap(
                     "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
                 ),
                 "relevant_due_handling": (
+                    "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
+                    "Audit beyond bounded context if needed. Resolve with unit fingerprint and parent hash, "
+                    "not due fingerprint; no extra triage. triage_memory dismisses presentation only. "
+                    "Keep write authority."
+                    if profile == "compact" and not frozen_profile
+                    else
                     "For relevant_due_refs, read review_item_context(ref, expected_fingerprint); bounded context may need a wider audit. "
                     "review_memory has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
                     "One applicable writer, such as observe_memory(operation='update'), resolves with the real unit "
@@ -1934,7 +1946,7 @@ def op_bootstrap(
                     "MCP cannot observe tool-free turns"
                 ),
                 "due_state_authority": (
-                    "Advisory counts measure authored state. The runtime never judges, resolves, closes, archives or writes for them, or changes retrieval ordering."
+                    "The runtime measures authored state; it never resolves, writes or changes retrieval order."
                     if profile == "compact" and not frozen_profile
                     else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
                 ),
