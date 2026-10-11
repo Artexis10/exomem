@@ -218,3 +218,54 @@ def test_rest_openapi_disabled_without_key(vault, monkeypatch: pytest.MonkeyPatc
     client = _client(vault, monkeypatch)
     r = client.get("/api/openapi.json")
     assert r.status_code == 503, r.text
+
+
+def test_rest_command_timer_covers_response_construction_and_ingress_exclusions(
+    vault, monkeypatch
+) -> None:
+    import time
+
+    from exomem import latency_watch, server_rest
+
+    watch = latency_watch.Watch(started_at=time.time() - 601)
+    monkeypatch.setattr(latency_watch, "_WATCH", watch)
+    original_render = server_rest.RestJSONResponse.render
+
+    def delayed_render(self, content):
+        time.sleep(0.015)
+        return original_render(self, content)
+
+    monkeypatch.setattr(server_rest.RestJSONResponse, "render", delayed_render)
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="service-key")
+    headers = {"Authorization": "Bearer service-key"}
+    successful = client.post("/api/activate_context", json={"turn": " "}, headers=headers)
+    assert successful.status_code == 200
+    refused = client.post(
+        "/api/activate_context", json={"turn": " ", "max_chars": "invalid"}, headers=headers
+    )
+    assert refused.status_code == 400
+    unauthorized = client.post("/api/activate_context", json={"turn": " "})
+    assert unauthorized.status_code == 401
+    rows = watch.verdicts()
+    command = next(row for row in rows if row["surface"] == "rest")
+    leaf = next(row for row in rows if row["surface"] == "activation")
+    assert command["observed"] == 3 and command["samples"] == 2
+    assert command["refusals"] == 2 and command["excluded"] == 1
+    assert command["p50_ms"] >= 15
+    assert leaf["observed"] == 1 and leaf["abstentions"] == 1
+
+
+def test_rest_observation_failure_preserves_the_response(vault, monkeypatch) -> None:
+    from exomem import latency_watch
+
+    def broken(**kwargs):
+        raise RuntimeError("observation unavailable")
+
+    monkeypatch.setattr(latency_watch, "observe", broken)
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="service-key")
+    response = client.post(
+        "/api/activate_context", json={"turn": " "}, headers={"Authorization": "Bearer service-key"}
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["abstained"] is True
+    assert latency_watch.current().failures >= 1

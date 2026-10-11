@@ -33,38 +33,29 @@ import recall_latency_gate as gate  # noqa: E402, I001
 # --- The ceilings are the contract -----------------------------------------
 
 
-def test_the_ceilings_are_the_spec_values_and_not_a_calibration() -> None:
-    """Pinned as literals, against the spec text, so a tuning edit is a diff.
-
-    `recall-latency-contract` says the ceilings "are the capability's contract,
-    not calibrated from any runner, and a gate MUST NOT loosen them". The only
-    way that sentence can be enforced is a pin that restates the numbers from
-    the spec rather than importing whatever the script currently believes. If
-    this test and the script are edited together the reviewer sees both halves
-    in one diff, which is the point.
-    """
-    assert gate.HYBRID_P50_MS == 300.0
-    assert gate.HYBRID_P95_MS == 600.0
-    assert gate.KEYWORD_P50_MS == 120.0
-    assert gate.FILTERED_HYBRID_P50_MS == 400.0
-    assert gate.FILTERED_ELIGIBILITY_MS == 20.0
-    assert gate.MAX_LOAD_AVERAGE == 2.0
+def test_the_current_ceiling_and_reference_bars_resolve_from_the_contract() -> None:
+    assert gate.HYBRID_P95_MS == 200.0
+    assert gate.KEYWORD_P95_MS == 100.0
+    assert gate.HYBRID_P50_MS == 50.0
+    assert gate.FILTERED_ELIGIBILITY_MS == 6.0
+    assert gate.MIN_CORPUS_PAGES == 6500
     assert gate.SAMPLES_PER_SERIES == 30
-    assert gate.MAX_WARMING_SAMPLES == 1
-    assert gate.MIN_CORPUS_PAGES == 8000
 
 
-def test_a_breach_is_reported_with_the_honest_number() -> None:
-    """The gate names what it measured, not a rounded reassurance."""
-    report = _report(hybrid_p50=421.5)
-
+def test_a_breach_names_the_p95_measurement() -> None:
+    report = _report()
+    report["series"]["hybrid"]["p95_ms"] = 421.5
     with pytest.raises(SystemExit) as raised:
         gate.check(report)
+    assert "hybrid p95=421.5ms > 200.0ms" in str(raised.value)
 
-    message = str(raised.value)
-    assert "hybrid" in message
-    assert "421.5" in message
-    assert "300.0" in message
+
+def test_missed_targets_do_not_fail_a_ceiling() -> None:
+    report = _report(hybrid_p50=62.0)
+    report["series"]["hybrid"]["p95_ms"] = 160.0
+    gate.check(report)
+    assert report["series"]["hybrid"]["p50_target_met"] is False
+    assert report["series"]["hybrid"]["p95_target_met"] is False
 
 
 def test_a_series_inside_every_ceiling_passes() -> None:
@@ -135,22 +126,16 @@ def test_a_cell_that_settles_within_the_bound_is_measured() -> None:
     assert report["series"]["hybrid"]["samples"] == gate.SAMPLES_PER_SERIES
 
 
-def test_a_load_spike_between_samples_refuses_the_series() -> None:
-    """Quiescence is checked between samples, not only at the start."""
-    loads = _StubLoad([1.0, 1.0, 1.0, 9.9] + [9.9] * 500)
-
-    with pytest.raises(SystemExit) as raised:
-        gate.run(
-            transport=_StubTransport(),
-            load_source=loads,
-            quiescence_bound_seconds=1.0,
-            sleep=lambda _seconds: None,
-        )
-
-    assert "9.9" in str(raised.value)
-
-
-# --- The series shape defeats the result cache -----------------------------
+def test_later_load_is_reported_without_rejecting_a_started_series() -> None:
+    report = gate.run(
+        transport=_StubTransport(),
+        load_source=_StubLoad([1.0, 9.9] + [1.0] * 500),
+        quiescence_bound_seconds=1.0,
+        sleep=lambda seconds: None,
+    )
+    assert report["series"]["hybrid"]["load_max"] == 9.9
+    assert report["acceptance"] == "not measured"
+    assert report["series"]["hybrid"]["contention"] == "unknown"
 
 
 def test_a_series_asks_for_thirty_samples_per_shape() -> None:
@@ -381,10 +366,11 @@ def test_a_cell_that_reports_no_stage_sources_is_not_a_pass() -> None:
     assert "no stage sources" in str(raised.value)
 
 
-def test_the_filtered_eligibility_stage_is_held_to_its_index_outcome() -> None:
-    """The spec's second scenario: an index outcome under 20 ms."""
-    with pytest.raises(SystemExit, match="filter_eligibility"):
-        gate.check(_report(filtered_eligibility_ms=44.0))
+def test_a_missed_stage_budget_diagnoses_without_failing_the_ceiling() -> None:
+    report = _report(filtered_eligibility_ms=44.0)
+    gate.check(report)
+    assert report["series"]["filtered_hybrid"]["eligibility_budget_ms"] == 6
+    assert report["series"]["filtered_hybrid"]["eligibility_over_budget"] is True
 
 
 def test_a_filtered_series_with_no_eligibility_stage_at_all_is_not_a_pass() -> None:
@@ -457,21 +443,11 @@ def test_a_qualified_eligibility_stage_name_is_still_held_to_its_source() -> Non
 
 
 def test_the_contract_states_no_ceiling_for_the_browse_shape() -> None:
-    """Read from the spec, not invented, and said out loud.
-
-    `recall-latency-contract` states three ceilings and names the shape each
-    belongs to: hybrid without filters (300/600 ms), keyword (120 ms), hybrid
-    with one structured filter (400 ms). It states nothing about the
-    `query=""` browse. So the gate measures that series, reports its
-    percentiles, and applies every structural rule to it — and makes no
-    latency comparison, because there is no number in the spec to compare
-    against and a number invented here would be stored in an artifact that
-    reads as the contract's.
-    """
+    """Browse remains measured under a pending threshold."""
     assert "browse" in gate.SERIES_SHAPES
-    assert "browse" not in gate._P50_CEILINGS
+    assert "browse" not in gate._P50_TARGETS
     assert gate.UNCEILINGED_SHAPES == frozenset({"browse"})
-    assert set(gate._P50_CEILINGS) | gate.UNCEILINGED_SHAPES == set(gate.SERIES_SHAPES)
+    assert set(gate._P50_TARGETS) | gate.UNCEILINGED_SHAPES == set(gate.SERIES_SHAPES)
 
 
 def test_a_slow_browse_does_not_fail_a_ceiling_it_was_never_given() -> None:
@@ -617,20 +593,12 @@ def test_the_series_reports_the_median_sample_and_the_total_separately() -> None
         gate.check(report)
 
 
-def test_a_sample_with_no_usable_total_is_a_warming_outcome() -> None:
-    """Thirty missing totals must not become thirty 0.0 ms samples.
-
-    An absent `timings` dict is already read as warming. A timings dict whose
-    `total_ms` is missing, null or zero says exactly as little, and reading it
-    as a 0.0 ms recall produces the best p50 the gate can emit from a cell that
-    reported nothing at all.
-    """
-    for payload in (
-        {"hits": [], "timings": {"stages": {}}},
-        {"hits": [], "timings": {"total_ms": None, "stages": {}}},
-        {"hits": [], "timings": {"total_ms": 0.0, "stages": {}}},
-    ):
-        assert gate._sample_from_envelope(payload).warming is True, payload
+@pytest.mark.parametrize("total", [None, -1, float("inf"), float("nan")])
+def test_unknown_timing_is_distinct_from_typed_warming(total) -> None:
+    sample = gate._sample_from_envelope({"hits": [], "timings": {"total_ms": total, "stages": {}}})
+    assert sample.elapsed_ms is None and sample.warming is False
+    warming = gate._sample_from_envelope({"warming": {"status": "warming"}})
+    assert warming.elapsed_ms is None and warming.warming is True
 
 
 def test_a_real_total_is_not_read_as_warming() -> None:
@@ -699,7 +667,7 @@ def test_a_corpus_below_the_reference_size_is_not_a_verdict() -> None:
 
 
 def test_a_corpus_size_that_could_not_be_derived_is_refused_by_name() -> None:
-    """"Unverified" and "too small" are different answers and must read differently.
+    """ "Unverified" and "too small" are different answers and must read differently.
 
     `ServedTransport` used to count `.md` files under the gate process's own
     `EXOMEM_VAULT_PATH` while the series ran against a cell over HTTP, so the
@@ -873,9 +841,7 @@ def _report(
                 warming=warming,
                 hits_p50=medians["hybrid"],
             ),
-            "keyword": _series(
-                p50=40.0, p95=60.0, sources=sources, hits_p50=medians["keyword"]
-            ),
+            "keyword": _series(p50=40.0, p95=60.0, sources=sources, hits_p50=medians["keyword"]),
             "filtered_hybrid": filtered,
             "browse": _series(
                 p50=browse_p50, p95=140.0, sources=sources, hits_p50=medians["browse"]

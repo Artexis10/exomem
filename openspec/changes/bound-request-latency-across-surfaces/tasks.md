@@ -34,3 +34,29 @@
 - [ ] 4.6 Close only proven requirements after merge evidence; sync/archive this change through OpenSpec and verify strict validation before and after.
 
 Product work uses temporary runtime roots and an isolated tenant with external effects blocked. Existing acknowledgement acceptance and rollout tasks keep their owner. Pending bars do not invent defaults or third-party release holds. Metered evaluation follows the existing budget agreement; these artifacts authorize no provider run or held-out-key construction.
+
+## Source-loaded observation slice: verification scope
+
+The implementation packages the bar source and extends the existing watch,
+MCP dispatch, REST command, activation log, bootstrap and doctor surfaces.
+It preserves the current request-budget behavior. Activation collects existing
+named stages without exposing public timing payloads unless the caller opts in.
+The runtime observation profile remains pending because automatic observations
+cannot prove pre-call warmth or installed acceptance.
+
+The isolated model-free workflow tests prove separate dispatch and leaf samples,
+all terminal outcomes, response construction, finalization errors, caller isolation
+and partial source coverage. The initial contract branch run had 11 failures.
+The scoped observation run passed 196 tests. The adjacent activation, conversation
+and timing run passed 126 tests. These runs use Python 3.13.12 and disabled
+embedding, CLIP and warm-up lanes; they establish no served-model latency gain.
+
+The wheel and source distribution build with the pinned uv writer. The built
+wheel loads the contract through `importlib.resources`. The public-artifact gate,
+strict OpenSpec validation and harness-module generator checks pass.
+
+These checks do not complete installed baseline or live acceptance tasks.
+CPU caps, RSS, current warm residency, paired latency gains and deadline repair
+remain unproved. Task boxes remain open until integrated delivery supplies the
+required evidence. The foreground and durable-acknowledgement owners retain
+their unfinished acceptance work and default-off fast acknowledgement.

@@ -408,44 +408,58 @@ exomem logs verify
 
 ## Latency watch
 
-The ledger is also read back, so a latency regression is found by the system
-and not by a person getting annoyed. `src/exomem/latency_watch.py` keeps a
-bounded, content-free ring of recent recall calls (tool, client, deep or not,
-`total_ms`, the five largest spans), fed beside the ledger row and under the
-same rule that it can never break or slow a call. Over a trailing 24 h window
-it reports p50 and p90 per (tool, client, deep) and compares the p90 against
-PROVISIONAL ceilings held in that one module: 1,000 ms for `ask_memory`
-without `deep`, `read_memory` and `find`; 5,000 ms for `ask_memory` with
-`deep`. A verdict needs 20 samples, and calls in the first 10 minutes after
-the process started do not count, so the cold window after a promotion is not
-reported as a regression. There is no environment override: change the
-constants through a spec change.
+`request_latency_contract.json` is the packaged source for latency bars. Each
+bar names its owner, boundary, profile, population, outcomes, reference and
+window. Python consumers load the validated resource with `importlib.resources`.
+The source keeps provisional p90 recall diagnostics separate from live warm
+activation's strict p95 bar. Pending bars have null thresholds and no pass.
 
-Where a breach shows up:
+The existing watch retains up to 2,048 content-free observations. MCP dispatch,
+REST command and public activation have separate boundary identities. REST
+command timing includes response construction and excludes transmission. Earlier
+REST refusals count as excluded ingress coverage with unknown duration.
+Activation timing includes packet finalization and every known terminal outcome.
+Existing `total_ms`, `duration_ms` and metrics keep their original meanings.
 
-- `bootstrap` carries a `latency` block, only while the calling client's own
-  recalls breach: per tool `{deep, samples, p50_ms, p90_ms, ceiling_ms,
-  dominant_spans: [{name, ms, calls}]}`. A healthy service returns today's
-  response shape. Another client's slowness is never reported to this one.
-- `event=latency_ceiling_exceeded` (WARNING) with the same fields, at most
-  once per hour per (tool, client, deep).
-- `exomem doctor` `latency` (below), which reads the file instead of the ring.
+The ring reports retained samples, its oldest retained time, errors, refusals,
+abstentions, missing joins, invalid readings and evictions. Its requested window
+is not a traffic census. Evictions across the window boundary have an unknown
+window count and a known lifetime count. Unknown timings never become zero.
+Incomplete coverage cannot establish acceptance. A breach still diagnoses the
+retained slow observations. The existing startup grace, conditional sweep and
+hourly breach interval remain unchanged.
+
+`bootstrap` reports only the calling client's breaches. Structured breach events
+omit caller identities. `doctor` reads the ledger and activation log independently,
+including their archived or rotated segments, and also reports the process ring.
+A failed segment does not hide older samples. Each source exposes malformed rows,
+failed reads and unknown window membership. Doctor warnings remain advisory;
+absence of a breach means no observed breach, not accepted live performance.
+
+Activation collects the existing named stages for host-local attribution even
+without `include_timings`. Public packet timings remain opt-in. The activation
+log preserves its outcome codes and stores timing-only stage rows. Observation
+adds no request-path source reads or fsync and cannot change a request result.
+The automatic runtime profile does not prove pre-call warmth or installed live
+acceptance, so it uses a pending bar. Matching live acceptance remains separate.
+
+`scripts/recall_latency_gate.py` resolves the current governed recall ceilings,
+diagnostic targets and reference premise from the same source. It identifies
+its legacy inner-timing boundary and reports full acceptance as not measured.
+The owning task 6.1 remains open until reference, principal, encoder, contention
+and stage evidence cover its current contract. Missed diagnostic targets fail
+neither a ceiling nor a release.
 
 ## Doctor
 
-`exomem doctor` includes an `observability` check: log directory writability,
-active/rotated file sizes, JSONL tail parseability, the NSSM `service.*`
-rotation pile (warns above 50), and metrics-snapshot freshness (warns past 2×
-the snapshot interval).
+The `observability` check covers log-directory writes, rotation sizes, and
+metrics-snapshot freshness. It reports those conditions separately from latency.
 
-It also includes a `latency` check: the same figures as the latency watch,
-computed from `ledger.jsonl` (and the newest archive generations when the 24 h
-window reaches past the active file) so they survive restarts, per tool and
-calling client, with the dominant spans among the calls over the ceiling. It
-warns above a ceiling, passes otherwise, notes pairs with fewer than 20 calls,
-and passes with a note rather than failing when the ledger is absent or
-unreadable. The startup grace is not applied here: a slow post-promotion
-window is worth seeing in a diagnosis, and its spans say what it was.
+`exomem doctor` reports observation coverage beside each measured percentile.
+It reports unavailable or partial sources independently and preserves healthy
+request results when observation fails. Consult `sources` and each row's
+`coverage` before using a percentile. The latency check does not contact a
+service or change runtime state.
 
 ## Environment variables
 

@@ -20,21 +20,35 @@ def ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(directory))
     monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
     call_ledger.reset_chain_cache()
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(directory))
+    monkeypatch.setattr(latency_watch, "_WATCH", latency_watch.Watch())
     yield directory
     call_ledger.reset_chain_cache()
 
 
-def _row(*, age_s: float, tool="ask_memory", client="openai-mcp/1.0.0", total_ms=200.0, deep=False, spans=None):
+def _row(
+    *,
+    age_s: float,
+    tool="ask_memory",
+    client="openai-mcp/1.0.0",
+    total_ms=200.0,
+    deep=False,
+    spans=None,
+):
     ts = datetime.fromtimestamp(time.time() - age_s, tz=UTC).isoformat(timespec="milliseconds")
     deep_raw = call_ledger.canonical_json({"v": deep})
     return {
         "ts_utc": ts,
         "tool": tool,
+        "outcome": "ok",
         "client_name": client,
         "total_ms": total_ms,
-        "duration_ms": total_ms - 5,
+        "duration_ms": total_ms - 5 if total_ms is not None else None,
         "spans": spans or [],
-        "args": {"query": {"len": 9, "sha256": "0" * 64}, "deep": {"len": len(deep_raw), "sha256": hashlib.sha256(deep_raw).hexdigest()}},
+        "args": {
+            "query": {"len": 9, "sha256": "0" * 64},
+            "deep": {"len": len(deep_raw), "sha256": hashlib.sha256(deep_raw).hexdigest()},
+        },
     }
 
 
@@ -48,16 +62,27 @@ def _write(path: Path, rows: list[dict], *, junk: bool = False) -> None:
 def test_a_slow_client_is_diagnosed_not_just_measured(ledger: Path) -> None:
     rows = [_row(age_s=60 * i, total_ms=150) for i in range(20)]
     rows += [
-        _row(age_s=3000 + i, total_ms=4000, spans=[{"name": "embeddings.matrix_load", "ms": 3500, "count": 1}])
+        _row(
+            age_s=3000 + i,
+            total_ms=4000,
+            spans=[{"name": "embeddings.matrix_load", "ms": 3500, "count": 1}],
+        )
         for i in range(5)
     ]
-    rows += [_row(age_s=100, tool="remember", total_ms=20000)]  # not a recall; ignored
+    rows += [
+        _row(age_s=100, tool="remember", total_ms=20000)
+    ]  # separate pending dispatch population
     _write(ledger / "ledger.jsonl", rows, junk=True)
     check = doctor._check_latency()
     assert check.status == "warn"
-    assert "ask_memory from openai-mcp/1.0.0: p90 4000 ms over the 1000 ms ceiling (25 calls)" in check.message
+    assert (
+        "ask_memory (mcp-dispatch-v1): p90 4000 ms breaches <= 1000 ms (25 known timings)"
+        in check.message
+    )
+    assert check.details["sources"]["call-ledger"]["malformed_rows"] == 1
+    assert "openai-mcp" not in json.dumps(check.details)
     assert "embeddings.matrix_load 17500 ms over 5 call(s)" in check.message
-    [row] = check.details["rows"]
+    row = next(row for row in check.details["rows"] if row["tool"] == "ask_memory")
     assert row["samples"] == 25 and row["breach"] is True
 
 
@@ -65,7 +90,7 @@ def test_deep_recalls_are_classified_from_the_row_shape(ledger: Path) -> None:
     rows = [_row(age_s=10 * i, total_ms=4200, deep=True) for i in range(25)]
     _write(ledger / "ledger.jsonl", rows)
     check = doctor._check_latency()
-    assert check.status == "pass"
+    assert check.status == "warn"
     [row] = check.details["rows"]
     assert row["deep"] is True and row["ceiling_ms"] == 5000 and row["breach"] is False
 
@@ -76,7 +101,10 @@ def test_the_window_reaches_into_the_archive_and_stops_at_old_generations(ledger
     archive = ledger / "ledger-archive"
     archive.mkdir()
     recent = [dict(_row(age_s=3600 + 10 * i, total_ms=3000), sequence=500 + i) for i in range(15)]
-    stale = [dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=1 + i) for i in range(50)]
+    stale = [
+        dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=1 + i)
+        for i in range(50)
+    ]
     _write(archive / "ledger-000001.jsonl", stale)
     _write(archive / "ledger-000002.jsonl", recent)
     check = doctor._check_latency()
@@ -94,7 +122,10 @@ def test_archive_generations_are_placed_by_sequence_not_mtime(ledger: Path) -> N
     _write(ledger / "ledger.jsonl", [_row(age_s=10, total_ms=100)])
     archive = ledger / "ledger-archive"
     archive.mkdir()
-    stale = [dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=100 + i) for i in range(5)]
+    stale = [
+        dict(_row(age_s=latency_watch.WINDOW_SECONDS + 3600 + i, total_ms=1), sequence=100 + i)
+        for i in range(5)
+    ]
     recent = [dict(_row(age_s=3600 + i, total_ms=3000), sequence=900 + i) for i in range(20)]
     _write(archive / "ledger-aaaa.jsonl", recent)
     _write(archive / "ledger-bbbb.jsonl", stale)
@@ -122,19 +153,72 @@ def test_a_string_deep_is_classified_the_same_from_disk_as_live(ledger: Path) ->
 def test_too_few_calls_passes_with_a_note(ledger: Path) -> None:
     _write(ledger / "ledger.jsonl", [_row(age_s=i, total_ms=9000) for i in range(5)])
     check = doctor._check_latency()
-    assert check.status == "pass"
-    assert "fewer than 20 calls" in check.message
+    assert check.status == "warn"
+    assert "insufficient samples" in check.message
 
 
 def test_an_absent_ledger_is_not_a_failure(ledger: Path) -> None:
     check = doctor._check_latency()
-    assert check.status == "pass"
+    assert check.status == "warn"
     assert "nothing to measure" in check.message.lower()
 
 
-def test_the_check_is_registered(ledger: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_check_is_registered(
+    ledger: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     vault = tmp_path / "vault"
     (vault / "Knowledge Base").mkdir(parents=True)
     monkeypatch.setenv("EXOMEM_STATE_DIR", str(tmp_path / "state"))
     report = doctor.doctor(vault=str(vault), probe=False)
     assert "latency" in {check.id for check in report.checks}
+
+
+def test_unreadable_segment_does_not_hide_an_older_breach(ledger: Path, monkeypatch) -> None:
+    _write(ledger / "ledger.jsonl", [_row(age_s=10, total_ms=100)])
+    archive = ledger / "ledger-archive"
+    archive.mkdir()
+    unreadable = archive / "ledger-new.jsonl"
+    older = archive / "ledger-old.jsonl"
+    _write(unreadable, [dict(_row(age_s=20), sequence=500)])
+    _write(older, [dict(_row(age_s=30 + i, total_ms=3000), sequence=100 + i) for i in range(25)])
+    original = Path.open
+
+    def open_segment(path, *args, **kwargs):
+        if path == unreadable:
+            raise PermissionError("segment unavailable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_segment)
+    check = doctor._check_latency()
+    assert check.status == "warn"
+    assert check.details["sources"]["call-ledger"]["failed_reads"] == 1
+    assert check.details["sources"]["call-ledger"]["read_segments"] == 2
+    [row] = check.details["rows"]
+    assert row["samples"] == 26
+    assert row["breach"] is True
+
+
+def test_unknown_timings_and_truncated_rows_are_visible(ledger: Path) -> None:
+    rows = [_row(age_s=i, total_ms=100) for i in range(20)]
+    rows += [_row(age_s=30, total_ms=None), _row(age_s=31, total_ms=float("nan"))]
+    _write(ledger / "ledger.jsonl", rows, junk=True)
+    check = doctor._check_latency()
+    [row] = check.details["rows"]
+    assert row["observed"] == 22 and row["samples"] == 20
+    assert row["unknown_timings"] == 1 and row["invalid_timings"] == 1
+    assert row["verdict"] == "unavailable"
+    assert check.details["sources"]["call-ledger"]["malformed_rows"] == 1
+
+
+def test_malformed_row_fields_do_not_abandon_the_remaining_segment(ledger: Path) -> None:
+    broken = _row(age_s=20, total_ms=100)
+    broken["spans"] = 42
+    unknown = _row(age_s=15, total_ms=100)
+    unknown["outcome"] = []
+    _write(ledger / "ledger.jsonl", [broken, unknown, _row(age_s=10, total_ms=100)])
+    check = doctor._check_latency()
+    assert check.details["sources"]["call-ledger"]["malformed_rows"] == 1
+    [row] = check.details["rows"]
+    assert row["observed"] == 2 and row["eligible_known_timings"] == 1
+    assert row["unknown_outcomes"] == 1
+    assert row["verdict"] == "unavailable"

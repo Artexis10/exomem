@@ -51,7 +51,10 @@ def test_a_breaching_client_is_told_what_is_slow(
     assert row["tool"] == "ask_memory" and row["deep"] is False
     assert row["samples"] == 25 and row["p90_ms"] == 3000 and row["ceiling_ms"] == 1000
     assert row["dominant_spans"][0]["name"] == "embeddings.matrix_load"
-    assert set(row) == {"tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms", "dominant_spans"}
+    assert row["profile"] == "rolling-recall-ordinary"
+    assert row["coverage"]["population"] == "retained"
+    assert row["contract_revision"] == "request-latency-v1"
+    assert "client" not in row
 
 
 def test_another_clients_breach_is_not_this_clients(

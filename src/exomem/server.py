@@ -419,9 +419,14 @@ def _record_ledger_row(
             deep=latency_watch.deep_flag(arguments),
             total_ms=total_ms,
             spans=spans,
+            surface="mcp",
+            outcome=outcome,
+            correlated=bool(request_id and request_id != "unknown"),
         )
     except Exception:  # noqa: BLE001 - the watch must never break a call either
-        pass
+        from . import latency_watch
+
+        latency_watch.current().record_failure()
 
 
 def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:

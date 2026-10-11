@@ -200,3 +200,75 @@ def test_activation_rows_never_feed_the_usage_signal(
 
     assert usage.access_events(activation_log.parent, **weights) == before
     assert "Knowledge Base/Notes/hot.md" not in json.dumps(before)
+
+
+def test_finalization_error_is_one_observed_activation(vault, activation_log, monkeypatch) -> None:
+    import time
+
+    from exomem import latency_watch
+
+    watch = latency_watch.Watch(started_at=time.time() - 601)
+    monkeypatch.setattr(latency_watch, "_WATCH", watch)
+
+    def fail_finalization(*args):
+        time.sleep(0.015)
+        raise RuntimeError("finalization unavailable")
+
+    monkeypatch.setattr(commands, "_withhold_vault_generation", fail_finalization)
+    with pytest.raises(RuntimeError, match="finalization unavailable"):
+        commands.op_activate_context(vault, turn=" ")
+    [row] = watch.verdicts()
+    assert row["observed"] == 1 and row["errors"] == 1
+    assert row["boundary"] == "activation-leaf-v1"
+    assert row["p95_ms"] >= 15
+    [logged] = _rows(activation_log)
+    assert logged["outcome"] == "error" and logged["duration_ms"] >= 15
+
+
+def test_mcp_activation_has_one_dispatch_and_one_leaf(vault, monkeypatch) -> None:
+    import asyncio
+    import time
+
+    from fastmcp import Client
+
+    from exomem import latency_watch, server
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    watch = latency_watch.Watch(started_at=time.time() - 601)
+    monkeypatch.setattr(latency_watch, "_WATCH", watch)
+
+    async def invoke():
+        async with Client(server.build_server(require_auth=False)) as client:
+            result = await client.call_tool("activate_context", {"turn": " "})
+            assert result.data["abstained"] is True
+
+    asyncio.run(invoke())
+    rows = [row for row in watch.verdicts() if row["tool"] == "activate_context"]
+    assert {row["boundary"] for row in rows} == {"mcp-dispatch-v1", "activation-leaf-v1"}
+    assert all(row["observed"] == 1 for row in rows)
+    leaf = next(row for row in rows if row["surface"] == "activation")
+    dispatch = next(row for row in rows if row["surface"] == "mcp")
+    assert leaf["abstentions"] == 1 and leaf["unavailable_joins"] == 0
+    assert dispatch["p95_ms"] >= leaf["p95_ms"]
+
+
+def test_stage_attribution_is_recorded_without_public_timing_payload(
+    vault, activation_log, monkeypatch
+) -> None:
+    import time
+
+    from exomem import latency_watch
+
+    watch = latency_watch.Watch(started_at=time.time() - 601)
+    monkeypatch.setattr(latency_watch, "_WATCH", watch)
+    packet = commands.op_activate_context(vault, turn=TURN)
+    assert "timings" not in packet
+    [logged] = _rows(activation_log)
+    assert logged["spans"]
+    assert any(span["name"] == "working_set.readiness" for span in logged["spans"])
+    [observed] = watch.verdicts()
+    assert observed["observed"] == 1
+    assert observed["verdict"] == "pending"
+    assert all("ms" in span and "name" in span for span in logged["spans"])
+    assert TURN not in json.dumps(logged)

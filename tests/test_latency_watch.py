@@ -42,7 +42,10 @@ def test_samples_are_content_free_and_the_ring_is_bounded() -> None:
     ring = list(watch._ring)
     assert len(ring) == latency_watch.RING_SIZE
     sample = ring[-1]
-    assert set(sample.__slots__) == {"at", "tool", "client", "deep", "total_ms", "spans"}
+    [row] = watch.verdicts()
+    assert row["coverage"]["evictions"] == 100
+    assert row["coverage"]["population"] == "retained"
+    assert "texts" not in repr(sample)
     assert sample.spans == (("recall.keyword", 40.0),)
 
 
@@ -202,7 +205,7 @@ def test_a_breach_log_names_only_the_client_family_in_content_private_mode(
     watch, _clock = _watch()
     _fill(watch, n=25, total_ms=3000, client=phrase)
     assert [e["event"] for e in events] == ["latency_ceiling_exceeded"]
-    assert events[0]["fields"]["client"] == "other"
+    assert phrase not in json.dumps(events)
     assert watch.breaches(client=phrase), "the watch itself still keys on the real name"
 
 
@@ -236,7 +239,9 @@ def test_bootstrap_block_reports_only_the_calling_client() -> None:
         _fill(watch, n=25, total_ms=150, client="claude-code")
         block = latency_watch.bootstrap_block("openai-mcp/1.0.0")
         assert block is not None and len(block) == 1
-        assert set(block[0]) == {"tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms", "dominant_spans"}
+        assert block[0]["contract_revision"] == "request-latency-v1"
+        assert block[0]["coverage"]["population"] == "retained"
+        assert "client" not in block[0]
         assert latency_watch.bootstrap_block("claude-code") is None
         assert latency_watch.bootstrap_block(None) is None
     finally:
