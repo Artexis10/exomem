@@ -85,11 +85,13 @@ import os
 import re
 import stat
 import sys
+import threading
 import unicodedata
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -477,6 +479,20 @@ def _actionable_finding_sort_key(finding: AuditFinding) -> tuple[str | int, ...]
     )
 
 
+def _one_log_parse(function: Callable[..., AuditReport]) -> Callable[..., AuditReport]:
+    """Run one audit inside one access-log parse (`usage.read_scope`)."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> AuditReport:
+        from . import usage
+
+        with usage.read_scope():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+@_one_log_parse
 def audit(
     vault_root: Path,
     *,
@@ -6894,6 +6910,79 @@ def _check_entity_recurrence(
     ]
 
 
+#: The last proximity sweep per vault. The sweep multiplies every eligible
+#: page's chunks against every chunk in the vault, and its answer moves only
+#: with the vectors, the eligible set, the authored exclusions and the band.
+#: The matrix is held weakly, so the memo never keeps one resident after the
+#: index or quiet mode releases it.
+_SWEEP_MEMO: dict[str, tuple[tuple[Any, ...], Any, dict[tuple[str, str], float]]] = {}
+_SWEEP_MEMO_LOCK = threading.Lock()
+_SWEEP_MEMO_CAP = 8
+
+
+def _swept_pairs(
+    vault_root: Path, key: tuple[Any, ...], matrix: Any
+) -> dict[tuple[str, str], float] | None:
+    """The remembered sweep when nothing it read has changed, else None.
+
+    The vectors are identified by the matrix object alone, with no generation:
+    every catch-up and reload builds a new array (`_splice_path_blocks` is
+    copy-on-write) and nothing writes into a served one.
+    """
+    with _SWEEP_MEMO_LOCK:
+        held = _SWEEP_MEMO.get(str(vault_root))
+    if held is None or held[0] != key or held[1]() is not matrix:
+        return None
+    return dict(held[2])
+
+
+def _remember_sweep(
+    vault_root: Path, key: tuple[Any, ...], matrix: Any, pairs: dict[tuple[str, str], float]
+) -> None:
+    with _SWEEP_MEMO_LOCK:
+        _SWEEP_MEMO.pop(str(vault_root), None)
+        while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
+            _SWEEP_MEMO.pop(next(iter(_SWEEP_MEMO)))
+        _SWEEP_MEMO[str(vault_root)] = (key, weakref.ref(matrix), dict(pairs))
+
+
+def _sweep_pairs(
+    metadata: list[tuple[str, int]],
+    matrix: Any,
+    eligible: Mapping[str, Any],
+    excluded: set[tuple[str, str]],
+    floor: float,
+    ceiling: float,
+    np: Any,
+) -> dict[tuple[str, str], float]:
+    """Max chunk-cosine per deduped unordered file pair, both endpoints eligible."""
+    rows_by_file: dict[str, list[int]] = {}
+    for i, (fp, _cidx) in enumerate(metadata):
+        rows_by_file.setdefault(fp, []).append(i)
+    pair_cos: dict[tuple[str, str], float] = {}
+    for fp, _page in eligible.items():
+        rows = rows_by_file.get(fp)
+        if not rows:
+            continue  # eligible page with no vectors yet (e.g. never embedded)
+        sub = matrix[rows]                       # (m, D) this file's chunk vectors
+        col_max = (sub @ matrix.T).max(axis=0)   # (N,) best cosine file→each chunk
+        in_band = np.nonzero((col_max >= floor) & (col_max < ceiling))[0]
+        for j in in_band:
+            other_fp = metadata[int(j)][0]
+            if other_fp == fp or other_fp not in eligible:
+                continue
+            score = float(col_max[int(j)])
+            a, b = sorted((fp, other_fp))
+            key = (a, b)
+            # Already surfaced as an authored contradiction: the stronger signal
+            # owns the pair, so it is not re-measured, re-counted, or re-capped.
+            if key in excluded:
+                continue
+            if key not in pair_cos or score > pair_cos[key]:
+                pair_cos[key] = score
+    return pair_cos
+
+
 def _check_corpus_contradictions(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -7007,32 +7096,16 @@ def _proximity_contradictions(
         return []
     excluded = exclude or set()
 
-    rows_by_file: dict[str, list[int]] = {}
-    for i, (fp, _cidx) in enumerate(metadata):
-        rows_by_file.setdefault(fp, []).append(i)
-
-    # max chunk-cosine per deduped unordered file pair, both endpoints eligible.
-    pair_cos: dict[tuple[str, str], float] = {}
-    for fp, _page in eligible.items():
-        rows = rows_by_file.get(fp)
-        if not rows:
-            continue  # eligible page with no vectors yet (e.g. never embedded)
-        sub = matrix[rows]                       # (m, D) this file's chunk vectors
-        col_max = (sub @ matrix.T).max(axis=0)   # (N,) best cosine file→each chunk
-        in_band = np.nonzero((col_max >= floor) & (col_max < ceiling))[0]
-        for j in in_band:
-            other_fp = metadata[int(j)][0]
-            if other_fp == fp or other_fp not in eligible:
-                continue
-            score = float(col_max[int(j)])
-            a, b = sorted((fp, other_fp))
-            key = (a, b)
-            # Already surfaced as an authored contradiction: the stronger signal
-            # owns the pair, so it is not re-measured, re-counted, or re-capped.
-            if key in excluded:
-                continue
-            if key not in pair_cos or score > pair_cos[key]:
-                pair_cos[key] = score
+    sweep_key = (
+        frozenset(eligible),
+        frozenset(excluded),
+        float(floor),
+        float(ceiling),
+    )
+    pair_cos = _swept_pairs(vault_root, sweep_key, matrix)
+    if pair_cos is None:
+        pair_cos = _sweep_pairs(metadata, matrix, eligible, excluded, floor, ceiling, np)
+        _remember_sweep(vault_root, sweep_key, matrix, pair_cos)
 
     # Order into a usable review queue: priority = cosine + w · pair_dormancy,
     # same-family pairs demoted, then capped at top-N with an explicit count.

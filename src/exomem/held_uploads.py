@@ -27,7 +27,6 @@ import json
 import os
 import re
 import secrets
-import stat
 import tempfile
 import time
 from collections.abc import Callable
@@ -35,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import local_ingress
+from . import local_ingress, private_state
 
 #: The `download_url` scheme of a held handle. Never fetched.
 HELD_SCHEME = "exomem-held:"
@@ -90,21 +89,7 @@ def _binding() -> str | None:
 
 
 def _store(vault_root: Path) -> Path:
-    from .state_paths import ensure_vault_state_dir
-
-    store = ensure_vault_state_dir(vault_root) / STORE_DIRNAME
-    store.mkdir(mode=0o700, exist_ok=True)
-    # `mkdir` leaves an existing directory as it was; a hold directory is
-    # private whoever created it.
-    info = os.lstat(store)
-    if not stat.S_ISDIR(info.st_mode):
-        raise OSError(f"held-upload store is not a directory: {store}")
-    if os.name == "posix":
-        if info.st_uid != os.geteuid():
-            raise OSError(f"held-upload store is owned by another user: {store}")
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            os.chmod(store, 0o700)
-    return store
+    return private_state.store(vault_root, STORE_DIRNAME)
 
 
 def _key(secret: str) -> str:
@@ -115,12 +100,7 @@ def _unavailable() -> HeldUploadError:
     return HeldUploadError("HELD_UPLOAD_UNAVAILABLE", UNAVAILABLE_REASON)
 
 
-def _remove(*paths: Path) -> None:
-    for path in paths:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+_remove = private_state.remove
 
 
 def _sweep(store: Path, now: float) -> None:
@@ -167,15 +147,8 @@ def _quota() -> HeldUploadError:
 
 
 def _write_record(store: Path, key: str, record: dict) -> None:
-    meta_fd, meta_raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
-    try:
-        with os.fdopen(meta_fd, "w", encoding="utf-8") as sink:
-            json.dump(record, sink)
-        # The record is what makes a hold redeemable, so it lands last.
-        os.replace(meta_raw, store / f"{key}.json")
-    except BaseException:
-        _remove(Path(meta_raw))
-        raise
+    # The record is what makes a hold redeemable, so it lands last; `_sweep` owns its `.part` temp.
+    private_state.write_record(store, key, record, temp_suffix=".part")
 
 
 def hold(

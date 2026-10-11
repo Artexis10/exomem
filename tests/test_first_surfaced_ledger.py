@@ -625,7 +625,7 @@ def test_a_ref_carrying_two_fingerprints_stamps_neither(vault: Path) -> None:
     assert rows, projection
     ref = rows[0]["ref"]
     finger = rows[0]["fingerprint"]
-    assert due_state_module._fingerprints_by_ref(projection)[ref] == finger
+    assert due_state_module._fingerprints_by_ref(projection)[ref][0] == finger
 
     # The same ref appearing again under a DIFFERENT fingerprint.
     collided = {

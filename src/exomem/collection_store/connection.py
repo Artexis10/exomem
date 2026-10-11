@@ -218,10 +218,11 @@ class WriterConnection:
         self._release_cache = None
         self._inspection_identity = object()
         # Host-local import job facts (``importer``), keyed by job id: this handle's
-        # proofs of bound source bytes, and the store refusal blocking a running job.
-        # A new handle, as after a takeover, starts with neither.
+        # proofs of bound source bytes, the store refusal blocking a running job, and
+        # a streamed job's open reader. A new handle, as after a takeover, starts with none.
         self.import_proofs: dict[str, Any] = {}
         self.import_blocked: dict[str, str] = {}
+        self.import_readers: dict[str, Any] = {}
 
     @property
     def release_cache(self):
@@ -299,6 +300,9 @@ class WriterConnection:
     def close(self) -> None:
         if not self._closed:
             self._release_cache = None
+            for reader in self.import_readers.values():
+                reader.close()
+            self.import_readers.clear()
             self.core.close()
             self.core.engine.dispose()
             self._closed = True

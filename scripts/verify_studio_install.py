@@ -6,14 +6,18 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from importlib.resources import files
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import scratch_root  # noqa: E402
+
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="exomem-studio-wheel-") as raw:
-        vault = Path(raw) / "vault"
+    with scratch_root.scratch_root("exomem-studio-wheel-") as root:
+        vault = root / "vault"
         subprocess.run(
             [sys.executable, "-m", "exomem", "init", "--vault", str(vault)],
             check=True,
@@ -26,7 +30,7 @@ def main() -> int:
                 "EXOMEM_REST_API_KEY": "wheel-acceptance-key",
                 "EXOMEM_DISABLE_EMBEDDINGS": "1",
                 "EXOMEM_DISABLE_WATCHER": "1",
-                "EXOMEM_LOG_DIR": str(Path(raw) / "logs"),
+                "EXOMEM_LOG_DIR": str(root / "logs"),
             }
         )
         from starlette.testclient import TestClient

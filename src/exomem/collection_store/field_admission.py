@@ -113,13 +113,16 @@ def _mapping_sources(mapping, manifest, fmt):
             if spec.items is not None:
                 descendants(target, source, spec.items)
 
+    from .importer import basis_paths
+
     for target, source in mapping.get("fields", {}).items():
+        if isinstance(source, dict) and "const" in source:
+            continue  # a literal the mapping declares reads no source path
         descendants((target,), source_path(source.get("from") if isinstance(source, dict) else source),
                     manifest.schema.fields.get(target))
     time_mapping = mapping.get("time") or {}
-    # The mapping grammar fixes these keys; all time outputs share the declared source dependencies.
-    time_sources = tuple(source_path(value) for source in time_mapping.get("from", [])
-                         for key, value in source.items() if key in {"instant", "offset", "date"})  # nosemgrep: ep-word-membership -- The time-mapping grammar fixes these source keys.
+    # All time outputs share the declared source dependencies, an interval read from the source included.
+    time_sources = tuple(source_path(path) for basis in time_mapping.get("from", []) for path in basis_paths(basis))
     time_targets = tuple((time_mapping[key],) for key in ("instant", "offset", "local_date") if time_mapping.get(key))
     links = fields + [(target, source, manifest.schema.fields.get(target[0]))
                       for target in time_targets for source in time_sources]

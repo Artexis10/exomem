@@ -1,0 +1,84 @@
+scenario_id: f33-pet-owner-v1
+family_id: f33
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-seed
+  - op: agent_turn
+    ref: t01
+    detail: I'm helping Lotte Brandvold set up a winter enclosure in her spare room this weekend for her
+      tortoise, Bartholomew.
+  - op: agent_turn
+    ref: t02
+    detail: Bartholomew is 41 years old; Lotte inherited him from her grandmother and has looked after
+      him since she was a child.
+  - op: agent_turn
+    ref: t03
+    detail: Lotte asked me to look after Bartholomew for the first week of March while she is away at
+      a conference.
+  - op: snapshot
+    ref: s-hookless-end
+  - op: fresh_agent
+    ref: q01
+    detail: How old is Lotte Brandvold's tortoise?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-pet-owner-v1
+  - assert: referent_key_edge_present
+    subject: f33-pet-owner-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-pet-owner-v1
+- phase_id: hooked
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-seed
+  - op: agent_turn
+    ref: t01
+    detail: I'm helping Lotte Brandvold set up a winter enclosure in her spare room this weekend for her
+      tortoise, Bartholomew.
+  - op: agent_turn
+    ref: t02
+    detail: Bartholomew is 41 years old; Lotte inherited him from her grandmother and has looked after
+      him since she was a child.
+  - op: agent_turn
+    ref: t03
+    detail: Lotte asked me to look after Bartholomew for the first week of March while she is away at
+      a conference.
+  - op: snapshot
+    ref: s-hooked-end
+  - op: fresh_agent
+    ref: q01
+    detail: How old is Lotte Brandvold's tortoise?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-pet-owner-v1
+  - assert: referent_key_edge_present
+    subject: f33-pet-owner-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-pet-owner-v1
+fairness:
+  why_neutral: Ordinary conversation about people and the things around them, with no turn naming a store;
+    state is read from canonical pages and the fresh session's delivered packet and answer.
+  public_coverage_subtraction: No public suite covers referent capture followed by owner-anchored activation.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Canonical entity pages, typed relation bullets and the fresh-session activation packet
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only canonical pages, registries and delivered client responses
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Both surfaces are visible to the client.
+    competitor_surface: Documented file and client response
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-seven referent-capture predicates.

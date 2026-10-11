@@ -648,3 +648,106 @@ def test_cf_access_upload_beside_a_non_ascii_bearer_is_not_a_server_error(
         headers=[(b"cf-access-jwt-assertion", b"fake.jwt.token"), (b"authorization", b"Bearer \xe9abc")],
     )
     assert r.status_code == 201, r.text
+
+
+def _export_zip(days: dict[str, bytes]) -> bytes:
+    """An invented device export: one nested-JSON member per day, plus an index."""
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("export/", b"")
+        for name, data in days.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def _day(index: int, revision: int = 0) -> bytes:
+    import json
+
+    return json.dumps(
+        {
+            "date": f"2026-03-{index:02d}",
+            "revision": revision,
+            "samples": [{"offset_s": n * 60, "heart_rate": 55 + (n * index) % 40} for n in range(200)],
+        }
+    ).encode()
+
+
+def test_archive_members_upload_stores_each_distinct_member_once(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gzip
+    import io
+    import json
+    import zipfile
+
+    from exomem.governance import raw_protection
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    days = {f"export/device_days/day-{i:02d}.json": _day(i) for i in range(1, 7)}
+    days["export/profile.json"] = b'{"units": "metric"}'
+    first = _export_zip(days)
+
+    def post(data: bytes, name: str = "export.zip") -> httpx.Response:
+        return client.post(
+            "/upload",
+            files={"file": (name, data, "application/zip")},
+            data={"scope": "Device", "category": "Exports", "archive": "members"},
+            headers={"Authorization": "Bearer sekret"},
+        )
+
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+
+    def blobs() -> set[str]:
+        return {p.relative_to(family).as_posix() for p in family.rglob("*.gz")}
+
+    stored = post(first)
+    assert stored.status_code == 201, stored.text
+    receipt = stored.json()
+    assert receipt["state"] == "stored"
+    assert receipt["archive"]["sha256"] == hashlib.sha256(first).hexdigest()
+    manifest = json.loads((vault / receipt["path"]).read_bytes())
+    assert manifest["schema_version"] == 1
+    assert manifest["archive"] == {
+        "filename": "export.zip",
+        "sha256": hashlib.sha256(first).hexdigest(),
+        "bytes": len(first),
+        "verified": "upload",
+    }
+    paths = [member["path"] for member in manifest["members"]]
+    assert paths == sorted(days)
+    declared = {info.filename: info.file_size for info in zipfile.ZipFile(io.BytesIO(first)).infolist()}
+    assert sum(member["bytes"] for member in manifest["members"]) == sum(declared.values())
+    for member in manifest["members"]:
+        blob = family / member["blob"]
+        unpacked = gzip.decompress(blob.read_bytes())
+        assert hashlib.sha256(unpacked).hexdigest() == member["sha256"] == blob.name[: -len(".gz")]
+        assert unpacked == days[member["path"]]
+        assert member["stored_bytes"] == blob.stat().st_size
+        assert raw_protection.marked(blob.relative_to(vault).as_posix())
+    assert raw_protection.marked(receipt["path"]) and raw_protection.marked(receipt["sidecar_path"])
+    assert raw_protection.binding(vault, receipt["path"]) is not None
+    before = blobs()
+    assert len(before) == len(days)
+
+    # A re-export under the same name: two members changed, the rest unchanged.
+    days["export/device_days/day-02.json"] = _day(2, revision=1)
+    days["export/device_days/day-07.json"] = _day(7)
+    second = post(_export_zip(days))
+    assert second.status_code == 201, second.text
+    assert len(blobs() - before) == 2 and before <= blobs()
+    relisted = json.loads((vault / second.json()["path"]).read_bytes())
+    assert [member["path"] for member in relisted["members"]] == sorted(days)
+
+    # The same archive again is one fact: nothing in the family changes.
+    tree = sorted(p.relative_to(family).as_posix() for p in family.rglob("*"))
+    again = post(first, name="export-copy.zip")
+    assert again.status_code == 200, again.text
+    assert again.json()["state"] == "already_stored"
+    assert again.json()["path"] == receipt["path"]
+    assert sorted(p.relative_to(family).as_posix() for p in family.rglob("*")) == tree
+
+    not_a_zip = post(b"plain bytes, not an archive", name="notes.zip")
+    assert not_a_zip.status_code == 400 and not_a_zip.json()["code"] == "ARCHIVE_INVALID"

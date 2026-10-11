@@ -1,0 +1,80 @@
+scenario_id: f33-supplier-operator-v1
+family_id: f33
+kind: operational
+public_coverage: none
+phases:
+- phase_id: hookless
+  ops:
+  - op: configure
+    ref: hookless-maximal
+  - op: snapshot
+    ref: s-hookless-seed
+  - op: agent_turn
+    ref: t01
+    detail: Wendell Marsh runs the sourdough stall at the Saturday market, and all of his flour comes
+      from Thistlecombe Mill.
+  - op: agent_turn
+    ref: t02
+    detail: Thistlecombe Mill delivers to Wendell every Wednesday and has a minimum order of 25 sacks.
+  - op: agent_turn
+    ref: t03
+    detail: Wendell is renewing his supply contract with Thistlecombe Mill for another two years.
+  - op: snapshot
+    ref: s-hookless-end
+  - op: fresh_agent
+    ref: q01
+    detail: What is the minimum order that Wendell Marsh's flour supplier accepts?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-supplier-operator-v1
+  - assert: referent_key_edge_present
+    subject: f33-supplier-operator-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-supplier-operator-v1
+- phase_id: hooked
+  ops:
+  - op: configure
+    ref: hooked-balanced
+  - op: snapshot
+    ref: s-hooked-seed
+  - op: agent_turn
+    ref: t01
+    detail: Wendell Marsh runs the sourdough stall at the Saturday market, and all of his flour comes
+      from Thistlecombe Mill.
+  - op: agent_turn
+    ref: t02
+    detail: Thistlecombe Mill delivers to Wendell every Wednesday and has a minimum order of 25 sacks.
+  - op: agent_turn
+    ref: t03
+    detail: Wendell is renewing his supply contract with Thistlecombe Mill for another two years.
+  - op: snapshot
+    ref: s-hooked-end
+  - op: fresh_agent
+    ref: q01
+    detail: What is the minimum order that Wendell Marsh's flour supplier accepts?
+  expect:
+  - assert: referent_entity_typed
+    subject: f33-supplier-operator-v1
+  - assert: referent_key_edge_present
+    subject: f33-supplier-operator-v1
+  - assert: referent_used_in_fresh_session
+    subject: f33-supplier-operator-v1
+fairness:
+  why_neutral: Ordinary conversation about people and the things around them, with no turn naming a store;
+    state is read from canonical pages and the fresh session's delivered packet and answer.
+  public_coverage_subtraction: No public suite covers referent capture followed by owner-anchored activation.
+  mechanisms:
+  - provider_role: subject
+    mechanism: Canonical entity pages, typed relation bullets and the fresh-session activation packet
+    verdict: satisfiable
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+  privileged_endpoint_matrix:
+  - driver_surface_id: state.read
+    provider: exomem
+    variant: native
+    disposition: equivalent
+    audit_scope: Read-only canonical pages, registries and delivered client responses
+    evidence: benchmarks/epistemic/PREREGISTRATION.md:1
+    reason: Both surfaces are visible to the client.
+    competitor_surface: Documented file and client response
+  acceptance_predicate: PREREGISTRATION.md section 4, sequence-seven referent-capture predicates.

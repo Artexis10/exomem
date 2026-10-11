@@ -1274,6 +1274,9 @@ class CollectionWriter:
                                                manifest, data, types.type_for_manifest(manifest))
         except IndexDeclarationError as error:
             raise collections.CollectionError(error.code, error.reason) from error
+        from .importer import saved_imports
+
+        saved_imports(manifest, data)
         self._execute(
             "INSERT INTO collection_manifests(collection_id,manifest_version,manifest_text,manifest_hash,"
             "schema_json,natural_key_json,txn_id,governance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

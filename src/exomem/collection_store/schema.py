@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -87,6 +87,7 @@ TABLES = (
     "typed_encoding_mappings",
     "import_jobs",
     "import_rejections",
+    "import_members",
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
@@ -99,7 +100,7 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
-APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity")
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members")
 
 _TABLES_V1 = (
     """
@@ -289,6 +290,7 @@ _CONFLICT_KEYS = {
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
     "version_identity": (("row_id", "row_version"),),
+    "import_members": (("collection_id", "seq"),),
 }
 
 
@@ -697,6 +699,45 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
     ) STRICT, WITHOUT ROWID""")
 
 
+def _migrate_to_9(conn: sqlite3.Connection) -> None:
+    """Add the append-only import log: one row per export member an import completed.
+
+    A row is written once, in the transaction that advances its job's checkpoint past
+    the member, and never changed. ``seq`` counts a collection's members from 1 and
+    ``txn_id`` is the member's ``import_member`` transition. ``manifest_sha256`` names
+    the export manifest the member came from. ``rows_digest`` chains each accepted
+    row's item key and payload hash in member order (``importer``), and
+    ``row_count_after`` is the collection's row count once the member is in.
+    ``importer_version`` is the Exomem release that imported the member and
+    ``zone_rules`` the zone rules' release, NULL when the mapping names no zone. A
+    later job with the same mapping skips a member the log records.
+    """
+    conn.execute("""CREATE TABLE import_members(
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      seq INTEGER NOT NULL CHECK (seq >= 1),
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id),
+      job_id TEXT NOT NULL REFERENCES import_jobs(job_id),
+      member_index INTEGER NOT NULL CHECK (member_index >= 0),
+      member_sha256 TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL,
+      mapping_sha256 TEXT NOT NULL,
+      accepted INTEGER NOT NULL CHECK (accepted >= 0),
+      rejected INTEGER NOT NULL CHECK (rejected >= 0),
+      rows_digest TEXT NOT NULL,
+      row_count_after INTEGER NOT NULL CHECK (row_count_after >= 0),
+      importer_version TEXT NOT NULL,
+      zone_rules TEXT,
+      PRIMARY KEY (collection_id, seq)
+    ) STRICT, WITHOUT ROWID""")
+    # The job completes the skip question (an earlier job's log row), so the index answers it alone.
+    conn.execute("CREATE INDEX import_members_by_member "
+                 "ON import_members(collection_id, mapping_sha256, member_sha256, job_id)")
+    for statement in _TRIGGERS_V9:
+        conn.execute(statement)
+
+
+_TRIGGERS_V9 = _append_only_triggers("import_members")
+
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
 _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
@@ -789,7 +830,8 @@ def ensure_schema(conn: Connection) -> int:
                 if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
                     command.stamp(config, str(current))
                 command.upgrade(config, str(target))
-            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ())):
+            for statement in (*_TRIGGERS_V1, *(_TRIGGERS_V5 if target >= 5 else ()),
+                              *(_TRIGGERS_V9 if target >= 9 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

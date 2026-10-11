@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import functools
+import hashlib
 import logging
+import mimetypes
 import os
 import secrets
 from dataclasses import dataclass
+from email.utils import formatdate
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -13,10 +18,10 @@ from urllib.parse import quote
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from . import cf_access, local_ingress, reserved_paths, upload_tokens
+from . import cf_access, local_ingress, reserved_paths, upload_sessions, upload_tokens
 from .governance import egress
 from .governance import principal as principal_module
 from .vault import VaultPathError, resolve_under_vault
@@ -28,7 +33,47 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 #: Multipart framing and form fields that ride with the file part.
 _FORM_OVERHEAD_BYTES = 1024 * 1024
+#: tus 1.0 (tus.io resumable-upload protocol): the version, and the extensions served.
+_TUS_VERSION = "1.0.0"
+_TUS_EXTENSIONS = "creation,expiration,termination"
+_TUS_PATCH_CONTENT_TYPE = "application/offset+octet-stream"
+#: The session secret travels only in this header, never in a URL.
+_SESSION_SECRET_HEADER = "Exomem-Upload-Secret"
+_SESSION_WRITE_BYTES = 1024 * 1024
+#: Digits a byte count or offset header may carry: a 64-bit count has at most 19, and
+#: every limit here is far below one. Longer strings never reach `int()`, which caps at 4300.
+_MAX_COUNT_DIGITS = 19
+#: The one `archive` mode: keep a zip as its members (`archive_members`).
+ARCHIVE_MEMBERS = "members"
 log = logging.getLogger(__name__)
+
+
+def _header_count(value: str) -> int | None:
+    """A byte count or offset header as an integer; None when it is not one."""
+    if value.isascii() and value.isdigit() and len(value) <= _MAX_COUNT_DIGITS:
+        return int(value)
+    return None
+
+
+def _flag(value: str) -> bool | None:
+    """An `/upload` yes-or-no field: empty is no, `1` or `true` is yes, anything else is None."""
+    value = value.strip()
+    # nosemgrep: ep-word-membership -- `/upload` fixes these flag spellings.
+    return bool(value) if value in ("", "1", "true") else None
+
+
+def _upload_flags(raw_flag: str, archive: str) -> tuple[bool, bool, str | None]:
+    """`raw_protection` and `archive` as `/upload` and a session take them.
+
+    Returns whether raw protection is asked for, whether the archive is kept as
+    its members, and the refusal when either value is malformed.
+    """
+    raw_protection, archive = _flag(raw_flag), archive.strip()
+    if raw_protection is None:
+        return False, False, "`raw_protection` must be 1"
+    if archive and archive != ARCHIVE_MEMBERS:
+        return False, False, f"`archive` must be {ARCHIVE_MEMBERS}"
+    return raw_protection, bool(archive), None
 
 
 def _preserve_module():
@@ -52,6 +97,15 @@ def _preserve_under_guard(
     """Run the complete upload read-plan-write path under vault authority."""
     with manager.mutation_guard(vault_root):
         return preserve_stream(vault_root, **kwargs)
+
+
+def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
+    """Expand an archive's members outside the guard; commit its manifest under it."""
+    from . import archive_members
+
+    return archive_members.preserve_members(
+        vault_root, guard=lambda: manager.mutation_guard(vault_root), **kwargs
+    )
 
 
 def _capture_source_under_guard(
@@ -117,6 +171,100 @@ def _reconcile_under_guard(
         return None
     with manager.mutation_guard(vault_root):
         return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
+
+
+def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
+    """Preserve a verified session's bytes exactly as `/upload` would; return the receipt.
+
+    Idempotent, so a commit that a stop interrupted can run again: a single file
+    already stored at its target with the session's SHA-256 is `already_stored`,
+    as an archive whose manifest is recorded already is. A refusal of the bytes
+    or the target fails the session; anything else leaves it to a retry.
+    """
+    from . import archive_members
+    from .cli_ops import OpError, error_dict
+    from .writer_lease import get_manager
+
+    preserve_module = _preserve_module()
+    target = record["target"]
+    manager = get_manager()
+    try:
+        with part.open("rb") as stream:
+            if target.get("archive") == ARCHIVE_MEMBERS:
+                receipt, _stored = _preserve_members_under_guard(
+                    manager,
+                    vault_root,
+                    scope=target["scope"],
+                    category=target["category"],
+                    filename=target["filename"],
+                    stream=stream,
+                    max_bytes=int(record["length"]),
+                    verified="session",
+                    description=target.get("description"),
+                    sha256=record["sha256"],
+                )
+                return receipt
+            try:
+                result = _preserve_under_guard(
+                    manager,
+                    vault_root,
+                    preserve_module.preserve_stream,
+                    scope=target["scope"],
+                    category=target["category"],
+                    filename=target["filename"],
+                    stream=stream,
+                    description=target.get("description"),
+                    max_bytes=int(record["length"]),
+                    raw_protection=bool(target.get("raw_protection")),
+                )
+            except preserve_module.PreserveError as exc:
+                stored = _stored_already(vault_root, record) if exc.code == "ARTIFACT_EXISTS" else None
+                if stored is None:
+                    raise
+                receipt = stored
+            else:
+                receipt = result.as_dict()
+    except archive_members.ArchiveError as exc:
+        raise upload_sessions.CommitFailed(
+            exc.code, exc.reason, retryable=exc.code == archive_members.NO_SPACE
+        ) from exc
+    except preserve_module.PreserveError as exc:
+        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+    except OpError as exc:
+        # The writer lease or the vault guard: the same bytes commit once it returns.
+        error = error_dict(exc)
+        raise upload_sessions.CommitFailed(error["code"], error["message"], retryable=True) from exc
+    try:
+        # Also after `already_stored`: a stop may have come before the reconciliation ran.
+        _reconcile_under_guard(manager, vault_root, vault_root / receipt["path"])
+    except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
+        log.warning("media reconciliation failed for %s; evidence remains recoverable",
+                    receipt["path"], exc_info=True)
+    return receipt
+
+
+def _stored_already(vault_root: Path, record: dict) -> dict | None:
+    """The `already_stored` receipt when the session's target holds exactly its bytes."""
+    target = record["target"]
+    stored = _preserve_module().stored_artifact(
+        vault_root, scope=target["scope"], category=target["category"], filename=target["filename"],
+        sha256=record["sha256"], raw_protection=bool(target.get("raw_protection")),
+    )
+    if stored is None:
+        return None
+    return stored.receipt(size=int(record["length"]), content_type=mimetypes.guess_type(stored.path)[0])
+
+
+def resume_upload_sessions(vault_root: Path) -> None:
+    """Drop expired upload sessions and resume the commits that a stop interrupted.
+
+    Only the serving HTTP runtime's activation calls this. A standby owns nothing
+    until promotion, and a stdio server serves no session route, so neither may
+    commit an upload beside the worker that owns it.
+    """
+    committer = functools.partial(commit_session, vault_root)
+    for pending in upload_sessions.startup_sweep(vault_root):
+        upload_sessions.start_commit(pending, committer)
 
 
 @dataclass(frozen=True)
@@ -312,8 +460,8 @@ def register_transfer_routes(
             if local_ingress.current_grant() is not None
             else config.upload_max_bytes
         )
-        declared = request.headers.get("content-length", "")
-        if declared.isascii() and declared.isdigit() and int(declared) > max_bytes + _FORM_OVERHEAD_BYTES:
+        declared = _header_count(request.headers.get("content-length", ""))
+        if declared is not None and declared > max_bytes + _FORM_OVERHEAD_BYTES:
             # Refuse before the multipart parser spools the whole body to disk.
             return JSONResponse(
                 {"code": "TOO_LARGE", "reason": f"upload exceeds the {max_bytes:,}-byte limit"},
@@ -344,22 +492,25 @@ def register_transfer_routes(
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
-        raw_flag = str(form.get("raw_protection") or "").strip()
-        if raw_flag not in ("", "1", "true"):
+        raw_protection, archive, flag_refusal = _upload_flags(
+            str(form.get("raw_protection") or ""), str(form.get("archive") or "")
+        )
+        if flag_refusal is not None:
+            return JSONResponse({"code": "INVALID_UPLOAD", "reason": flag_refusal}, status_code=400)
+        hold = _flag(str(form.get("hold") or ""))
+        if hold is None:
+            return JSONResponse({"code": "INVALID_UPLOAD", "reason": "`hold` must be 1"}, status_code=400)
+        if archive and (hold or _upload_lane(request) == "source"):
             return JSONResponse(
-                {"code": "INVALID_UPLOAD", "reason": "`raw_protection` must be 1"}, status_code=400
+                {"code": "INVALID_UPLOAD", "reason": "archive=members preserves Evidence directly"},
+                status_code=400,
             )
-        raw_protection = bool(raw_flag)
-        if str(form.get("hold") or "").strip():
+        if hold:
             # `preserve-attachment-originals`: hold the bytes for a file-handle
             # command instead of preserving them. Only a verified local grant
             # can hold; nothing reaches the vault here.
             from . import held_uploads
 
-            if str(form.get("hold")).strip() not in ("1", "true"):
-                return JSONResponse(
-                    {"code": "INVALID_UPLOAD", "reason": "`hold` must be 1"}, status_code=400
-                )
             if raw_protection:
                 return JSONResponse(
                     {
@@ -387,10 +538,26 @@ def register_transfer_routes(
                     status_code=413 if exc.code == "TOO_LARGE" else 400,
                 )
             return JSONResponse(held, status_code=201)
+        from . import archive_members
+
         preserve_module = _preserve_module()
         lane = _upload_lane(request)
         try:
             manager = get_manager()
+            if archive:
+                receipt, stored = await run_in_threadpool(
+                    _preserve_members_under_guard,
+                    manager,
+                    vault_root,
+                    scope=scope,
+                    category=category,
+                    filename=filename,
+                    stream=upload.file,
+                    max_bytes=max_bytes,
+                    verified="upload",
+                    description=description,
+                )
+                return JSONResponse(receipt, status_code=201 if stored else 200)
             if lane == "source":
                 # The lane came off the token; the title is ordinary data and may
                 # come off the form, falling back to the filename so a capture is
@@ -440,6 +607,11 @@ def register_transfer_routes(
                 {"code": exc.code, "reason": exc.reason, "missing": exc.missing},
                 status_code=status,
             )
+        except archive_members.ArchiveError as exc:
+            return JSONResponse(
+                {"code": exc.code, "reason": exc.reason},
+                status_code={archive_members.TOO_LARGE: 413, archive_members.NO_SPACE: 507}.get(exc.code, 400),
+            )
         except (OpError, ValueError) as exc:
             error = error_dict(exc)
             return JSONResponse(
@@ -461,6 +633,243 @@ def register_transfer_routes(
                 exc_info=True,
             )
         return JSONResponse(result.as_dict(), status_code=201)
+
+    def _credential_binding(request: Request) -> str:
+        """Which credential opened a session, for its per-binding quota; never the credential."""
+        grant = local_ingress.current_grant()
+        if grant is not None:
+            return f"mcp-local:{grant.session_id}"
+        if config.cf_jwks is not None:
+            claims = cf_access.verified_claims(
+                request.headers.get("cf-access-jwt-assertion"),
+                jwks_client=config.cf_jwks,
+                team_domain=config.cf_team,
+                audience=config.cf_aud,
+            )
+            if claims:
+                identity = str(claims.get("sub") or claims.get("email") or "")
+                return "cf-access:" + hashlib.sha256(identity.encode()).hexdigest()
+        header = request.headers.get("authorization", "")
+        return "bearer:" + hashlib.sha256(header.encode("utf-8", "replace")).hexdigest()
+
+    session_max_bytes = upload_sessions.max_bytes_from_env()
+
+    def _tus_headers(
+        session: upload_sessions.Session | None = None, **extra: str
+    ) -> dict[str, str]:
+        headers = {"Tus-Resumable": _TUS_VERSION, "Cache-Control": "no-store", **extra}
+        if session is not None:
+            headers["Upload-Expires"] = formatdate(session.expires, usegmt=True)
+        return headers
+
+    def _tus_refusal(code: str, reason: str, status: int, **extra: str) -> JSONResponse:
+        return JSONResponse(
+            {"code": code, "reason": reason}, status_code=status, headers=_tus_headers(**extra)
+        )
+
+    def _tus_options() -> Response:
+        return Response(
+            status_code=204,
+            headers=_tus_headers(
+                **{
+                    "Tus-Version": _TUS_VERSION,
+                    "Tus-Extension": _TUS_EXTENSIONS,
+                    "Tus-Max-Size": str(session_max_bytes),
+                }
+            ),
+        )
+
+    def _tus_version_refused(request: Request) -> JSONResponse | None:
+        if request.headers.get("tus-resumable") == _TUS_VERSION:
+            return None
+        return _tus_refusal(
+            "TUS_VERSION_UNSUPPORTED",
+            f"`Tus-Resumable: {_TUS_VERSION}` is required",
+            412,
+            **{"Tus-Version": _TUS_VERSION},
+        )
+
+    def _tus_metadata(header: str) -> dict[str, str] | None:
+        """`Upload-Metadata`: comma-separated `key base64(value)` pairs; None if malformed."""
+        pairs: dict[str, str] = {}
+        for item in header.split(","):
+            if not item.strip():
+                continue
+            key, _, encoded = item.strip().partition(" ")
+            if not key or key in pairs:
+                return None
+            try:
+                pairs[key] = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return None
+        return pairs
+
+    commit = functools.partial(commit_session, vault_root)
+
+    @mcp_app.custom_route("/upload/sessions", methods=["POST", "OPTIONS"])
+    async def _create_upload_session(request: Request) -> Response:
+        if request.method == "OPTIONS":
+            return _tus_options()
+        if not config.enabled and local_ingress.current_grant() is None:
+            return _tus_refusal("UPLOAD_DISABLED", "uploads are off", 503)
+        if not _authorized(request):
+            return _tus_refusal("UNAUTHORIZED", "missing or invalid upload credential", 401)
+        if (refused := _tus_version_refused(request)) is not None:
+            return refused
+        declared = _header_count(request.headers.get("upload-length", ""))
+        metadata = _tus_metadata(request.headers.get("upload-metadata", ""))
+        if declared is None or metadata is None:
+            return _tus_refusal(
+                "INVALID_UPLOAD", "`Upload-Length` and a well-formed `Upload-Metadata` are required", 400
+            )
+        preserve_module = _preserve_module()
+        raw_protection, members, flag_refusal = _upload_flags(
+            metadata.get("raw_protection", ""), metadata.get("archive", "")
+        )
+        target = {
+            "filename": metadata.get("filename", "").strip(),
+            "scope": metadata.get("scope", "").strip(),
+            "category": metadata.get("category", "").strip(),
+            "description": metadata.get("description", "").strip() or None,
+            "raw_protection": raw_protection,
+            "archive": ARCHIVE_MEMBERS if members else None,
+        }
+        refusals = [
+            refusal
+            for refusal in (
+                preserve_module.destination_segment_refusal(target["scope"], field="scope"),
+                preserve_module.destination_segment_refusal(target["category"], field="category"),
+                None if target["filename"] else "`filename` is required",
+                flag_refusal,
+                None
+                if _upload_lane(request) == "evidence"
+                else "an upload session preserves Evidence",
+            )
+            if refusal
+        ]
+        if refusals:
+            return _tus_refusal("INVALID_UPLOAD", "; ".join(refusals), 400)
+        try:
+            if members:
+                preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
+            else:
+                # Before any byte is sent: a name the commit cannot store fails after the whole upload.
+                artifact, _ = preserve_module.evidence_artifact(
+                    vault_root, scope=target["scope"], category=target["category"],
+                    filename=target["filename"], raw_protection=raw_protection,
+                )
+                if artifact.exists():
+                    return _tus_refusal(
+                        "ARTIFACT_EXISTS",
+                        f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "
+                        "Evidence is append-only, so pick a new filename",
+                        409,
+                    )
+            session, secret = await run_in_threadpool(
+                upload_sessions.create,
+                vault_root,
+                binding=_credential_binding(request),
+                length=declared,
+                sha256=metadata.get("sha256", "").strip(),
+                target=target,
+                max_bytes=session_max_bytes,
+            )
+        except preserve_module.PreserveError as exc:
+            return _tus_refusal(exc.code, exc.reason, 400)
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        upload_sessions.start_commit(session, commit)
+        return Response(
+            status_code=201,
+            headers=_tus_headers(
+                session,
+                **{
+                    "Location": f"/upload/sessions/{session.id}",
+                    _SESSION_SECRET_HEADER: secret,
+                },
+            ),
+        )
+
+    @mcp_app.custom_route(
+        "/upload/sessions/{session_id}", methods=["HEAD", "PATCH", "DELETE", "GET", "OPTIONS"]
+    )
+    async def _upload_session(request: Request) -> Response:
+        if request.method == "OPTIONS":
+            return _tus_options()
+        if request.method != "GET" and (refused := _tus_version_refused(request)) is not None:
+            return refused
+        try:
+            session = await run_in_threadpool(
+                upload_sessions.open_session,
+                vault_root,
+                request.path_params["session_id"],
+                request.headers.get(_SESSION_SECRET_HEADER),
+            )
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        # A commit that a stop interrupted, or that can be retried, resumes when its session is read.
+        upload_sessions.start_commit(session, commit)
+        state = session.record["state"]
+        if request.method == "GET":
+            return JSONResponse(session.view(), headers=_tus_headers(session))
+        if request.method == "HEAD":
+            if state == upload_sessions.FAILED:
+                return Response(status_code=410, headers=_tus_headers(session))
+            try:
+                held = await run_in_threadpool(upload_sessions.held_offset, session)
+            except upload_sessions.SessionError as exc:
+                return _tus_refusal(exc.code, exc.reason, exc.status)
+            return Response(
+                status_code=200,
+                headers=_tus_headers(
+                    session, **{"Upload-Offset": str(held), "Upload-Length": str(session.length)}
+                ),
+            )
+        if request.method == "DELETE":
+            try:
+                await run_in_threadpool(upload_sessions.delete, session)
+            except upload_sessions.SessionError as exc:
+                return _tus_refusal(exc.code, exc.reason, exc.status)
+            return Response(status_code=204, headers=_tus_headers())
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != _TUS_PATCH_CONTENT_TYPE:
+            return _tus_refusal(
+                "INVALID_UPLOAD", f"a part is sent as `{_TUS_PATCH_CONTENT_TYPE}`", 415
+            )
+        offset = _header_count(request.headers.get("upload-offset", ""))
+        raw_length = request.headers.get("content-length", "")
+        length = _header_count(raw_length) if raw_length else None
+        if offset is None or (raw_length and length is None):
+            return _tus_refusal("INVALID_UPLOAD", "`Upload-Offset` is required", 400)
+        try:
+            patch = await run_in_threadpool(upload_sessions.Patch, session, offset, length)
+        except upload_sessions.SessionError as exc:
+            return _tus_refusal(exc.code, exc.reason, exc.status)
+        refusal: upload_sessions.SessionError | None = None
+        buffered = bytearray()
+        try:
+            try:
+                async for chunk in request.stream():
+                    buffered += chunk
+                    if len(buffered) >= _SESSION_WRITE_BYTES:
+                        await run_in_threadpool(patch.write, bytes(buffered))
+                        buffered.clear()
+            except ClientDisconnect:
+                pass  # keep what arrived: the client resumes from the offset it is told
+            if buffered:
+                await run_in_threadpool(patch.write, bytes(buffered))
+        except upload_sessions.SessionError as exc:
+            refusal = exc
+        finally:
+            new_offset, complete = await run_in_threadpool(patch.close)
+        if refusal is not None:
+            return _tus_refusal(
+                refusal.code, refusal.reason, refusal.status, **{"Upload-Offset": str(new_offset)}
+            )
+        if complete:
+            upload_sessions.start_commit(session, commit)
+        return Response(
+            status_code=204, headers=_tus_headers(session, **{"Upload-Offset": str(new_offset)})
+        )
 
     @mcp_app.custom_route("/upload", methods=["GET"])
     async def _upload_form(request: Request) -> HTMLResponse:
