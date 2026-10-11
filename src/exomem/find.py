@@ -2496,7 +2496,10 @@ def _vector_unit_candidates(
         return [], {"status": "warming", "reason": "model_warming", "model": model_name}, "kb"
     from . import recall_migration
 
-    if degraded_out is not None and recall_migration.building_sidecar(vault_root) is not None:
+    if degraded_out is not None and (
+        recall_migration.building_sidecar(vault_root) is not None
+        or recall_migration.coverage_unchecked(vault_root)
+    ):
         # Units are built after a pass's chunks, so the build adds none here
         # yet: the serving sidecar answers, and the answer is marked partial.
         degraded_out.append("embeddings")
