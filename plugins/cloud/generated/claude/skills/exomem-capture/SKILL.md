@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 6e5f3f3a5251aa8a79e11d555b08faf538c89efc12b853242efda9d6110c55f9
+  skill_contract: 0c67e74cd9b7097ac4e21c715fa936e35bbc1e4f51cc2a86c65c2b28b9e95f2f
   version: "0.1.0"
 ---
 
@@ -48,7 +48,7 @@ collection. Fleeting preferences, one-off activity, incidental associations, tri
 metrics, and tentative events stay quiet. Durable interpretations retain explicit
 attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
-`proactive_capture`; a new Entity or an affiliation edge you author follows `proactive_capture`;
+`proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
 confirmed `restructure_execution`.
 

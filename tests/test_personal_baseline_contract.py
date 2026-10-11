@@ -566,7 +566,7 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
         name,
         "new entity proactive_capture",
     )
-    assert re.search(r"edge you author.{0,60}proactive_capture", normalized), (
+    assert re.search(r"own (?:affiliation )?edge.{0,60}proactive_capture", normalized), (
         name,
         "authored edge proactive_capture",
     )

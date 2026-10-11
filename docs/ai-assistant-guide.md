@@ -66,7 +66,7 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
 collection, or schema. A concise observation or narrow Entity facet follows
-`proactive_capture`; a new Entity or an affiliation edge you author follows `proactive_capture`;
+`proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
 confirmed `restructure_execution`.
 
@@ -356,7 +356,7 @@ Without a loaded skill, call bootstrap(profile="compact") once per session and f
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or edge you author: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
 ```
 
 ## Codex CLI

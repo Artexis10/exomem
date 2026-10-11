@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 6e5f3f3a5251aa8a79e11d555b08faf538c89efc12b853242efda9d6110c55f9
+  skill_contract: 0c67e74cd9b7097ac4e21c715fa936e35bbc1e4f51cc2a86c65c2b28b9e95f2f
   version: "0.32.0"
 ---
 
@@ -174,7 +174,7 @@ or explicitly overridden by the user.
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, a typed edge you author, and the owner's type, category or relation save |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, and the owner's type, category or relation save |
 | `link_acceptance` | confirm | accepting a relation that the relation queue suggested |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
 | `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert |
