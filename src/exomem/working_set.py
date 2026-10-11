@@ -2031,7 +2031,9 @@ def _is_current_page(
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
-    return status_basis.classify(frontmatter.get("status"), path=text, frontmatter=frontmatter).carryable
+    return status_basis.classify(
+        frontmatter.get("status"), path=text, frontmatter=frontmatter
+    ).carryable
 
 
 def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
@@ -3742,7 +3744,9 @@ def _compile_packet(
             candidates = _candidates(rows)
             for candidate in candidates:
                 if candidate.path and candidate.partial_name_terms:
-                    partial_pages.setdefault(candidate.partial_name_terms, set()).add(candidate.path)
+                    partial_pages.setdefault(candidate.partial_name_terms, set()).add(
+                        candidate.path
+                    )
 
             candidates = working_set_resolve.add_graph_corroboration(
                 candidates, retrieval_paths=retrieval_paths

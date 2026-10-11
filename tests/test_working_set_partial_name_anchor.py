@@ -193,19 +193,13 @@ def test_shared_page_owners_check_their_partial_names_separately(
     counts = index.term_anchor_counts()
     monkeypatch.setattr(index, "anchors", lambda: (*rows, second))
     monkeypatch.setattr(index, "term_anchor_counts", lambda: {**counts, "thorn": 1})
-    lexical_evidence = working_set_runtime.lexical_evidence
     independent = working_set_runtime.lexical_hits_without
     checks: list[frozenset[str]] = []
-
-    def first_pass(*args, **kwargs):
-        hits, state = lexical_evidence(*args, **kwargs)
-        return [hit for hit in hits if hit.path != PERSON], state
 
     def checked(root, turn, pages, words, **kwargs):
         checks.append(words)
         return independent(root, turn, pages, words, **kwargs)
 
-    monkeypatch.setattr(working_set_runtime, "lexical_evidence", first_pass)
     monkeypatch.setattr(working_set_runtime, "lexical_hits_without", checked)
 
     packet = working_set.compile_packet(
