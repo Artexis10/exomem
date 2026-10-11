@@ -388,33 +388,36 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     root = Path(vault_root)
     path = spec.overlay(root)
     key = _cache_key(vault_root, spec)
+    stat = _stat_key(path)
+    if stat is None:
+        # A fresh leaf miss reads no override bytes; only shipped data may return.
+        snapshot = _pack_only(spec)
+        with _CACHE_LOCK:
+            _CACHE[key] = _Cached(None, snapshot)
+        return snapshot
     try:
         root.lstat()
     except FileNotFoundError:
         return _pack_only(spec)
-    stat = _stat_key(path)
-    # A matching leaf fingerprint cannot admit a replaced or aliased ancestor.
-    guard = vault.PathGuard.capture(
-        root, path.relative_to(root).as_posix(), leaf_policy="absent" if stat is None else "stable"
-    )
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
-    if cached is not None and stat is not None and cached.stat == stat:
+    # A matching leaf fingerprint cannot admit a replaced or aliased ancestor.
+    guard = vault.PathGuard.capture(
+        root, path.relative_to(root).as_posix(), leaf_policy="stable"
+    )
+    if cached is not None and cached.stat == stat:
         guard.recheck(root)
         if _stat_key(path) == stat:
             return cached.snapshot
-    if stat is None:
-        snapshot = _pack_only(spec)
+    text, _ = registry_history.read_previous(root, path)
+    if cached is not None and cached.snapshot.overlay_text == text:
+        snapshot = cached.snapshot
     else:
-        text, _ = registry_history.read_previous(root, path)
-        if cached is not None and cached.snapshot.overlay_text == text:
-            snapshot = cached.snapshot
-        else:
-            snapshot = _build(spec, text)
-        # A write between the two stats leaves no stat key, so the next load
-        # reads the file again instead of trusting bytes it may have missed.
-        after = _stat_key(path) if text is not None else None
-        stat = after if after == stat else None
+        snapshot = _build(spec, text)
+    # A write between the two stats leaves no stat key, so the next load
+    # reads the file again instead of trusting bytes it may have missed.
+    after = _stat_key(path) if text is not None else None
+    stat = after if after == stat else None
     guard.recheck(root)
     with _CACHE_LOCK:
         _CACHE[key] = _Cached(stat, snapshot)
