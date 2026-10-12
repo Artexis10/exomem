@@ -586,6 +586,10 @@ def _warm_request_path(vault_root: Path) -> None:
     carrier and the continuity carry-through never see it; with no session,
     anchor or caller it records no heat and no episode nudge. Never raises.
     """
+    from . import warmup
+
+    if not warmup.warmup_enabled():
+        return
     started = time.perf_counter()
     try:
         from . import commands, working_set
@@ -610,7 +614,9 @@ def _warm_request_path(vault_root: Path) -> None:
 
 def _warm_embedding_matrix(vault_root: Path) -> None:
     """Warm a retained corpus matrix without scanning the disk-only profile."""
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    from . import warmup
+
+    if not warmup.warmup_enabled() or os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return
     started = time.perf_counter()
     try:
