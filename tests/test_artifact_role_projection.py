@@ -491,6 +491,19 @@ def test_private_origins_do_not_consume_visible_origin_limit(tmp_path):
     assert coverage["artifact_role_promotion"] == "complete"
 
 
+def test_a_relevant_origin_is_served_beyond_the_global_origin_cap(tmp_path):
+    """Unrelated stored origins must not cap advice on the material a caller just received."""
+    from exomem import artifact_role_state as state
+
+    write(tmp_path, method())
+    index = report(tmp_path).role_state
+    index["origins"].update({f"A-unrelated-{i}": index["origins"][ORIGIN] for i in range(80)})
+    state.persist(tmp_path, index)
+    rows, coverage = state.served(tmp_path, lambda _path: True, paths=frozenset({ORIGIN}))
+    assert len(rows) == 1 and rows[0].path == ORIGIN
+    assert coverage["artifact_role_promotion"] == "complete"
+
+
 def test_persisted_alias_fanout_is_not_materialized_as_json(tmp_path, monkeypatch):
     from exomem import artifact_role_state as state
 

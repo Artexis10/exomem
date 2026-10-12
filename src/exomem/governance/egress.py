@@ -4998,6 +4998,11 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
+        from .. import due_state
+
+        # Filtering may remove a source while leaving its general anchor intact.
+        cleaned = due_state.filter_relevant_refs(cleaned)
     # A material version requires an unchanged requested page or exact unit.
     # Later filtering can turn that response into a projection; keep its
     # canonical hash, but withdraw the binding without scanning unreturned text.

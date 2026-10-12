@@ -594,6 +594,7 @@ def test_session_bootstrap_projects_filtered_compact_live_state(vault: Path) -> 
         for key in (
             "due_state",
             "due_state_handling",
+            "relevant_due_handling",
             "due_state_authority",
             "capture_sweep_handling",
             "artifact_role_state_handling",

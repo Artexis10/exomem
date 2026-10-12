@@ -123,6 +123,38 @@ def _unit_ref(path: str, label: str) -> str:
 
 UNIT_REF_OPEN = _unit_ref(OPEN_PATH, "open")
 UNIT_REF_HIDDEN = _unit_ref(RESTRICTED_PATH, "hidden")
+
+
+@pytest.mark.parametrize("ceiling", [0, 1])
+def test_final_egress_withdraws_due_advice_when_only_its_state_source_disappears(
+    vault: Path, ceiling: int,
+) -> None:
+    """The general anchor must not keep advice for a different source the guard removed."""
+    source = "Knowledge Base/Notes/current-stock.md"
+    _write_page(vault / source, "# Current stock\n\nA current stock source.\n")
+    write_scope(vault)
+    write_rule(vault, ceiling=ceiling)
+    packet = {
+        "anchors": [{"ref": OPEN_PATH, "path": OPEN_PATH, "status": "resolved"}],
+        "units": [], "pointers": [], "roles": [], "ambiguity": [], "missing": [],
+        "abstained": False, "budget": {"used_chars": 100},
+        "current_state": [{"anchor": OPEN_PATH, "path": source, "source": "notes",
+                           "statement": f"The latest stock is in [[{RESTRICTED_PATH}]]."}],
+        "relevant_due_refs": [{"ref": "exomem://review/0123456789abcdef01234567",
+                               "fingerprint": "fedcba987654321001234567", "category": "prediction_window",
+                               "due_since": "2026-08-01", "anchor": source}],
+    }
+    with request_scope(_external()):
+        guarded = egress.guard_working_set(vault, packet, _release())
+        assert guarded["anchors"] and not guarded["current_state"]
+        final = egress.postfilter("activate_context", guarded, vault)
+        without_advice = dict(guarded)
+        without_advice.pop("relevant_due_refs", None)
+        absent = egress.postfilter("activate_context", without_advice, vault)
+
+    assert "relevant_due_refs" not in final
+    assert final == absent
+    assert final["missing"] == ([{"role": "current_state", "reason": "withheld"}] if ceiling else [])
 UNIT_REF_WIKILINK = _unit_ref(OPEN_PATH, "wikilink")
 UNIT_REF_PROSE_LEAK = _unit_ref(OPEN_PATH, "prose-leak")
 

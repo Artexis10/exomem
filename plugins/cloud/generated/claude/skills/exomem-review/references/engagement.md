@@ -189,6 +189,30 @@ then attest with `resume` and `postcommit=true`. A committed note or a Saved
 marker is not coverage, and the server never claims your candidates exhaust
 the input.
 
+## Relevant due advice
+
+Activation may carry one `relevant_due_refs` candidate associated with released current material.
+Its `anchor` is the released parent reference or, for a current-state source without a reference, its released source path.
+Recent context, upkeep, ambiguous candidates and partial-only anchors do not trigger this advice.
+Missing advice does not mean nothing is due.
+
+Judge whether the finding matters to the current work before raising it in the user's language.
+Raise at most one due item per maintained client conversation, including items received through the existing due-state block.
+Remember any prior due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal.
+A transport session, credential, workspace or process does not define a new client conversation.
+Receiving a candidate does not use this allowance; the active agent remembers the mention without a new server ledger.
+
+Read `review_item_context(ref, expected_fingerprint)` for the needed context; its bounded lookup may fall back to an existing wider audit.
+`review_memory` has no `expected_fingerprint` argument.
+After `REVIEW_ITEM_CHANGED`, refresh context and decide again before a mutation.
+
+Use one applicable authored writer to record a verdict or resolving relation under the existing authority gates.
+For example, `observe_memory(operation="update")` uses the real unit fingerprint and current parent hash.
+The due fingerprint binds a review finding and is not the unit fingerprint.
+The existing projection update clears a resolved finding; do not add a second dismissal.
+If presentation dismissal is the decision, use one `triage_memory(ref, action="dismiss", expected_fingerprint, why)` mutation.
+That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
+
 ## Passing the conversation to activation
 
 In a longer conversation, or when the user's words lean on attachments, pass

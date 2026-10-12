@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 99a40503825d8ff17b8b47a86d1731580a7e9c7b2382f9067c3f4401da4dce3d
+  skill_contract: c6df4399669e4fde0bb7b0efd8b8b94b9910cc8baa01ef366c9d93ca58c6248f
   version: "0.32.0"
 ---
 
@@ -144,6 +144,13 @@ What comes back is bounded working memory, or an abstention with its reason; an
 is yours and guessing is not. At a session start the packet may carry one
 `upkeep` item: act through its route or dismiss it with a reason; nothing is
 applied for you. Use the packet and current conversation first.
+An optional `relevant_due_refs` candidate names due work on released current material.
+Judge semantic relevance; raise at most one due item per maintained client conversation.
+Remember any due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal; receipt alone is not a mention.
+Read `review_item_context(ref, expected_fingerprint)` before deciding.
+One applicable authored writer resolves with its own unit or parent guards; one `triage_memory` dismissal records presentation disposition.
+The due fingerprint is not a unit fingerprint; preserve existing authority gates.
+See [engagement](references/engagement.md) for stale context and the exact operations.
 When relevant knowledge is still missing, use
 `ask_memory(detail="compact", rerank=false)`, then `read_memory` for
 selected hits. Use `ask_memory(deep=true)` for a bounded synthesis context, and
