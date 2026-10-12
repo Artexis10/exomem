@@ -11,10 +11,13 @@ The restore Job's deadline is 900 s. The packaged in-place helper from PR #1641 
 The retained release files matched that merged implementation. Its restore Job took 44 seconds; service downtime was 93 seconds.
 The separate scratch drill took 49 seconds. Each proof compared 45 vault files, with zero differences and verified scratch cleanup.
 These runs did not compare `/data/host` runtime state. They do not close a full vault-and-host recovery proof.
+The current helper compares each backup root. Its release-specific vault-and-host proof remains unverified until an operator run.
 
 This runbook covers two operator tools for cells on Hetzner network volumes (storage class `exomem-cloud-encrypted`). One script, `infra/scripts/cloud_restore.sh`, runs both:
 
-- **Restore drill.** It restores one of a cell's restic snapshots from object storage into a scratch namespace. It hashes every restored vault file and compares the hashes with a reference vault. It proves that a backup restores byte-identical. The cell keeps serving: the drill never stops it, never mounts its volume in a new pod and never writes it.
+- **Restore drill.** It restores a cell's restic snapshot from object storage into a scratch namespace.
+  It hashes each backup root and compares the hashes with an independently captured reference.
+  The cell keeps serving: the drill never stops it, mounts its volume in a new pod or writes it.
 - **In-place restore.** It replaces a live cell's contents with a chosen snapshot, after a corrupted volume or a bad change. The cell is down from the stop to the start.
 
 cellctl itself restores a cell only after an upgrade readiness timeout or a local-storage relocation. A cell on local storage (`exomem-cloud-local`) is out of scope here; see [cloud node loss](cloud-node-loss.md). To bring the owner's own vault from another machine, use [cloud owner vault restore](cloud-operator-import.md).
@@ -22,16 +25,19 @@ cellctl itself restores a cell only after an upgrade readiness timeout or a loca
 ## Repeat the restore drill
 
 Use `infra/scripts/cloud_restore.sh drill` with the exact cell, selected B2 snapshot and reference documented below.
-The helper already uses `cloud_restore_manifests.py`, `cloud_restore_digest.py` and `cloud_restore_volume.sh`.
+The helper already uses `cloud_restore_manifests.py`, `cloud_vault_digest.py` and `cloud_restore_volume.sh`.
 Do not create another renderer or private drill script.
-A reference must represent the selected snapshot's canonical version; a live vault with newer writes is a different comparison.
-Record the selected snapshot time, restored/reference file counts, exact matches, downtime and verified scratch-resource absence.
-Keep the result scoped to the paths actually compared. Current hashes compare the vault; host-state comparison remains pending.
+A reference must represent the selected snapshot's canonical version.
+For canonical host proof, use a frozen reference from the selected snapshot's stopped backup interval.
+Record how that reference corresponds to the snapshot; a prior run ID alone does not prove correspondence.
+Capture both roots before restoring anything. The drill captures its reference before it starts the scratch restore.
+Record the snapshot time, each root's entry counts, exact matches, downtime and verified scratch-resource absence.
+Keep the result scoped to the paths and properties actually compared.
 Repeat after each relevant release and backup-policy change and at the agreed recovery-check cadence.
 Today's successful backup row alone does not satisfy this drill.
 
-Use a disk scratch root for run receipts and manifests. Existing helper hash scratch in `/dev/shm` is retained implementation debt.
-Only credentials that must stay off disk belong in memory scratch; do not copy that hash-storage pattern into new tooling.
+Use a disk scratch root for run receipts and manifests.
+The helper keeps hash lists in its private run directory. Only break-glass credentials stay in memory scratch.
 
 ## What a restore covers
 
@@ -43,15 +49,27 @@ The prior contents of both paths stay in `/data/.restore-prior-<run ID>` on the 
 
 Both tools run on the K3s server, the node that holds `/etc/rancher/k3s/k3s.yaml`, as root, from a checkout of the reviewed release. The script refuses to start on any other node. It mints break-glass with that admin kubeconfig, and it removes the scratch namespace with it even after break-glass expires. They use break-glass ([cloud operator access](cloud-operator-access.md#break-glass-mint-a-one-hour-identity)), because they read the cell's Secret and exec into cell and scratch pods, which the everyday identity cannot do. The script mints its own one-hour identity, and mints a new one when less than 20 minutes remain.
 
-The script copies its release files to `/var/lib/exomem-restore/<run ID>` and runs that copy as a transient systemd unit, `exomem-restore-<run ID>`. A dropped SSH session cannot interrupt it, and a later change to the checkout cannot reach it. The run log is `/var/lib/exomem-restore/<run ID>/run.log`. It holds counts, durations and names of Kubernetes objects, never vault file names or content. The hash lists name vault files, so they stay in `/dev/shm/exomem-restore-<run ID>`, and the script removes them after a pass.
+The script copies its release files to `/var/lib/exomem-restore/<run ID>` and runs that copy as a transient systemd unit, `exomem-restore-<run ID>`.
+A dropped SSH session cannot interrupt it, and a later change to the checkout cannot reach it.
+The run log is `/var/lib/exomem-restore/<run ID>/run.log`.
+It holds counts, durations and names of Kubernetes objects, never private file names or content.
+Hash lists stay in `/var/lib/exomem-restore/<run ID>/hashes`, with access restricted to root.
+The script removes them after a pass.
 
 The cell can run on another node than the server:
 
-- A drill reads the live or prior vault through the container runtime of the node it runs on. So it supports only a cell that runs on the K3s server. For any other cell it stops before the scratch restore, with `the cell runs on node <name>`.
+- A drill reads the live or prior backup roots through the node's container runtime.
+  It supports only a cell that runs on the K3s server.
+  For any other cell it stops before the scratch restore, with `the cell runs on node <name>`.
 - An in-place restore works for a cell on any node. Its helper pod and its restore Job take the cell's own placement, so the cell's volume stays on the cell's node during the downtime.
 - The scratch restore and its verify pod run on a node with no taint, as the export does, so they stay off a dedicated cell's node.
 
 The renderer is `infra/scripts/cloud_restore_manifests.py`, which the [export runbook](cloud-operator-export.md) also uses. It calls cellctl's own `render_cell_manifests` and `render_restore_job` from the same checkout, and it renders the helper pods. The hasher is `infra/scripts/cloud_vault_digest.py`. It hashes a regular file by content, a symlink by its target text without following it, and stops on any unreadable directory. The helper pod runs `infra/scripts/cloud_restore_volume.sh` to move the backed-up paths aside and to move them back.
+
+Each backup root must exist as a directory itself. A missing, unreadable or linked root fails hashing.
+An empty host directory can pass; an empty vault cannot.
+Hashes cover regular file bytes, symlink targets and special entry types.
+They do not compare directory metadata, permissions or ownership. Verify custody and writability separately after recovery.
 
 Both tools refuse to start in these cases:
 
@@ -88,12 +106,19 @@ Run the steps below on the node, as root, in `/root/exomem-release-$COMMIT`.
 ## Run a drill
 
 1. Set `CELL_ID` and `SNAPSHOT` from the authorization record.
-2. Start the drill against the live vault: `infra/scripts/cloud_restore.sh drill "$CELL_ID" "$SNAPSHOT" live`.
+2. Start the drill: `infra/scripts/cloud_restore.sh drill "$CELL_ID" "$SNAPSHOT" live`. Expect a run ID.
 3. Note the `run_id` it prints.
 4. Show progress with `infra/scripts/cloud_restore.sh follow "$RUN_ID"`. Repeat until `ActiveState=inactive`.
 5. Read the last log line. Expect `verdict=pass scratch_cleanup=yes rc=0`.
 
-A drill against `live` passes only when no vault file changed after the snapshot. On a cell in use, expect `differ`, `only_restored` or `only_reference` counts: they count the changes since the snapshot. A drill against `prior:<id>` compares with a vault that an earlier restore or owner import kept in `/data/.restore-prior-<id>`. Use it when that vault is what the snapshot captured.
+A drill against `live` passes only when both roots match the selected snapshot.
+Background runtime work can change host state while the cell serves, even without a governed write.
+The capture timestamps describe a sequential scan; they do not prove an atomic view of a running cell.
+A mismatch reports divergence from the captured reference. It does not alone prove that the backup or restore is defective.
+
+A drill against `prior:<id>` reads both roots that an earlier restore kept in `/data/.restore-prior-<id>`.
+Use it when independent capture evidence shows that those roots correspond to the selected snapshot.
+An owner import that kept only a vault cannot provide the missing host reference.
 
 `scratch_cleanup=no` means the script could not verify that the scratch namespace and its volume are gone. The log names what remains. Delete it by hand only after you check that it carries the `exomem.io/scratch-of` label for this cell.
 
@@ -101,7 +126,7 @@ A drill against `live` passes only when no vault file changed after the snapshot
 
 **Warning:** do not deploy the platform chart (the `helm upgrade` in [platform deploy](cloud-platform-deploy.md)) while a restore runs. The chart sets cellctl back to one replica, and cellctl then starts the cell on a half-restored volume. The script cannot prevent this.
 
-1. To see how far the snapshot is from the live vault, run a drill against `live` first and read its counts.
+1. Run a drill against `live` first. Expect separate vault and host divergence counts.
 2. Start the restore: `infra/scripts/cloud_restore.sh restore "$CELL_ID" "$SNAPSHOT"`.
 3. Note the `run_id` it prints.
 4. Show progress with `infra/scripts/cloud_restore.sh follow "$RUN_ID"`. Repeat until `ActiveState=inactive`.
@@ -109,15 +134,18 @@ A drill against `live` passes only when no vault file changed after the snapshot
 6. Through the cell's connector, recall a note that the snapshot holds. Expect an answer.
 7. Make one governed write, then read it back. Expect the write to succeed.
 
-The run does these steps. Every check that can refuse the snapshot runs before the cell stops, so a refusal costs no downtime.
+The run checks the scratch restore before the cell stops.
+It compares the in-place restore before startup; a failure then triggers recovery and costs downtime.
 
-1. It restores the snapshot into a scratch namespace and hashes the restored vault. It refuses a Job that fails or an empty vault. It measures the restored size, then removes the scratch namespace and verifies that the namespace and volume are gone.
+1. It restores the snapshot into scratch and hashes each backup root.
+   A failed Job, failed hash or empty vault stops the run before downtime.
+   It measures the restored size and verifies that the scratch namespace and volume are removed.
 2. If the runtime runs, it checks through the running cell that the volume has the restored size plus 2 GiB free.
 3. It refuses when cellctl is already paused, when the cell is not scaled to one, when the cell carries a hold, or when a Job runs in its namespace.
 4. It pauses cellctl and checks for a hold or Job again. Then it scales the cell to zero and waits until no pod runs in the namespace.
 5. A helper pod, placed where the cell runs, checks the free space again. Then it moves the backed-up paths into `/data/.restore-prior-<run ID>`.
 6. It applies cellctl's restore Job to the cell's own namespace, with the cell's placement, and waits for the Job to succeed or fail.
-7. A helper pod hashes the restored vault. The hashes must equal the scratch restore's hashes.
+7. A helper pod hashes each restored root. Each root must match the scratch restore before startup.
 8. It scales the cell to one and waits up to 30 minutes for Ready. Then it resumes cellctl.
 
 The cell is down from the `stopped at` line to the `serving again at` line in the log.
@@ -135,7 +163,8 @@ The last log line names the phase where the run stopped. The script recovers by 
 
 To abort a run, stop its unit: `systemctl stop exomem-restore-<run ID>`. The script starts the recovery for its phase when its current command returns, within five minutes. A second stop does not interrupt the recovery. A run also stops this way when it outlasts its time limit: 50 minutes for a drill, 150 minutes for a restore.
 
-A failed run keeps its hash lists in `/dev/shm/exomem-restore-<run ID>` for diagnosis. Delete that directory when you are done. The restore Job's own reason is in the log line that starts with `!! restore Job did not succeed`.
+A failed run keeps its hash lists in `/var/lib/exomem-restore/<run ID>/hashes` for diagnosis.
+Delete that directory after recording the evidence. The restore Job's reason appears after `!! restore Job did not succeed`.
 
 ### Recover by hand
 
@@ -194,7 +223,9 @@ Record:
 - the date, the cell ID, the run ID, and the snapshot ID and time;
 - the release commit and the digests the log prints first;
 - the break-glass CSR names the log prints;
-- the file counts, the restore duration and the restored bytes;
+- the reference source, capture timestamps and evidence of correspondence with the snapshot;
+- each root's restored, reference, identical, differing and extra entry counts;
+- the restore duration and the restored bytes;
 - for an in-place restore, the `stopped at` and `serving again at` times;
 - the last log line.
 

@@ -1,4 +1,4 @@
-"""Hash a restored vault and compare it with a reference, for the Cloud restore tools.
+"""Hash a restored backup root and compare it with a reference.
 
 `infra/scripts/cloud_restore.sh` runs this file in two places: inside a pod on
 the cell image, passed with `python3 -c`, and on the node. So it uses only the
@@ -6,11 +6,12 @@ standard library and imports nothing from this repository.
 
 A hash list holds one JSON array `[digest, relative path]` per line, so a file
 name with a newline or a byte that is not UTF-8 survives the round trip. The
-lists name vault files, so the restore tools keep them in memory-backed
+lists name private files, so the restore tools keep them in private disk
 storage and print only counts.
 
 `compare` writes the differing names to OUT_DIR, prints the counts and exits 0
 only when both lists hold the same non-empty set of files with equal digests.
+`--allow-empty` also accepts two empty lists, for a successfully hashed host root.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import stat
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import PurePath
 
 
 def tree_digests(root: str) -> Iterator[tuple[str, str]]:
@@ -34,8 +36,11 @@ def tree_digests(root: str) -> Iterator[tuple[str, str]]:
     directory can never drop out of both sides and still compare equal.
     """
 
-    if not os.path.isdir(root):
-        raise FileNotFoundError("hash root missing")
+    # Normalize slash/dot spellings without resolving links or collapsing parent references.
+    root = str(PurePath(root)) if root else root
+    # A backup root must be a directory itself; following a root link reads another tree.
+    if not stat.S_ISDIR(os.lstat(root).st_mode):
+        raise NotADirectoryError("hash root is not a directory")
 
     def fail(error: OSError) -> None:
         raise error
@@ -87,11 +92,11 @@ class Comparison:
     differ: list[str]
     only_restored: list[str]
     only_reference: list[str]
+    allow_empty: bool = False
 
     @property
     def passed(self) -> bool:
-        # An empty restore never passes, even against an empty reference.
-        return self.restored == self.reference == self.identical > 0
+        return self.restored == self.reference == self.identical and (self.restored > 0 or self.allow_empty)
 
     def summary(self) -> str:
         return (
@@ -101,7 +106,7 @@ class Comparison:
         )
 
 
-def compare(restored: dict[str, str], reference: dict[str, str]) -> Comparison:
+def compare(restored: dict[str, str], reference: dict[str, str], *, allow_empty: bool = False) -> Comparison:
     return Comparison(
         restored=len(restored),
         reference=len(reference),
@@ -109,6 +114,7 @@ def compare(restored: dict[str, str], reference: dict[str, str]) -> Comparison:
         differ=sorted(name for name in restored if name in reference and reference[name] != restored[name]),
         only_restored=sorted(set(restored) - set(reference)),
         only_reference=sorted(set(reference) - set(restored)),
+        allow_empty=allow_empty,
     )
 
 
@@ -124,8 +130,8 @@ def main(argv: list[str]) -> int:
             for digest, name in tree_digests(argv[1]):
                 sys.stdout.write(json.dumps([digest, name]) + "\n")
             return 0
-        if command == "compare" and len(argv) == 4:
-            result = compare(load(argv[1]), load(argv[2]))
+        if command == "compare" and (len(argv) == 4 or (len(argv) == 5 and argv[4] == "--allow-empty")):
+            result = compare(load(argv[1]), load(argv[2]), allow_empty=len(argv) == 5)
             for label in ("differ", "only_restored", "only_reference"):
                 _write_names(os.path.join(argv[3], label + ".txt"), getattr(result, label))
             print(result.summary())
@@ -133,7 +139,7 @@ def main(argv: list[str]) -> int:
     except Exception as error:  # noqa: BLE001 - a traceback would name vault paths in the run log
         print(f"{command} failed: {type(error).__name__}", file=sys.stderr)
         return 1
-    print("usage: hash ROOT | compare RESTORED REFERENCE OUT_DIR", file=sys.stderr)
+    print("usage: hash ROOT | compare RESTORED REFERENCE OUT_DIR [--allow-empty]", file=sys.stderr)
     return 2
 
 
