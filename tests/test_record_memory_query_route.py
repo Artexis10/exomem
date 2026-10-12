@@ -168,6 +168,10 @@ def test_agent_imports_and_reads_source_local_daily_totals_in_every_mode(store, 
     assert [row["calories"] for row in rows["rows"]] == sorted(
         (record["metrics"]["calories"] for record in valid(records)), reverse=True)[:5]
 
+    # Agents must not mistake default item-key paging for a full collection scan.
+    default_plan = query(store, {"version": 1, "mode": "explain"})["plan"]
+    assert default_plan["access"] == "index" and default_plan["index"] is None
+
 
 def test_applying_the_previewed_declarations_lets_imported_rows_answer_from_a_rollup(store, monkeypatch):
     """An import that works but leaves the daily totals on the base scan, so the agent still has to

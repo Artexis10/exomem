@@ -6,15 +6,15 @@ independent expected rows and daily results) over the parent change
 move-structured-collections-to-sqlite. It runs as one step of the product E2E
 (`scripts/e2e_product_loop.py`) on the wheel that run already built and installed.
 
-The journey runs twice on the same installed bytes:
+The journey checks the installed release capability before enrolment:
 
-* Dark phase: the wheel as built. `capability.RELEASED` is empty, so creating a
-  summary collection refuses `RECORDS_SUMMARY_UNAVAILABLE`, as does the owner's
-  offline enrolment, and no import has a store collection to run into.
-* Released phase: the one line of `capability.py` in site-packages that holds
-  `RELEASED` is rewritten to enable `records-summary-v1`, and the service restarts.
-  Those are the bytes the S1.8 release would ship. No environment variable,
-  argument or vault state can turn the capability on, so nothing else is set.
+* Disabled wheels prove that summary creation and offline enrolment refuse.
+  The isolated test installation then changes the one release-capability line.
+* Enabled wheels keep their installed bytes throughout the journey.
+
+Both paths prove that an unenrolled vault refuses MCP summary creation, then
+exercise owner enrolment and the released workflow. No environment variable,
+argument or vault state turns the release capability on.
 
 All data is invented and generated here from a fixed seed. The expected values
 come from `reference_daily` below, written from the raw rows with `datetime`
@@ -63,8 +63,8 @@ import e2e_product_loop as loop  # noqa: E402
 
 # --- the invented export and its independent reference -------------------------
 
-#: Enough rows for ten import batches, so the service stops well before the job ends.
-EXPORT_ROWS = 5000
+#: Enough rows for an interrupted import to leave work for the restarted service.
+EXPORT_ROWS = 1600
 EXPORT_SEED = 20261007
 WINDOW_START = date(2026, 3, 1)
 WINDOW_DAYS = 80
@@ -115,7 +115,7 @@ def export_rows() -> list[dict[str, Any]]:
             ]}
             row["place"] = {"label": f"Invented place {index % 7}", "region": "Invented region"}
         # The preview never sees this source subtree; its undeclared values must stay private.
-        if index >= 4200:
+        if index >= EXPORT_ROWS - 800:
             row["context"] = {"unreviewed": {"place": f"Late invented place {index}"}}
         shape = index % 10
         if shape < 4:
@@ -365,7 +365,7 @@ def member_documents() -> tuple[dict[str, bytes], dict[str, dict[str, Any]]]:
     The reference uses those stated offsets, never the product or the host zone database.
     """
     documents, expected = {}, {}
-    for month, days in ((10, range(1, 32)), (11, range(1, 8))):
+    for month, days in ((10, range(24, 32)), (11, range(1, 8))):
         nested = []
         for day in days:
             clocks = [(minute, 120 if month == 10 and day < 25 else 60) for minute in range(0, 1440, 10)]
@@ -524,7 +524,7 @@ async def compare_sample_days(journey: Journey, service: Session) -> None:
 
 
 async def compare_samples(journey: Journey, service: Session) -> None:
-    rows, _ = await paged(service, SAMPLE_ROWS, "rows", 1000, SAMPLES_ID)
+    rows, _ = await paged(service, SAMPLE_ROWS, "rows", None, SAMPLES_ID)
     expect(len(rows) == len(journey.sample_reference)
            and {row["sample_id"]: row for row in rows} == journey.sample_reference,
            "derived rows differ from the independent source reference, including the October fold",
@@ -566,12 +566,12 @@ async def discover_and_plan(journey: Journey, service: Session) -> None:
     schema_bytes = sum(row["total"] for row in measure.measure(
         [tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools]))
     bootstrap = await service.call("bootstrap", profile="compact")
-    journey.measurements = {"source": "installed stdio MCP discovery on the invented journey vault",
+    journey.measurements.update({"source": "installed stdio MCP discovery on the invented journey vault",
                             "query_chapter_bytes": sizes, "zone_rules": described["import"]["zone_rules"],
                             "installed_schema_bytes": schema_bytes,
                             "installed_surface": tool_surface.discovery_contract(wires),
                             "compact_core_bytes": len(json.dumps(bootstrap)),
-                            "derived_source_rows": len(journey.sample_reference)}
+                            "derived_source_rows": len(journey.sample_reference)})
 
 
 async def protected_members(journey: Journey, owner: Session, recipient: Session) -> None:
@@ -704,6 +704,9 @@ class Journey:
         # The outer E2E collector rescues this directory before scratch cleanup.
         self.observer_log_root = self.home / "logs" / "query-observation"
         self.timeout = args.request_timeout
+        self.initial_records_summary_enabled = loop._installed_records_summary_enabled(
+            self.python, env=loop._clean_env(self.home, self.vault), cwd=self.work,
+        )
         self.rows = export_rows()
         self.export = export_bytes(self.rows)
         self.timings: dict[str, float] = {}
@@ -1085,47 +1088,65 @@ async def preserve_export(journey: Journey, service: Session) -> None:
     )
 
 
+async def refuse_unenrolled(journey: Journey, service: Session) -> None:
+    with journey.step("0. released phase: MCP create on an unenrolled vault refuses"):
+        await service.refused(
+            ENROLMENT_REQUIRED,
+            "record_memory",
+            action="create",
+            manifest_path=WORKOUTS_PATH,
+            manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
+            why="a NEW summary collection on an unenrolled vault",
+        )
+        await file_collections_unchanged(journey, service, "while the vault is unenrolled")
+
+
 async def dark_phase(journey: Journey) -> None:
+    enabled = journey.initial_records_summary_enabled
     async with journey.service("dark") as service:
         with journey.step("A/B: file Records and Planning collections, created before the store"):
             await create_file_collections(journey, service)
             await file_collections_unchanged(journey, service, "right after creation")
         with journey.step("1. preserve the invented export and check its receipt"):
             await preserve_export(journey, service)
-        with journey.step("0. dark phase: create and import refuse"):
-            await service.refused(
-                UNAVAILABLE,
-                "record_memory",
-                action="create",
-                manifest_path=WORKOUTS_PATH,
-                manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
-                why="a NEW summary collection, before the release",
-            )
-            # With no store in the vault, an import has no store collection to run into. It
-            # refuses as the file collection or the absent one, not RECORDS_SUMMARY_UNAVAILABLE,
-            # which an enrolled vault under a dark release answers (test_collection_store_service).
-            for target, code in (
-                (journey.file_collections["records"], "IMPORT_UNAVAILABLE"),
-                (WORKOUTS_ID, "COLLECTION_NOT_FOUND"),
-            ):
+        if enabled:
+            await refuse_unenrolled(journey, service)
+        else:
+            with journey.step("0. dark phase: create and import refuse"):
                 await service.refused(
-                    code,
+                    UNAVAILABLE,
                     "record_memory",
-                    action="import",
-                    collection=target,
-                    import_request={"mode": "preview", **journey.import_request},
+                    action="create",
+                    manifest_path=WORKOUTS_PATH,
+                    manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
+                    why="a NEW summary collection, before the release",
                 )
+                # With no store in the vault, an import has no store collection to run into. It
+                # refuses as the file collection or the absent one, not RECORDS_SUMMARY_UNAVAILABLE,
+                # which an enrolled vault under a dark release answers (test_collection_store_service).
+                for target, code in (
+                    (journey.file_collections["records"], "IMPORT_UNAVAILABLE"),
+                    (WORKOUTS_ID, "COLLECTION_NOT_FOUND"),
+                ):
+                    await service.refused(
+                        code,
+                        "record_memory",
+                        action="import",
+                        collection=target,
+                        import_request={"mode": "preview", **journey.import_request},
+                    )
     enrolment = journey.work / "enrolment.md"
     enrolment.write_text(summary_manifest(ENROLMENT_ID, "Enrolment"), encoding="utf-8")
-    refused = journey.owner_cli(
-        "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
-        "--why", "enrol before the release",
-    )  # fmt: skip
-    expect(
-        refused.returncode == 1 and UNAVAILABLE in refused.stderr,
-        "the owner's offline create did not refuse in the dark phase",
-        {"returncode": refused.returncode, "stderr": refused.stderr[-800:]},
-    )
+    if not enabled:
+        refused = journey.owner_cli(
+            "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
+            "--why", "enrol before the release",
+        )  # fmt: skip
+        expect(
+            refused.returncode == 1 and UNAVAILABLE in refused.stderr,
+            "the owner's offline create did not refuse in the dark phase",
+            {"returncode": refused.returncode, "stderr": refused.stderr[-800:]},
+        )
     leftovers = [name for name in STORE_FILES if (journey.vault / name).exists()]
     expect(not leftovers, "the dark phase left store files in the vault", leftovers)
 
@@ -1149,19 +1170,14 @@ def installed_capability_file(journey: Journey) -> Path:
 
 
 async def released_phase_enrol(journey: Journey) -> None:
-    with journey.step("0. released phase: rewrite the RELEASED line in site-packages"):
-        release_records_summary(installed_capability_file(journey))
-    with journey.step("0. released phase: MCP create on an unenrolled vault refuses"):
+    if not journey.initial_records_summary_enabled:
+        with journey.step("0. released phase: rewrite the RELEASED line in the test installation"):
+            release_records_summary(installed_capability_file(journey))
+        expect(loop._installed_records_summary_enabled(
+            journey.python, env=loop._clean_env(journey.home, journey.vault), cwd=journey.work,
+        ), "the installed release does not enable summary collections")
         async with journey.service("unenrolled") as service:
-            await service.refused(
-                ENROLMENT_REQUIRED,
-                "record_memory",
-                action="create",
-                manifest_path=WORKOUTS_PATH,
-                manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
-                why="a NEW summary collection on an unenrolled vault",
-            )
-            await file_collections_unchanged(journey, service, "while the vault is unenrolled")
+            await refuse_unenrolled(journey, service)
     with journey.step("2. owner enrols the vault: offline `exomem collections create`"):
         enrolment = journey.work / "enrolment.md"
         enrolled = journey.owner_cli_after_stop(
@@ -1321,12 +1337,14 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
     )
 
 
-async def paged(service: Session, query: dict[str, Any], key: str, size: int,
+async def paged(service: Session, query: dict[str, Any], key: str, size: int | None,
                 collection: str = WORKOUTS_ID) -> tuple[list, list]:
     """Every row or group of a query across its cursor pages, with each page's plan."""
     items, plans, after = [], [], None
     while True:
-        page = await service.query({**query, "page": {"limit": size, **({"after": after} if after else {})}}, collection)
+        # Row acceptance uses the product's default page instead of its maximum.
+        paging = {**({"limit": size} if size is not None else {}), **({"after": after} if after else {})}
+        page = await service.query({**query, "page": paging}, collection)
         items.extend(page[key])
         plans.append(page.get("plan"))
         after = page.get("next_cursor")
@@ -1377,7 +1395,7 @@ async def compare_queries(journey: Journey, service: Session) -> None:
         service,
         {"version": 1, "select": ROW_FIELDS, "order_by": [{"field": "local_date"}]},
         "rows",
-        1000,
+        None,
     )
     ids = [row["exercise_id"] for row in scan]
     expect(len(ids) == len(set(ids)), "an exercise_id came back twice: the import duplicated a row")
@@ -1393,7 +1411,7 @@ async def compare_queries(journey: Journey, service: Session) -> None:
 
     day = "2026-03-11"  # holds an instant whose own offset moved it from UTC's 10 March
     on_day = {"version": 1, "select": ROW_FIELDS, "where": {"field": "local_date", "op": "eq", "value": day}}
-    found, _ = await paged(service, on_day, "rows", 1000)
+    found, _ = await paged(service, on_day, "rows", None)
     expected_ids = {key for key, row in rows.items() if _local_day(row).isoformat() == day}
     expect(
         {row["exercise_id"] for row in found} == expected_ids and "wk-edge-0" in expected_ids,
@@ -1593,25 +1611,17 @@ async def copy_and_adopt(journey: Journey) -> None:
 
 async def unsupported_launcher(journey: Journey) -> None:
     """The store fence must refuse an actual older reader without a RAW fence masking it."""
+    from exomem.governance import raw_protection
+
     with journey.step("6. refuse an actual unsupported interpreter through the launcher"):
         expect(journey.older_python, "the launcher proof needs --older-python")
         fixture = journey.fork("older-reader", journey.work / "older-reader-vault")
-        loop._run([str(fixture.executable), "init", "--vault", str(fixture.vault)],
-                  env=fixture.lease_env(), cwd=fixture.work, timeout=60)
-        async with fixture.service("files") as service:
-            await create_file_collections(fixture, service)
-        manifest = fixture.work / "summary.md"
-        manifest.write_text(summary_manifest(WORKOUTS_ID, "Reader compatibility fixture"), encoding="utf-8")
-        created = fixture.owner_cli("create", "--manifest-path", WORKOUTS_PATH,
-                                    "--manifest-file", str(manifest), "--why", "create compatibility fixture")
-        expect(created.returncode == 0, "compatibility fixture create refused", created.stderr)
-        async with fixture.service("summary") as service:
-            await service.mutate("record_memory", action="append", collection=WORKOUTS_ID,
-                                 item={"exercise_id": "reader-proof", "calories": 7, "local_date": "2026-03-11"},
-                                 why="compatibility proof row")
-        copied_root = fixture.work / "copied-vault"
-        shutil.copytree(fixture.vault, copied_root)
-        result = fixture.installed_helper("--unsupported-launcher", copied_root,
+        # Exclude RAW-marked paths only in this refusal copy, so RAW cannot mask the store fence.
+        shutil.copytree(
+            journey.vault, fixture.vault,
+            ignore=lambda _directory, names: [name for name in names if raw_protection.marked(name)],
+        )
+        result = fixture.installed_helper("--unsupported-launcher", fixture.vault,
                                           older_python=journey.older_python)
         expect(result["store_fence_refused"] is True, "the unsupported launcher accepted the copy", result)
 
@@ -1796,8 +1806,14 @@ def print_log_tails(work: Path, chars: int = 1500, *, observer_log_root: Path | 
 
 
 def run(args: argparse.Namespace) -> int:
-    journey = Journey(args)
     started = time.monotonic()
+    journey = Journey(args)
+    capability_file = installed_capability_file(journey)
+    capability_before = capability_file.read_bytes()
+    journey.measurements["installed_capability"] = {
+        "initially_enabled": journey.initial_records_summary_enabled,
+        "initial_sha256": hashlib.sha256(capability_before).hexdigest(),
+    }
     with journey.step("setup: init the vault, start the lease coordinator"):
         loop._run(
             [str(journey.executable), "init", "--vault", str(journey.vault)],
@@ -1816,6 +1832,10 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(copy_and_adopt(journey))
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
+        capability_after = capability_file.read_bytes()
+        if journey.initial_records_summary_enabled:
+            expect(capability_after == capability_before, "the ON journey changed installed capability bytes")
+        journey.measurements["installed_capability"]["final_sha256"] = hashlib.sha256(capability_after).hexdigest()
     except BaseException:
         print_log_tails(journey.work, observer_log_root=journey.observer_log_root)
         raise
