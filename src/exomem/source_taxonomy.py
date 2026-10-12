@@ -223,7 +223,9 @@ class Resolution:
     definition: Definition | None = None
     replaced_by: str | None = None
     close_match: str | None = None
-    selected_spec: vocabulary_registry.RegistrySpec | None = field(default=None, compare=False, repr=False)
+    selected_spec: vocabulary_registry.RegistrySpec | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def requires_url(self) -> bool:
@@ -389,7 +391,9 @@ class SourceTaxonomy:
     kind_aliases: Mapping[str, str] = field(default_factory=dict)
     domain_aliases: Mapping[str, str] = field(default_factory=dict)
     findings: tuple[str, ...] = ()
-    selected_spec: vocabulary_registry.RegistrySpec | None = field(default=None, compare=False, repr=False)
+    selected_spec: vocabulary_registry.RegistrySpec | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         for name in ("kinds", "domains", "kind_aliases", "domain_aliases"):
@@ -527,7 +531,9 @@ def load_taxonomy(vault_root: Path, *, registry_scope: str | None = None) -> Sou
         from .vocabulary import instances
 
         selected = instances.select(Path(vault_root), KIND_SPEC, registry_scope)
-        return replace(vocabulary_registry.load(selected, Path(vault_root)).typed, selected_spec=selected)
+        return replace(
+            vocabulary_registry.load(selected, Path(vault_root)).typed, selected_spec=selected
+        )
     except OSError as exc:
         path = registry_path(vault_root)
         log.warning("%s unreadable (%s); using built-in source taxonomy", path, exc)
@@ -834,9 +840,20 @@ def plan_registrations(
     selected = observed[0] if observed else instances.select(root, KIND_SPEC)
     for previous in observed:
         instances.recheck(root, previous)
-        if (previous.instance_id, previous.binding_revision, previous.stem, previous.overlay(root)) != (
-                selected.instance_id, selected.binding_revision, selected.stem, selected.overlay(root)):
-            raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: taxonomy resolutions have different bindings")
+        if (
+            previous.instance_id,
+            previous.binding_revision,
+            previous.stem,
+            previous.overlay(root),
+        ) != (
+            selected.instance_id,
+            selected.binding_revision,
+            selected.stem,
+            selected.overlay(root),
+        ):
+            raise vocabulary_registry.RegistryError(
+                "REGISTRY_UNAVAILABLE: taxonomy resolutions have different bindings"
+            )
     taxonomy = replace(vocabulary_registry.load(selected, root).typed, selected_spec=selected)
     if not pending:
         return TaxonomyPlan(taxonomy, selected_spec=selected)
@@ -986,8 +1003,11 @@ def register(
         vault_root, kind=kind_resolution, domain=domain_resolution
     )
     if plan.writes:
-        batch_atomic_write(list(plan.writes), vault_root=Path(vault_root),
-                           _validate_prepared_bindings=lambda: plan.recheck_bindings(Path(vault_root)))
+        batch_atomic_write(
+            list(plan.writes),
+            vault_root=Path(vault_root),
+            _validate_prepared_bindings=lambda: plan.recheck_bindings(Path(vault_root)),
+        )
     return plan.introductions
 
 

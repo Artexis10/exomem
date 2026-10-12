@@ -2612,7 +2612,7 @@ class EpistemicGraphIndex:
         try:
             epoch = graph_sync.canonical_publication_epoch(self.vault_root)
             sidecar_identity = self._availability_sidecar_identity()
-            # Neutral graph republication proves Markdown topology; selected definitions belong to per-caller interpretation.
+            # Neutral republication proves topology; each caller interprets selected definitions.
             snapshot = self._open_read_snapshot(require_current_projection=False)
             if snapshot is None:
                 return False
