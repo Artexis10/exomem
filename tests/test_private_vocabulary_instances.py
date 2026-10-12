@@ -270,6 +270,100 @@ def test_private_registry_evidence_checks_its_snapshots_without_loading_public_s
             evidence.close()
 
 
+@pytest.mark.parametrize("domain", [None, "meteorology"])
+def test_capture_keeps_the_binding_used_to_resolve_a_registered_kind(
+    private_instances, configured_boundary, vault, source_schema, monkeypatch, domain,
+):
+    """Rearming between resolution and planning must not repin a capture's meaning."""
+    from test_source_taxonomy import _capture
+
+    from exomem import source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    original = source_taxonomy.plan_registrations
+    with principal.request_scope(private_instances("full")):
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC)
+        source_taxonomy.register(vault, kind="field-notebook", domain=domain)
+        before = selected.overlay(vault).read_bytes()
+
+        def rearm_before_plan(*args, **kwargs):
+            config, _authenticate = configured_boundary
+            document = json.loads(config.read_text())
+            document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable resolution binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(source_taxonomy, "plan_registrations", rearm_before_plan)
+        with pytest.raises(ValueError):
+            _capture(vault, source_schema, source_type="field-notebook", title="Retained resolution", domain=domain)
+        assert selected.overlay(vault).read_bytes() == before
+        assert not instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault).exists()
+        assert not list((vault / "Knowledge Base/Sources").rglob("*retained-resolution.md"))
+
+
+@pytest.mark.parametrize("race", ["planning", "prepared", "same-path"])
+def test_reclassification_keeps_its_binding_through_source_publication(
+    private_instances, configured_boundary, vault, source_schema, monkeypatch, race,
+):
+    """A stopped rearm must refuse a correction and restore an already renamed source."""
+    from test_source_taxonomy import _capture
+
+    from exomem import move_file, reclassify_source, source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    with principal.request_scope(private_instances("full")):
+        config, _authenticate = configured_boundary
+        document = json.loads(config.read_text())
+        document["capture_paths"] = [path for path in document["capture_paths"] if "/_Schema/" not in path]
+        config.write_text(json.dumps(document))
+        authority = state_migration.assert_offline_migration_authority(source="disposable unrestricted registry destination")
+        state_migration.arm_connector_boundary_offline(vault, authority=authority)
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC)
+        captured = _capture(vault, source_schema, source_type="field-notebook", title="Original classification")
+        source_before = (vault / captured.path).read_bytes()
+        registry_before = selected.overlay(vault).read_bytes()
+
+        def rearm_selection():
+            document = json.loads(config.read_text())
+            document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable correction binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+
+        if race == "prepared":
+            original = move_file.batch_atomic_write
+
+            def rearm_before_batch(*args, **kwargs):
+                rearm_selection()
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(move_file, "batch_atomic_write", rearm_before_batch)
+        else:
+            original = source_taxonomy.plan_registrations
+
+            def rearm_after_plan(*args, **kwargs):
+                planned = original(*args, **kwargs)
+                rearm_selection()
+                return planned
+
+            monkeypatch.setattr(source_taxonomy, "plan_registrations", rearm_after_plan)
+
+        with pytest.raises(ValueError):
+            reclassify_source.reclassify(
+                vault, path=captured.path,
+                source_kind="field-notebook" if race == "same-path" else "observation-diary",
+                reason="Correct the source kind",
+            )
+        assert (vault / captured.path).read_bytes() == source_before
+        assert selected.overlay(vault).read_bytes() == registry_before
+        assert not instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault).exists()
+        assert not list((vault / "Knowledge Base/Sources/Observation Diary").rglob("*.md"))
+
+
 def test_capture_refuses_a_binding_rearmed_after_its_registration_plan(
     private_instances, configured_boundary, vault, source_schema, monkeypatch,
 ):

@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -328,7 +328,7 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
         path.lstat()
     except FileNotFoundError:
         return (
-            source_taxonomy.core_taxonomy(),
+            replace(source_taxonomy.core_taxonomy(), selected_spec=spec),
             vault.PathGuard.capture(root, relative, leaf_policy="absent"),
             _snapshot({"registry": "missing"}),
         )
@@ -343,7 +343,7 @@ def _strict_taxonomy(root: Path) -> tuple[source_taxonomy.SourceTaxonomy, vault.
             "INVALID_DOMAIN_TAXONOMY", "domain taxonomy is unreadable"
         ) from error
     taxonomy, snapshot = _strict_registry_text(raw)
-    return taxonomy, guard, snapshot
+    return replace(taxonomy, selected_spec=spec), guard, snapshot
 
 
 def registry_text_snapshot(text: str | None) -> str | None:

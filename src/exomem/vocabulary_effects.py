@@ -203,20 +203,14 @@ def staged_page_state(
     transitions: dict[tuple[str, str], RegistryTransition],
 ) -> semantic_contract.SemanticPageState:
     """Enrich the maintained detached parser with this image's selected snapshots."""
-    from . import activation, lifecycle_statuses, note_types
+    from . import lifecycle_statuses
     from .vocabulary import registry_spec
 
     state = semantic_contract._parse_page_state(root, path, source, complete_authored_effects=True)
     scope = instances.page_scope(root, state.path, dict(state.frontmatter))
     snapshots = {}
     binding = None
-    subjects: tuple[str, ...] = semantic_contract._PAGE_DEFINITION_SUBJECTS
-    type_basis = note_types.Basis(root)
-    page_type = type_basis.resolve(activation.normalized_page_type(state.page_type)).note_type
-    # The note-type schema fixes the entity role; individual type keys remain registry data.
-    if page_type is not None and page_type.role == "entity":
-        subjects = (*subjects, entity_types.SPEC.name)
-    for subject in subjects:
+    for subject in semantic_contract._PAGE_DEFINITION_SUBJECTS:
         spec = instances.select(root, registry_spec(subject), scope)
         transition = capture_transition(root, spec, images, transitions)
         snapshots[subject] = transition.after if after else transition.before
@@ -225,7 +219,7 @@ def staged_page_state(
         scope or instances.PUBLIC_INSTANCE, binding, snapshots, state.path, state.frontmatter,
     )
     return semantic_contract.enrich_page_state(
-        root, state, lifecycle_statuses.Basis(root), type_basis,
+        root, state, lifecycle_statuses.Basis(root),
         page_definitions=definitions,
     )
 
@@ -419,7 +413,14 @@ def classify_additive_effects(
             title = frontmatter.get("title")
             entity_type = frontmatter.get("entity_type")
             identifier = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
-            definition = new.definitions.snapshots[entity_types.SPEC.name].typed.resolve(str(entity_type or ""))
+            try:
+                # Folder validation consumes entity types; page parsing needs only relations and categories.
+                spec = instances.select(root, entity_types.SPEC, new.definitions.instance_id)
+                entities = capture_transition(root, spec, indexed, transitions).after.typed
+            except (ValueError, OSError):
+                reasons.append(ClassificationReason("registry_invalid", image.path))
+                continue
+            definition = entities.resolve(str(entity_type or ""))
             if not isinstance(title, str) or identifier is None or definition is None or new.status != "active":
                 reasons.append(ClassificationReason("new_entity_invalid", image.path))
             elif not _entity_path_is_canonical(image.path, definition):
