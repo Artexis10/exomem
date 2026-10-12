@@ -5951,6 +5951,32 @@ def release_level_for_path_only(
     once (`lifecycle.tombstoned_paths`), for the same reason `policy` is handed
     in: the plane does not move while one pass runs.
     """
+    return _release_level_for_path_only_snapshot(
+        vault_root, rel_path, principal=principal, purpose=purpose,
+        receipt_decision=receipt_decision, policy=policy, tombstones=tombstones,
+    )
+
+
+_CURRENT_PATH_FINGERPRINT = object()
+
+
+@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
+def _release_level_for_path_only_snapshot(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    receipt_decision: str | None = None,
+    policy: Any | None = None,
+    tombstones: frozenset[str] | None = None,
+    content_fingerprint: str | None | object = _CURRENT_PATH_FINGERPRINT,
+) -> int:
+    """Continue internal publication admission against its verified raw preimage.
+
+    Ordinary callers always hash the current file. Only an operation-local
+    registry witness supplies a captured fingerprint; canonical refusal wins.
+    """
     vault_root = Path(vault_root)
     if tombstones is None:
         if lifecycle.is_tombstoned(vault_root, rel_path):
@@ -5999,7 +6025,10 @@ def release_level_for_path_only(
     content_hash: str | None = None
     if who.verified_authorization_session is not None:
         try:
-            content_hash = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+            content_hash = (
+                hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+                if content_fingerprint is _CURRENT_PATH_FINGERPRINT else content_fingerprint
+            )
         except OSError:
             if receipt_decision is not None:
                 _outcome_for_decision(

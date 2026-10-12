@@ -21,6 +21,42 @@ def test_effect_details_are_immutable_snapshots_with_an_empty_default() -> None:
             effect.details["relation"] = "links_to"
 
 
+def test_registry_publication_checks_raw_after_bytes_even_when_registry_hash_matches(tmp_path: Path) -> None:
+    from exomem import entity_types, vault
+    from exomem.vocabulary import registry
+    from exomem.vocabulary_effects import capture_transition
+
+    path = entity_types.SPEC.overlay(tmp_path)
+    path.parent.mkdir(parents=True)
+    before = b"schema_version: 1\nentity_types: {}\n"
+    after = before + b"# reviewed publication\n"
+    path.write_bytes(before)
+    image = CanonicalWriteImage(path.relative_to(tmp_path).as_posix(), before, after)
+    transition = capture_transition(tmp_path, entity_types.SPEC, {image.path: image}, {})
+    transition.recheck(tmp_path)
+    path.write_bytes(after)
+    transition.recheck(tmp_path, after=True)
+
+    changed = after.replace(b"\n", b"\r\n")
+    assert registry.content_hash(changed.decode()) == registry.content_hash(after.decode())
+    path.write_bytes(changed)
+    with pytest.raises(vault.PathGuardError, match="PATH_GUARD_CONTENT"):
+        transition.recheck(tmp_path, after=True)
+
+
+def test_registry_publication_cannot_capture_a_staged_preimage_that_is_not_current(tmp_path: Path) -> None:
+    from exomem import entity_types, vault
+    from exomem.vocabulary_effects import capture_transition
+
+    path = entity_types.SPEC.overlay(tmp_path)
+    path.parent.mkdir(parents=True)
+    before = b"schema_version: 1\nentity_types: {}\n"
+    path.write_bytes(before + b"# external edit\n")
+    image = CanonicalWriteImage(path.relative_to(tmp_path).as_posix(), before, before + b"# planned\n")
+    with pytest.raises(vault.PathGuardError, match="PATH_GUARD_CONTENT: publication preimage changed"):
+        capture_transition(tmp_path, entity_types.SPEC, {image.path: image}, {})
+
+
 def _image(path: str, before: str | None, after: str | None) -> CanonicalWriteImage:
     return CanonicalWriteImage(
         path=path,
@@ -69,24 +105,26 @@ def test_classifies_a_new_canonical_entity_and_an_authored_edge(tmp_path: Path) 
 
 
 def test_classifies_only_new_type_and_relation_registry_definitions(tmp_path: Path) -> None:
-    result = classify_additive_effects(
-        tmp_path,
-        (
-            _image(
-                "Knowledge Base/_Schema/entity-types.yaml",
-                "schema_version: 1\nentity_types: {}\n",
-                "schema_version: 1\nentity_types:\n  guild:\n"
-                "    folder: Guilds\n    label: Guild\n    aliases: []\n"
-                "    cue_nouns: []\n    capture_guidance: A durable group.\n",
-            ),
-            _image(
-                "Knowledge Base/_Schema/relation-registry.yaml",
-                "schema_version: 1\nextensions: {}\n",
-                "schema_version: 1\nextensions:\n  guild.member:\n"
-                "    description: Membership\n    parent: relates_to\n",
-            ),
+    images = (
+        _image(
+            "Knowledge Base/_Schema/entity-types.yaml",
+            "schema_version: 1\nentity_types: {}\n",
+            "schema_version: 1\nentity_types:\n  guild:\n"
+            "    folder: Guilds\n    label: Guild\n    aliases: []\n"
+            "    cue_nouns: []\n    capture_guidance: A durable group.\n",
+        ),
+        _image(
+            "Knowledge Base/_Schema/relation-registry.yaml",
+            "schema_version: 1\nextensions: {}\n",
+            "schema_version: 1\nextensions:\n  guild.member:\n"
+            "    description: Membership\n    parent: relates_to\n",
         ),
     )
+    for image in images:
+        path = tmp_path / image.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image.before)
+    result = classify_additive_effects(tmp_path, images)
 
     assert result.state == "reviewed"
     assert {(effect.action, effect.key) for effect in result.effects} == {
@@ -97,23 +135,25 @@ def test_classifies_only_new_type_and_relation_registry_definitions(tmp_path: Pa
 
 def test_refuses_a_mixed_registry_addition_and_existing_entity_edit(tmp_path: Path) -> None:
     path = "Knowledge Base/Entities/Organizations/amber-guild.md"
-    result = classify_additive_effects(
-        tmp_path,
-        (
-            _image(path, _entity("Amber Guild"), _entity("Amber Guild") + "extra\n"),
-            _image(
-                "Knowledge Base/_Schema/entity-types.yaml",
-                "schema_version: 1\nentity_types:\n  guild:\n"
-                "    folder: Guilds\n    label: Guild\n    aliases: []\n"
-                "    cue_nouns: []\n    capture_guidance: A durable group.\n",
-                "schema_version: 1\nentity_types:\n  guild:\n"
-                "    folder: Guilds\n    label: Guild revised\n    aliases: []\n"
-                "    cue_nouns: []\n    capture_guidance: A durable group.\n  team:\n"
-                "    folder: Teams\n    label: Team\n    aliases: []\n"
-                "    cue_nouns: []\n    capture_guidance: A durable team.\n",
-            ),
+    images = (
+        _image(path, _entity("Amber Guild"), _entity("Amber Guild") + "extra\n"),
+        _image(
+            "Knowledge Base/_Schema/entity-types.yaml",
+            "schema_version: 1\nentity_types:\n  guild:\n"
+            "    folder: Guilds\n    label: Guild\n    aliases: []\n"
+            "    cue_nouns: []\n    capture_guidance: A durable group.\n",
+            "schema_version: 1\nentity_types:\n  guild:\n"
+            "    folder: Guilds\n    label: Guild revised\n    aliases: []\n"
+            "    cue_nouns: []\n    capture_guidance: A durable group.\n  team:\n"
+            "    folder: Teams\n    label: Team\n    aliases: []\n"
+            "    cue_nouns: []\n    capture_guidance: A durable team.\n",
         ),
     )
+    for image in images:
+        path = tmp_path / image.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image.before)
+    result = classify_additive_effects(tmp_path, images)
 
     assert result.state == "mixed"
     assert [effect.action for effect in result.effects] == ["entity_type.add"]
@@ -142,17 +182,19 @@ def test_refuses_unknown_schema_and_duplicate_image_paths(tmp_path: Path) -> Non
 
 
 def test_refuses_removing_an_existing_relation_type_definition(tmp_path: Path) -> None:
-    result = classify_additive_effects(
-        tmp_path,
-        (
-            _image(
-                "Knowledge Base/_Schema/relation-registry.yaml",
-                "schema_version: 1\nextensions:\n  guild.member:\n"
-                "    description: Membership\n    parent: relates_to\n",
-                None,
-            ),
+    images = (
+        _image(
+            "Knowledge Base/_Schema/relation-registry.yaml",
+            "schema_version: 1\nextensions:\n  guild.member:\n"
+            "    description: Membership\n    parent: relates_to\n",
+            None,
         ),
     )
+    for image in images:
+        path = tmp_path / image.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image.before)
+    result = classify_additive_effects(tmp_path, images)
 
     assert result.state == "non_additive"
     assert result.effects == ()
@@ -253,6 +295,9 @@ def test_refuses_invalid_utf8_and_duplicate_yaml_keys(tmp_path: Path) -> None:
         tmp_path,
         (CanonicalWriteImage("Knowledge Base/Notes/binary.md", None, b"\xff"),),
     )
+    path = tmp_path / "Knowledge Base/_Schema/entity-types.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("schema_version: 1\nentity_types: {}\n")
     duplicate_yaml = classify_additive_effects(
         tmp_path,
         (
@@ -277,18 +322,20 @@ def test_refuses_invalid_utf8_and_duplicate_yaml_keys(tmp_path: Path) -> None:
 
 
 def test_refuses_relation_alias_edit_and_duplicate_or_unverified_entity_ids(tmp_path: Path) -> None:
-    alias_edit = classify_additive_effects(
-        tmp_path,
-        (
-            _image(
-                "Knowledge Base/_Schema/relation-registry.yaml",
-                "schema_version: 1\nextensions:\n  guild.member:\n"
-                "    description: Membership\n    parent: relates_to\n    aliases: [member]\n",
-                "schema_version: 1\nextensions:\n  guild.member:\n"
-                "    description: Membership\n    parent: relates_to\n    aliases: [membership]\n",
-            ),
+    images = (
+        _image(
+            "Knowledge Base/_Schema/relation-registry.yaml",
+            "schema_version: 1\nextensions:\n  guild.member:\n"
+            "    description: Membership\n    parent: relates_to\n    aliases: [member]\n",
+            "schema_version: 1\nextensions:\n  guild.member:\n"
+            "    description: Membership\n    parent: relates_to\n    aliases: [membership]\n",
         ),
     )
+    for image in images:
+        path = tmp_path / image.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image.before)
+    alias_edit = classify_additive_effects(tmp_path, images)
     duplicate_ids = classify_additive_effects(
         tmp_path,
         (

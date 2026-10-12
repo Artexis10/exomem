@@ -757,13 +757,18 @@ def commit(
     added: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Write one overlay with its snapshot and `log.md` entry as one batch."""
-    from .. import registry_history
-    from . import instances
+    from .. import registry_history, vault
+    from . import contract, instances
 
     root = Path(vault_root)
     if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
         spec = instances.select(root, spec, authoring=True)
     path = spec.overlay(root)
+    # Preserve the history writer's held bootstrap before binding an absent root.
+    vault._create_parent_dirs_held(root, root, [])
+    admission = contract.capture_admission(
+        root, spec, previous.encode("utf-8") if previous is not None else None,
+    )
     try:
         history = registry_history.commit(
             root,
@@ -777,8 +782,7 @@ def commit(
             after_hash=content_hash(rendered),
             added={spec.name: added},
             private=spec.instance_id != PUBLIC_INSTANCE,
-            validate_bindings=(lambda: instances.recheck(root, spec))
-            if spec.binding_revision is not None else None,
+            validate_bindings=admission.recheck,
         )
     finally:
         invalidate(root, path=path)

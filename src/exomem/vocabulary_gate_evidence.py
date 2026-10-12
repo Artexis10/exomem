@@ -82,7 +82,6 @@ def classify(
 
     def bind_dependencies():
         from . import lifecycle_statuses, note_types, registry_history
-        from .governance import policy
 
         for state in (*pages.values(), *detached.values()):
             if state.status_dependency is not None:
@@ -97,8 +96,11 @@ def classify(
         if any(dependency[0] == "effective" for dependency in binding.type_dependencies):
             spec = instances.select(root, note_types.SPEC)
             vocabulary_effects.capture_transition(root, spec, indexed, binding.transitions)
-        if any(transition.spec.binding_revision is not None for transition in binding.transitions.values()):
-            binding.selection_policy = policy.load(root).fingerprint
+        if binding.transitions:
+            fingerprints = {transition.admission.policy_fingerprint for transition in binding.transitions.values()}
+            if len(fingerprints) != 1:
+                raise VocabularyAuthorityUnavailable("instance selection policy changed during classification")
+            binding.selection_policy = next(iter(fingerprints))
             binding.registry_digests["selection_policy"] = binding.selection_policy
         for key, transition in binding.transitions.items():
             spec = transition.spec

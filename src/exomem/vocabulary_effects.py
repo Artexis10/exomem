@@ -20,7 +20,7 @@ import yaml
 from . import entity_types, memory_refs, relation_registry, semantic_contract, vault
 from .kbdir import kb_dirname
 from .semantic_contract import _derive_relation_facts
-from .vocabulary import instances
+from .vocabulary import contract, instances
 from .vocabulary import registry as vocabulary_registry
 
 _SCHEMA_PREFIX = f"{kb_dirname()}/_Schema/"
@@ -150,9 +150,37 @@ class RegistryTransition:
     spec: vocabulary_registry.RegistrySpec
     before: vocabulary_registry.Snapshot
     after: vocabulary_registry.Snapshot
+    admission: contract.RegistryAdmission
     guard: Any = None
+    image: CanonicalWriteImage | None = None
 
     def recheck(self, root: Path, *, after: bool = False) -> None:
+        self.admission.recheck()
+        if self.image is not None:
+            if not after:
+                instances.recheck(root, self.spec)
+                current = vocabulary_registry.load(self.spec, root)
+                if (current.content_hash, current.effective_digest) != (self.before.content_hash, self.before.effective_digest):
+                    raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: operation definitions changed")
+            path = self.spec.overlay(root).relative_to(root).as_posix()
+            expected = self.after if after else self.before
+            raw_image = self.image.after if after else self.image.before
+            raw_hash = self.image.after_sha256 if after else self.image.before_sha256
+            if raw_image is None:
+                current_guard = vault.PathGuard.capture(root, path, leaf_policy="absent")
+                text = None
+            else:
+                raw, current_guard = vault.read_bounded_guarded_bytes(
+                    root, path, limit=vocabulary_registry.MAX_OVERLAY_BYTES,
+                    expected_hash=raw_hash,
+                )
+                text = raw.decode("utf-8")
+            current = vocabulary_registry._build(self.spec, text)
+            if (current.content_hash, current.effective_digest) != (expected.content_hash, expected.effective_digest):
+                raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: operation definitions changed")
+            current_guard.recheck(root)
+            # The batch writer also checks its installed inode and ancestor guards.
+            return
         instances.recheck(root, self.spec)
         if self.guard is not None:
             self.guard.recheck(root)
@@ -172,18 +200,20 @@ def capture_transition(
     key = (spec.name, spec.instance_id)
     if key in transitions:
         return transitions[key]
-    instances.recheck(root, spec)
     path = spec.overlay(root).relative_to(root).as_posix()
     image = images.get(path)
     guard = None
     if image is None:
+        instances.recheck(root, spec)
         try:
             text, guard = vault.read_guarded_text(root, root / path)
         except FileNotFoundError:
             text = None
             guard = vault.PathGuard.capture(root, path, leaf_policy="absent")
         before = after = vocabulary_registry._build(spec, text)
+        admission = contract.capture_admission(root, spec, text.encode("utf-8") if text is not None else None)
     else:
+        admission = contract.capture_admission(root, spec, image.before)
         snapshots = []
         for raw in (image.before, image.after):
             if raw is not None and _yaml_image(image, raw) is None:
@@ -192,7 +222,7 @@ def capture_transition(
         before, after = snapshots
     if before.findings or after.findings:
         raise vocabulary_registry.RegistryError("INVALID_REGISTRY_OVERLAY: operation definitions are invalid")
-    transition = RegistryTransition(spec, before, after, guard)
+    transition = RegistryTransition(spec, before, after, admission, guard, image)
     transitions[key] = transition
     return transition
 
