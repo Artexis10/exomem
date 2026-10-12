@@ -4400,6 +4400,7 @@ class LeaseManager:
                     # governed writer exits through here (wide or narrow), which
                     # is what lets the validity-stamp comparison skip the
                     # in-boundary corpus stat-walk.
+                    _note_process_mutation()
                     _bump_commit_generation(self.config.state_dir, vault_root)
         finally:
             _ACTIVE_LEASE_MANAGER.reset(manager_token)
@@ -6427,6 +6428,27 @@ def _bump_reserved_identity_generation(
             pass
         raise RuntimeError("reserved identity generation could not advance") from error
     return token
+
+
+_process_mutations = 0
+_process_mutations_lock = threading.Lock()
+
+
+def _note_process_mutation() -> None:
+    global _process_mutations
+    with _process_mutations_lock:
+        _process_mutations += 1
+
+
+def process_mutation_count() -> int:
+    """Mutation boundaries this process has left, whatever their outcome.
+
+    Unlike `read_commit_generation`, it cannot fail to advance: it is an integer
+    in memory, not a file that a full or read-only disk can leave unchanged. A
+    cache keyed on it serves nothing older than this process's last governed write.
+    """
+    with _process_mutations_lock:
+        return _process_mutations
 
 
 def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:

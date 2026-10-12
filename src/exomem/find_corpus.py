@@ -10,7 +10,7 @@ import stat
 import sys
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -337,7 +337,12 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     return freshness.triple_from_entries(entries)
 
 
-def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
+def _walk_md_entry(
+    anchor: Path,
+    child: Path,
+    reserved_paths,
+    on_error: Callable[[OSError], None] | None = None,
+) -> str | None:
     """How `walk_md` treats one directory entry: "dir" to descend, "md" to yield.
 
     None skips it. The walk's whole per-entry rule lives here so `walk_md_admits`
@@ -352,7 +357,9 @@ def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
         return None
     try:
         info = child.lstat()
-    except OSError:
+    except OSError as error:
+        if on_error is not None:
+            on_error(error)
         return None
     if stat.S_ISLNK(info.st_mode) or bool(
         getattr(os.path, "isjunction", lambda _path: False)(child)
@@ -372,11 +379,14 @@ def _walk_md_entry(anchor: Path, child: Path, reserved_paths) -> str | None:
     return None
 
 
-def walk_md(root: Path):
+def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
     """Yield every .md path under root, skipping excluded subtrees.
 
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
+    `on_error` receives every directory or entry the walk could not read, so a
+    caller can tell an incomplete walk from a whole one; without it the walk
+    stays best-effort.
     """
     from . import foreground_priority, reserved_paths
 
@@ -386,11 +396,13 @@ def walk_md(root: Path):
         foreground_priority.check_cancelled()
         try:
             children = tuple(current.iterdir())
-        except OSError:
+        except OSError as error:
+            if on_error is not None:
+                on_error(error)
             return
         for child in children:
             foreground_priority.check_cancelled()
-            kind = _walk_md_entry(anchor, child, reserved_paths)
+            kind = _walk_md_entry(anchor, child, reserved_paths, on_error)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":

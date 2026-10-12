@@ -26,7 +26,9 @@ Both headers MUST tune eagerness only, never authority.
 `events` SHALL hold at most 20 events, newest first, each `{client, action, items, at}`.
 Only successful calls SHALL become events. `action` SHALL be `recalled` or `saved`, derived from the command registry's product actions and the row's `access`.
 Rows of one client family and action SHALL join the newest event of that pair when they are at most 60 seconds older than its newest row.
-`items` SHALL be null when any joined row's count is unknown. `note_count` SHALL be the compiled-note count, or null when it cannot be read.
+`items` SHALL be null when any joined row's count is unknown.
+`note_count` SHALL count every page saved in the Knowledge Base, sources, records and compiled notes alike, without navigation pages.
+`note_count` SHALL be null when any part of the Knowledge Base cannot be read, and MUST NOT be older than a committed write.
 The list SHALL stop at the first row it cannot represent: a damaged row, a break in the sequence, a version 1 row or a call the full list has no room for.
 `since` SHALL be the oldest ledger row the list accounts for, or the ledger writer's start when there is none. It MUST NOT cover a row the list omits.
 A disabled or unreadable ledger, a damaged newest row or a version 1 row not older than `since` SHALL be refused with `ACTIVITY_UNAVAILABLE`.

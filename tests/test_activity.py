@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -248,17 +249,44 @@ def test_a_fresh_vault_counts_zero_notes(tmp_path, ledger, monkeypatch):
     assert _activity(fresh)["note_count"] == 0
 
 
-def test_an_unreadable_notes_folder_counts_as_unknown_not_zero(vault, ledger):
-    """A count that failed to read is not an empty vault."""
+def test_the_note_count_includes_every_saved_page(tmp_path, ledger, monkeypatch):
+    """The owner counts everything saved, not compiled notes only: an owner who has
+    captured only sources or records must not read "Waiting for the first note"."""
+    from exomem.init import init_vault
+    from exomem.vault import kb_root
+
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "machine.json"))
+    fresh = tmp_path / "fresh"
+    init_vault(fresh)
+    for rel in (
+        "Sources/Articles/2026-03-01-upload-log.md",
+        "Records/vehicle/Events/2026-03-01-oil.md",
+        "Notes/Insights/flaky-upload-fixed.md",
+    ):
+        page = kb_root(fresh) / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("# A saved page\n", encoding="utf-8")
+
+    assert _activity(fresh)["note_count"] == 3
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller",
+)
+def test_a_folder_that_can_be_listed_but_not_entered_counts_as_unknown(vault, ledger):
+    """A count that failed to read part of the vault is not a smaller vault."""
     from exomem.vault import kb_root
 
     notes = kb_root(vault) / "Notes"
-    for path in sorted(notes.rglob("*"), reverse=True):
-        path.unlink() if path.is_file() else path.rmdir()
-    notes.rmdir()
-    notes.write_text("not a folder", encoding="utf-8")
+    mode = notes.stat().st_mode
+    notes.chmod(0o400)
+    try:
+        count = _activity(vault)["note_count"]
+    finally:
+        notes.chmod(mode)
 
-    assert _activity(vault)["note_count"] is None
+    assert count is None
 
 
 @pytest.fixture

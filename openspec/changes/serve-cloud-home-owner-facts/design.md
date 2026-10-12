@@ -60,8 +60,14 @@ A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an em
 
 ### Note count
 
-The count is the existing compiled-note count, or null when a read fails.
-A cloud cell caches it against the writer commit counter: every change to its vault goes through a governed writer.
+The owner chose the meaning: the count holds everything saved, not compiled notes only.
+It counts every page that the Knowledge Base corpus walk yields: sources, records kept as pages, entities, evidence and compiled notes.
+Navigation pages (`index.md`, `log.md`) are not saved items. Rows of a record dataset kept as one CSV are not pages, and are not counted.
+The count is null when the walk cannot read any directory or entry.
+Measured on a laptop, one uncached count of 10,000 pages took 373 ms, so a cloud cell caches it.
+The cache key holds two counters that every governed writer advances as it leaves the mutation boundary.
+The first is this process's own count, which cannot fail to advance.
+The second is the vault's commit generation on disk, which also sees a writer in another process, such as the media worker.
 A local install counts every time, because an editor can change the vault outside the writers.
 
 ### The gateway's client header
@@ -83,4 +89,4 @@ Home then saves a level to exactly the context the cell applies to that app, bef
 ## Risks / Trade-offs
 
 A local install still depends on surface detection, which matches only some client names.
-Saves whose destination the server derives show unknown item counts until those writers report committed targets.
+A call whose ledger append fails leaves no row and no gap in the sequence, so the activity list cannot show it.
