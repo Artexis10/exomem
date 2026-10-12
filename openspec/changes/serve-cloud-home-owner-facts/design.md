@@ -64,7 +64,9 @@ The reader skips the text after the file's last newline, which is a row still be
 A failed append writes no row and leaves no gap in the sequence, so the file cannot show the missing call.
 The failing process therefore records the time of each failed append in memory, and best effort in a marker file beside the ledger (`ledger.gap`).
 Memory keeps the latest time, whatever order concurrent failures arrive in.
-The marker is an empty file that each failure touches, so its modification time is the latest touch, after every failure it marks.
+The marker is an empty file. Each failure sets its modification time to the failure time rounded up to the next millisecond, unless the marker already holds a later time.
+A plain touch is not enough: Linux stamps it from a coarse clock, which can be a few milliseconds earlier than the failure.
+Two processes that fail within the same few microseconds can still leave the earlier of their two times.
 The reader needs no parser for it, and a marker that cannot be stat'ed makes the section `ACTIVITY_UNAVAILABLE`.
 The reader treats the later of the two times as a boundary: the interval starts strictly after the failed call.
 With no row after that time, the section is `ACTIVITY_UNAVAILABLE` until the next call that the ledger records.
@@ -121,6 +123,7 @@ On a Cloud cell, a power loss replaces the pod and its ledger.
 
 The reader assumes that the ledger appends rows in time order.
 A backward step of the wall clock that is larger than the gap between calls breaks that assumption, and a damaged row can then fall inside the interval.
+On a cell, a backward step larger than the process's uptime stamps new rows before the writer's start time, and the section drops them.
 Without a monotonic time in each row, no sound check exists.
 
 `append_row` does not check how many bytes `os.write` wrote.

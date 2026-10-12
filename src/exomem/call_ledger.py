@@ -103,6 +103,7 @@ _LEDGER_FILENAME = "ledger.jsonl"
 _ARCHIVE_DIRNAME = "ledger-archive"
 
 _GAP_MARKER_FILENAME = "ledger.gap"
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 
 _lock = threading.Lock()
 #: Chain head, cached in-process. `None` means "not yet loaded from disk".
@@ -143,24 +144,30 @@ def archive_dir() -> Path:
 
 def gap_marker_path() -> Path:
     """An empty file whose modification time is no earlier than the latest failed
-    append, beside the ledger, for a reader in another process."""
+    append that could mark it, beside the ledger, for a reader in another process."""
     return ledger_dir() / _GAP_MARKER_FILENAME
 
 
 def _note_append_failure() -> None:
     """Record that a call has no row: in memory, and beside the ledger if possible.
 
-    Both keep the latest time, whatever order concurrent failures arrive in:
-    memory keeps the maximum, and the marker's modification time is set at each
-    touch, after the failure it marks. The marker write is best effort; design.md
-    states what a reader in another process misses when it fails too.
+    Memory keeps the latest failure time. The marker's modification time is set
+    explicitly to the failure time rounded up to the next millisecond, unless it
+    already holds a later time: Linux stamps a plain touch from a coarse clock,
+    which can be earlier than the failure. The marker write is best effort;
+    design.md states what a reader in another process misses when it fails too.
     """
     at = dt.datetime.now(dt.UTC)
     with _lock:
         seen = _append_failure["at"]
         _append_failure["at"] = at if seen is None else max(seen, at)
     try:
-        gap_marker_path().touch()
+        path = gap_marker_path()
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))  # keeps an existing time
+        microseconds = (at - _EPOCH) // dt.timedelta(microseconds=1)
+        marked_ns = -(-microseconds // 1000) * 1_000_000
+        if path.stat().st_mtime_ns < marked_ns:
+            os.utime(path, ns=(marked_ns, marked_ns))
     except Exception:  # noqa: BLE001 - this process still holds the time in memory
         pass
 
@@ -174,7 +181,7 @@ def last_append_failure() -> dt.datetime | None:
     with _lock:
         seen = _append_failure["at"]
     try:
-        marked = dt.datetime.fromtimestamp(gap_marker_path().stat().st_mtime, dt.UTC)
+        marked = _EPOCH + dt.timedelta(microseconds=gap_marker_path().stat().st_mtime_ns // 1000)
     except FileNotFoundError:
         return seen
     return marked if seen is None else max(seen, marked)

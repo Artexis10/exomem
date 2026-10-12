@@ -55,7 +55,7 @@ def payload(vault_root: Path) -> dict[str, Any]:
         raise _unavailable("the call ledger is disabled on this server")
     try:
         since, events = _events(_lines_newest_first(call_ledger.ledger_path()), _known_from())
-    except OSError as error:
+    except (OSError, ValueError) as error:  # ValueError: a tampered row the reader cannot use
         raise _unavailable("the call ledger could not be read") from error
     return {
         "since": _iso(since),

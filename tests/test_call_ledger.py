@@ -1386,3 +1386,26 @@ def test_two_long_paths_that_share_their_start_are_two_pages(ledger_dir: Path) -
     )
 
     assert row["item_count"] == 2
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller",
+)
+def test_the_gap_marker_is_never_earlier_than_the_failure_it_marks(ledger_dir: Path) -> None:
+    """A reader in another process starts its activity interval after the marker's
+    time. A marker stamped before the failure, as a coarse file system clock does,
+    would put the lost call back inside that interval."""
+    _drive("ask_memory", {"query": "anything"}, _ok)
+    path = ledger_dir / "ledger.jsonl"
+    path.chmod(0o400)
+    try:
+        for _ in range(100):
+            before = time.time_ns() // 1000 * 1000
+            lost = call_ledger.record_call(
+                request_id="request", tool="ask_memory", outcome="ok", duration_ms=1.0
+            )
+            assert lost is None, "sanity: the append failed"
+            assert call_ledger.gap_marker_path().stat().st_mtime_ns >= before
+    finally:
+        path.chmod(0o600)
