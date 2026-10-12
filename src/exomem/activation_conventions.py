@@ -328,7 +328,9 @@ def load_conventions(
         return shipped
     path = override_path(vault_root)
     try:
-        raw, _ = registry_history.read_previous(Path(vault_root), path, max_bytes=MAX_FILE_BYTES)
+        raw, _ = registry_history.read_previous(
+            Path(vault_root), path, max_bytes=MAX_FILE_BYTES, guard_absence=False
+        )
     except registry_history.RegistryFileTooLarge:
         return replace(
             shipped,

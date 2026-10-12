@@ -765,10 +765,11 @@ class Journey:
         from fastmcp.client.transports import StdioTransport
 
         log = self.work / f"service-{label}.log"
+        server = self.observed_server(label, "--transport", "stdio")
         client = Client(
             StdioTransport(
-                command=str(self.executable),
-                args=["--transport", "stdio"],
+                command=server[0],
+                args=server[1:],
                 env=self.lease_env(),
                 cwd=str(self.work),
                 keep_alive=False,

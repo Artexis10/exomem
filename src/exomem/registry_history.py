@@ -83,9 +83,9 @@ class RegistryFileTooLarge(ValueError):
 
 
 def read_previous(
-    root: Path, path: Path, *, max_bytes: int | None = None
+    root: Path, path: Path, *, max_bytes: int | None = None, guard_absence: bool = True
 ) -> tuple[str | None, vault_module.PathGuard | None]:
-    """Inspect the overlay without mutation; bind a guard when the root exists."""
+    """Inspect the overlay; writers retain a guard for an absent override."""
     try:
         if max_bytes is None:
             return vault_module.read_guarded_text(root, path)
@@ -101,6 +101,9 @@ def read_previous(
         raw, guard = vault_module.read_bounded_guarded_bytes(root, relative, limit=max_bytes)
         return raw.decode("utf-8"), guard
     except FileNotFoundError:
+        if not guard_absence:
+            # A fresh reader miss returns only shipped data, with no vault bytes to bind.
+            return None, None
         try:
             root.lstat()
         except FileNotFoundError:
