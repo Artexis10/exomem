@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -627,6 +628,139 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     )
     assert fast_jobs
     assert all("if" not in jobs[name] for name in fast_jobs)
+
+
+def _scope_fixture_git(repository: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=repository,
+        env={
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _installed_journey_scope(repository: Path, event: str) -> tuple[str, str]:
+    scope = next(
+        step
+        for step in _workflow()["jobs"]["product-e2e"]["steps"]
+        if step.get("id") == "journey-scope"
+    )
+    output = repository / "scope-output"
+    summary = repository / "scope-summary"
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", scope["run"]],
+        cwd=repository,
+        env={**os.environ, "EVENT_NAME": event, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    decision = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    return decision["run_journey"], summary.read_text() if summary.exists() else ""
+
+
+@pytest.mark.parametrize(
+    "old_path,new_path,earlier_runtime,expected",
+    [
+        ("openspec/spec.md", "openspec/spec.md", False, "false"),
+        ("openspec/spec.md", None, False, "false"),
+        ("src/example.py", "src/example.py", False, "true"),
+        ("src/example.py", None, False, "true"),
+        ("src/example.py", "openspec/moved.py", False, "true"),
+        ("openspec/spec.md", "src/moved.md", False, "true"),
+        ("openspec/spec.md", "openspec/spec.md", True, "true"),
+    ],
+)
+def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
+    tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, expected: str
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _scope_fixture_git(repository, "init", "-b", "main")
+    for relative in {old_path, "src/runtime.py"}:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("initial\n")
+    _scope_fixture_git(repository, "add", ".")
+    _scope_fixture_git(repository, "commit", "-m", "initial")
+    _scope_fixture_git(repository, "checkout", "-b", "topic")
+    if earlier_runtime:
+        (repository / "src/runtime.py").write_text("changed runtime\n")
+        _scope_fixture_git(repository, "commit", "-am", "runtime change")
+    if new_path is None:
+        (repository / old_path).unlink()
+    elif old_path != new_path:
+        destination = repository / new_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        (repository / old_path).rename(destination)
+    else:
+        (repository / old_path).write_text("changed\n")
+    _scope_fixture_git(repository, "add", ".")
+    _scope_fixture_git(repository, "commit", "-m", "final change")
+    _scope_fixture_git(repository, "checkout", "main")
+    _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
+
+    decision, summary = _installed_journey_scope(repository, "pull_request")
+    assert decision == expected
+    if expected == "false":
+        assert "Installed journey not run" in summary
+    else:
+        assert not summary
+
+
+@pytest.mark.parametrize(
+    "event,has_parent",
+    [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
+)
+def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_events(
+    tmp_path: Path, event: str, has_parent: bool
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _scope_fixture_git(repository, "init", "-b", "main")
+    path = repository / "openspec/spec.md"
+    path.parent.mkdir()
+    path.write_text("initial\n")
+    _scope_fixture_git(repository, "add", ".")
+    _scope_fixture_git(repository, "commit", "-m", "initial")
+    if has_parent:
+        path.write_text("changed\n")
+        _scope_fixture_git(repository, "commit", "-am", "spec change")
+
+    decision, summary = _installed_journey_scope(repository, event)
+    assert decision == "true"
+    assert not summary
+
+
+def test_installed_e2e_scope_uses_merge_checkout_and_omits_only_an_explicit_false() -> None:
+    job = _workflow()["jobs"]["product-e2e"]
+    checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
+    assert checkout["with"]["fetch-depth"] == 2
+    assert "ref" not in checkout["with"]
+    scope = next(step for step in job["steps"] if step.get("id") == "journey-scope")
+    assert scope["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    journey = next(step for step in job["steps"] if "scripts/e2e_product_loop.py" in step.get("run", ""))
+    assert journey["if"] == "steps.journey-scope.outputs.run_journey != 'false'"
+
+
+def test_installed_e2e_scope_relies_on_openspec_being_outside_package_inputs() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    build = project["tool"]["hatch"]["build"]
+    wheel = build["targets"]["wheel"]
+    # These distribution roots justify omitting unchanged installed inputs.
+    assert set(wheel["packages"]) == {"src/exomem", "src/kb_mcp"}
+    assert "force-include" not in build and "force-include" not in wheel
+    assert set(build["targets"]["sdist"]["include"]) == {"/src", "/LICENSE", "/README.md", "/pyproject.toml"}
 
 
 def test_release_evidence_is_enforced_on_the_release_pr() -> None:
