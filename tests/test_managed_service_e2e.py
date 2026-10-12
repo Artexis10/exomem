@@ -53,7 +53,10 @@ def observe_managed_requests(monkeypatch):
     async def observed_exit(client, exc_type, exc_value, exc_tb):
         # FastMCP can replace this body error while awaiting its failed session task.
         if exc_value is not None:
-            traceback.print_exception(exc_value)
+            try:
+                traceback.print_exception(exc_value)
+            except (OSError, ValueError):
+                pass  # A broken capture stream must not prevent client cleanup.
         return await exit_client(client, exc_type, exc_value, exc_tb)
 
     monkeypatch.setattr(httpx2.AsyncClient, "send", observed_send)
