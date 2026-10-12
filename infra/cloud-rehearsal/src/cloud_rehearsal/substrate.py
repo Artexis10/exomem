@@ -39,9 +39,8 @@ from .infra import PG_DATABASE, PG_ROLES, Stack
 from .shell import run, wait_for
 
 SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate.git"
-# Substrate #214 supplies the observed growth column that cellctl reads.
-# Pin its main merge commit so the rehearsal uses the shipped schema.
-SUBSTRATE_COMMIT = "370597b136518540de374bc376b06b59a3fb3c9e"
+# Substrate #224 supplies C5 and the ordinary CLI's pinned OAuth admission.
+SUBSTRATE_COMMIT = "544a7ef22c828ffd5b4e2cd588b5778401b6514b"
 NODE_IMAGE = "node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 MCP_PATH = "/mcp"
 MCP_URL = f"https://{tls.MCP_HOST}{MCP_PATH}"
@@ -181,9 +180,10 @@ def _app_environment(stack: Stack, substrate_secrets: SubstrateSecrets, cell_ima
 
 def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_repository: str) -> Substrate:
     substrate_secrets = SubstrateSecrets()
-    sealed = f"{stack.network}-sealed"
-    run(["docker", "network", "create", "--internal", sealed])
-    stack.networks.append(sealed)
+    sealed = stack.sealed_network or f"{stack.network}-sealed"
+    if not stack.sealed_network:
+        run(["docker", "network", "create", "--internal", sealed])
+        stack.networks.append(sealed)
     run(["docker", "network", "connect", sealed, stack.postgres.container])
     pg_sealed_ip = json.loads(run(["docker", "inspect", stack.postgres.container]).stdout)[0][
         "NetworkSettings"]["Networks"][sealed]["IPAddress"]
@@ -226,6 +226,12 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
                     "services": {"substrate": {"loadBalancer": {"servers": [{"url": f"http://{app}:3000"}]}}},
                 },
                 "tls": {"certificates": [{"certFile": "/edge/substrate.crt", "keyFile": "/edge/substrate.key"}]},
+                # Native clients use Docker DNS. Preserve the gateway's own TLS through passthrough.
+                "tcp": {
+                    "routers": {"mcp": {"rule": f"HostSNI(`{tls.MCP_HOST}`)", "entryPoints": ["websecure"],
+                                       "service": "mcp", "tls": {"passthrough": True}}},
+                    "services": {"mcp": {"loadBalancer": {"servers": [{"address": f"{stack.k3s.ip}:30443"}]}}},
+                },
             }
         ),
         encoding="utf-8",
@@ -246,7 +252,7 @@ def start(stack: Stack, source: Path, pki: tls.RehearsalPki, cell_image_reposito
         ]
     )
     stack.containers.append(edge)
-    run(["docker", "network", "connect", sealed, edge])
+    run(["docker", "network", "connect", "--alias", tls.SUBSTRATE_HOST, "--alias", tls.MCP_HOST, sealed, edge])
     edge_port = int(run(["docker", "port", edge, "443/tcp"]).stdout.strip().splitlines()[0].rsplit(":", 1)[1])
     return Substrate(
         source=source,

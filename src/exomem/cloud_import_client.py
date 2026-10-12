@@ -213,5 +213,5 @@ def main(argv=None) -> int:
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
         print(json.dumps({"ok": False, "error": type(error).__name__}))
         return 1
-    print(json.dumps({"ok": True, "import_id": result["id"], "state": result["observed_state"]}))
+    print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"]}))
     return 0

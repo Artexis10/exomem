@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         help="build cellctl from infra/cellctl/Dockerfile (default), or assemble its venv from a host resolution",
     )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
+    run_parser.add_argument("--cloud-import", action="store_true", help="also run the native CLI import journey after provisioning")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
@@ -103,6 +104,7 @@ async def _run(args: argparse.Namespace) -> int:
         "cell_image_source": "prebuilt:" + args.cell_image if args.cell_image else "Dockerfile --target cloud",
         "gateway_image_source": "Dockerfile.exomem-gateway" if args.gateway_build == "dockerfile" else "host-assembled final stage",
         "local_storage_coexistence": args.local_storage_coexistence,
+        "native_cloud_import": args.cloud_import,
     }
     if args.cell_image:
         report.valid = False
@@ -130,8 +132,23 @@ async def _run(args: argparse.Namespace) -> int:
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
         with stage(report, "infrastructure"):
-            stack = infra.create_stack(run_id, workdir)
+            stack = infra.create_stack(run_id, workdir, tls_storage=args.cloud_import)
             report.adaptations.extend(stack.adaptations)
+        pki = stack.pki or tls.make_pki(workdir)
+        if args.cloud_import:
+            with stage(report, "import_tls"):
+                source_v1 = v1
+                v1, v2, broken = (build.trust_rehearsal_ca(tag, pki.ca_path, workdir) for tag in (v1, v2, broken))
+                report.overlays.append("Cloud images: the disposable CA is the sole added trust root")
+                report.overlays.append("Native CLI container: legacy resource profile")
+                from .native_import import enable_versioning, image_payload
+
+                baseline_payload = image_payload(source_v1)
+                trusted_payload = image_payload(v1)
+                if baseline_payload != trusted_payload:
+                    raise RuntimeError("the CA layer changed product or model bytes")
+                report.stages["import_tls"]["product_and_model"] = trusted_payload
+                enable_versioning(stack.object_store)
         with stage(report, "images_into_k3s"):
             built = build.BuiltImages(
                 cell_v1=build.load_into_k3s(stack.k3s.container, v1),
@@ -152,7 +169,6 @@ async def _run(args: argparse.Namespace) -> int:
         with stage(report, "control_database"):
             await substrate.bootstrap_database(stack)
             report.stages["control_database"]["migrate_tail"] = substrate.migrate(stack, source)[-800:]
-        pki = tls.make_pki(workdir)
         with stage(report, "substrate"):
             control = substrate.start(stack, source, pki, build.CELL_REPOSITORY)
             resolver = Resolver(pki.ca_path, {tls.SUBSTRATE_HOST: control.edge_host_port, tls.MCP_HOST: stack.k3s.ingress_host_port})
@@ -188,7 +204,8 @@ async def _run(args: argparse.Namespace) -> int:
             platform.wait_rollout(stack, platform.CLOUD_NAMESPACE, "exomem-cloud-gateway")
             platform.wait_rollout(stack, platform.EDGE_NAMESPACE, "rehearsal-traefik")
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
-        ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report)
+        ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report,
+                      cli_image=v1 if args.cloud_import else None)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
             await ctx.admin_release({"cellImage": built.cell_v1})
