@@ -2762,7 +2762,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
         s1 = tmp / "s1"
         (s1 / "home").mkdir(parents=True)
         print(f"product-e2e: generic home={home} vault={vault} work={work}", flush=True)
-        print(f"product-e2e: S1 home={s1 / 'home'} vault={s1 / 'vault'} work={s1 / 'work'}", flush=True)
+        print(
+            f"product-e2e: S1 home={s1 / 'home'} vault={s1 / 'vault'} work={s1 / 'work'}",
+            flush=True,
+        )
         child_timeout = max(30.0, args.request_timeout * 14)
         common = [
             "--vault",
@@ -2828,7 +2831,11 @@ def _orchestrate(args: argparse.Namespace) -> int:
                     timeout=max(60.0, args.request_timeout * 8),
                 )
             finally:
-                print(f"product-e2e: generic branch wall seconds={time.monotonic() - branch_started:.1f}", flush=True)
+                print(
+                    "product-e2e: generic branch wall seconds="
+                    f"{time.monotonic() - branch_started:.1f}",
+                    flush=True,
+                )
 
         def summary_branch() -> None:
             branch_started = time.monotonic()
@@ -2865,7 +2872,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 )
                 print(s1_journey.stdout.strip().splitlines()[-1])
             finally:
-                print(f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}", flush=True)
+                print(
+                    f"product-e2e: S1 branch wall seconds={time.monotonic() - branch_started:.1f}",
+                    flush=True,
+                )
 
         if initially_enabled:
             # ON branches share immutable installed bytes and use separate vaults and process state.
@@ -2880,12 +2890,16 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 if failures:
                     raise ExceptionGroup("installed product acceptance failed", failures)
         else:
-            # OFF acceptance finishes on the original bytes before S1 rewrites the test installation.
+            # OFF acceptance finishes on the original bytes before S1 rewrites
+            # the test installation.
             generic_branch()
             summary_branch()
 
     elapsed = time.monotonic() - started
-    print(f"product-e2e: total wall seconds={elapsed:.1f} budget seconds={args.budget_seconds:.1f}", flush=True)
+    print(
+        f"product-e2e: total wall seconds={elapsed:.1f} budget seconds={args.budget_seconds:.1f}",
+        flush=True,
+    )
     if elapsed > args.budget_seconds:
         _publish_parent_phase_timings(phases, elapsed=elapsed, budget=args.budget_seconds)
         raise TimeoutError(
