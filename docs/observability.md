@@ -190,12 +190,26 @@ it with `exomem logs verify`.
   unattributed without a client trace. See the
   [durable-closure investigation](benchmarks/durable-closure-investigation-2026-09.md).
 
-- **`outcome`** is `ok`, `refused`, or `error`. `refused` is a governance
+- **`outcome`** is `ok`, `abstained`, `refused`, or `error`. `refused` is a governance
   refusal — the tool wrapper returns an error *envelope* rather than raising, so
   control flow alone cannot distinguish it from success; the ledger reads the
   wrapper's per-call breadcrumb to tell them apart. `error` is an uncaught
   exception. `error_code` is the refusal's `OpError.code`, or the exception
-  class.
+  class. A completed activation records `abstained` only when the final served
+  packet has strict `abstained: true`. Its error code is null. Refusals and
+  exceptions take precedence. A non-abstained budget-limited packet remains
+  `ok`; this outcome does not certify usefulness, completeness or relevance.
+- **`activation_result`** is an optional schema-1 observation for activation.
+  It carries strict booleans `abstained` and `budget_limited`, plus a bounded
+  `reason`: `ambiguous`, `unresolved`, `index_warming`, `unavailable`, `disabled`,
+  `withheld`, or null. Unknown reasons become null; invalid booleans omit the
+  block. Strict abstention still determines the outcome when metadata is invalid.
+  The wrapper observes the final postfiltered packet and retains no material.
+  An absent block means unknown server activation semantics. Historical rows
+  and hashes stay unchanged. Timing joins can match historical activation `ok`
+  with null error to client `ok` or `abstained` with null error. Readers keep
+  those client facts separate from the raw server outcome and unknown semantics.
+  Current disagreements and failure mismatches still invalidate the join.
 - **`client_name` / `client_version` / `transport` / `session_id`** come from
   the MCP initialize handshake and are recorded **in the clear**: they identify
   software, the same class of value as a `User-Agent`. This is what makes one

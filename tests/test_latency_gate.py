@@ -161,10 +161,8 @@ def _build_dense_vault(root: Path, n: int) -> Path:
     lexstore.ensure_fresh(vault)
     # Warm every lane once so the measured passes reflect steady state, not the
     # first-touch lexical-sidecar / bm25-corpus / resolver build.
-    # This fixture measures owner-local retrieval; explicit admission cases keep their predicates.
-    with principal.library_scope():
-        for q in _QUERIES:
-            find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
+    for q in _QUERIES:
+        find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
     return vault
 
 
@@ -189,9 +187,13 @@ def model_free(monkeypatch: pytest.MonkeyPatch):
         raise ImportError("model-free latency gate: vector lane disabled")
 
     monkeypatch.setattr(embeddings_module, "get_embedding_index", _raise)
-    yield
-    find_module.clear_cache()
-    freshness.clear()
+    # These benchmarks model an owner-local caller; admission cases keep explicit predicates.
+    with principal.library_scope():
+        try:
+            yield
+        finally:
+            find_module.clear_cache()
+            freshness.clear()
 
 
 @pytest.fixture
@@ -204,20 +206,19 @@ def _measure(vault: Path, **find_kwargs) -> tuple[dict[str, float], float]:
     """Return (per-lane median ms, total median ms) over the warm query set."""
     lane_samples: dict[str, list[float]] = {}
     total_samples: list[float] = []
-    with principal.library_scope():
-        for _ in range(_REPEAT):
-            for q in _QUERIES:
-                t = find_module.FindTimings()
-                find_module.find(
-                    vault, query=q, limit=10, mode="hybrid", graph=True, timings=t, **find_kwargs
-                )
-                d = t.as_dict()
-                total_samples.append(d["total_ms"])
-                for lane, stage in d["stages"].items():
-                    # A lane's span records `ms` even when its body raised (the
-                    # model-free vector ImportError), so skip errored/skipped lanes.
-                    if "ms" in stage and "error" not in stage and "skipped" not in stage:
-                        lane_samples.setdefault(lane, []).append(stage["ms"])
+    for _ in range(_REPEAT):
+        for q in _QUERIES:
+            t = find_module.FindTimings()
+            find_module.find(
+                vault, query=q, limit=10, mode="hybrid", graph=True, timings=t, **find_kwargs
+            )
+            d = t.as_dict()
+            total_samples.append(d["total_ms"])
+            for lane, stage in d["stages"].items():
+                # A lane's span records `ms` even when its body raised (the
+                # model-free vector ImportError), so skip errored/skipped lanes.
+                if "ms" in stage and "error" not in stage and "skipped" not in stage:
+                    lane_samples.setdefault(lane, []).append(stage["ms"])
     medians = {lane: statistics.median(v) for lane, v in lane_samples.items()}
     return medians, statistics.median(total_samples)
 
@@ -339,6 +340,7 @@ def test_warm_candidate_admission_reuses_checkpointed_projection(
         limit=10,
         mode="hybrid",
         graph=True,
+        admit_path=lambda _path: True,
     )
 
     assert calls <= note_count + 100, (
@@ -347,6 +349,8 @@ def test_warm_candidate_admission_reuses_checkpointed_projection(
     )
 
 
+# Two cold catalogue builds dominate this case's setup; the assertions bound warm query scaling.
+@pytest.mark.timeout(300)
 def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
     """Warm graph median at 4x the corpus stays within CEIL_GRAPH_RATIO (plus an
     absolute ms-scale noise floor) — so a linear-in-N warm cost cannot return

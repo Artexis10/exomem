@@ -942,3 +942,75 @@ def test_stress_smoke_places_a_timed_public_recall_after_every_real_mutation(tmp
     for index, call in enumerate(report["calls"]):
         if call["mutation_ack"]:
             assert report["calls"][index + 1]["tool"] == "ask_memory"
+
+
+@pytest.mark.parametrize("server_outcome,client_outcome,observation", [
+    ("ok", "ok", None),
+    ("ok", "abstained", None),
+    ("abstained", "abstained", {"abstained": True, "reason": "unavailable", "budget_limited": True}),
+    ("ok", "ok", {"abstained": False, "reason": None, "budget_limited": True}),
+])
+def test_activation_timing_join_keeps_server_observation_separate(
+    server_outcome, client_outcome, observation
+):
+    row = {
+        "tool": "activate_context", "outcome": server_outcome, "error_code": None,
+        "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"
+    }
+    if observation is not None:
+        row["activation_result"] = observation
+    original = dict(row)
+    joined = benchmark.attach_ledger_measurements(
+        [{"tool": "activate_context", "outcome": client_outcome, "error_code": None}], [row]
+    )[0]
+    assert joined["outcome"] == client_outcome
+    assert joined["server_outcome"] == server_outcome
+    assert joined["server_activation_result"] == observation
+    assert row == original
+
+
+@pytest.mark.parametrize("row_outcome,client_outcome,flag,code,has_observation", [
+    ("ok", "abstained", False, None, True),
+    ("ok", "ok", True, None, True),
+    ("abstained", "ok", True, None, True),
+    ("ok", "abstained", False, None, False),
+    ("refused", "abstained", None, "INVALID_ANCHOR", False),
+    ("error", "abstained", None, "RuntimeError", False),
+])
+def test_activation_join_rejects_current_disagreement_and_non_activation_mismatches(
+    row_outcome, client_outcome, flag, code, has_observation
+):
+    row = {
+        "tool": "activate_context" if flag is not False or has_observation else "ask_memory",
+        "outcome": row_outcome, "error_code": code,
+        "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00"
+    }
+    if has_observation:
+        row["activation_result"] = {"abstained": flag, "reason": None, "budget_limited": False}
+    with pytest.raises(ValueError, match="outcome"):
+        benchmark.attach_ledger_measurements(
+            [{"tool": row["tool"], "outcome": client_outcome, "error_code": None}], [row]
+        )
+
+
+@pytest.mark.parametrize("flag,expected", [(True, "abstained"), (False, "ok"), (1, "ok"), ("true", "ok")])
+def test_client_activation_classifier_observes_strict_abstention_after_failures(flag, expected):
+    assert benchmark._result_outcome({"abstained": flag}) == (expected, None)
+    assert benchmark._result_outcome({"abstained": flag, "success": False, "error": {"code": "NOPE"}}) == ("refused", "NOPE")
+
+
+@pytest.mark.parametrize("observation", [
+    None,
+    {"abstained": 1, "reason": None, "budget_limited": False},
+    {"abstained": True, "reason": "private text", "budget_limited": False},
+])
+def test_present_invalid_observation_cannot_use_the_legacy_timing_exception(observation):
+    row = {
+        "tool": "activate_context", "outcome": "ok", "error_code": None,
+        "duration_ms": 1, "total_ms": 1, "ts_utc": "2026-09-05T12:00:01+00:00",
+        "activation_result": observation,
+    }
+    with pytest.raises(ValueError, match="activation result"):
+        benchmark.attach_ledger_measurements(
+            [{"tool": "activate_context", "outcome": "abstained", "error_code": None}], [row]
+        )

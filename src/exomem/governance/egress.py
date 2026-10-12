@@ -47,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs, reserved_paths, vault
+from .. import activation_result, find_corpus, memory_refs, reserved_paths, vault
 from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
@@ -3424,7 +3424,9 @@ def guard_working_set(
         # At L0 the turn resolved nothing the caller may know of, which is
         # what `unresolved` says; `withheld` is for material released at a
         # notice level, which the caller may know exists.
-        guarded["abstention"] = {"reason": "withheld" if noticed else "unresolved"}
+        guarded["abstention"] = {
+            "reason": activation_result.WITHHELD if noticed else activation_result.UNRESOLVED
+        }
         for section in ("units", "pointers", "current_state", "roles"):
             guarded[section] = []
         # `missing` is deliberately NOT cleared: its markers are the only thing

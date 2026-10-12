@@ -404,7 +404,8 @@ def stage(
     uv = _uv()
     for command in (
         [uv, "venv", "--python", str(launcher), str(environment)],
-        [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python), requirement],
+        [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python),
+         requirement, "--compile-bytecode"],
     ):
         # stderr goes to a file, not a pipe, so a long run is never held in
         # memory; only the bounded window the tail needs is read back. One

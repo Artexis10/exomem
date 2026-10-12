@@ -42,6 +42,7 @@ from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSc
 from typing_extensions import TypedDict
 
 from . import activation_conventions as activation_conventions_module
+from . import activation_result as activation_result_module
 from . import add as add_module
 from . import adopt as adopt_module
 from . import adoption_proposals as adoption_proposals_module
@@ -6682,11 +6683,11 @@ def _op_activate_context_body(
         return packet
 
     if not turn.strip():
-        return _abstain("unresolved")
+        return _abstain(activation_result_module.UNRESOLVED)
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
         # tool-surface digest is independent of the environment; it just abstains.
-        return _abstain("disabled")
+        return _abstain(activation_result_module.DISABLED)
 
     # The request budget is checked before EVERY stage below, not only here:
     # `working_set_module.budget_exhausted(stage)` is the one shared helper,
@@ -6889,7 +6890,7 @@ def _op_activate_context_body(
             )
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
-        return _abstain("unavailable")
+        return _abstain(activation_result_module.UNAVAILABLE)
     # An `anchor` naming no row of THIS index but an eligible agent-picked
     # page (design close-memory-loop, U7) is decided on the release plane
     # HERE, before the compile that page would otherwise buy nothing for: a
@@ -6982,7 +6983,7 @@ def _op_activate_context_body(
     # and deliberately NOT for the server's own abstentions (`index_warming`,
     # `disabled`, `unavailable`), which say something about this server rather
     # than about the ref the caller passed.
-    if anchor and _abstention_reason(packet) == "unresolved":
+    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     # Only gated when `packet` actually carries content: an already-abstained
     # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
@@ -7004,7 +7005,7 @@ def _op_activate_context_body(
             guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
     except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
         log.warning("activation egress guard failed; abstaining", exc_info=True)
-        return _abstain("unavailable", generation=packet.get("generation") or generation_stub)
+        return _abstain(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or generation_stub)
     # The release plane's own decision, reused rather than re-derived: the
     # override anchor was the packet's ONLY anchor, so the guard emptying the
     # packet IS the answer to "may this audience see that ref".
@@ -7024,12 +7025,12 @@ def _op_activate_context_body(
     # The guard answers an L0 anchor as `unresolved` and a notice-level one as
     # `withheld`; either way the override's one anchor is gone.
     if anchor and (
-        guarded is None or _abstention_reason(guarded) in {"withheld", "unresolved"}
+        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
         return _abstain(
-            "withheld",
+            activation_result_module.WITHHELD,
             generation=packet.get("generation") or generation_stub,
             carry_thread=False,
         )
