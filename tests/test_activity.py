@@ -158,6 +158,75 @@ def test_a_fresh_ledger_reports_no_events_since_the_writer_started(vault, ledger
     assert payload["since"] <= payload["as_of"]
 
 
+def test_a_full_list_never_claims_to_cover_a_call_it_omits(vault, ledger):
+    """With twenty events listed, an older save has no room. `since` must stay newer
+    than that save, or Home would claim the list covers a call it does not show."""
+    ledger("remember", _at(0), access="write", arguments={"path": "Notes/a.md"}, client="ChatGPT")
+    for minute in range(20):  # 20 recalls, two minutes apart, from 30 s after the save
+        ledger("ask_memory", _at(0.5 + 2 * minute), access="read", released=1)
+
+    payload = _activity(vault)
+
+    assert len(payload["events"]) == 20
+    assert all(event["action"] == "recalled" for event in payload["events"])
+    assert payload["since"] == _iso(_at(0.5)) > _iso(_at(0))
+
+
+@pytest.mark.parametrize("damage", ["unreadable row", "removed row"])
+def test_damaged_history_is_never_inside_the_interval_home_claims(vault, ledger, tmp_path, damage):
+    """Home's empty list says "No assistant activity since ...". A recall whose row
+    cannot be read, or is gone, must not fall inside that interval."""
+    ledger("bootstrap", _at(0), access="read", released=0)
+    ledger("ask_memory", _at(1), access="read", released=2)
+    ledger("bootstrap", _at(2), access="read", released=0)
+    path = tmp_path / "logs" / "ledger.jsonl"
+    lines = path.read_text("utf-8").splitlines()
+    if damage == "unreadable row":
+        lines[1] = lines[1][:40]
+    else:
+        del lines[1]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    payload = _activity(vault)
+
+    assert payload["events"] == []
+    assert payload["since"] == _iso(_at(2))
+
+
+def test_a_damaged_newest_row_makes_history_unavailable(vault, ledger, tmp_path):
+    """With no readable row after the damage, no interval is known to be complete."""
+    ledger("ask_memory", _at(0), access="read", released=2)
+    ledger("ask_memory", _at(1), access="read", released=3)
+    path = tmp_path / "logs" / "ledger.jsonl"
+    lines = path.read_text("utf-8").splitlines()
+    path.write_text("\n".join([lines[0], lines[1][:40]]) + "\n", encoding="utf-8")
+
+    with pytest.raises(OpError, match="ACTIVITY_UNAVAILABLE"):
+        _activity(vault)
+
+
+def test_a_row_still_being_appended_is_not_yet_history(vault, ledger, tmp_path):
+    """Home polls while calls are being recorded. A half-written last row must not
+    turn the panel into "unavailable"."""
+    ledger("ask_memory", _at(0), access="read", released=2)
+    with (tmp_path / "logs" / "ledger.jsonl").open("ab") as stream:
+        stream.write(b'{"schema_version":2,"sequence":2,"tool":"ask_')
+
+    assert [event["items"] for event in _activity(vault)["events"]] == [2]
+
+
+def test_version_1_rows_written_after_this_writer_started_make_history_unavailable(
+    vault, ledger, ledger_v1
+):
+    """An older process still appending version 1 rows leaves calls that no one can
+    classify inside the interval Home would claim."""
+    ledger("ask_memory", _at(0), access="read", released=2)
+    ledger_v1("remember", dt.datetime.now(dt.UTC))
+
+    with pytest.raises(OpError, match="ACTIVITY_UNAVAILABLE"):
+        _activity(vault)
+
+
 def test_activity_is_refused_to_anyone_but_the_owner(vault, ledger):
     """A delegated principal must not learn when and how much the owner's other
     assistants recalled and saved."""

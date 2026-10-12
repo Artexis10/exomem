@@ -47,7 +47,14 @@ The action comes from the command registry's `product_actions` and the row's `ac
 Rows of one client family and action join the newest event of that pair when they are at most 60 seconds older than its newest row.
 An event's `items` is null when any joined row's count is null.
 `since` is the oldest row the returned list accounts for, or the ledger writer's start when there is none.
-A version 1 row ends the readable history, because it cannot say whether it read or wrote.
+The reader stops at the first row the list cannot represent, so `since` never covers an omitted row:
+- a qualifying call that the full list has no room for;
+- a damaged row: not JSON, no valid time, or a break in the sequence, which shows a removed row;
+- a version 1 row, which cannot say whether it read or wrote.
+The ledger appends rows in time order, so a damaged row is older than every row after it.
+A damaged newest row leaves no complete interval, so it is `ACTIVITY_UNAVAILABLE`.
+A version 1 row that is not older than `since` shows an older process still writing, which is also `ACTIVITY_UNAVAILABLE`.
+The reader skips the text after the file's last newline, which is a row still being appended.
 The section is owner-only: it shows when and how much the owner's other assistants used memory.
 A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an empty list.
 

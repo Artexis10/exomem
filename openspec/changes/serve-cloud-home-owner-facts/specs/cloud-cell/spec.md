@@ -27,8 +27,9 @@ Both headers MUST tune eagerness only, never authority.
 Only successful calls SHALL become events. `action` SHALL be `recalled` or `saved`, derived from the command registry's product actions and the row's `access`.
 Rows of one client family and action SHALL join the newest event of that pair when they are at most 60 seconds older than its newest row.
 `items` SHALL be null when any joined row's count is unknown. `note_count` SHALL be the compiled-note count, or null when it cannot be read.
-`since` SHALL be the oldest ledger row the list accounts for, or the ledger writer's start when there is none.
-A disabled or unreadable ledger SHALL be refused with `ACTIVITY_UNAVAILABLE`.
+The list SHALL stop at the first row it cannot represent: a damaged row, a break in the sequence, a version 1 row or a call the full list has no room for.
+`since` SHALL be the oldest ledger row the list accounts for, or the ledger writer's start when there is none. It MUST NOT cover a row the list omits.
+A disabled or unreadable ledger, a damaged newest row or a version 1 row not older than `since` SHALL be refused with `ACTIVITY_UNAVAILABLE`.
 The cell MUST NOT register a route for these facts.
 
 #### Scenario: A recall and a save appear
@@ -36,6 +37,16 @@ The cell MUST NOT register a route for these facts.
 - **WHEN** a chat app recalls notes and another assistant saves a note
 - **THEN** the save is listed first, then the recall with the number of notes it released
 - **AND** the note count has grown by one
+
+#### Scenario: A full list
+
+- **WHEN** twenty newer events fill the list and an older save has no room
+- **THEN** `since` is newer than that save
+
+#### Scenario: A damaged row
+
+- **WHEN** a recall's row cannot be read but newer rows can
+- **THEN** `since` is newer than the damaged row
 
 #### Scenario: A fresh cell
 
