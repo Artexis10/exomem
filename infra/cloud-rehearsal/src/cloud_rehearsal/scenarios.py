@@ -56,11 +56,11 @@ from .report import (
     StepRecord,
     failure_record,
     innermost,
+    stage,
 )
-from .shell import run
+from .shell import run, wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
-CLOUD_EXCLUSIONS = {"transfer_artifact", "adopt_vault", "process_media", "read_media"}
 WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
 CELLCTL_REPO = "Artexis10/exomem#1368"
@@ -132,6 +132,7 @@ class Context:
     images: BuiltImages
     resolver: Resolver
     report: Report
+    cli_image: str | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -284,6 +285,7 @@ class Context:
         return boto3.client(
             "s3", endpoint_url=store.endpoint(from_host=True), aws_access_key_id=store.access_key,
             aws_secret_access_key=store.secret_key, region_name="us-east-1",
+            verify=str(store.ca_path) if store.ca_path else True,
             # proxies={} keeps an ambient HTTP(S)_PROXY off the S3 double.
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
@@ -464,7 +466,7 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 
 
 async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
-    _require(ctx.a.session)
+    _require(ctx.a.session and ctx.a.cell_id)
     # The stock MCP Python SDK client: its PKCE verifiers use the whole RFC
     # 7636 grammar, and it redirects to a 127.0.0.1 loopback.
     ctx.a.client = TenantClient(ctx.resolver, ctx.browser, ctx.a.session, ctx.substrate.redirect_uri)
@@ -473,7 +475,17 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
     if ctx.a.client.verifier_seen is None:
         raise StepFailure("no PKCE code_verifier was seen at the token endpoint")
-    exposed = CLOUD_EXCLUSIONS & set(tools)
+    # The stable workload and existing retry allow normal Pod replacement.
+    policy = wait_for(
+        lambda: ctx.exec_in(
+            namespace_name(ctx.a.cell_id), "statefulset/cell", "python3", "-c",
+            "import json;from exomem.commands import CLOUD_SURFACE_EXCLUSIONS;"
+            "print(json.dumps(list(CLOUD_SURFACE_EXCLUSIONS)))",
+        ).stdout,
+        timeout=120, description="tenant A's runtime policy to be readable",
+    )
+    exclusions = json.loads(policy)
+    exposed = set(exclusions) & set(tools)
     record.evidence.update(
         {
             "oauth": {
@@ -485,11 +497,16 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
             },
             "tool_count": len(tools),
             "tools": tools,
+            "expected_cloud_exclusions": exclusions,
             "cloud_exclusions_absent": not exposed,
+            "staged_adoption_present": "adopt_vault" in tools,
         }
     )
     if exposed:
         raise StepFailure(f"cloud-excluded tools are served: {sorted(exposed)}")
+    # Staged encrypted imports require the standard adoption command.
+    if "adopt_vault" not in tools:
+        raise StepFailure("staged adoption is absent from the Cloud tool surface")
     # 5.3: warm initialize and tools/list, each on a fresh MCP session over
     # the connector's existing token and its one HTTP client, so a sample
     # measures the MCP exchange, not a new TCP or TLS handshake.
@@ -542,12 +559,16 @@ async def step_5_cited_recall(ctx: Context, record: StepRecord) -> None:
             answers.append(result)
             ctx.report.sample("cited_recall", result.seconds)
     text = answers[0].text()
+    # RecallResult returns either a hit list or an envelope containing that list.
+    hits = answers[0].structured["result"]
+    if isinstance(hits, dict):
+        hits = hits["hits"]
     record.evidence.update(
         {
             "query_is_paraphrase": ctx.a.phrase not in query,
             "cites_the_capture": ctx.a.phrase in text,
             "cited_paths": [
-                hit.get("path") for hit in (answers[0].structured.get("result") or {}).get("hits", [])[:5]
+                hit.get("path") for hit in hits[:5]
                 if isinstance(hit, dict)
             ],
         }
@@ -1083,6 +1104,11 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         snapshot_logs(ctx)
         detail = "" if record.status == PASSED else f" -- {record.failure.get('message', '')[:300]}"  # type: ignore[union-attr]
         print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
+        if number == 2 and ctx.cli_image:
+            from .native_import import import_folder
+
+            with stage(ctx.report, "cloud_import"):
+                ctx.report.stages["cloud_import"]["evidence"] = await import_folder(ctx, ctx.cli_image)
 
 
 async def close_clients(ctx: Context) -> None:

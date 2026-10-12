@@ -50,14 +50,14 @@ class S3BackedFakeB2(FakeB2):
 
     def list_object_versions(self, prefix: str) -> list[ObjectVersion]:
         versions: list[ObjectVersion] = []
-        paginator = self._s3.get_paginator("list_objects_v2")
+        paginator = self._s3.get_paginator("list_object_versions")
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for item in page.get("Contents", []):
-                versions.append(ObjectVersion(key=item["Key"], version_id="null"))
+            for item in page.get("Versions", []) + page.get("DeleteMarkers", []):
+                versions.append(ObjectVersion(key=item["Key"], version_id=item["VersionId"]))
         return versions
 
     def delete_object_version(self, version: ObjectVersion) -> None:
-        self._s3.delete_object(Bucket=self._bucket, Key=version.key)
+        self._s3.delete_object(Bucket=self._bucket, Key=version.key, VersionId=version.version_id)
 
 
 def main() -> None:

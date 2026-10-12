@@ -11,11 +11,11 @@ import zipfile
 import httpx2
 import pytest
 
+from exomem import cloud_import_client
 from exomem.cloud_import_client import CloudImportClientConfig, import_source
 
-pytestmark = pytest.mark.skipif(not shutil.which("age") or not shutil.which("age-keygen"), reason="real age executables required")
 
-
+@pytest.mark.skipif(not shutil.which("age") or not shutil.which("age-keygen"), reason="real age executables required")
 def test_interrupted_upload_resumes_same_ciphertext(tmp_path):
     source = tmp_path / "export.zip"
     with zipfile.ZipFile(source, "w") as archive:
@@ -23,7 +23,7 @@ def test_interrupted_upload_resumes_same_ciphertext(tmp_path):
     identity = tmp_path / "identity"
     subprocess.run(["age-keygen", "-o", str(identity)], capture_output=True, check=True)
     recipient = subprocess.run(["age-keygen", "-y", str(identity)], capture_output=True, check=True).stdout.decode().strip()
-    row = {"id": None, "requested_state": "requested", "observed_state": "key_ready", "recipient": recipient}
+    row = {"import_id": None, "requested_state": "requested", "observed_state": "key_ready", "recipient": recipient}
     uploaded = {}
     fail_once = True
 
@@ -44,7 +44,7 @@ def test_interrupted_upload_resumes_same_ciphertext(tmp_path):
                 assert body["part_etags"] == [{"part_number": n, "etag": f'"part-{n}"'} for n in sorted(uploaded)]
                 row.update(requested_state="uploaded", observed_state="done")
             else:
-                row["id"] = body["import_id"]
+                row["import_id"] = body["import_id"]
         return httpx2.Response(200, json={"import": row})
 
     def upload_handler(request):
@@ -72,3 +72,20 @@ def test_interrupted_upload_resumes_same_ciphertext(tmp_path):
     assert asyncio.run(run())["observed_state"] == "done"
     assert encrypted == b"".join(uploaded[n] for n in sorted(uploaded))
     assert not (tmp_path / "checkpoint/archive.age").exists()
+
+
+def test_completed_c5_import_reports_success_without_crashing(tmp_path, monkeypatch, capsys):
+    """C5 returns import_id; the command must not crash after the server commits the import."""
+    import_id = "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef"
+
+    async def completed(*args, **kwargs):
+        return {"import_id": import_id, "observed_state": "done"}
+
+    monkeypatch.setattr(cloud_import_client, "import_source", completed)
+    status = cloud_import_client.main([
+        "import", str(tmp_path / "notes"), "--checkpoint", str(tmp_path / "checkpoint"),
+        "--mcp-url", "https://cloud.example/mcp", "--api-base-url", "https://cloud.example",
+    ])
+
+    assert status == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "import_id": import_id, "state": "done"}

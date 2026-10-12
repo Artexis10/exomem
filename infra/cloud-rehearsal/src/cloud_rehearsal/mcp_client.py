@@ -84,6 +84,11 @@ class HeadlessBrowser:
             return BrowserSession(cookies=dict(client.cookies.items()))
 
     async def consent(self, session: BrowserSession, authorization_url: str, redirect_uri: str) -> tuple[str, str | None]:
+        redirect = urllib.parse.urlparse(await self.consent_redirect(session, authorization_url, redirect_uri))
+        query = urllib.parse.parse_qs(redirect.query)
+        return query["code"][0], query.get("state", [None])[0]
+
+    async def consent_redirect(self, session: BrowserSession, authorization_url: str, redirect_uri: str) -> str:
         """Follows the authorization request to the consent page and submits it.
 
         Substrate must send the code to exactly the registered redirect URI
@@ -116,7 +121,8 @@ class HeadlessBrowser:
             query = urllib.parse.parse_qs(redirect.query)
             if "code" not in query:
                 raise RuntimeError(f"consent redirected without a code: {query.get('error')}")
-            return query["code"][0], query.get("state", [None])[0]
+            # Native callback handling must also receive issuer and any other protocol parameters.
+            return complete.headers["location"]
 
     async def post_with_session(self, session: BrowserSession, path: str, payload: dict[str, Any]) -> httpx.Response:
         async with self._client(session.cookies) as client:
@@ -168,6 +174,9 @@ class ToolResult:
     @property
     def error_code(self) -> str | None:
         error = self.structured.get("error")
+        if error is None and isinstance(self.structured.get("result"), dict):
+            # The MCP producer wraps non-object output schemas under result.
+            error = self.structured["result"].get("error")
         return error.get("code") if isinstance(error, dict) else None
 
 
