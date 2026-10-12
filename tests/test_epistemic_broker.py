@@ -934,13 +934,14 @@ def test_finalreview_whole_driver_deadline_interrupts_surface_and_reaps_child(
         receipt_path=tmp_path / "receipts.json",
     )
     started = time.monotonic()
-    with pytest.raises(broker_module.BrokerContractError, match="deadline|timeout"):
+    # The fixture budget includes sandbox startup, so leave time to enter its callback.
+    with pytest.raises(broker_module.BrokerSurfaceTimeout):
         broker.run_driver(
-            "def run(broker): return broker.invoke('state.read')", timeout_s=0.2
+            "def run(broker): return broker.invoke('state.read')", timeout_s=2.0
         )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 1.0, elapsed
+    assert elapsed < 2.5, elapsed
     assert children and children[0].poll() is not None
     receipt = json.loads((tmp_path / "receipts.json").read_text(encoding="utf-8"))
     assert [(item["outcome"], item["exception_type"]) for item in receipt["receipts"]] == [
