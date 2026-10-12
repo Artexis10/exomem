@@ -70,9 +70,8 @@ def _events(rows: Iterator[dict[str, Any]]) -> tuple[dt.datetime, list[dict[str,
     oldest_seen: dt.datetime | None = None
     for row in rows:
         if "access" not in row:
-            # A version 1 row cannot say whether it read or wrote, and every
-            # row older than it is older still: the list is complete only from
-            # the oldest version 2 row after it.
+            # A version 1 row cannot say whether it read or wrote, so the list
+            # can account only for the version 2 rows after it.
             break
         at = _parse_time(row.get("ts_utc"))
         if at is None:
