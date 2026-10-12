@@ -45,7 +45,7 @@ The vault around it is yours: any top-level folders you keep (`Daily/`, `Project
 `Reference/`, a journal — whatever) sit *beside* `Knowledge Base/` and are **read-only
 input** to this skill. Don't infer a fixed vault shape from the tree above. On your
 first engagement in a vault, run `browse_memory` once to learn its real top-level layout
-(see § Assessing a vault you didn't build), then treat everything outside
+(see § Assessing or adopting a vault you didn't build), then treat everything outside
 `Knowledge Base/` as read-only. Only `Knowledge Base/` is governed and writeable.
 
 `<vault>` resolves to your markdown vault root (Obsidian optional) — the folder that

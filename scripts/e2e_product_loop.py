@@ -2643,8 +2643,57 @@ def _e2e_workdir(*, keep: bool):
             raise
 
 
+def _publish_parent_phase_timings(
+    phases: list[dict[str, object]], *, elapsed: float, budget: float,
+) -> None:
+    """Keep aggregate-budget evidence after the scratch root has been removed."""
+    try:
+        document = json.dumps({
+            "measurement": "parent subprocess wall time",
+            "elapsed_seconds_including_cleanup": elapsed,
+            "budget_seconds": budget,
+            "phases": phases,
+        }, allow_nan=False)
+    except Exception:  # noqa: BLE001 - observation must not replace the budget failure
+        document = None
+    if document is not None:
+        try:
+            destination = REPO_ROOT / "test-results" / "e2e-logs"
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "parent-phase-timings.json").write_text(
+                document + "\n", encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001 - stderr can retain an unavailable artifact
+            pass
+    try:
+        print(
+            "product-e2e: parent phase timings: " + (document or "unavailable"),
+            file=sys.stderr, flush=True,
+        )
+    except Exception:  # noqa: BLE001 - diagnostic I/O must not replace the failure
+        pass
+
+
 def _orchestrate(args: argparse.Namespace) -> int:
     started = time.monotonic()
+    phases: list[dict[str, object]] = []
+
+    def run_phase(phase: str, command: list[str], **options: Any):
+        # These labels name fixed harness steps, never command text or vault content.
+        try:
+            phase_started = time.monotonic()
+        except Exception:  # noqa: BLE001 - a missing observation does not block work
+            phase_started = None
+        result = _run(command, **options)
+        try:
+            observation: dict[str, object] = {"phase": phase, "seconds": None}
+            phases.append(observation)
+            if phase_started is not None:
+                observation["seconds"] = time.monotonic() - phase_started
+        except Exception:  # noqa: BLE001 - retain the subprocess result unchanged
+            pass
+        return result
+
     with _e2e_workdir(keep=args.keep_work) as tmp_raw:
         tmp = Path(tmp_raw)
         home = tmp / "home"
@@ -2655,7 +2704,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             path.mkdir()
         env = _clean_env(home, vault)
         print("product-e2e: build installed wheel")
-        _run(
+        run_phase(
+            "wheel build",
             ["uv", "build", "--out-dir", str(dist)],
             env=env,
             cwd=REPO_ROOT,
@@ -2668,14 +2718,16 @@ def _orchestrate(args: argparse.Namespace) -> int:
         bin_dir = venv / ("Scripts" if WINDOWS else "bin")
         python = bin_dir / ("python.exe" if WINDOWS else "python")
         executable = bin_dir / ("exomem.exe" if WINDOWS else "exomem")
-        _run(["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
-        _run(
+        run_phase("environment creation", ["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
+        run_phase(
+            "wheel installation",
             ["uv", "pip", "install", "--python", str(python), str(wheels[-1])],
             env=env,
             cwd=work,
             timeout=min(args.budget_seconds, 120),
         )
-        _run(
+        run_phase(
+            "vault initialization",
             [str(executable), "init", "--vault", str(vault)],
             env=env,
             cwd=work,
@@ -2693,7 +2745,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             str(args.request_timeout),
         ]
         print("product-e2e: stdio governed lifecycle + restart")
-        _run(
+        run_phase(
+            "stdio journey",
             [
                 str(python),
                 str(Path(__file__).resolve()),
@@ -2707,7 +2760,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             timeout=child_timeout,
         )
         print("product-e2e: HTTP auth + Studio + review context + triage + shutdown")
-        _run(
+        run_phase(
+            "HTTP journey",
             [
                 str(python),
                 str(Path(__file__).resolve()),
@@ -2723,7 +2777,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             timeout=max(30.0, args.request_timeout * 6),
         )
         print("product-e2e: writer-lease coordination (two replicas)")
-        _run(
+        run_phase(
+            "writer lease journey",
             [
                 str(python),
                 str(Path(__file__).resolve()),
@@ -2744,7 +2799,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             "product-e2e: S1 Records summary journey "
             "(dark, released, import, fields, copy, restore, rollback)"
         )
-        s1_journey = _run(
+        s1_journey = run_phase(
+            "records summary journey",
             [
                 str(python),
                 str(REPO_ROOT / "scripts" / "e2e_s1_summary_journey.py"),
@@ -2770,6 +2826,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
         print(s1_journey.stdout.strip().splitlines()[-1])
     elapsed = time.monotonic() - started
     if elapsed > args.budget_seconds:
+        _publish_parent_phase_timings(phases, elapsed=elapsed, budget=args.budget_seconds)
         raise TimeoutError(
             f"product E2E took {elapsed:.1f}s, over {args.budget_seconds:.1f}s budget"
         )
