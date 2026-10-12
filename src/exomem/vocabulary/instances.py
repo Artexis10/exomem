@@ -344,13 +344,22 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     return selected
 
 
-def recheck(root: Path, spec: RegistrySpec) -> None:
-    """Recheck the same binding and its current admission at the existing write seam."""
+def recheck_binding(root: Path, spec: RegistrySpec) -> RegistrySpec:
+    """Select fresh storage and require the operation's original binding."""
     from . import registry_spec
-    from .contract import admission_refusal
 
     current = select(root, registry_spec(spec.name),
                      None if spec.instance_id == PUBLIC_INSTANCE else spec.instance_id)
-    if (current.binding_revision != spec.binding_revision or current.stem != spec.stem
-            or current.overlay(root) != spec.overlay(root) or admission_refusal(root, current)):
+    if (current.instance_id != spec.instance_id or current.binding_revision != spec.binding_revision
+            or current.stem != spec.stem or current.overlay(root) != spec.overlay(root)):
+        raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")
+    return current
+
+
+def recheck(root: Path, spec: RegistrySpec) -> None:
+    """Recheck the same binding and its current admission at the existing write seam."""
+    from .contract import admission_refusal
+
+    current = recheck_binding(root, spec)
+    if admission_refusal(root, current):
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")

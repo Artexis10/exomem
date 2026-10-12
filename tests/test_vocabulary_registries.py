@@ -560,6 +560,78 @@ def test_limited_owner_save_uses_admitted_overlay_without_approval(
 
 
 @pytest.mark.usefixtures("owner_scope")
+def test_registry_publication_refuses_an_identical_bytes_replacement_of_the_installed_leaf(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import vault as vault_module
+
+    first = commands.op_schema_memory(
+        vault, subject="entity-types", operation="save",
+        proposal={"upsert": {"venue": _VENUE}}, expected_hash="none", why="first entry",
+    )
+    path = entity_types.extension_registry_path(vault)
+    kept = registry_history.versions(vault, stem="entity-types")
+    replacement = tmp_path / "external-replacement.yaml"
+    installed_bytes = None
+    original = vault_module._after_batch_destination_published
+
+    def replace_installed_leaf(installed):
+        nonlocal installed_bytes
+        original(installed)
+        if installed == path:
+            installed_bytes = path.read_bytes()
+            replacement.write_bytes(installed_bytes)
+            replacement.replace(path)
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", replace_installed_leaf)
+    with pytest.raises(vault_module.BatchWriteError) as refused:
+        commands.op_schema_memory(
+            vault, subject="entity-types", operation="save",
+            proposal={"upsert": {"venue": {**_VENUE, "label": "Revised venue"}}},
+            expected_hash=first["saved"]["content_hash"], why="revise entry",
+        )
+    assert refused.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert refused.value.committed is False
+    assert isinstance(refused.value.__cause__, vault_module.PathGuardError)
+    assert refused.value.__cause__.code == "PATH_GUARD_CHANGED"
+    assert installed_bytes is not None and path.read_bytes() == installed_bytes
+    assert registry_history.versions(vault, stem="entity-types") == kept
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_public_registry_publication_rolls_back_when_policy_changes_after_install(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import vault as vault_module
+    from exomem.vocabulary.registry import RegistryError
+
+    first = commands.op_schema_memory(
+        vault, subject="entity-types", operation="save",
+        proposal={"upsert": {"venue": _VENUE}}, expected_hash="none", why="first entry",
+    )
+    path = entity_types.extension_registry_path(vault)
+    before = path.read_bytes()
+    kept = registry_history.versions(vault, stem="entity-types")
+    original = vault_module._after_batch_destination_published
+
+    def replace_policy(installed):
+        original(installed)
+        if installed == path:
+            _govern(vault, scope_path="_Schema/entity-types.yaml")
+            _reset_governance()
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", replace_policy)
+    with pytest.raises(RegistryError, match="publication admission changed"):
+        commands.op_schema_memory(
+            vault, subject="entity-types", operation="save",
+            proposal={"upsert": {"venue": {**_VENUE, "label": "Revised venue"}}},
+            expected_hash=first["saved"]["content_hash"], why="revise entry",
+        )
+    assert path.read_bytes() == before
+    assert registry_history.versions(vault, stem="entity-types") == kept
+
+
+@pytest.mark.usefixtures("owner_scope")
 @pytest.mark.parametrize(
     ("subject", "key", "entry"),
     [

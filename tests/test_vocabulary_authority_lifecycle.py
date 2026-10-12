@@ -22,6 +22,7 @@ from exomem import (
 from exomem.governance import (
     authorization_custody,
     authorization_serving_membership,
+    authorization_session_authority,
     authorization_session_lifecycle,
     store,
 )
@@ -270,6 +271,12 @@ def test_floor_two_pending_session_activation_and_session_revocation(
     assert "venue:" in registry_path.read_text(encoding="utf-8")
     assert entity_types.load_entity_types(vault).resolve("venue") is not None
 
+    from exomem.vocabulary.contract import admission_refusal, capture_admission
+    from exomem.vocabulary.registry import RegistryError
+
+    with request_scope(principal):
+        assert admission_refusal(vault, entity_types.SPEC)["reason"] == "audience_restricted"
+
     # Disclosure binds the current overlay bytes independently of vocabulary authority.
     token = wire._mint_route_grant_token(
         vault, bearer=bearer, paths=(registry_path.relative_to(vault).as_posix(),)
@@ -313,8 +320,22 @@ def test_floor_two_pending_session_activation_and_session_revocation(
     assert entity_types.load_entity_types(vault).resolve("guild") is None
     assert registry_path.read_bytes() == registry_before_revocation
 
+    with request_scope(principal):
+        witness = capture_admission(vault, entity_types.SPEC, registry_path.read_bytes())
+        with monkeypatch.context() as expired:
+            expired.setattr(time, "time", lambda: now + 120)
+            with pytest.raises(RegistryError, match="publication admission is unavailable"):
+                witness.recheck()
+
     connection = store.open_authorization_session_connection(vault)
     try:
+        assert authorization_session_authority.revoke_session_grants(
+            connection, context=context, audience=audience, now=now,
+        ) > 0
+        with request_scope(principal), pytest.raises(
+            RegistryError, match="publication admission is unavailable",
+        ):
+            witness.recheck()
         rotated = authorization_session_lifecycle.rotate_verified_session(
             connection, custody=custody, context=context, now=now, ttl_seconds=60
         )
