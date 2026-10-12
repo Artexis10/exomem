@@ -305,6 +305,114 @@ def test_mcp_and_rest_return_the_same_relevant_due_identity(
     assert "due_state" not in packet and "due_state" not in rest.json()["data"]
 
 
+@pytest.mark.parametrize("headroom", [0.05, 1.3])
+def test_mcp_due_omission_reaches_the_response_and_final_observation(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, headroom: float,
+) -> None:
+    """A served MCP packet and its observation must expose optional due omissions."""
+    import time
+
+    from fastmcp import Client
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import call_ledger, due_state, lexstore, query_log, request_budget
+    from exomem import vault as vault_module
+    from exomem.governance import egress
+
+    mcp = _surface_server(monkeypatch)
+    _seed_structure(vault)
+    _seed_planning(vault)
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    target = vault / page
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n## Prediction\n\n- id: capacity-check\n- check_by: "
+        + (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        + "\n\nThe runners withstand the planned load.\n",
+        encoding="utf-8",
+    )
+    due_state.reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    baseline = commands.op_activate_context(vault, turn=TURN, anchor=page)
+    assert baseline["abstained"] is False and baseline["relevant_due_refs"]
+
+    logs = tmp_path / "logs"
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(logs))
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(logs))
+    monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
+    monkeypatch.setattr(query_log, "_disabled", lambda: False)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "5")
+    request_budget.reset_resolution_cache()
+    call_ledger.reset_chain_cache()
+    guard = egress.guard_working_set
+    read = vault_module.read_bytes_without_pinning
+    projection = due_state.state_path(vault)
+    observed: list[tuple[request_budget.RequestBudget, float]] = []
+    projection_reads: list[float] = []
+
+    def slow_guard(*args, **kwargs):
+        packet = guard(*args, **kwargs)
+        budget = request_budget.current()
+        if budget is not None:
+            observed.append((budget, budget.deadline))
+            pause = budget.remaining() - headroom
+            assert pause > 0
+            time.sleep(pause)
+        return packet
+
+    def slow_projection(path, *args, **kwargs):
+        budget = request_budget.current()
+        if path == projection and budget is not None:
+            projection_reads.append(budget.remaining())
+            time.sleep(budget.remaining() + 0.04)
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "guard_working_set", slow_guard)
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", slow_projection)
+
+    async def invoke():
+        async with Client(mcp) as client:
+            result = await client.call_tool("activate_context", {"turn": TURN, "anchor": page})
+            return result.structured_content
+
+    try:
+        packet = asyncio.run(invoke())
+    finally:
+        request_budget.reset_resolution_cache()
+        call_ledger.reset_chain_cache()
+    assert request_budget.current() is None
+    assert packet["abstained"] is False
+    for name in ("anchors", "units", "current_state"):
+        assert packet.get(name) == baseline.get(name), name
+    assert "relevant_due_refs" not in packet
+    (budget, deadline), = observed
+    assert budget.deadline == deadline
+    assert packet["request_budget"]["applied"] is True
+    assert packet["request_budget"]["seconds"] == budget.seconds
+    assert packet["request_budget"]["skipped"] == budget.skipped
+    assert packet["request_budget"]["truncated"] == budget.truncated
+    if headroom < request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
+        assert projection_reads == []
+        assert budget.skipped == ["working_set.relevant_due"] and budget.truncated == []
+    else:
+        assert projection_reads
+        assert budget.skipped == [] and budget.truncated == ["working_set.relevant_due"]
+
+    ledger = [json.loads(line) for line in (logs / "ledger.jsonl").read_text().splitlines()]
+    assert len(ledger) == 1 and ledger[0]["outcome"] == "ok"
+    assert ledger[0]["activation_result"] == {
+        "abstained": False, "reason": None, "budget_limited": True,
+    }
+    assert ledger[0]["budget"]["skipped"] == budget.skipped
+    assert call_ledger.verify(logs / "ledger.jsonl") == []
+    activation = [json.loads(line) for line in (logs / "activations.jsonl").read_text().splitlines()]
+    assert len(activation) == 1 and activation[0]["outcome"] == "served"
+    assert "capacity-check" not in json.dumps(ledger + activation)
+    assert "relevant_due_refs" not in json.dumps(ledger + activation)
+
+
 def test_the_long_cli_name_reaches_the_same_leaf(
     activation_vault: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

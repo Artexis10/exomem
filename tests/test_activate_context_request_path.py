@@ -474,6 +474,19 @@ def test_a_normal_budget_leaves_activation_unchanged(
     assert packet["abstained"] is False
     assert packet["units"]
     assert budget.skipped == []
+    assert "request_budget" not in packet
+
+
+def test_an_unrelated_abstention_does_not_claim_a_borrowed_budget_omission(
+    activation_vault: Path, bind_budget, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior omission must not turn a later freshness error into a budget cause."""
+    budget = bind_budget(50.0)
+    budget.note_skipped("working_set.conversation")
+
+    _assert_generic_freshness_failure_abstains_immediately(activation_vault, monkeypatch)
+
+    assert request_budget.current() is budget
 
 
 @pytest.mark.parametrize("headroom", [0.05, 1.2])
@@ -538,6 +551,9 @@ def test_relevant_due_advice_respects_the_fixed_request_deadline(
     assert packet["units"] == baseline["units"]
     assert packet.get("current_state") == baseline.get("current_state")
     assert "relevant_due_refs" not in packet
+    assert packet["request_budget"]["applied"] is True
+    assert packet["request_budget"]["skipped"] == budget.skipped
+    assert packet["request_budget"]["truncated"] == budget.truncated
     if headroom < request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
         assert projection_reads == []
         assert budget.skipped == ["working_set.relevant_due"]

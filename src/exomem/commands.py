@@ -6649,6 +6649,12 @@ def op_activate_context(
         # already said `absent` when it skipped the stage for the request's budget.
         if isinstance(packet.get("generation"), dict):
             packet["generation"].setdefault("conversation", bounded.state)
+        # Served packets include optional omissions; abstentions retain their own cause.
+        if packet.get("abstained") is False:
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
         return packet
     except Exception as error:
         outcome = "refused" if isinstance(error, ValueError) else "error"
