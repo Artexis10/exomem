@@ -7141,19 +7141,19 @@ class EpistemicGraphIndex:
             ):
                 return
             paths.add(page)
+            if page in provenance:
+                return
+            # The first admitted match owns page provenance.
             requested_relation, resolved_relation = _query_identity(
                 matched_key, matched_via
             )
-            provenance.setdefault(
-                page,
-                RelationMatch(
-                    relation_type,
-                    cand_dir,
-                    counterpart,
-                    matched_via,
-                    requested_relation,
-                    resolved_relation,
-                ),
+            provenance[page] = RelationMatch(
+                relation_type,
+                cand_dir,
+                counterpart,
+                matched_via,
+                requested_relation,
+                resolved_relation,
             )
 
         for src_path, dst_path, relation_type, matched_via, matched_key, symmetric in rows:
