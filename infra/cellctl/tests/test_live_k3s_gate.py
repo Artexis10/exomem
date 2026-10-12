@@ -31,6 +31,10 @@ LIVE_PATHS = {
     "infra/cellctl/src/cellctl/k8s_client.py",
     "infra/ansible/roles/k3s/files/audit-policy.yaml",
     "infra/cellctl/tests/test_k3s_integration.py",
+    # The real-S3 export transport tests run only in the live job.
+    "infra/cellctl/tests/test_export_storage.py",
+    "infra/cellctl/src/cellctl/exports.py",
+    "src/exomem/cloud_export.py",
 }
 
 
