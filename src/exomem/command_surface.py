@@ -494,6 +494,9 @@ def bind_vault(
                 # uncovered selector before its leaf. This preliminary result
                 # exists only to keep retry/admission metadata conservative.
                 invocation_read_only = False
+            from . import call_ledger
+
+            call_ledger.note_call_access(invocation_read_only)
             request_id = mcp_request_id()
             tool_name = command.name
             # Computed at most once per call, and only for a mutation: a

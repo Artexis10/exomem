@@ -61,11 +61,21 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+#: Version 2 adds the content-free `access` and `item_count`. A version 1 row
+#: lacks both; every reader treats them as unknown there, and `verify` re-hashes
+#: each row as stored, so v1 rows keep verifying.
+SCHEMA_VERSION = 2
+
+#: The earliest moment this process could have recorded a row: before it, the
+#: ledger says nothing about calls this process served.
+WRITER_STARTED_AT = dt.datetime.now(dt.UTC)
+
+#: The closed set `access` may record; anything else is written as null.
+_ACCESS = frozenset({"read", "write"})
 
 #: The closed set `principal_kind` may record; anything else is written as null.
 _PRINCIPAL_KINDS = frozenset(
@@ -201,6 +211,12 @@ def _target_paths(
         # target paths at all, the same way mutation_journal keeps only
         # `target_count` (see its docstring).
         return [], False
+    targets = _known_targets(arguments, committed)
+    return targets[:_MAX_TARGET_PATHS], len(targets) > _MAX_TARGET_PATHS
+
+
+def _known_targets(arguments: dict[str, Any], committed: Sequence[str] | None) -> list[str]:
+    """Every distinct page the call addressed or reported committing, unbounded."""
     found: list[str] = []
     for name in _TARGET_ARG_NAMES:
         value = arguments.get(name)
@@ -215,79 +231,126 @@ def _target_paths(
     for value in committed or ():
         if isinstance(value, str) and value.strip():
             found.append(_clip(value.strip()))
-    deduplicated = list(dict.fromkeys(found))
-    truncated = len(deduplicated) > _MAX_TARGET_PATHS
-    return deduplicated[:_MAX_TARGET_PATHS], truncated
+    return list(dict.fromkeys(found))
 
 
-#: Committed target paths for one in-flight call, keyed by the call token.
+#: Facts about one in-flight call, keyed by the call token: committed target
+#: paths, the access the dispatcher classified, and the items a read released.
 #: Bridged through the token for the same reason `call_spans` is: these are
 #: recorded deep inside the synchronous tool wrapper on FastMCP's threadpool,
 #: and a ContextVar mutation there never propagates back to the middleware that
 #: writes the row.
-_targets_lock = threading.Lock()
-_committed_targets: dict[str, dict[str, Any]] = {}
+_facts_lock = threading.Lock()
+_call_facts: dict[str, dict[str, Any]] = {}
 #: Calls tracked at once, so a missed pop cannot leak indefinitely, and how long
 #: an unpopped entry survives. The same two independent guards `call_spans` uses,
 #: for the same reason: the middleware pops unconditionally, but a direct test
 #: harness or an abandoned call never reaches it. Eviction is by age, not by
-#: insertion order, so a long-running call's targets are not dropped to make
+#: insertion order, so a long-running call's facts are not dropped to make
 #: room for a short one that arrived later.
 _MAX_TRACKED_CALLS = 256
-_TARGETS_TTL_SECONDS = 300.0
+_FACTS_TTL_SECONDS = 300.0
 
 
-def _sweep_targets_locked(now: float) -> None:
+def _sweep_facts_locked(now: float) -> None:
     for token in [
         token
-        for token, entry in _committed_targets.items()
-        if now - float(entry["at"]) > _TARGETS_TTL_SECONDS
+        for token, entry in _call_facts.items()
+        if now - float(entry["at"]) > _FACTS_TTL_SECONDS
     ]:
-        _committed_targets.pop(token, None)
+        _call_facts.pop(token, None)
 
 
-def note_committed_targets(paths: Iterable[Any]) -> None:
-    """Record the vault-relative paths this call actually committed.
-
-    Structural paths only -- the same thing `target_paths` already carries for a
-    note write. A no-op outside an MCP call, so CLI, watcher and test paths that
-    mint no token are unaffected. Never raises into the call path.
-    """
+def _note_call_fact(record: Callable[[dict[str, Any]], None]) -> None:
+    """Apply `record` to this call's entry. A no-op outside an MCP call, so CLI,
+    watcher and test paths that mint no token are unaffected. Never raises into
+    the call path."""
     try:
         from . import call_spans
 
         token = call_spans.MCP_CALL_TOKEN.get()
         if token is None:
             return
+        now = time.monotonic()
+        with _facts_lock:
+            _sweep_facts_locked(now)
+            if token not in _call_facts and len(_call_facts) >= _MAX_TRACKED_CALLS:
+                oldest = min(_call_facts, key=lambda key: _call_facts[key]["at"])
+                _call_facts.pop(oldest, None)
+            record(
+                _call_facts.setdefault(
+                    token, {"at": now, "paths": [], "access": None, "released": None}
+                )
+            )
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        pass
+
+
+def note_committed_targets(paths: Iterable[Any]) -> None:
+    """Record the vault-relative paths this call actually committed.
+
+    Structural paths only -- the same thing `target_paths` already carries for a
+    note write. Kept whole, so the row's `item_count` is not a capped count; the
+    row's `target_paths` applies its own bound.
+    """
+    try:
         clean = [
             _clip(value.strip())
             for value in paths
             if isinstance(value, str) and value.strip()
         ]
-        now = time.monotonic()
-        with _targets_lock:
-            _sweep_targets_locked(now)
-        if not clean:
-            return
-        with _targets_lock:
-            if token not in _committed_targets and len(_committed_targets) >= _MAX_TRACKED_CALLS:
-                oldest = min(_committed_targets, key=lambda key: _committed_targets[key]["at"])
-                _committed_targets.pop(oldest, None)
-            entry = _committed_targets.setdefault(token, {"at": now, "paths": []})
-            slot: list[str] = entry["paths"]
-            slot.extend(clean[: _MAX_TARGET_PATHS - len(slot)])
     except Exception:  # noqa: BLE001 - the ledger must never break a call
-        pass
+        return
+    if clean:
+        _note_call_fact(lambda entry: entry["paths"].extend(clean))
 
 
-def pop_committed_targets(token: str | None) -> list[str]:
-    """Pop this call's committed targets. Unconditional, like the span pop."""
+def note_call_access(read_only: bool) -> None:
+    """Record how the dispatcher classified this invocation: `read` or `write`."""
+    access = "read" if read_only else "write"
+    _note_call_fact(lambda entry: entry.update(access=access))
+
+
+def note_released_items(count: int) -> None:
+    """Record how many distinct items this read's disclosure boundary released.
+
+    The outermost boundary of a call finishes last, so its count is the one kept.
+    """
+    _note_call_fact(lambda entry: entry.update(released=int(count)))
+
+
+def pop_call_facts(token: str | None) -> dict[str, Any]:
+    """Pop this call's facts. Unconditional, like the span pop."""
+    empty: dict[str, Any] = {"paths": [], "access": None, "released": None}
     if token is None:
-        return []
-    with _targets_lock:
-        _sweep_targets_locked(time.monotonic())
-        entry = _committed_targets.pop(token, None)
-    return list(entry["paths"]) if entry else []
+        return empty
+    with _facts_lock:
+        _sweep_facts_locked(time.monotonic())
+        entry = _call_facts.pop(token, None)
+    return {**empty, **entry} if entry else empty
+
+
+def _item_count(
+    access: str | None,
+    outcome: str,
+    released: int | None,
+    arguments: dict[str, Any],
+    committed: Sequence[str],
+) -> int | None:
+    """Items a successful call touched: released for a read, targets for a write.
+
+    `None` is unknown, never zero: a call that failed touched nothing it can
+    vouch for, and a write whose destination the server derived and did not
+    report has no known target to count.
+    """
+    if outcome != "ok":
+        return None
+    if access == "read":
+        return released
+    if access == "write":
+        targets = _known_targets(arguments, committed)
+        return len(targets) if targets else None
+    return None
 
 
 def build_row(
@@ -312,6 +375,8 @@ def build_row(
     activation_result: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
     committed_targets: Sequence[str] | None = None,
+    access: str | None = None,
+    released_items: int | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
     from .privacy_log import log_client_label, log_client_version, log_session_ref
@@ -376,6 +441,13 @@ def build_row(
         # mean the caller got the whole answer it asked for.
         "budget": _clip_budget(budget),
         "truncated": bool(args_truncated or targets_truncated),
+        # Content-free, so they survive content-private logging: how the
+        # dispatcher classified the call, and how many items it touched (see
+        # `_item_count`). Null is unknown, never zero.
+        "access": access if access in _ACCESS else None,
+        "item_count": _item_count(
+            access, outcome, released_items, arguments or {}, committed_targets or ()
+        ),
     }
     from .activation_result import project_block
 
@@ -606,7 +678,7 @@ def record_call(
     """
     from . import call_spans
 
-    committed_targets = pop_committed_targets(call_spans.MCP_CALL_TOKEN.get())
+    facts = pop_call_facts(call_spans.MCP_CALL_TOKEN.get())
     if not enabled():
         return None
     try:
@@ -637,7 +709,9 @@ def record_call(
                 spans=spans,
                 budget=budget,
                 activation_result=activation_result,
-                committed_targets=committed_targets,
+                committed_targets=facts["paths"],
+                access=facts["access"],
+                released_items=facts["released"],
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])

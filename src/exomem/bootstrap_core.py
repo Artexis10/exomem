@@ -103,8 +103,14 @@ SESSION_POST_WRITE_KEYS = (
 _PASSTHROUGH = ("due_state", "latency")
 
 
+#: Sections answered from live state rather than projected from the reference
+#: payload, so the index (a map of reference bytes) does not list them.
+ACTIVITY_SECTION = "activity"
+LIVE_SECTIONS = (ACTIVITY_SECTION,)
+
+
 def accepted_sections() -> tuple[str, ...]:
-    return ("all", "index", *SECTIONS, *SECTION_ALIASES)
+    return ("all", "index", *SECTIONS, *LIVE_SECTIONS, *SECTION_ALIASES)
 
 
 def _size(value: object) -> int:

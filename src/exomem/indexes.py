@@ -232,23 +232,37 @@ _NOTES_FOLDER_TO_TYPE: dict[str, str] = {
 }
 
 
-def _count_notes(notes_dir: Path) -> dict[str, int]:
+def _count_notes(
+    notes_dir: Path, *, on_error: Callable[[OSError], None] | None = None
+) -> dict[str, int]:
     """Per-type compiled-note count, recursing into project/domain/medium subfolders.
 
     Returns a dict keyed by the page-type token used in `index.md` Counts
     (e.g. "research", "insight", "production-log"). Excludes index.md files
-    and any folder starting with "_".
+    and any folder starting with "_". `on_error` receives every read failure,
+    so a caller can tell an incomplete count from a whole one; without it the
+    count stays best-effort.
     """
     out: dict[str, int] = {}
-    if not notes_dir.is_dir():
-        return out
-    for sub in notes_dir.iterdir():
+    if on_error is None:
+        if not notes_dir.is_dir():
+            return out
+        subs = list(notes_dir.iterdir())
+    else:
+        try:
+            subs = list(notes_dir.iterdir())
+        except FileNotFoundError:
+            return out
+        except OSError as error:
+            on_error(error)
+            return out
+    for sub in subs:
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
         key = _NOTES_FOLDER_TO_TYPE.get(sub.name)
         if key is None:
             continue  # unknown top-level folder under Notes/; ignore
-        out[key] = _count_markdown_pages(sub)
+        out[key] = _count_markdown_pages(sub, on_error=on_error)
     return out
 
 

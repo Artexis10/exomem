@@ -840,6 +840,12 @@ def op_bootstrap(
             )
         if profile != "compact":
             raise ValueError("bootstrap: section requires profile='compact'")
+    if section == bootstrap_core_module.ACTIVITY_SECTION:
+        # Live state for a settings view, not agent guidance: answered without
+        # building the reference payload it has no part in.
+        from . import activity as activity_module
+
+        return activity_module.payload(vault_root)
 
     session_requested = profile == "session"
     session_unavailable: str | None = None

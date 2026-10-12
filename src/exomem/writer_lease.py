@@ -6773,6 +6773,10 @@ def invoke_command(
             emit_boundary_receipt(collector)
             raise
         emit_boundary_receipt(collector)
+        from . import call_ledger
+        from .governance.egress import released_item_count
+
+        call_ledger.note_released_items(released_item_count(collector))
         return result
 
 

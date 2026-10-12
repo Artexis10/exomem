@@ -173,7 +173,7 @@ it with `exomem logs verify`.
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
 `target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
-`request_bytes`, `truncated`.
+`request_bytes`, `truncated`, `access`, `item_count`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -230,6 +230,15 @@ it with `exomem logs verify`.
   client retrying the same call?".
 - **`target_paths`** records the page a call addresses, verbatim. A path is
   structure, not content, and it is the first thing a forensic pass needs.
+- **`access`** and **`item_count`** arrive with schema version 2. `access` is
+  `read` or `write`, as the dispatcher classified the call, or null when no
+  classification reached the row. `item_count` counts what a successful call
+  touched: the distinct items a read released, or the distinct targets a write
+  addressed or reported committing. It is null for any other outcome and for a
+  write whose destination the server derived and did not report. Null means
+  unknown, never zero. Both fields carry no content, so a cloud cell keeps
+  them. A version 1 row lacks both; readers treat them as unknown, and
+  `exomem logs verify` accepts a chain that runs from version 1 into version 2.
 
 ### Where a write's time went (`spans`)
 
