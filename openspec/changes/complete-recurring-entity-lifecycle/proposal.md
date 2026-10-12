@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted candidate contribution and promotion. Shared recurring-entity semantics remain unchanged. Closure requires surviving local/Cloud implementation, review, and merge evidence.
+
 ## Why
 
 Exomem can detect an unresolved wikilink that recurs, but ordinary history can repeatedly describe a stable identity without ever producing that representation, and an already-created Entity can remain sparse while durable facets accumulate elsewhere. The result is two forms of the same lifecycle failure: the user must nudge the agent both to promote a recurring identity and later to reconnect durable knowledge to it.

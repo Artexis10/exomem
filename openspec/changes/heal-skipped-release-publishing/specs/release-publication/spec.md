@@ -2,7 +2,7 @@
 
 ### Requirement: Each release artifact is published once from the release tag
 
-The release workflow SHALL publish a release's artifacts only from a run on that release's tag at the tag's commit. The artifacts are the GitHub release assets, the PyPI distribution, the MCP Registry entry and every image the release builds. Before publishing, the run SHALL check which artifacts are present and SHALL publish only the missing ones, so an artifact that exists is never rebuilt with a new digest. Any other run that finds an artifact of the release missing SHALL hand the publish to a run on the tag. Runs that publish the same tag SHALL NOT overlap.
+The release workflow SHALL publish a release's artifacts only from a run on that release's tag at the tag's commit. The artifacts are the GitHub release assets, the PyPI distribution, the MCP Registry entry and every supported image. The supported image roles are lean, ml, cuda, cloud and cellctl. Before publishing, the run SHALL check which artifacts are present and SHALL publish only the missing ones, so an artifact that exists is never rebuilt with a new digest. Any other run that finds an artifact of the release missing SHALL hand the publish to a run on the tag. Runs that publish the same tag SHALL NOT overlap.
 
 #### Scenario: The release's own run stops before publishing
 
@@ -11,7 +11,7 @@ The release workflow SHALL publish a release's artifacts only from a run on that
 
 #### Scenario: Some artifacts already exist
 
-- **WHEN** a run verifies matching wheel and sdist filenames and hashes, and complete original evidence for four images, while two images are missing
+- **WHEN** a run verifies matching wheel and sdist filenames and hashes, and complete original evidence for some supported images, while other images are missing
 - **THEN** it builds only the missing images and preserves every existing immutable file and tagged digest
 
 #### Scenario: Publishing keeps failing on one tag
@@ -27,7 +27,7 @@ The release workflow SHALL publish a release's artifacts only from a run on that
 #### Scenario: Dry run
 
 - **WHEN** a maintainer dispatches the workflow with `dry_run` for an existing tag from any ref
-- **THEN** the run builds the wheel, sdist, Cloud archives, and all six images from the tag regardless of registry presence or publication settings
+- **THEN** the run builds the wheel, sdist, Cloud archives, and every supported image from the tag regardless of registry presence or publication settings
 - **AND** it creates no package, OCI, release-asset, MCP, attestation, deployment, or live-record publication
 - **AND** it may retain temporary Actions artifacts and caches for verification
 
@@ -35,18 +35,24 @@ The release workflow SHALL publish a release's artifacts only from a run on that
 
 New images SHALL publish by digest before discovery tags. The workflow SHALL
 verify and retain original image attestations before attaching tags to that same
-digest. Hosted images SHALL retain their existing signed candidate triplet.
-Recovery SHALL preserve its filenames, producer fields, and signed bytes.
+digest. Recovery SHALL preserve receipt filenames, producer fields and signed
+bytes. Current publication and automatic recovery SHALL exclude Hosted images
+and Records rollback claims. Historical Hosted candidate files and both original
+Sigstore bundles SHALL remain immutable and verifiable through the standalone
+verifier from each receipt's exact source commit. Both immutable aliases SHALL
+continue to match the verified image digest.
 
 #### Scenario: A producer stops before tagging
 
 - **WHEN** a producer retains complete evidence but stops before creating a version tag
 - **THEN** recovery finds its release assets or Actions artifacts, verifies the original digest and producer evidence, and fills missing tags without rebuilding
 
-#### Scenario: A release contains only part of the hosted triplet
+#### Scenario: Historical Hosted receipts remain verifiable
 
-- **WHEN** release assets contain partial evidence and the producer artifact contains the complete triplet
-- **THEN** recovery combines matching original bytes, verifies the complete triplet, and uploads only missing files
+- **WHEN** current publication retires Hosted images
+- **THEN** historical release assets retain their original filenames, producer fields and signed bytes
+- **AND** the receipt's source-commit verifier authenticates the unchanged candidate and both bundles with the maintained gh CLI
+- **AND** the version and commit aliases still match the verified image digest
 
 #### Scenario: An immutable discovery tag conflicts
 

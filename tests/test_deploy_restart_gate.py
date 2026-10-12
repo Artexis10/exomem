@@ -47,9 +47,6 @@ DEPLOY = ROOT / "scripts" / "deploy.ps1"
 UPGRADE = ROOT / "scripts" / "upgrade.ps1"
 INSTALL_SERVICE = ROOT / "scripts" / "install-service.ps1"
 DEPLOYMENT_DOC = ROOT / "docs" / "deployment.md"
-HOSTED_DEPLOY_DOC = ROOT / "docs" / "runbooks" / "hosted" / "deploy.md"
-HOSTED_UPGRADE_DOC = ROOT / "docs" / "runbooks" / "hosted" / "runtime-upgrades.md"
-HOSTED_INIT_JOB = ROOT / "infra" / "helm" / "cell" / "templates" / "init-job.yaml"
 COMMON_SH = ROOT / "scripts" / "_service-common.sh"
 UPGRADE_SH = ROOT / "scripts" / "upgrade.sh"
 INSTALL_SERVICE_SH = ROOT / "scripts" / "install-service.sh"
@@ -2070,22 +2067,3 @@ class TestScriptsAreWired:
         assert "stop -> prove stopped/PID gone -> install target" in body
         assert "offline migrate -> doctor -> start -> prove new PID/version" in body
         assert "failure leaves the service stopped" in body
-
-    def test_hosted_runbook_requires_zero_pods_and_target_image_migration_locking(
-        self,
-    ) -> None:
-        deploy = HOSTED_DEPLOY_DOC.read_text(encoding="utf-8")
-        upgrades = HOSTED_UPGRADE_DOC.read_text(encoding="utf-8")
-        assert "routes closed and drained" in deploy
-        assert "zero tenant runtime pods" in deploy
-        assert "existing hosted lifetime lock" in deploy
-        assert "new state-migration lock" in deploy
-        assert "target image" in deploy
-        assert "never roll back to the old image after state migration" in upgrades
-
-    def test_hosted_target_image_job_enables_offline_state_migration(self) -> None:
-        body = HOSTED_INIT_JOB.read_text(encoding="utf-8")
-        assert "image: {{ .Values.image }}" in body
-        assert "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION" in body
-        assert 'eq .Values.workloadMode "initialize"' in body
-        assert 'eq .Values.migrationMode "state-root-v1"' in body

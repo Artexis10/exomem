@@ -210,7 +210,7 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 9. The same run publishes the missing artifacts whose gate is on:
    - PyPI, from the same wheel and sdist, if `PYPI_PUBLISH_ENABLED=true`;
    - the MCP Registry entry, if `MCP_REGISTRY_PUBLISH_ENABLED=true`;
-   - the lean, ml, cuda, hosted, cloud and cellctl images, if
+   - the lean, ml, cuda, cloud and cellctl images, if
      `GHCR_PUBLISH_ENABLED=true`.
 
 Every later push to `main` checks the newest release again and hands any missing
@@ -231,10 +231,14 @@ tag, use these steps:
 The run on `main` hands the publish to a run on `refs/tags/vX.Y.Z`. That run
 publishes only the artifacts the release lacks.
 
+A branch dry run uses the dispatch commit's workflow and recovery tools. It
+builds the selected tag's product source. Record both commits separately.
+The dry run bypasses original-image recovery and publication, so it proves
+build scheduling rather than publication acceptance or the current product source.
+
 New images publish by digest. The workflow verifies and retains original
 attestations before attaching version, commit, or floating tags to that digest.
-Hosted evidence keeps its candidate file and both original Sigstore bundles.
-Cloud and cellctl retain their image bundles as release assets too.
+Every supported image retains its original Sigstore bundle as a release asset.
 
 A retry searches release assets and producer Actions artifacts, even when no
 version tag exists. It fills missing files and tags from verified original bytes.
@@ -246,8 +250,7 @@ update. A running image build delays the next publisher; dry runs use separate
 groups and do not occupy the publication queue.
 
 A legacy image without original evidence remains visibly incomplete. It needs a
-complete successor release. An explicit Records rollback request cannot replace
-an existing tagged image or fabricate a new producer claim during recovery.
+complete successor release.
 
 Raw image recovery checks BuildKit's selected target for every platform and
 GitHub's signed producer run and attempt. The receipt filename only locates the
@@ -265,6 +268,24 @@ Cloud completeness uses the committed release metadata. Conflicting immutable by
 Dry runs still build during registry outages. They may retain temporary Actions
 artifacts and caches, but create no release assets, registry publications,
 attestations, deployments, or live records.
+
+### Verify historical Hosted receipts
+
+Current publication and automatic recovery support lean, ml, cuda, cloud and
+cellctl. Historical Hosted assets remain unchanged, including their filenames,
+signed bytes, producer fields, version alias and commit alias.
+
+Use the original standalone verifier from the receipt's exact source commit.
+Keep the maintained `gh` CLI available on `PATH` for attestation verification.
+
+1. Resolve the historical release tag to its source commit; expect the receipt's `source.commit` to match.
+2. Read `infra/scripts/hosted_image_candidate.py` from that commit with `git show`; expect the original standalone verifier.
+3. Download the original candidate and both Sigstore bundles without renaming them; expect the three unchanged release assets.
+4. Run the verifier's `verify` command with `--candidate`, `--candidate-bundle` and `--bundle`; expect authenticated image and candidate subjects.
+5. Compare both immutable aliases with the verified image digest; expect the version and commit aliases to match.
+
+This verifies historical publication evidence. It does not qualify the retired
+runtime or establish a current rollback target.
 
 The initial `0.1.0` baseline is recorded in `.release-please-manifest.json` and
 `CHANGELOG.md`; future releases should come from Release Please rather than

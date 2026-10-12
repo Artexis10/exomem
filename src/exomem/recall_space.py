@@ -30,8 +30,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-#: The encoder every sidecar without a record was written by, and the one a
-#: hosted cell keeps.
+#: The encoder every sidecar without a record was written by.
 LEGACY_MODEL = "BAAI/bge-base-en-v1.5"
 LEGACY_DIM = 768
 #: The one multilingual encoder a personal server and a cloud cell run for
@@ -42,10 +41,8 @@ PERSONAL_MODEL = "BAAI/bge-m3"
 RECALL_MODEL_ENV = "EXOMEM_RECALL_MODEL"
 
 
-#: Mirror `hosted_runtime.HOSTED_MODE_ENV` and `cloud_cell.CLOUD_MODE_ENV`. Read
-#: directly: `embeddings` imports this module and must stay cheap to import.
-_CELL_FLAGS = ("EXOMEM_HOSTED_CELL", "EXOMEM_CLOUD_CELL")
-_HOSTED_FLAG = _CELL_FLAGS[0]
+#: Read the Cloud protocol flag directly to keep embeddings cheap to import.
+_CLOUD_FLAG = "EXOMEM_CLOUD_CELL"
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 
 #: Widths of the models recall declares, so an empty store answers at the width
@@ -85,26 +82,22 @@ _SELECTED: ContextVar[str | None] = ContextVar("exomem_recall_encoder", default=
 
 
 def cell_mode(env: Mapping[str, str] | None = None) -> bool:
-    """Whether this process is a hosted or cloud cell.
+    """Whether this process is a Cloud cell.
 
     A malformed flag counts as a cell, the way content-private logging reads
     it: such a cell refuses to start anyway.
     """
     values = os.environ if env is None else env
-    return any(str(values.get(flag, "")).strip().lower() not in _FALSE for flag in _CELL_FLAGS)
+    return str(values.get(_CLOUD_FLAG, "")).strip().lower() not in _FALSE
 
 
 def configured_recall_model(env: Mapping[str, str] | None = None) -> str:
-    """The recall encoder for this process: `EXOMEM_RECALL_MODEL` when set, else
-    the multilingual one on a personal server and a cloud cell, and the English
-    one on a hosted cell, whose runtime runs no re-embed and whose memory limit
-    was sized for it. A malformed hosted flag counts as a hosted cell."""
+    """Use the explicit recall encoder, or the multilingual default."""
     values = os.environ if env is None else env
     explicit = str(values.get(RECALL_MODEL_ENV, "")).strip()
     if explicit:
         return explicit
-    hosted = str(values.get(_HOSTED_FLAG, "")).strip().lower() not in _FALSE
-    return LEGACY_MODEL if hosted else PERSONAL_MODEL
+    return PERSONAL_MODEL
 
 
 def serving_model(index: object) -> str:

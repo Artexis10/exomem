@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 admission and package gates. Shared curation, remote maintenance refusal, portable evidence, and pending closure remain in scope.
+
 ## Context
 
 The no-nudge architecture now has deterministic sensors, review queues, and a

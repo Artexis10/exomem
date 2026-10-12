@@ -909,7 +909,7 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     ) is True
 
 
-@pytest.mark.parametrize("surface", ["mcp", "rest", "hosted"])
+@pytest.mark.parametrize("surface", ["mcp", "rest"])
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -948,33 +948,6 @@ def test_remote_write_maintenance_is_refused_before_manager_dispatch(
     assert raised.value.details == {"status": "terminal", "committed": False}
     assert raised.value.remediation is not None
     assert "exomem maintain" in raised.value.remediation
-
-
-def test_hosted_agent_write_maintenance_uses_production_descriptor_and_is_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from exomem import hosted_gateway
-    from exomem.commands import product_commands_for
-
-    command = next(
-        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
-    )
-    descriptor = hosted_gateway.hosted_agent_surface_descriptor(
-        "hosted-alpha-agent-v4"
-    )
-    assert descriptor.surface == "hosted-agent"
-    assert "maintain_memory" in descriptor.product_commands
-    monkeypatch.setattr(
-        writer_lease,
-        "get_manager",
-        lambda: pytest.fail("hosted-agent maintenance reached manager dispatch"),
-    )
-
-    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
-        writer_lease.invoke_command(command, tmp_path, mode="reconcile")
-
-    assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
 
 
 def test_remote_unknown_maintenance_selector_preserves_coverage_refusal(
@@ -1049,7 +1022,7 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
     [
         ("mcp", {}),
         ("rest", {"mode": "fix"}),
-        ("hosted", {"mode": "reconcile", "dry_run": True}),
+        ("rest", {"mode": "reconcile", "dry_run": True}),
         ("mcp", {"mode": "backfill-ids"}),
         ("cli", {"mode": "reconcile"}),
         (None, {"mode": "reconcile"}),

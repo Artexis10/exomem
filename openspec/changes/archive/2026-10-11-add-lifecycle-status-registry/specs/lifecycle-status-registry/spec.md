@@ -106,23 +106,12 @@ Cached owner state SHALL NOT disclose a private registry identity to another aud
 The semantic contract SHALL teach the fixed class rule with a new version and digest.
 Admitted status definitions and their identity SHALL remain separate from its normative fields.
 Clients SHALL discover current status vocabulary through the exposed registry contract.
-Released hosted profiles SHALL retain their historical semantic contract artifacts and descriptors while using current shared runtime semantics.
-The versioned bootstrap operating contract SHALL provide separate corrective guidance for the current class rule and classification outcomes.
-Compact and full bootstrap SHALL expose that correction without requiring a parameter absent from the frozen descriptor.
 Registry lookup guidance SHALL name only routes exposed by the active profile.
 Unknown labels SHALL create debt only after admitted classification establishes that they are unregistered.
 
-#### Scenario: Frozen clients and current clients receive their own contracts
-- **WHEN** a current client and a released hosted profile request their authoring contract
-- **THEN** the current client receives the class rule and current registry route
-- **AND** the released profile retains its published contract
-- **AND** its bootstrap operating contract explains the current shared runtime behavior separately
-
-#### Scenario: A frozen client learns the changed validation rule through its real route
-- **WHEN** a v3 client requests full bootstrap and validates a body edit after an owner changes the page's extension class from pending to live
-- **THEN** corrective guidance explains that the current live-class rule supersedes historical inactive-label teaching
-- **AND** the client's exposed edit route requires a valid semantic unit without changing page bytes during validation
-- **AND** bootstrap advertises no registry inspection route that v3 cannot call
+#### Scenario: Current clients receive the current authoring contract
+- **WHEN** a current client requests its authoring contract
+- **THEN** the client receives the class rule and current registry route
 
 ### Requirement: Derived views classify admitted current status without persisting its meaning
 

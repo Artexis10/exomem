@@ -13,13 +13,13 @@ import threading
 
 import pytest
 
-from exomem import hosted_runtime, privacy_log
+from exomem import privacy_log
 from exomem.log_events import JsonLinesFormatter, log_event
 
 
 @pytest.fixture()
 def hosted_logger(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
-    monkeypatch.setenv(hosted_runtime.HOSTED_MODE_ENV, "true")
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
     privacy_log.install_hosted_log_redaction()
     caplog.set_level(logging.DEBUG)
     return logging.getLogger("exomem.test_privacy_structured_redaction")
@@ -83,7 +83,7 @@ def test_hosted_call_trace_line_passes_through_but_strips_exc_info(hosted_logger
 def test_non_hosted_structured_record_is_untouched(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.delenv(hosted_runtime.HOSTED_MODE_ENV, raising=False)
+    monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
     privacy_log.install_hosted_log_redaction()
     caplog.set_level(logging.DEBUG)
     logger = logging.getLogger("exomem.test_privacy_structured_redaction.nonhosted")

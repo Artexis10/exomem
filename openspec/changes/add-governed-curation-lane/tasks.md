@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 admission and package gates. Shared curation, remote maintenance refusal, portable evidence, and pending closure remain in scope.
+
 ## 1. Plan model and canonical store
 
 - [x] 1.1 Add red pure-logic tests for canonical plan JSON, plan/run ids, strict step schemas, binding manifests, fingerprints, size caps, collisions, and unknown-field refusal.
@@ -48,15 +50,6 @@
 - [x] 6.4 Add standalone restart tests proving the governed run artifacts, not a Hosted or machine-local service, are sufficient to inspect, recover, resume, and compensate.
 - [x] 6.5 Regenerate the golden MCP schema and generated capability documentation with an exact intentional-diff assertion for `maintain_memory` only.
 
-## 7. Hosted admission and release artifacts
-
-- [x] 7.1 Add the generic synthetic curation contribution input at `tests/fixtures/hosted_v5_contributions/governed_curation.json`; it is sibling-owned input outside the candidate tree, not a v5 release file.
-- [x] 7.2 In the single v5 owner lane, add red profile-version tests proving v1-v4 keep their pinned legacy schema and refuse curation-only arguments while v5 discovers curation and routes it through the generic registry boundary.
-- [x] 7.3 In that owner lane, make the request-bound `curation` exception conditional on the active profile's pinned schema; preserve pre-dispatch refusal for v1-v4 curation and for fix, reconcile, backfill, and unknown modes everywhere.
-- [x] 7.4 Add v5 tenant-isolation, entitlement, path-confinement, idempotency, process-restart recovery, and edge-duration tests for one-step execution without a candidate-specific executor.
-- [x] 7.5 Require the v5 owner to canonicalise and freeze the curation contribution into the candidate-owned combined fixture and include it in compatibility, package, lock, archive, promotion, and clean-client evidence; fixture drift MUST invalidate package verification.
-- [x] 7.6 Prove one complete v1-v4 immutability manifest covering source bytes, definitions, fixtures, promotion records, resolved command schemas, and actual-wire identities; generated packages, locks and archives are release-owned -- `release-please` regenerates them on every schema-contract move -- and are covered by the release parity gate and the `hosted-plugin.py check` freshness tests instead.
-
 ## 8. Agent contract and no-nudge integration
 
 - [x] 8.1 Add red scaffold tests that map work-item/propose/preview to `structural_suggestions` and apply/resume/compensation to confirm-required `restructure_execution`.
@@ -69,4 +62,4 @@
 - [x] 9.1 Run the affected curation, semantic writer, file governance, command-surface, mutation-terminal, Hosted, workflow-skill, and artifact-freshness suites with explicit scope. Evidence: tests/test_curation_*.py, semantic writer, file governance, command-surface, mutation-terminal, hosted, workflow-skill and artifact-freshness suites green on the delivered tip.
 - [x] 9.2 Run `ruff check`, the full lean pytest corpus, strict OpenSpec validation, lock/diff checks, privacy scan, and all release artifact freshness gates; record unrelated environmental failures separately from attributable failures. Evidence: ruff clean; full lean suite on the delivered tip; strict validate 182/182; lock/diff checks and privacy scan clean.
 - [x] 9.3 Exercise one multilingual forward plan, crash recovery, partial run, exact replay, and compensation end to end on both standalone and Hosted test harnesses. Evidence: standalone tests/test_curation_plan.py and tests/test_curation_execution.py (Finnish forward plans, terminal-receipt crash replay), tests/test_curation_compensation.py; Hosted tests/test_hosted_private_routes.py::test_v5_curation_* (isolation, one step per request, replay, process restart, fast-ack seam).
-- [ ] 9.4 After the shared v5 delivery and all four changes' merge/review evidence are complete, participate in the owner-controlled sync/archive sequence: `add-governed-curation-lane`, then `complete-recurring-entity-lifecycle`, then `preserve-adopted-generated-artifacts`, then `capture-durable-personal-baselines`, with strict validation before and after every archive.
+- [ ] 9.4 After current client acceptance and all four changes' merge/review evidence are complete, participate in the owner-controlled sync/archive sequence: `add-governed-curation-lane`, then `complete-recurring-entity-lifecycle`, then `preserve-adopted-generated-artifacts`, then `capture-durable-personal-baselines`, with strict validation before and after every archive.

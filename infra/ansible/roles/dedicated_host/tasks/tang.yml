@@ -10,7 +10,7 @@
     - name: Require the escrowed Tang keys
       ansible.builtin.assert:
         that: dedicated_host_tang_keys | length > 0
-        fail_msg: Pass dedicated_host_tang_keys from its SOPS file (docs/runbooks/hosted/dedicated-host.md).
+        fail_msg: Pass dedicated_host_tang_keys from its SOPS file (docs/runbooks/cloud-dedicated-host.md).
 
     - name: Validate the escrowed Tang keys
       ansible.builtin.set_fact:

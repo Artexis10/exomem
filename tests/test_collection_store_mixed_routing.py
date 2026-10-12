@@ -300,16 +300,16 @@ def test_mixed_file_routing_keeps_owner_natural_key_evidence(mixed):
         assert collection_claims.normalize_text(title) in target.natural_key_values
 
 
-@pytest.mark.parametrize("identity", ["unissued-owner", "hosted-tenant"])
+@pytest.mark.parametrize("identity", ["unissued-owner", "remote-tenant"])
 def test_unavailable_store_notices_require_fresh_owner_authority(mixed, monkeypatch, tmp_path, identity):
     """An owner label or RAW tenant exemption that exposes otherwise withheld C inventory metadata."""
-    from exomem.governance.principal import RequestPrincipal, resolve_hosted_principal
+    from exomem.governance.principal import RequestPrincipal, resolve_rest_principal
 
     broken = tmp_path / "unavailable.sqlite"
     broken.write_bytes(b"not a database")
     monkeypatch.setattr("exomem.collection_store.connection.store_path", lambda root: broken)
     who = (RequestPrincipal("owner", surface="mcp") if identity == "unissued-owner"
-           else resolve_hosted_principal("tenant:unrelated"))
+           else resolve_rest_principal("tenant:unrelated"))
     with request_scope(who):
         inventory = record_governance.inventory_collections(mixed.root)
     assert not any(row["path"] == manifest_path() for row in inventory["unreadable_manifests"])

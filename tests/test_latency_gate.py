@@ -45,6 +45,7 @@ import yaml
 
 from exomem import find as find_module
 from exomem import freshness, lexstore
+from exomem.governance import principal
 from exomem.vault import walk_vault_md
 
 # Reuse the ONE synthetic-vault generator (scripts/synth_vault.py).
@@ -186,9 +187,13 @@ def model_free(monkeypatch: pytest.MonkeyPatch):
         raise ImportError("model-free latency gate: vector lane disabled")
 
     monkeypatch.setattr(embeddings_module, "get_embedding_index", _raise)
-    yield
-    find_module.clear_cache()
-    freshness.clear()
+    # These benchmarks model an owner-local caller; admission cases keep explicit predicates.
+    with principal.library_scope():
+        try:
+            yield
+        finally:
+            find_module.clear_cache()
+            freshness.clear()
 
 
 @pytest.fixture
@@ -335,6 +340,7 @@ def test_warm_candidate_admission_reuses_checkpointed_projection(
         limit=10,
         mode="hybrid",
         graph=True,
+        admit_path=lambda _path: True,
     )
 
     assert calls <= note_count + 100, (
@@ -343,6 +349,8 @@ def test_warm_candidate_admission_reuses_checkpointed_projection(
     )
 
 
+# Two cold catalogue builds dominate this case's setup; the assertions bound warm query scaling.
+@pytest.mark.timeout(300)
 def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
     """Warm graph median at 4x the corpus stays within CEIL_GRAPH_RATIO (plus an
     absolute ms-scale noise floor) — so a linear-in-N warm cost cannot return

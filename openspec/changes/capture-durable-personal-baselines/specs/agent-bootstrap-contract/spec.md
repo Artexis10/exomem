@@ -3,8 +3,8 @@
 ### Requirement: Bootstrap teaches durable personal baseline capture
 Balanced and maximal bootstrap profiles SHALL expose a command-independent durable-personal-baseline contract in compact, full, and diagnostics views. The contract SHALL carry both eligibility discriminators, positive and negative boundaries, and Entity-versus-compiled-observation-versus-Records routing without naming unavailable commands. Off and light profiles SHALL retain their existing explicit-request-only semantics. The executed-method contract SHALL remain separately present and semantically unchanged.
 
-#### Scenario: Filtered Hosted descriptor retains the doctrine
-- **WHEN** compact bootstrap is rendered for a Hosted descriptor with a filtered command set
+#### Scenario: Filtered active descriptor retains the doctrine
+- **WHEN** compact bootstrap is rendered for an active descriptor with a filtered command set
 - **THEN** it still teaches the command-independent durability and reusable-comparison boundary and does not recommend an unavailable command
 
 #### Scenario: Prominent profiles carry the full boundary
@@ -18,4 +18,3 @@ Balanced and maximal bootstrap profiles SHALL expose a command-independent durab
 #### Scenario: Compact budget remains bounded
 - **WHEN** the new bootstrap contract is added
 - **THEN** duplicated prose is trimmed and the established compact byte budget remains satisfied
-

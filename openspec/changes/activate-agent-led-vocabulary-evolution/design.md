@@ -89,7 +89,7 @@ This change may deliver its consideration protocol and guidance while v1 remains
 | `add-governed-curation-lane` | Reviewed multi-step execution/recovery | Use for combined plans; single additive leaves do not invent a plan runner |
 | This change | Common queue/decisions, ordinary agent cadence, additive authority | Own shared adapters, bootstrap and authority guards |
 
-Before integration, amend the two active predecessor plans' confirm-only language to be explicitly v1, with an explicit dependency on this change for v2. Until that reconciliation and code evidence exist, those plans remain confirm-only and no task here may claim their work implemented. Preserve their scenario requirements and frozen hosted contributions; evolve the current candidate, never v1-v4 release artifacts. Completing this change requires the integration tasks, not only a newly available endpoint.
+Before integration, amend the two active predecessor plans' confirm-only language to be explicitly v1, with an explicit dependency on this change for v2. Until that reconciliation and code evidence exist, those plans remain confirm-only and no task here may claim their work implemented. Preserve their shared scenario requirements and evolve current local and Cloud surfaces. Completing this change requires the integration tasks, not only a newly available endpoint.
 
 ### 6. Acceptance measures meaning and use
 

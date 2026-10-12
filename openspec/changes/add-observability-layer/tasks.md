@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes server_hosted instrumentation and Hosted trace prefixes. Shared privacy logging, MCP/REST telemetry, and unchecked observability work remain in scope.
+
 ## 1. O1 — Logging core
 
 - [x] 1.1 Add `src/exomem/log_events.py`: `log_event()` helper attaching

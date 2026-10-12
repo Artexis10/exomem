@@ -73,10 +73,6 @@ infra/secrets/age.key
 infra/secrets/*.agekey
 infra/secrets/**/*.agekey
 infra/secrets/receipts/**/*.handoff.lock
-infra/provisioner/.mypy_cache/
-infra/provisioner/.ruff_cache/
-infra/provisioner/.pytest_cache/
-infra/provisioner/*.sqlite*
 .refs.sqlite
 .lexical.sqlite*
 snapshot_report.html

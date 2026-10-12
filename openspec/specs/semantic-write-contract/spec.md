@@ -566,6 +566,34 @@ For an existing page with a unique valid stable memory UUID, a reviewed-none lif
 
 Lifecycle decisions and prepared slots SHALL NOT be created or loaded for path-only legacy identities. A legacy page requiring reviewed-none SHALL first acquire a stable UUID through the explicit backfill workflow. Decision lookup SHALL be direct by UUID/current fingerprint, alias/symlink/reparse safe, and bounded to 256 conforming decision files per UUID; overflow or unsafe/malformed exact lifecycle state SHALL fail closed with governed cleanup guidance. The immutable 6D v1/v2 receipt at `relation-reviews/<uuid>.json` SHALL NOT be overwritten, deleted, reinterpreted, or migrated. Any conforming lifecycle artifact SHALL reserve its UUID against later creation even when the page is absent and no creation receipt exists; unsafe or malformed lifecycle state at that exact UUID SHALL likewise fail creation closed as identity-in-use. Trash/delete SHALL preserve that history. Recovery MAY replace the last committed prepared slot only when the trash sidecar, original path, UUID, and trashed bytes exactly prove its committed after state and no live page owns the UUID. Reconcile SHALL preserve and report that `trashed_committed` proof and SHALL remove only a neither-side prepared slot with no exact trash proof.
 
+Lifecycle decisions and prepared slots SHALL inherit operational admission only from their exact admitted primary UUID and transition. Both current and proposed primary images SHALL remain admitted. Auxiliary path and reference restrictions and access exclusions SHALL still apply. Publication SHALL bind exact generated lifecycle paths, bytes, hashes, and guards through the existing sealed auxiliary manifest. Creation receipts, operation logs, history, indexes, and backreferences SHALL retain independent admission.
+
+The writer SHALL establish admission before inspecting required prepared slots, requested decisions, or decisions referenced by admitted prepared slots. Denied absent and present targets SHALL produce the same content-free refusal. Directory enumeration SHALL filter denied names before leaf inspection, alias checks, encoding, residue classification, and capacity counts. Forward rechecks SHALL preserve the captured admitted census and detect source, permission, directory, or leaf changes.
+
+For a restricted caller, the 256-decision bound SHALL count only admitted lifecycle decisions. Denied siblings SHALL affect neither advice nor transition outcomes, including when physical directories exceed the admitted decision or residue bounds. Unrestricted callers SHALL retain the 256-decision bound and all unsafe-state checks. Publication entry, publication completion, and committed replay SHALL recheck primary admission and source bindings.
+
+After an ordinary publication failure, rollback SHALL restore only exact unchanged installed artifacts through retained full ancestry and directory identities. Rollback SHALL NOT invoke live caller admission or enumerate unrelated lifecycle siblings. Each inverse attempt and retry SHALL prove installed content at the maintained operation boundary. An intervening owned edit or namespace substitution SHALL remain untouched and produce an explicit incomplete rollback. An unrelated new sibling SHALL remain untouched without preventing restoration of unchanged owned artifacts.
+
+#### Scenario: Restricted stable-identity edit retains operational state
+- **WHEN** a restricted caller edits an admitted compiled page with a stable UUID
+- **THEN** exact bound lifecycle artifacts are admitted without granting the enclosing schema directory or unrelated auxiliary writes
+
+#### Scenario: Denied lifecycle siblings do not change an admitted transition
+- **WHEN** two otherwise identical edits differ only in denied lifecycle siblings, including siblings beyond physical history or residue bounds
+- **THEN** both edits have the same advice and transition outcome while admitted history still obeys its bound
+
+#### Scenario: Required lifecycle denial precedes existence
+- **WHEN** a required prepared slot or decision is denied, whether absent or present
+- **THEN** the writer returns the same content-free refusal before inspecting that target
+
+#### Scenario: Revocation after publication restores owned lifecycle state
+- **WHEN** permission is revoked after the primary replacement and completion validation refuses the transition
+- **THEN** rollback restores unchanged primary bytes and removes newly installed lifecycle artifacts without inspecting revoked sibling state
+
+#### Scenario: Concurrent owned edit survives rollback
+- **WHEN** an outside writer changes installed bytes or ancestry before an inverse operation or retry
+- **THEN** rollback preserves that state and reports an explicit incomplete outcome
+
 #### Scenario: Inactive page activates with reviewed-none
 - **WHEN** an inactive stable-ID page is validated and committed into an active state with an exact reviewed-none decision
 - **THEN** the immutable decision and prepared transition are installed before the active primary becomes visible

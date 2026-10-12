@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted candidate contribution and promotion. Shared recurring-entity semantics remain unchanged. Closure requires surviving local/Cloud implementation, review, and merge evidence.
+
 ## 1. Freeze lifecycle behavior with red tests
 
 - [x] 1.1 Replace the plain-text blanket-exclusion test with paired red fixtures for three-origin reusable-facet positives and a frequency-matched incidental twin that stays quiet.
@@ -54,5 +56,5 @@
 - [x] 7.2 Run Ruff, targeted type checks, package and import gates, generated-contract gates, and the full lean suite. Evidence: ruff clean over the branch diff; generated-contract gates (tool surface, MCP schema fixture, plugin sync) green; full lean suite on the delivered tip diffed against the origin/main baseline, see PR body.
 - [x] 7.3 Run `openspec validate --all --strict`.
 - [x] 7.4 Reconcile stale fixed-registry and prose-inference claims in `harden-write-and-entity-capture` before implementation delegation. Evidence: commit a8091216 removed the fixed-registry increment from harden-write-and-entity-capture/design.md.
-- [ ] 7.5 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
+- [ ] 7.5 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
   Pointer: `promote-referents-without-nudges` amends this change's `delegation-envelope` delta (design decision 2, owner decision O2): an owner's type save and an owner-authored typed edge follow `proactive_capture`, and only a queue-suggested relation keeps `link_acceptance`.

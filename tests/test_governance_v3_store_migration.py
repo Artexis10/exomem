@@ -28,6 +28,9 @@ def _custody_paths(
 ) -> Iterator[None]:
     external = tmp_path / "external"
     external.mkdir(mode=0o700)
+    host_control = tmp_path / "host-control"
+    host_control.mkdir(mode=0o700, exist_ok=True)
+    monkeypatch.setattr(authorization_custody, "_standalone_host_control_root", lambda: host_control)
     lease_state = tmp_path / "lease-state"
     lease_state.mkdir(mode=0o700)
     if os.name == "nt":  # pragma: no cover - exercised by Windows CI

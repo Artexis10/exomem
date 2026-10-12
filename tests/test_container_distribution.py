@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ATTEST_ACTION = "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
 
 
 def _read(path: str) -> str:
@@ -31,50 +30,43 @@ def test_dockerfile_declares_cuda_target_as_capable_not_resident() -> None:
     assert "EXOMEM_MODE=performance" not in text
 
 
-def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
+def test_dockerfile_has_a_fixed_nonroot_immutable_cloud_target() -> None:
     text = _read("Dockerfile")
-    hosted = text.split("FROM python:3.12-slim AS cell-runtime", 1)[1].split(
+    cell = text.split("FROM python:3.12-slim AS cell-runtime", 1)[1].split(
         "FROM python:3.12-slim AS lean", 1
     )[0]
 
-    assert "ARG EXOMEM_RELEASE_BUILD_TIME" in hosted
-    assert 'test -n "$EXOMEM_RELEASE_BUILD_TIME"' in hosted
-    assert "EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME}" in hosted
-    assert "EXOMEM_CONTAINER_VARIANT=hosted" in hosted
-    assert "PYTHONDONTWRITEBYTECODE=1" in hosted
-    assert "USER 10001:10001" in hosted
-    assert "ENTRYPOINT [\"exomem\"]" in hosted
-    assert "VOLUME" not in hosted
+    assert "ARG EXOMEM_RELEASE_BUILD_TIME" in cell
+    assert 'test -n "$EXOMEM_RELEASE_BUILD_TIME"' in cell
+    assert "EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME}" in cell
+    assert "EXOMEM_CONTAINER_VARIANT=cloud" in cell
+    assert "PYTHONDONTWRITEBYTECODE=1" in cell
+    assert "USER 10001:10001" in cell
+    assert "ENTRYPOINT [\"exomem\"]" in cell
+    assert "VOLUME" not in cell
 
 
 def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
     """A cell can fetch nothing under its no-egress policy and read-only root,
-    so each image carries and names exactly the model its cells resolve: the
-    English model in the hosted image, and bge-m3, which a personal server
-    also runs, in the cloud image. Each model's build stage fetches it and
-    loads it offline at its declared width."""
+    so the cloud image carries and names exactly the model its cells resolve:
+    bge-m3, which a personal server also runs. The model's build stage fetches
+    it and loads it offline at its declared width."""
     from exomem import recall_space
 
-    hosted_model = recall_space.configured_recall_model({"EXOMEM_HOSTED_CELL": "1"})
     cloud_model = recall_space.configured_recall_model({"EXOMEM_CLOUD_CELL": "1"})
-    assert (hosted_model, cloud_model) == (recall_space.LEGACY_MODEL, recall_space.PERSONAL_MODEL)
+    assert cloud_model == recall_space.PERSONAL_MODEL
     text = _read("Dockerfile")
 
     def stage(header: str) -> str:
         return text.split(header, 1)[1].split("\nFROM ", 1)[0]
 
-    builder = stage("FROM builder-lean AS builder-hosted")
-    hosted = stage("FROM cell-runtime AS hosted")
     cloud_builder = stage("FROM builder-hosted AS builder-cloud-model")
     cloud = stage("FROM cell-runtime AS cloud")
 
-    for part in (builder, hosted):
-        assert f"{recall_space.RECALL_MODEL_ENV}={hosted_model}" in part
     for part in (cloud_builder, cloud):
         assert f"{recall_space.RECALL_MODEL_ENV}={cloud_model}" in part
-    for part in (builder, cloud_builder):
-        assert "HF_HUB_OFFLINE=1" in part
-        assert "recall_space.declared_dim(MODEL_NAME)" in part
+    assert "HF_HUB_OFFLINE=1" in cloud_builder
+    assert "recall_space.declared_dim(MODEL_NAME)" in cloud_builder
     # The cloud builder fetches into a root of its own, so the English model
     # it was built over never reaches the cloud image.
     assert "HF_HOME=/opt/exomem-cloud-models" in cloud_builder
@@ -104,65 +96,6 @@ def test_release_workflow_publishes_cuda_tags() -> None:
     assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda"' in text
 
 
-def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> None:
-    text = _read(".github/workflows/release-please.yml")
-
-    assert text.count("target: hosted") == 1
-    # The hosted build and the cloud build both carry the tag commit's time.
-    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
-    assert '"hosted ghcr.io/artexis10/exomem:$version-hosted hosted"' in text
-    assert text.count("build_time=$(git show -s --format=%cI HEAD)") == 1
-
-
-def test_release_workflow_publishes_digest_authoritative_hosted_candidates() -> None:
-    text = _read(".github/workflows/release-please.yml")
-    job = _workflow_job(text, "publish-image")
-
-    proof_step = job.split(
-        "\n      - name: Verify the hosted runtime image and signed candidate\n", 1
-    )[1].split("\n      - name:", 1)[0]
-    assert "contents: write" in job
-    assert "packages: write" in job
-    assert "id-token: write" in job
-    assert "attestations: write" in job
-    assert "id: hosted-build" in job
-    assert "steps.hosted-build.outputs.digest" in job
-    assert 'discovery_tag="ghcr.io/artexis10/exomem:${SOURCE_COMMIT}-hosted"' in job
-    assert "org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}" in job
-    # Each image and the hosted candidate file retain original attestations.
-    assert job.count(ATTEST_ACTION) == 7
-    assert "subject-name: ghcr.io/artexis10/exomem" in job
-    assert "subject-digest: ${{ steps.hosted-build.outputs.digest }}" in job
-    assert "subject-path: ${{ steps.runtime-candidate.outputs.candidate }}" in job
-    assert "push-to-registry: true" in job
-    assert job.count("create-storage-record: false") == 7
-    assert "infra/scripts/hosted_image_candidate.py record" in job
-    assert "infra/scripts/hosted_image_candidate.py verify" in job
-    assert "GH_TOKEN: ${{ github.token }}" in proof_step
-    assert "--candidate-bundle" in job
-    assert "candidate.sigstore.json" in job
-    assert "--attestation-id" not in job
-    assert "--attestation-url" not in job
-    assert 'docker run --rm --network=none "$IMMUTABLE_IMAGE" --version' in job
-    assert 'test "$observed_version" = "exomem ${VERSION}"' in job
-    assert 'test "$observed_revision" = "$SOURCE_COMMIT"' in job
-    assert '--source-repository "$GITHUB_REPOSITORY"' in job
-    assert (
-        '--producer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-please.yml"'
-        in job
-    )
-    assert '--release "$VERSION"' in job
-    assert "--storage-kind github-release" in job
-    assert "--producer-oidc-source-ref" in job
-    assert "--source-ref" in job
-    assert "GITHUB_RUN_ID" in job and "GITHUB_RUN_ATTEMPT" in job
-    assert "release_recovery.py finish-images" in job
-    assert '"$CANDIDATE_BUNDLE"' in job
-    assert "--clobber" not in job
-    assert "exomem-hosted-release-v1.json" not in job
-    assert "substrate-gateway-contract-selection" not in job
-
-
 def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
     text = _read(".github/workflows/release-please.yml")
     automatic = _workflow_job(text, "publish-image")
@@ -175,37 +108,6 @@ def test_release_workflow_publishes_attested_cloud_image_by_digest() -> None:
     assert "push-by-digest=true" in cloud
     assert "release-image-evidence-cloud" in cloud
     assert "release_recovery.py finish-images" in cloud
-
-
-def test_manual_release_can_sign_an_explicit_records_rollback_runtime_target() -> None:
-    text = _read(".github/workflows/release-please.yml")
-    plan = _workflow_job(text, "plan", "build-artifacts")
-    manual = _workflow_job(text, "publish-image")
-
-    assert "records_rollback_runtime_target_json:" in text
-    assert "required: false" in text.split(
-        "records_rollback_runtime_target_json:", 1
-    )[1].split("\njobs:", 1)[0]
-    # A push has no dispatch inputs, so only an explicit request signs the claim, and
-    # a hand-off carries that request to the run on the tag.
-    assert text.count("${{ inputs.records_rollback_runtime_target_json }}") == 3
-    assert "RECORDS_TARGET: ${{ inputs.records_rollback_runtime_target_json }}" in plan
-    assert "records_rollback_runtime_target_json: $records" in plan
-    assert (
-        "RECORDS_RUNTIME_TARGET_JSON: "
-        "${{ inputs.records_rollback_runtime_target_json }}"
-    ) in manual
-    for flag in (
-        "--records-profile hosted-alpha-agent-v1",
-        "--records-reader-version 2",
-        "--lifecycle-actions-enabled false",
-        "--records-issued-at",
-        "--records-expires-at",
-        "--records-runtime-target-json",
-    ):
-        assert flag in manual
-    assert 'if [[ -n "$RECORDS_RUNTIME_TARGET_JSON" ]]' in manual
-    assert '"${records_compatibility_args[@]}"' in manual
 
 
 def test_release_publish_runs_only_on_the_tag_commit() -> None:
@@ -240,65 +142,6 @@ def test_release_publication_jobs_checkout_the_created_tag() -> None:
         assert "ref: main" not in job
     # PyPI receives the wheel and sdist that build-artifacts built from the tag.
     assert "name: python-distributions" in _workflow_job(text, "publish-pypi", "publish-mcp-registry")
-
-
-V2_OPENAI_APP = "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json"
-
-
-def _assert_openai_app_id_derivation(flow: str, command: str) -> None:
-    assert "openai_app_id=\"$(python - <<'PY'" in flow
-    assert f'Path("{V2_OPENAI_APP}")' in flow
-    assert 'print(app["apps"]["exomem"]["id"])' in flow
-    assert 'PY\n          )"' in flow
-    assert (
-        f"{command} --candidate hosted-alpha-agent-v2 --platform all "
-        '--openai-app-id "$openai_app_id"'
-    ) in flow
-    assert f"cat {V2_OPENAI_APP}" not in flow
-    assert 'echo "$openai_app_id"' not in flow
-    assert "plugin_asdk_app_" not in flow
-
-
-def _assert_parity_candidate_derivation(flow: str, command: str) -> None:
-    assert 'parity_candidate="$(uv run --frozen python - <<\'PY\'' in flow
-    assert "from exomem.hosted_plugins import PARITY_CANDIDATE" in flow
-    assert "print(PARITY_CANDIDATE)" in flow
-    assert 'PY\n          )"' in flow
-    assert (
-        f'{command} --candidate "$parity_candidate" --platform all '
-        '--openai-app-id "$openai_app_id"'
-    ) in flow
-    assert "hosted-alpha-agent-v4" not in flow
-
-
-def _assert_baseline_candidate_derivation(flow: str, command: str) -> None:
-    assert 'baseline_candidate="$(uv run --frozen python - <<\'PY\'' in flow
-    assert "from exomem.hosted_plugins import BASELINE_CANDIDATE" in flow
-    assert "print(BASELINE_CANDIDATE)" in flow
-    assert 'PY\n          )"' in flow
-    assert (
-        f'{command} --candidate "$baseline_candidate" --platform all '
-        '--openai-app-id "$openai_app_id"'
-    ) in flow
-    assert "hosted-alpha-agent-v5" not in flow
-
-
-def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> None:
-    text = _read(".github/workflows/release-please.yml")
-    sync = _workflow_job(text, "sync-hosted-artifacts", "plan")
-    render = sync.split("\n      - name: Regenerate hosted plugin artifacts\n", 1)[1].split(
-        "\n      - name: Verify the regenerated artifacts are current\n", 1
-    )[0]
-    check = sync.split("\n      - name: Verify the regenerated artifacts are current\n", 1)[
-        1
-    ].split("\n      - name: Commit the resync onto the release PR\n", 1)[0]
-
-    _assert_openai_app_id_derivation(render, "render")
-    _assert_openai_app_id_derivation(check, "check")
-    _assert_parity_candidate_derivation(render, "render")
-    _assert_parity_candidate_derivation(check, "check")
-    _assert_baseline_candidate_derivation(render, "render")
-    _assert_baseline_candidate_derivation(check, "check")
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:

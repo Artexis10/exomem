@@ -16,7 +16,7 @@ import pytest
 from test_episode_records_leaf import COLLECTION, READING, _collection, _container, _entries
 
 from exomem import commands, graph_sync, record_history, registry_history, writer_lease
-from exomem import hosted_portability as portability
+from exomem import vault_portability as portability
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.vault import parse_frontmatter
 
@@ -271,10 +271,9 @@ def test_a_deep_history_reads_one_bounded_page_and_reports_truncation(
 
 
 def test_export_and_restore_carry_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from test_hosted_restore_candidate import _bootstrap, _request
+    from dataclasses import replace
 
     from exomem import init as init_module
-    from exomem.hosted_restore import restore_candidate
 
     source = tmp_path / "source"
     init_module.init_vault(source)
@@ -286,24 +285,19 @@ def test_export_and_restore_carry_history(tmp_path: Path, monkeypatch: pytest.Mo
         before = _history(source, key)
     # Export takes a quiesced vault: the writes' background graph rebuild must land first.
     assert graph_sync.drain_active_rebuilds()
-    exported = portability.export_quiesced_vault(
-        source,
-        tmp_path / "artifacts",
-        context=portability.PortabilityContext(
-            cell_id="source-cell",
-            vault_id="logical-vault",
-            operation_id="export-operation",
-            created_at="2026-10-05T10:00:00+00:00",
-            operator_authorized=True,
-            lifecycle_state="quiesced",
-            routing_stopped=True,
-            active_mutations=0,
-            background_writers_stopped=True,
-            reads_allowed=True,
-        ),
+    context = portability.PortabilityContext(
+        cell_id="source-cell", vault_id="logical-vault", operation_id="export-operation",
+        created_at="2026-10-05T10:00:00+00:00", operator_authorized=True,
+        lifecycle_state="quiesced", routing_stopped=True, active_mutations=0,
+        background_writers_stopped=True, reads_allowed=True,
     )
-
-    restore_candidate(_request(tmp_path, exported), bootstrap_security=_bootstrap)
+    exported = portability.export_quiesced_vault(source, tmp_path / "artifacts", context=context)
+    prepared = portability.prepare_restore(
+        exported.archive_path, tmp_path / "staging",
+        context=replace(context, lifecycle_state="restore-staging", operation_id="restore-operation"),
+    )
+    restored = portability.publish_prepared_restore(prepared, tmp_path / "target-vault")
+    assert restored.state == "published" and restored.lexical_ready
 
     with request_scope(owner_principal(surface="mcp")):
         after = _history(tmp_path / "target-vault", key)

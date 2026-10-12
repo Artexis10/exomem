@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gateway forwarding. Exact adoption, no-handle truth, shared fixtures, and pending client traces remain in scope. Historical Hosted evidence does not close current client acceptance.
+
 ## 1. Red-first adoption fixtures
 
 - [x] 1.1 Add generic draft, selection, rejection, approval, and delivery lifecycle fixtures with explicit zero-write expectations for unadopted variants.
@@ -20,13 +22,11 @@
 - [x] 3.3 Add capability-sensitive no-handle behavior that reports unavailable or non-committing handoff without false save language.
 - [x] 3.4 Add delegation-envelope and carrier tests proving selection/approval is an adoption fact, not write confirmation: Source/Evidence adoption and delivery Records obey `proactive_capture`, explicit save remains requested action, and missing-collection proposals/changes stay structural and confirmed.
 
-## 4. Hosted v5 candidate
+## 4. Current client acceptance
 
-- [x] 4.1 Add the generic synthetic artifact contribution input at `tests/fixtures/hosted_v5_contributions/artifact_adoption.json`; do not edit, render, lock, archive, promote, or roll back v5 files from this lane.
-- [x] 4.2 Require the single v5 owner to validate, canonicalise, and freeze the artifact input into the candidate-owned combined fixture while preserving v4 command order and withholding `transfer_artifact` until a real bridge exists.
-- [x] 4.3 Prove the shared combined fixture digest includes artifact behavior alongside baseline, recurring-entity, and governed-curation behavior and is bound by the owner's compatibility, package, lock, archive, and promotion gates; fixture drift MUST invalidate package verification.
-- [ ] 4.4 Supply clean supported-client traces for Source and Evidence direct adoption, sibling no-write, no-handle handoff, receipt-linked delivery, and no false remote-byte claim before owner render/promotion.
-- [x] 4.5 Verify pre-lock rebuild and post-promotion v6-only correction semantics through the owner's shared-v5 rollback tests.
+Hosted candidate tasks 4.1–4.3 and 4.5 are superseded, not current release obligations.
+
+- [ ] 4.4 Supply clean supported-client traces for direct adoption, sibling no-write, honest no-handle handoff, and receipt-linked delivery.
 
 ## 5. Mutants and verification
 
@@ -37,4 +37,4 @@
 
 ## 6. OpenSpec closure
 
-- [ ] 6.1 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
+- [ ] 6.1 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
