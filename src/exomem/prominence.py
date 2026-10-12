@@ -144,8 +144,9 @@ CONTEXTS: tuple[str, ...] = (CODING_CONTEXT, CONVERSATION_CONTEXT)
 
 _PROMINENCE_ENV = "EXOMEM_PROMINENCE"
 _SURFACE_ENV = "EXOMEM_SURFACE"
-#: Mirrors `hosted_runtime.HOSTED_MODE_ENV`. Read directly rather than importing that
-#: module: this one is on the bootstrap hot path and must stay cheap to import.
+#: The retired Hosted cell flag, still honoured as a content-private cell flag
+#: (`privacy_log.content_private_logging_enabled`). Read directly: this module is
+#: on the bootstrap hot path and must stay cheap to import.
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 

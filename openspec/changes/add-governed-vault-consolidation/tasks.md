@@ -1,5 +1,7 @@
 # Tasks
 
+Retirement removes Hosted adapters, gateway work, and Hosted restore acceptance. Checked Hosted test references below record historical dependency evidence. Current generic connector, vocabulary, and offline import obligations remain in force.
+
 Delivery A is the current implementation batch. Deliveries B and C remain required for T16 and precede real managed-vault consolidation. All checks use temporary state unless an operator authorizes a named live operation.
 
 Evidence for the checked Delivery A tasks. Each test passed in a scoped local run on head 9cbfe771a, and the pull request's CI runs the full corpus. Delivery A lands as commit 168922522 on base 8365f0e92 (#1614). The branch later merged main at 7b242bfa8 and also carries Delivery B. Commit dfa5870c3 followed and added two move tests and one find-consumer test. They passed with the first group's files (48 tests) and count under 3.5 and 4.3. Tests that run the actual older runtime need an exomem 0.106.0 environment in `EXOMEM_TEST_OLDER_READER_PYTHON`, as CI installs it.
@@ -95,11 +97,11 @@ Open: 3.2, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.7, 5.6 and 6.1 are implemented w
 - [x] 5.5 Run the actual older runtime against an armed root; record refusal without patching its capability catalogue or deleting the guard.
 - [ ] 5.6 Document maintenance arming, restore configuration, and rollback to isolation; verify examples against temporary state and preserve guard requirements.
   Gap: `docs/connector-boundaries.md` documents arming and restore configuration. It does not document rollback to isolation.
-- [x] 5.7 Record shared-cell provenance limits and the gateway dependency; prove armed hosted requests use the restricted default without extending the RAW exemption.
-- [x] 5.8 Share hosted journal mechanics with standalone restore; reserve the exact proposal before rename and persist missing documents before issuance.
+- [x] 5.7 Record shared-cell provenance limits and the restricted default. Hosted gateway work and its RAW exemption are retired.
+- [x] 5.8 Use the shared journal owner for standalone restore; reserve the exact proposal before rename and persist missing documents before issuance.
 - [x] 5.9 Resume the original Scope proposal before policy loading; verify Scope, receipt, and pending-marker residue through canonical owners across separate evidence and authority roots.
 - [x] 5.10 Share versioned complete-continuity evidence across protective proposal creation, commit, and recovery; retain membership for admission and prove full scaffold preservation and tamper refusal.
-- [x] 5.11 Exercise legacy and enrolled v4 destinations, hosted recovery, process death, preserved destination inodes, changed custody and identities, tampered mirrors, invented events, and missing destination heads.
+- [x] 5.11 Exercise legacy and enrolled v4 destinations, process death, preserved destination inodes, changed custody and identities, tampered mirrors, invented events, and missing destination heads.
 
 ## 6. Delivery A: integrated acceptance and release
 

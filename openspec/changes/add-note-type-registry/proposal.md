@@ -22,7 +22,7 @@ S4b, the write side and promotion:
 
 - Promote a type under a parent that supplies its role and flags.
 - Move the typed writer's folders, partitions, stems, required fields, statuses, sections and typed fields onto the registry. Create the index entry for a new folder.
-- Add one generic `fields` parameter to `remember` and `replace_memory` on the current tool surfaces, including hosted v5, and never on released profiles.
+- Add one generic `fields` parameter to `remember` and `replace_memory` on the current tool surfaces, including Cloud, and never on released profiles.
 - Remove the type-key debt that S4a leaves, and unify type normalisation as a deliberate, proven change.
 - Bind the claim store to the registry digest, and let statuses follow the note-type admission rule for callers who cannot admit the overlay.
 
@@ -42,5 +42,5 @@ S4b, the write side and promotion:
 - Dependency: `add-lifecycle-status-registry` (S3) merges first. Both changes edit the semantic authoring contract and its version, and S4a reuses the S3 operation basis. S4a rebases on S3 and refreshes its modified requirement against the synchronized S3 text.
 - Code, S4a: a new `note_types` adapter and pack, and predicate calls in about 24 modules. Among them are `ranking_config`, `find_policy`, `find`, `semantic_contract`, `semantic_authoring`, `lexstore`, `activation` and `audit`.
 - Code, S4b: `note`, `commands`, `indexes`, `init`, `create_file`, `adoption_proposals`, `compile_proposal`, `claims`, `audit_fix`, `find_types`, `vault`, `knowledge_packs` and the capture clients.
-- Published surface: S4a adds no tool parameter. It regenerates the skill scaffold, the plugin copies, the cloud plugin and the live hosted candidate. S4b adds one parameter to the current surfaces, including hosted v5. Released hosted profiles v1 to v4 keep their descriptors, schemas and authoring contract.
+- Published surface: S4a adds no tool parameter. It regenerates the skill scaffold, the plugin copies, the cloud plugin and the live hosted candidate. S4b adds one parameter to the current surfaces, including Cloud. Hosted profile preservation is superseded by retirement.
 - Vaults: the upgrade rewrites no page and no overlay. An unchanged vault resolves every type as before.

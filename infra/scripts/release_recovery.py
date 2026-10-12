@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,7 +24,6 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
-import hosted_image_candidate as candidate_tool
 from packaging.utils import (
     InvalidSdistFilename,
     InvalidWheelFilename,
@@ -32,7 +32,59 @@ from packaging.utils import (
     parse_wheel_filename,
 )
 from packaging.version import Version
-from verify_hosted_release import runtime_candidate_assets
+
+# GitHub's image attestation protocol fixes this predicate and these field formats.
+SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
+
+
+def _digest(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    # OCI SHA256 digests use a fixed lowercase hexadecimal format.
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{label} must be a sha256 digest")
+    return value
+
+
+def _run_number(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    # GitHub Actions run IDs and attempts are positive decimal protocol fields.
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise ValueError(f"{label} must be a positive decimal string")
+    return value
+
+
+def _verified_statements(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("attestation verification output must contain verification results")
+    statements: list[dict[str, object]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ValueError("attestation verification result is malformed")
+        verification_result = entry.get("verificationResult")
+        if not isinstance(verification_result, dict):
+            raise ValueError("attestation verification result is malformed")
+        statement = verification_result.get("statement")
+        if not isinstance(statement, dict):
+            raise ValueError("attestation verification output statement is malformed")
+        statements.append(cast(dict[str, object], statement))
+    return statements
+
+
+def _require_verified_subject(
+    statement: dict[str, object], name: str, digest: str, *, label: str
+) -> None:
+    subjects = statement.get("subject")
+    if not isinstance(subjects, list) or len(subjects) != 1 or not isinstance(subjects[0], dict):
+        raise ValueError("verified statement must contain exactly one subject")
+    subject = cast(dict[str, object], subjects[0])
+    expected_digest = digest.removeprefix("sha256:")
+    if set(subject) != {"name", "digest"} or subject["name"] != name:
+        raise ValueError(f"verified statement subject does not equal {label}")
+    subject_digest = subject["digest"]
+    if not isinstance(subject_digest, dict) or subject_digest != {"sha256": expected_digest}:
+        raise ValueError(f"verified statement subject digest does not equal {label}")
 
 
 def run(*args: str) -> str:
@@ -373,7 +425,7 @@ def image_digest(reference: str) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             digest = response.headers["Docker-Content-Digest"]
-            candidate_tool._digest(digest, label="registry manifest digest")
+            _digest(digest, label="registry manifest digest")
             return digest
     except urllib.error.HTTPError as error:
         if error.code == 404:
@@ -425,8 +477,14 @@ def verify_build_target(image: str, name: str) -> None:
 def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, name: str) -> str:
     envelope = json.loads(bundle.read_text())["dsseEnvelope"]
     statement = json.loads(base64.b64decode(envelope["payload"]))
-    subject = statement["subject"][0]
-    digest = "sha256:" + subject["digest"]["sha256"]
+    try:
+        digest_hex = statement["subject"][0]["digest"]["sha256"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise ValueError("image receipt subject digest is malformed") from error
+    if not isinstance(digest_hex, str):
+        raise ValueError("image receipt subject digest must be a non-empty string")
+    digest = _digest("sha256:" + digest_hex, label="image receipt subject digest")
+    _require_verified_subject(statement, repository, digest, label="release image")
     target = f"{repository}@{digest}"
     verified = json.loads(
         run(
@@ -448,13 +506,13 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
             f"refs/tags/{tag}",
             "--deny-self-hosted-runners",
             "--predicate-type",
-            candidate_tool.SLSA_PREDICATE,
+            SLSA_PREDICATE,
             "--format",
             "json",
         )
     )
-    for proof in candidate_tool._verified_statements(verified):
-        candidate_tool._require_verified_subject(proof, repository, digest, label="release image")
+    for proof in _verified_statements(verified):
+        _require_verified_subject(proof, repository, digest, label="release image")
         predicate = cast(dict, proof["predicate"])
         invocation = urlsplit(predicate["runDetails"]["metadata"]["invocationId"])
         prefix = f"/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
@@ -470,8 +528,8 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
         parts = invocation.path.removeprefix(prefix).split("/")
         if len(parts) != 3 or parts[1] != "attempts":
             raise ValueError("signed producer invocation has no exact attempt")
-        run_id = candidate_tool._run_number(parts[0], label="signed producer run")
-        attempt = candidate_tool._run_number(parts[2], label="signed producer attempt")
+        run_id = _run_number(parts[0], label="signed producer run")
+        attempt = _run_number(parts[2], label="signed producer attempt")
         expected = f"exomem-image-{name}-{commit}-{digest.removeprefix('sha256:')}-{run_id}-{attempt}.sigstore.json"
         if bundle.name != expected:
             raise ValueError("receipt locator differs from the signed producer invocation")
@@ -480,49 +538,23 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
 
 
 def image_evidence(tag: str, commit: str, directory: Path) -> None:
-    # Prefixes identify the existing hosted triplet and image Sigstore receipts.
+    # These prefixes identify the release contract's image Sigstore receipts.
     names = [
         a["name"]
         for a in release_assets(tag)
-        if a["name"].startswith(("exomem-hosted-runtime-", "exomem-image-"))
+        if a["name"].startswith("exomem-image-")
     ]
     download_release(tag, names, directory)
-    producer_artifacts(
-        tag, commit, ("hosted-runtime-candidate-", "release-image-evidence-"), directory
-    )
+    producer_artifacts(tag, commit, ("release-image-evidence-",), directory)
 
 
 def recovered_image(
     name: str, repository: str, tag: str, commit: str, directory: Path
 ) -> tuple[str | None, list[Path]]:
     found: dict[str, list[Path]] = {}
-    if name == "hosted":
-        for path in directory.glob("*.candidate-v1.json"):
-            candidate = candidate_tool.load_candidate(path)
-            # load_candidate validates these string fields before returning the JSON object.
-            source = cast(dict[str, str], candidate["source"])
-            release = cast(dict[str, str], candidate["release"])
-            image = cast(dict[str, str], candidate["image"])
-            if source["commit"] != commit or release["tag"] != tag:
-                continue
-            stem = path.name.removesuffix(".candidate-v1.json")
-            bundle = directory / f"{stem}.sigstore.json"
-            signature = directory / f"{stem}.candidate.sigstore.json"
-            if not bundle.is_file() or not signature.is_file():
-                continue
-            runtime_candidate_assets(
-                [
-                    {"name": item.name, "size": item.stat().st_size}
-                    for item in (path, bundle, signature)
-                ]
-            )
-            candidate_tool.verify_candidate(path, bundle=bundle, candidate_bundle=signature)
-            verify_build_target(image["reference"], name)
-            found[image["digest"]] = [path, bundle, signature]
-    else:
-        for path in directory.glob(f"exomem-image-{name}-{commit}-*.sigstore.json"):
-            digest = verify_image_bundle(path, tag, commit, repository, name)
-            found[digest] = [path]
+    for path in directory.glob(f"exomem-image-{name}-{commit}-*.sigstore.json"):
+        digest = verify_image_bundle(path, tag, commit, repository, name)
+        found[digest] = [path]
     if len(found) > 1:
         # Maintainers resolve conflicting producer receipts; guessing could retag an immutable release.
         raise ValueError(f"multiple verified digests for {name}; release remains incomplete")
@@ -563,20 +595,11 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
             entry["state"] = (
                 "present" if complete and all(p.name in assets for p in files) else "missing"
             )
-            requested = os.environ.get("RECORDS_TARGET")
-            if name == "hosted" and requested:
-                candidate = candidate_tool.load_candidate(files[0])
-                claim = cast(dict[str, object], candidate.get("recordsCompatibility", {}))
-                if claim.get("runtimeTarget") != json.loads(requested):
-                    entry["state"] = "incomplete: requested rollback claim needs a new release"
-                    entry["blocked"] = True
         elif any(aliases.values()):
             entry["state"] = "incomplete: immutable tag has no recoverable producer evidence"
         else:
-            # An incomplete hosted receipt proves a prior push; never replace its lost proof with a rebuild.
-            partial = name == "hosted" and any(directory.glob("*.candidate-v1.json"))
-            entry["state"] = "incomplete: original evidence is partial" if partial else "missing"
-            entry["publish"] = not partial
+            entry["state"] = "missing"
+            entry["publish"] = True
     return images
 
 
@@ -596,7 +619,7 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
             raise ValueError(
                 f"immutable discovery tag differs from original evidence: {entry['ref']}"
             )
-        if entry.get("blocked") or not digest:
+        if not digest:
             incomplete.append(name)
         if digest:
             recovered[name] = (digest, files)

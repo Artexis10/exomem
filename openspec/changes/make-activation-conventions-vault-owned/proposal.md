@@ -97,8 +97,7 @@ or `Evidence/`.
 - Code: `working_set_resolve.py`, `working_set_index.py`, `working_set_state.py`,
   `working_set_runtime.py` (cache key, `generation`, continuity payload),
   `context_roles.py` (evidence categories, caps, size cap, save), new
-  `activation_conventions.py`, `commands.py` (`schema_memory`), `hosted_gateway.py`,
-  scaffold and plugin registry files.
+  `activation_conventions.py`, `commands.py` (`schema_memory`),   scaffold and plugin registry files.
 - Behaviour on shipped defaults: resolution, state and packets equal today's, with three
   intended differences: `Products` and `Systems` match case-insensitively, pages inside
   the governance trees are never anchors, and a question mark alone no longer makes

@@ -386,11 +386,8 @@ def validate_raw_capture(
 ) -> bool:
     """Resolve protection before a canonical write or a duplicate receipt."""
     from .governance import raw_protection as raw_guard
-    from .governance.principal import effective_principal
 
     protected = raw_protection or raw_guard.marked(str(Path(destination) / _sanitize_filename(filename)))
-    if protected and not raw_guard.applies_to(effective_principal()):
-        _raise("RAW_PROTECTION_UNAVAILABLE", ["raw_protection"], raw_guard.UNAVAILABLE_REASON)
     return protected
 
 

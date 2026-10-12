@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted read guards and gateway retry state. Shared mutation, cancellation, and writer authority requirements remain in scope.
+
 ## Why removing the hosted read-bypass is safe (R3, GAP D)
 
 The archived design (`make-mcp-acknowledgement-replay-safe`) reserved the

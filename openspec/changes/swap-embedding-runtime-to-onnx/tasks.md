@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes the Hosted image and provisioner capacity contract. Backend equivalence remains in scope; Cloud image, resource qualification, and the unchecked envelope and quality tasks remain open.
+
 ## 1. Prove equivalence before changing anything
 
 - [x] 1.1 Add a committed equivalence check that encodes a fixed text set, including

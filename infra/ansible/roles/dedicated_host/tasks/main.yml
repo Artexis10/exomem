@@ -69,7 +69,7 @@
   ansible.builtin.debug:
     msg: >-
       {{ dedicated_host_md_device }} is degraded; replace the failed disk as
-      docs/runbooks/hosted/dedicated-host.md describes.
+      docs/runbooks/cloud-dedicated-host.md describes.
   when: dedicated_host_md_health.rc == 1
 
 - name: Record the array's UUID

@@ -817,60 +817,6 @@ def test_open_registry_projection_reports_leaf_folder_and_family(tmp_path: Path)
     assert community["family"] == "organization"
 
 
-def test_hosted_v5_entity_lifecycle_input_is_generic_and_bounded() -> None:
-    path = Path("tests/fixtures/hosted_v5_contributions/recurring_entity_lifecycle.json")
-    value = json.loads(path.read_text(encoding="utf-8"))
-
-    assert value["family"] == "recurring-entity-lifecycle"
-    assert value["primitive"] == "stable-recurring-identity"
-    assert value["ordinary_read"]["arguments"]["categories"] == ["entity_recurrence"]
-    assert value["bounds"] == {
-        "candidates_per_read": 3,
-        "contexts_per_candidate": 8,
-        "hydration_mutations_per_session": 8,
-        "hydration_rechecks_per_session": 8,
-    }
-    assert value["authority"] == {
-        "candidate_read": "structural_suggestions",
-        "registry_save": "restructure_execution",
-        "curation_apply": "restructure_execution",
-        "standalone_relation_acceptance": "link_acceptance",
-    }
-    assert "community" not in value["primitive"]
-
-    # Every case pinned by id, state and route. Asserting only that cases exist
-    # lets one be renamed, restated or silently dropped while the count holds.
-    assert [case["id"] for case in value["cases"]] == [
-        "generic-promotion",
-        "existing-identity-hydration",
-        "ambiguous-identity-stop",
-        "frequency-matched-twin",
-        "open-registry-family-metadata",
-    ]
-    assert {
-        case["id"]: (case.get("candidate_state"), case["expected_route"])
-        for case in value["cases"]
-    } == {
-        "generic-promotion": ("promotion", "governed-create-entity"),
-        "existing-identity-hydration": ("hydration", "governed-edit-or-accept-relation"),
-        "ambiguous-identity-stop": ("ambiguous", "no-executable-default"),
-        "frequency-matched-twin": ("quiet", "absent"),
-        "open-registry-family-metadata": (None, "traversal-only"),
-    }
-
-    # D3: the canonical kind is a singular open leaf, the folder is a plural
-    # projection of it, and the parent family is traversal only. The case
-    # mirrors the shape bootstrap serves at entity_registry.types[*].
-    family_case = next(
-        case for case in value["cases"] if case["id"] == "open-registry-family-metadata"
-    )
-    assert set(family_case["entity_type"]) == {"id", "label", "folder", "family"}
-    assert family_case["entity_type"]["id"] == "guild"
-    assert family_case["entity_type"]["folder"] == "Guilds"
-    assert family_case["entity_type"]["family"] == "organization"
-    assert family_case["entity_type"]["id"] != family_case["entity_type"]["folder"]
-
-
 def _lifecycle_block(path: Path) -> str:
     """The one block in each carrier that states the recurrence cadence.
 

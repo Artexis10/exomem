@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted read guards and gateway retry state. Shared mutation, cancellation, and writer authority requirements remain in scope.
+
 ## Why
 
 `MUTATION_BUSY` and "cannot write" (`WRITER_LEASE_REQUIRED` /

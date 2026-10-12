@@ -46,7 +46,7 @@ from .vault import (
 from .writer_lease import active_manager, active_mutation_request_id, mark_active_mutation_committed
 
 MAX_FILES = 8
-#: The per-file and per-call caps on a hosted or Cloud cell. The artifact broker's grants
+#: The per-file and per-call caps on a Cloud cell. The artifact broker's grants
 #: carry exactly this `max_bytes`, so raising it is a gateway change. A standalone server
 #: takes larger files: see `fetch_budget`.
 MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -109,13 +109,12 @@ def fetch_budget() -> FetchBudget:
     A standalone server serves upload sessions, so it takes a file handle, and a
     call's handles together, as large as a session may be. It bounds a pull by a
     minimum rate rather than a fixed time: a fixed time either stops a healthy
-    multi-gigabyte pull or lets a trickle run as long. A hosted or Cloud cell keeps
+    multi-gigabyte pull or lets a trickle run as long. A Cloud cell keeps
     the broker-bound cap and fixed deadlines.
     """
     from .cloud_cell import cloud_mode_enabled
-    from .hosted_runtime import hosted_mode_enabled
 
-    if cloud_mode_enabled() or hosted_mode_enabled():
+    if cloud_mode_enabled():
         return FetchBudget()
     from .upload_sessions import max_bytes_from_env
 

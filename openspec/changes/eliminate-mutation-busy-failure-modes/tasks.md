@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted read guards and gateway retry state. Shared mutation, cancellation, and writer authority requirements remain in scope.
+
 ## 1. R1 — Telemetry + dynamic retry_after_ms
 
 - [x] 1.1 `mutation_lock.py::hold()` emits `acquired`/`released` events with

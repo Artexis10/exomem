@@ -356,7 +356,7 @@ PROTECTED_TREES: Final = frozenset(
 
 def _folded_segment(part: str) -> str:
     """One path segment as a filesystem may match it: NFKC, casefolded, and
-    without the trailing dots and spaces Windows drops (`hosted_gateway`)."""
+    without the trailing dots and spaces Windows drops."""
     return unicodedata.normalize("NFKC", part).casefold().strip().rstrip(". ")
 
 

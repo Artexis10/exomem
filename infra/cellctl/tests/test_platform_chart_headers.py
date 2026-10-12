@@ -106,7 +106,6 @@ def test_cloud_mode_keeps_lifecycle_and_sign_in_delivery_running() -> None:
     assert suspension == {
         "exomem-access-delivery": False,
         "exomem-reconcile": False,
-        "exomem-export-gc": True,
     }
 
 
@@ -457,10 +456,6 @@ def test_cloud_gateway_certificate_uses_a_cluster_issuer_whose_token_stays_in_ex
     values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
     hostname = values["cloudGateway"]["hostname"]
     assert hostname == values["cloudIngress"]["hostname"]
-    assert hostname not in {
-        values["provisioner"]["controlHostname"],
-        values["provisioner"]["transferHostname"],
-    }
 
     assert not [doc for doc in documents if doc.get("kind") == "Issuer"], "no namespaced Issuer may remain"
     issuer = _find(documents, "ClusterIssuer", "exomem-cloud-dns01")
@@ -1200,3 +1195,10 @@ def test_cellctl_may_read_the_alert_delivery_secret_it_is_told_and_no_other(monk
     binding = _find(documents, "RoleBinding", "cellctl-alert-delivery")
     assert binding["metadata"]["namespace"] == namespace
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "cellctl", "namespace": "exomem-cloud"}]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_platform_jobs_image_is_required_and_digest_pinned() -> None:
+    result = _helm_render("--set-string", "platformJobs.image=ghcr.io/artexis10/exomem:latest")
+    assert result.returncode != 0
+    assert "/platformJobs/image" in result.stderr

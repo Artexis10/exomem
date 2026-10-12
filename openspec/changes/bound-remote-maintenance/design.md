@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes the Hosted adapter cases. MCP/REST maintenance admission and every surviving unchecked task remain in scope.
+
 ## Context
 
 All product surfaces converge on `writer_lease.invoke_command`, and each adapter

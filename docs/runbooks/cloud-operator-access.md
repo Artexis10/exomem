@@ -599,7 +599,7 @@ so a build leaves the second CPU to queries.
 At the unchanged 2 CPU / 3 GiB cell limit, measure cgroup peak during warmup,
 saves, import competition and restart; require at most 80% of the limit and no
 OOM. For node capacity, charge each cell the greater of its memory request and
-measured warm peak, add measured platform usage, and retain at least 20% warm
+qualified worst-supported per-slot warm peak, add measured platform usage, and retain at least 20% warm
 headroom before admitting more cells. Pod readiness alone does not prove capacity.
 
 Kernel-cache control is a separate node adoption. The existing K3s role defaults
@@ -656,7 +656,11 @@ reserves through `cellctl.sharedWorker`. The controller receives that object as
 `topology_key`, `topology_value`, `occupancy`, `resources`, `reserve_cpu` and
 `reserve_memory`; the resource keys are `cpu_request`, `cpu_limit`,
 `memory_request` and `memory_limit`. Limits remain `2` CPU and `3Gi` memory.
-Supply measured requests, not historical idle usage. Reserves cover additional
+The controller divides by scheduler requests; it does not measure workload peaks.
+Qualify the worst supported per-slot warm footprint, including restart and maintenance
+overlap, then use conservative occupancy and fixed reserves to charge at least
+`max(request, qualified peak)` per slot with at least 20% node memory headroom.
+Numeric settings remain measurement-driven. Reserves cover additional
 platform/headroom demand beyond observed Pod requests; do not deduct kubelet
 reservations already removed from Node Allocatable again. Existing init,
 backup and restore budgets stay unchanged and fit within the selected serving
@@ -673,6 +677,10 @@ existing cell PV's affinity. Initial capacity supports exactly one worker with
 that profile; another profile worker closes shared admission automatically
 until the deployment is returned to the qualified envelope. More workers need
 a packing/admission contract extension and qualification first.
+
+A production request reduction to `512Mi/125m` requires separate operator restart go.
+If qualification fails, retain `1Gi/250m` for an image-only roll, with `3Gi/2CPU` limits.
+Do not enable shared-node MemoryQoS during qualification or migration.
 
 1. Install the default-off controller/chart support. Qualify the intended
    signed runtime, request values, effective memory controls and occupancy
@@ -719,3 +727,21 @@ legacy capacity publication. Preserve the current PVC/data and do not restore
 an older snapshot over newer writes. Remove a shared node only after its selected
 workloads have relocated; shared workers do not count as unrestricted spare
 attachment capacity in the existing removal preflight.
+
+## Qualify a historical image rollback
+
+Use the existing per-cell release API and restore helpers in an exclusive QA writer window.
+Do not use a direct database `read_only` change as a durable maintenance override: the entitlement sweep can overwrite it.
+
+1. Close the QA writer window and verify current identity, custody, image, canonical data and outstanding durable work.
+2. Create a fresh pre-attempt backup S1 after the current image's writes, with vault and host paths included.
+3. Restore S1 into an isolated copy with writes confined to that copy, and retain its source comparison.
+4. Run the historical image against the copy and verify route reads, governed writes, custody and durable-debt recovery.
+5. If the copy rejects compatibility, prove refusal and current-image recovery; leave the live image unchanged and rollback acceptance open.
+6. If copied-state checks pass, obtain the specific live pin authority and use the existing per-cell release procedure.
+7. Verify post-attempt canonical writes and durable work, return to the reviewed current image and reopen the QA writer window.
+
+The planned 0.116-to-0.114 rehearsal crosses collection schema 10 to schema 8.
+Readiness and manifest compatibility IDs do not prove those routes work.
+Never restore the older S0 backup over post-upgrade writes. Do not add a downmigration or another product endpoint.
+A successful refusal/recovery test proves safe handling of incompatibility; it does not prove successful historical rollback.

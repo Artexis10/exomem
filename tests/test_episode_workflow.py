@@ -146,10 +146,6 @@ def test_the_operations_are_actions_of_the_generated_episode_command() -> None:
         assert commands.invocation_is_read_only(command, {"action": action}) is False
     params = {param.name for param in command.params}
     assert {"candidate", "proposal", "disposition", "reason", "input_revision"} <= params
-    # Hosted exposes none of it.
-    assert "episode_memory" in commands.HOSTED_SURFACE_EXCLUSIONS
-    for profile in commands.PRODUCT_SURFACE_PROFILES.values():
-        assert "episode_memory" not in profile.command_names
 
 
 def test_execution_is_off_unless_the_service_enables_it(monkeypatch) -> None:

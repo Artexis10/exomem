@@ -7,10 +7,10 @@ import zipfile
 
 import pytest
 from test_connector_boundary import configured_boundary as configured_boundary
-from test_hosted_portability import _context
+from test_vault_portability import _context
 
-from exomem import hosted_portability as portability
 from exomem import state_migration
+from exomem import vault_portability as portability
 from exomem.governance import connector_boundary, principal
 
 
@@ -200,42 +200,6 @@ def test_interrupted_protection_restore_resumes_original_proposal(configured_bou
     assert not prior_ids or proposal_ids == prior_ids
 
 
-def test_hosted_restore_recovers_its_protected_publication(configured_boundary, vault, tmp_path, monkeypatch):
-    from test_connector_boundary import PRIVATE, SCOPE
-    from test_hosted_restore_candidate import _bootstrap, _request, _require_bound_state_ready
-
-    from exomem import hosted_restore
-    from exomem import init as init_module
-    from exomem.governance import policy, receipts
-    from exomem.hosted_runtime import HostedBindingV2
-
-    with principal.request_scope(principal.owner_principal(surface="cli")):
-        init_module.init_vault(vault, force=True)
-    authority = state_migration.assert_offline_migration_authority(source="isolated hosted restore")
-    state_migration.arm_connector_boundary_offline(vault, authority=authority)
-    with principal.request_scope(principal.owner_principal(surface="cli")):
-        exported = portability.export_quiesced_vault(vault, tmp_path / "exports",
-            context=_context(cell_id="source-cell", vault_id="logical-vault"))
-    request = _request(tmp_path, exported)
-    def crash(point):
-        if point == "protection_restored":
-            raise hosted_restore.HostedRestoreCrash(point)
-    with pytest.raises(hosted_restore.HostedRestoreCrash):
-        hosted_restore.restore_candidate(request, bootstrap_security=_bootstrap, crash_hook=crash)
-    destination = tmp_path / "target-vault"
-    events = receipts.event_records(destination)
-    restored = hosted_restore.restore_candidate(request, bootstrap_security=_bootstrap)
-    assert restored.status == "ready"
-    assert receipts.event_records(destination) == events
-    assert (destination / PRIVATE).read_bytes() == (vault / PRIVATE).read_bytes()
-    for record in exported.manifest["files"]:
-        assert (destination / record["path"]).read_bytes() == (vault / record["path"]).read_bytes()
-    assert SCOPE in policy.load(destination).scopes
-    binding = HostedBindingV2(cell_id="target-cell", vault_id="logical-vault", vault_root=destination,
-        state_root=tmp_path / "target-state", log_root=tmp_path / "target-log", runtime_uid=os.getuid(), runtime_gid=os.getgid())
-    assert _require_bound_state_ready(binding).dual_state is False
-
-
 @pytest.mark.parametrize("failure", ["process_death", "protection_failure"])
 def test_restore_preserves_published_tree_for_exact_crash_recovery(configured_boundary, vault, tmp_path, monkeypatch, failure):
     """A killed process or failed protection step retains the published inode."""
@@ -255,7 +219,7 @@ def test_restore_preserves_published_tree_for_exact_crash_recovery(configured_bo
 
         script = '''import json, os, sys
 from pathlib import Path
-from exomem import hosted_portability as p
+from exomem import vault_portability as p
 assert Path(p.__file__).resolve().is_relative_to(Path(sys.argv[5]).resolve())
 a = p.verify_export_archive(sys.argv[1])
 r = p.PreparedRestore(Path(sys.argv[2]), a.archive_path, a.archive_sha256, a.manifest, p.PortabilityContext(**json.loads(sys.argv[4])))

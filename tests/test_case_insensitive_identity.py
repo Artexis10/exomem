@@ -437,10 +437,8 @@ def test_canonical_vault_rel_returns_input_unchanged_when_resolution_relocates_i
 def test_canonical_vault_rel_returns_input_unchanged_for_a_symlink(tmp_path: Path) -> None:
     """The regression: a symlink must not be laundered into its target.
 
-    `tests/test_hosted_private_routes.py::
-    test_hosted_transfer_scope_expiry_cross_cell_and_download_isolation` is the
-    specification — it requires the download route to answer 400/INVALID_PATH
-    for `Knowledge Base/Notes/link.md -> shared.md`. That only holds while the
+    A download route must answer 400/INVALID_PATH for
+    `Knowledge Base/Notes/link.md -> shared.md`. That only holds while the
     rel-form handed to the `O_NOFOLLOW` re-open still says `link.md`.
     """
     if not _symlinks_available(tmp_path):

@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted candidate contribution and promotion. Shared recurring-entity semantics remain unchanged. Closure requires surviving local/Cloud implementation, review, and merge evidence.
+
 ## Context
 
 The shipped recurrence sensor is deliberately narrow: it counts unresolved body wikilinks on distinct eligible pages, suppresses identities already resolved by a page or active Entity title or alias, and projects an identity-partitioned `entity_recurrence` review item. It is deterministic and read-only, but misses stable identities present only in ordinary prose. Separately, a created Entity can stay sparse while durable contexts remain disconnected, and a vault-defined type's core `parent` is validated but not operational for query or traversal.

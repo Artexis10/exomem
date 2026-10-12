@@ -15,11 +15,6 @@
 - **WHEN** the local `record_memory` tool schema is generated before and after declared-type support
 - **THEN** the only differences are the `transition` action value and the optional `collection_type` argument, and the schema grows by at most 400 bytes
 
-#### Scenario: Frozen hosted candidates do not see declared-type actions
-- **WHEN** the released hosted candidate schemas are compared with their pinned digests
-- **THEN** they are byte-identical, and only the local surface and the v5 candidate list `transition` and the `collection_type` describe argument
-
-## MODIFIED Requirements
 
 ### Requirement: Refused Record writes are held, inspectable and resumable
 When a Records append or update refuses for a candidate-content reason (representability, undeclared field, schema type or enum failure), the writer SHALL by default preserve the complete candidate (item values, body, changes and rationale) as one held candidate in the collection store, distinct from items, with the machine-readable diagnostics attached. It SHALL render the held candidate as a read-only view under the collection's `Held/` directory, and SHALL return the held reference beside the unchanged refusal. Held candidates SHALL NOT be counted as items, returned by queries, opened by recall, or recorded as item transitions, and holding SHALL NOT advance the collection generation or audit head. The caller SHALL be able to resume a held candidate by reference through the same action with optional field overrides; a successful resume commits exactly one item and removes the held candidate in the same store transaction, and a repeated refusal updates the held diagnostics in place under the same reference. The caller SHALL be able to discard a held candidate by reference with a rationale. A caller MAY decline holding for one call. If the hold itself cannot be written, the original refusal SHALL be returned unchanged with a warning and no second error. Held candidates, including held view corrections, SHALL be subject to the same release filtering as items before they are disclosed or counted.

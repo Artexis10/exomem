@@ -42,6 +42,7 @@ from . import (
 from . import (
     find as find_module,
 )
+from .governance import connector_boundary
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
 
@@ -1952,13 +1953,19 @@ def _preflight_existing(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
+        armed = connector_boundary.read_requirement(root) is not None
     resolver_freshness_before = freshness.triple(root, "vault")
     with (
         _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
-            root, registry=registry, language_registry=language, status_basis=status_basis
+            # Unarmed vaults use saved public definitions; redundant overrides bypass warm reuse.
+            # Armed vaults retain their explicit public corpus registry.
+            root,
+            registry=registry if armed else None,
+            language_registry=language if armed else None,
+            status_basis=status_basis,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
     resolver_freshness = (

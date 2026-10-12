@@ -3,7 +3,7 @@
 ### Requirement: Canonical audience resolution, threaded and fail-closed
 
 Every content-returning read SHALL resolve a canonical principal at its surface boundary
-— MCP OAuth principal, REST key/identity scope, hosted gateway principal, explicit
+— MCP OAuth principal, REST key/identity scope, explicit
 local owner for stdio/CLI, or the owner for a verified remote OAuth principal the host
 has explicitly bound as owner-equivalent — normalized into one comparable audience space, and SHALL
 thread it to the release decision. A standing policy grant authored against one surface

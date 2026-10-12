@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and historical-profile gates. Shared baseline doctrine and client acceptance remain in scope. Pending client traces and closure still require surviving implementation and merge evidence.
+
 ## Why
 
 The active capture predicate names conclusions, recurring entities, executed methods, intent, and outcomes, but omits stable preferences, recurring habits, historical baselines, and durable memberships expressed in casual prose. Agents therefore stay quiet on reusable longitudinal context merely because it arrived conversationally, forcing the user to ask whether Exomem should have remembered it.

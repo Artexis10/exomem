@@ -226,8 +226,6 @@ def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> Requ
 
 #: The issuer family of a local client token, whichever surface it reaches.
 LOCAL_INGRESS_ISSUER_FAMILY = "mcp-local"
-#: The issuer family of every principal a hosted cell's gateway resolves.
-HOSTED_GATEWAY_ISSUER_FAMILY = "hosted-gateway"
 
 
 def local_owner_principal(*, surface: str) -> RequestPrincipal:
@@ -510,24 +508,6 @@ def resolve_rest_principal(principal_scope: str | None) -> RequestPrincipal:
     )
 
 
-def resolve_hosted_principal(principal_scope: str | None) -> RequestPrincipal:
-    """Hosted cell boundary: the gateway always supplies a validated scope.
-
-    Unlike REST, a missing scope here is never the owner — a hosted cell is
-    reached only through the gateway, so absence means the expected identity
-    did not resolve.
-    """
-    if principal_scope is None or not str(principal_scope).strip():
-        return most_restrictive_principal(surface="hosted")
-    audience = _canonical_scope(str(principal_scope))
-    if audience == MOST_RESTRICTIVE_AUDIENCE:
-        return most_restrictive_principal(surface="hosted")
-    return RequestPrincipal(
-        audience_id=audience,
-        surface="hosted",
-        resolved=True,
-        issuer_family=HOSTED_GATEWAY_ISSUER_FAMILY,
-    )
 
 
 def current_principal() -> RequestPrincipal | None:

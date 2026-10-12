@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes server_hosted instrumentation and Hosted trace prefixes. Shared privacy logging, MCP/REST telemetry, and unchecked observability work remain in scope.
+
 ## Structured event shape
 
 Every observability log call goes through one helper,

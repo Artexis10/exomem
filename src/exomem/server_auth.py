@@ -9,7 +9,7 @@ import math
 import os
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx2
 from cryptography.fernet import Fernet
@@ -31,62 +31,7 @@ from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 from .session_oauth import OAUTH_AUTHORIZATION_SCOPES, ExomemSessionOAuthProxy
 from .session_validation_cache import SessionValidationCache
 
-if TYPE_CHECKING:
-    from .hosted_runtime import HostedCellConfig
-    from .hosted_security import HostedAuthenticator
-
 log = logging.getLogger(__name__)
-
-
-class HostedCellTokenVerifier(TokenVerifier):
-    """FastMCP bearer verifier for one immutable private hosted cell."""
-
-    def __init__(
-        self,
-        config: HostedCellConfig,
-        *,
-        authenticator: HostedAuthenticator | None = None,
-    ) -> None:
-        super().__init__(required_scopes=["hosted:cell"])
-        self._config = config
-        self._authenticator = authenticator
-
-    async def verify_token(self, token: str) -> AccessToken | None:
-        credential_version: str | None = None
-        security_revision: int | None = None
-        if self._authenticator is None:
-            # Narrow compatibility seam for v1 cells until operator startup wires
-            # the durable authority. New hosted cells inject the dynamic authority.
-            if not self._config.matches_service_credential(token):
-                return None
-        else:
-            from .hosted_security import HostedSecurityError
-
-            try:
-                authenticated = self._authenticator.authenticate(token)
-            except HostedSecurityError:
-                return None
-            if authenticated is None:
-                return None
-            credential_version = authenticated.credential_version
-            security_revision = authenticated.security_revision
-        claims: dict[str, Any] = {
-            "cell_id": self._config.cell_id,
-            "kind": "hosted-cell-service",
-        }
-        if credential_version is not None and security_revision is not None:
-            claims.update(
-                {
-                    "credential_version": credential_version,
-                    "security_revision": security_revision,
-                }
-            )
-        return AccessToken(
-            token="hosted-cell-service",
-            client_id=self._config.cell_id,
-            scopes=["hosted:cell"],
-            claims=claims,
-        )
 
 
 class CloudCellAccessToken(AccessToken):
@@ -98,8 +43,7 @@ class CloudCellTokenVerifier(TokenVerifier):
 
     Accepts a bearer equal to the current token, or, during rotation, the
     previous one, each compared in constant time (fixed-length digest
-    comparison via `hmac.compare_digest`, mirroring
-    `HostedCellConfig.matches_service_credential`). The resulting principal
+    comparison via `hmac.compare_digest`). The resulting principal
     carries fixed claims that are never derived from the bearer or a key
     version. The configured cell binds this concrete token type to its owner.
     """
