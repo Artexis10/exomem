@@ -102,7 +102,7 @@
       the current D0/D1 governance rollback crash matrix and real old-v3 proof.
 - [x] 3.2 Independent adversarial review of the current rollback implementation
       and its D0/D1/fence evidence; resolve findings.
-- [x] 3.3 Release and deploy to personal and POLLY cells; verify exact package
+- [x] 3.3 Release and deploy to the personal cell and the client cell; verify exact package
       and service process, path-free health/readiness, detailed doctor state,
       clean quiescent leftover scan, restart durability, and real retrieval.
       (0.65.0 released and deployed 2026-08-29: both cells report

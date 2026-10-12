@@ -112,12 +112,12 @@ def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
     The casefold is modelled here so the contract is pinned on Linux CI too.
     """
     vault = tmp_path / "vault"
-    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder = vault / "Knowledge Base" / "Notes" / "ACME"
     folder.mkdir(parents=True)
     identity = memory_refs.new_id()
     (folder / "terms.md").write_text(_page(identity), encoding="utf-8")
-    on_disk = "Knowledge Base/Notes/POLLY/terms.md"
-    phantom = "Knowledge Base/Notes/Polly/terms.md"
+    on_disk = "Knowledge Base/Notes/ACME/terms.md"
+    phantom = "Knowledge Base/Notes/Acme/terms.md"
 
     index = memory_refs.ReferenceIndex(vault)
     assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
@@ -139,12 +139,12 @@ def test_bulk_reference_lookup_answers_phantom_casing_in_the_callers_form(
 def test_delete_paths_removes_the_canonical_row_for_phantom_casing(tmp_path: Path) -> None:
     """A delete addressed with the caller's casing must not orphan the real row.
 
-    On NTFS `.../Polly/terms.md` and `.../POLLY/terms.md` open one file, but the
+    On NTFS `.../Acme/terms.md` and `.../ACME/terms.md` open one file, but the
     sidecar keys rows as case-sensitive text: a stale row survives the delete and
     then reads back as a second owner of the identity.
     """
     vault = tmp_path / "vault"
-    folder = vault / "Knowledge Base" / "Notes" / "POLLY"
+    folder = vault / "Knowledge Base" / "Notes" / "ACME"
     folder.mkdir(parents=True)
     identity = memory_refs.new_id()
     page = folder / "terms.md"
@@ -152,10 +152,10 @@ def test_delete_paths_removes_the_canonical_row_for_phantom_casing(tmp_path: Pat
 
     index = memory_refs.ReferenceIndex(vault)
     assert index.rebuild_all() == {"indexed": 1, "duplicates": 0, "malformed": 0}
-    assert index.resolve(identity) == "Knowledge Base/Notes/POLLY/terms.md"
+    assert index.resolve(identity) == "Knowledge Base/Notes/ACME/terms.md"
 
     page.unlink()
-    index.delete_paths(["Knowledge Base/Notes/Polly/terms.md"])
+    index.delete_paths(["Knowledge Base/Notes/Acme/terms.md"])
 
     with pytest.raises(memory_refs.ReferenceError) as excinfo:
         index.resolve(identity)

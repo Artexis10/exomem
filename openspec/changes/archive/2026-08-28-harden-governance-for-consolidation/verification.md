@@ -123,7 +123,7 @@ The final exact-head evidence is:
 
 The public registry still has no `consolidate_memory` command. `_Consolidation` remains
 reserved with an explicit no-owner refusal until that later command ships. No real vault,
-POLLY cell, or personal cell was opened, migrated, combined, or otherwise mutated by this
+the client cell, or the personal cell was opened, migrated, combined, or otherwise mutated by this
 work.
 
 ## Canonical sync and archive closeout

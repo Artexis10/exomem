@@ -59,7 +59,7 @@ class _RecordingMutationManager:
 def _preserve_media_stub(vault, filename="rec.mp3"):
     """Preserve a media binary with no text → a `pending` stub sidecar."""
     return preserve.preserve_bytes(
-        vault, scope="Yolo", category="audio", filename=filename, data=b"FAKEBYTES"
+        vault, scope="Rental", category="audio", filename=filename, data=b"FAKEBYTES"
     )
 
 
@@ -1925,7 +1925,7 @@ def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="guarded.jpg",
         data=b"\xff\xd8\xff",
@@ -1968,7 +1968,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="video",
         filename="guarded.mp4",
         data=b"video",
@@ -2089,7 +2089,7 @@ def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     result = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="video",
         filename="changes-during-clip.mp4",
         data=b"original-video",
@@ -2493,7 +2493,7 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="p.jpg",
         data=b"\xff\xd8\xff",
@@ -2521,7 +2521,7 @@ def test_a_clip_job_queued_before_clip_was_disabled_skips_clip(vault, monkeypatc
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="p.jpg",
         data=b"\xff\xd8\xff",
@@ -2551,10 +2551,10 @@ def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t"
+        vault, scope="Rental", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t"
     )
     preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t"
+        vault, scope="Rental", category="photos", filename="y.png", data=b"\x89PNG", text="t"
     )
     w = media_worker.MediaWorker(vault)
     assert w._scan_unindexed_images() == 2  # both images queued for CLIP
@@ -3707,7 +3707,7 @@ def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> N
     # Provide text so the sidecar is populated + keyword-findable; media frontmatter is set either way.
     preserve.preserve_bytes(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="audio",
         filename="meeting.mp3",
         data=b"X",
@@ -4924,7 +4924,7 @@ def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypat
     document = fitz.open()
     document.new_page()
     result = preserve.preserve_bytes(
-        vault, scope="Yolo", category="documents", filename="scan.pdf", data=document.tobytes()
+        vault, scope="Rental", category="documents", filename="scan.pdf", data=document.tobytes()
     )
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)

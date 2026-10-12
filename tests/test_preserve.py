@@ -36,9 +36,9 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     """
     result = preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="letters",
-        filename="2026-05-25-warning-letter.txt",
+        filename="2026-05-25-notice.txt",
         content="Dear Ms. Vale, please withdraw the notice.",
         today=TODAY,
     )
@@ -47,12 +47,12 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert "withdraw the notice" in _read(written)
 
     assert result.sidecar_path == (
-        "Knowledge Base/Evidence/Yolo/letters/2026-05-25-warning-letter.txt.md"
+        "Knowledge Base/Evidence/Rental/letters/2026-05-25-notice.txt.md"
     )
     page = _read(vault / result.sidecar_path)
     assert "type: source" in page
     assert "ingested_into: []" in page
-    assert "original_filename: 2026-05-25-warning-letter.txt" in page
+    assert "original_filename: 2026-05-25-notice.txt" in page
     assert f"binary_sha256: {result.hash}" in page
     assert f"binary_size: {result.size}" in page
     # Not an empty page: `schema.validate_source` treats an empty body as an
@@ -73,7 +73,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
         "artifact_sha256": result.hash,
         "artifact_size": result.size,
         "media_type": "text",
-        "original_filename": "2026-05-25-warning-letter.txt",
+        "original_filename": "2026-05-25-notice.txt",
         "semantics": {
             "projects": [],
             "tags": [],
@@ -687,7 +687,7 @@ def test_preserve_refuses_when_artifact_exists(vault: Path) -> None:
     """Evidence is append-only per SKILL rule 2."""
     preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="letters",
         filename="dupe.txt",
         content="first",
@@ -696,7 +696,7 @@ def test_preserve_refuses_when_artifact_exists(vault: Path) -> None:
     with pytest.raises(preserve_module.PreserveError) as exc:
         preserve_module.preserve(
             vault,
-            scope="Yolo",
+            scope="Rental",
             category="letters",
             filename="dupe.txt",
             content="second",
@@ -841,14 +841,14 @@ def test_preserve_with_text_writes_searchable_sidecar(vault: Path) -> None:
 
     result = preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="photos",
         filename="2026-05-25-kitchen.jpg",
         content_base64=base64.b64encode(b"\xff\xd8\xff-fakejpeg").decode("ascii"),
         text="Photo shows a cockroach infestation under the sink, water damage on the cabinet.",
         today=TODAY,
     )
-    assert result.sidecar_path == "Knowledge Base/Evidence/Yolo/photos/2026-05-25-kitchen.jpg.md"
+    assert result.sidecar_path == "Knowledge Base/Evidence/Rental/photos/2026-05-25-kitchen.jpg.md"
     sidecar = vault / result.sidecar_path
     body = _read(sidecar)
     assert "## Extracted text" in body
@@ -863,7 +863,7 @@ def test_preserve_text_without_description_still_writes_sidecar(vault: Path) -> 
     """`text` alone (no description) is enough to trigger the sidecar."""
     result = preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="docs",
         filename="2026-05-25-letter.pdf",
         content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
@@ -880,7 +880,7 @@ def test_preserve_text_without_description_still_writes_sidecar(vault: Path) -> 
 def test_preserve_description_and_text_render_both_sections(vault: Path) -> None:
     result = preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="docs",
         filename="2026-05-25-both.pdf",
         content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
@@ -899,7 +899,7 @@ def test_preserve_appends_to_log(vault: Path) -> None:
     log_file = vault / "Knowledge Base" / "log.md"
     preserve_module.preserve(
         vault,
-        scope="Yolo",
+        scope="Rental",
         category="logged",
         filename="logged.txt",
         content="x",
@@ -907,5 +907,5 @@ def test_preserve_appends_to_log(vault: Path) -> None:
         today=TODAY,
     )
     text = _read(log_file)
-    assert "## [2026-05-25] preserve | Evidence/Yolo/logged/logged.txt" in text
+    assert "## [2026-05-25] preserve | Evidence/Rental/logged/logged.txt" in text
     assert "Why preserved" in text
