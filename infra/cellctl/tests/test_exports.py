@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import itertools
-import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -155,7 +154,9 @@ def test_the_export_job_carries_part_urls_but_no_storage_credential():
     pod = job["spec"]["template"]["spec"]
     container = pod["containers"][0]
     assert container["command"][-4:] == ["--part-url", "https://storage.test/one", "--part-url", "https://storage.test/two"]
-    assert not [env for env in container["env"] if "valueFrom" in env and "b2" in json.dumps(env["valueFrom"])]
+    assert {env["name"]: set(env) for env in container["env"]} == {
+        name: {"name", "value"} for name in ("EXOMEM_CLOUD_CELL", "EXOMEM_CLOUD_CELL_ID", "TMPDIR", "EXOMEM_LOG_DIR")}
+    assert "envFrom" not in container
     assert {"name": "staging", "emptyDir": {"sizeLimit": "20Gi"}} in pod["volumes"]
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
 
