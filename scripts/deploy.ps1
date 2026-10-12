@@ -253,7 +253,7 @@ Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 # the cu132 note in the gate below). Lock-exact would downgrade the GPU away.
 $packagesBefore = Get-PackageSnapshot -PythonPath $servicePython
 Write-Host "`nUpgrading to exomem[$Extras]==$Version ..." -ForegroundColor Cyan
-& uv pip install --python $servicePython "exomem[$Extras]==$Version"
+& uv pip install --python $servicePython "exomem[$Extras]==$Version" --compile-bytecode
 if ($LASTEXITCODE -ne 0) { Fail "uv pip install returned $LASTEXITCODE." }
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "installed"
 

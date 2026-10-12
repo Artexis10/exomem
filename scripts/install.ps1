@@ -65,7 +65,7 @@ if (Test-Command "uv") {
 
 # --- 2. exomem ------------------------------------------------------------------
 Write-Step "Installing exomem from PyPI..."
-& uv tool install exomem --upgrade
+& uv tool install exomem --upgrade --compile-bytecode
 if ($LASTEXITCODE -ne 0) {
     Write-Host "uv tool install exomem failed (exit $LASTEXITCODE)." -ForegroundColor Red
     exit 1
