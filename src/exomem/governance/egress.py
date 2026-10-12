@@ -5922,7 +5922,6 @@ def unit_seed_parent_filter(
     return keep
 
 
-@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
 def release_level_for_path_only(
     vault_root: Path,
     rel_path: str,
@@ -5950,6 +5949,8 @@ def release_level_for_path_only(
     is still true, once per path. A pass over N paths hands in the set it read
     once (`lifecycle.tombstoned_paths`), for the same reason `policy` is handed
     in: the plane does not move while one pass runs.
+
+    The shared implementation owns the canonical read boundary for both entrypoints.
     """
     return _release_level_for_path_only_snapshot(
         vault_root, rel_path, principal=principal, purpose=purpose,

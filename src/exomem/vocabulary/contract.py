@@ -189,7 +189,12 @@ class RegistryAdmission:
         paths = (self.spec.overlay(root).relative_to(root).as_posix(),)
         if self.spec.binding_revision is not None:
             paths += (registry_history.history_dir(root, self.spec.stem).relative_to(root).as_posix(),)
-        if tuple(membership.evaluate_path_only(root, path, compiled) for path in paths) != self.memberships:
+        current_memberships = tuple(
+            membership.evaluate_path_only(root, path, compiled) for path in paths
+        )
+        # Creating missing parents can change a refusal reason without changing its authority.
+        if any(current.state != before.state or current.scope_ids != before.scope_ids
+               for current, before in zip(current_memberships, self.memberships, strict=True)):
             raise RegistryError("REGISTRY_UNAVAILABLE: publication membership changed")
         overlay = paths[0]
         refusal = _admission_refusal(
