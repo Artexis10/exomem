@@ -380,7 +380,7 @@ def test_a_healthy_core_carries_no_latency_line(monkeypatch, surface):
     assert "latency" not in core
 
 
-def test_the_full_blocks_are_served_by_the_sections_and_the_session(monkeypatch):
+def test_the_sections_and_session_serve_due_state_and_the_latency_advisory(monkeypatch):
     epistemics = _bootstrap(monkeypatch, "maximal", None, populated=True, section="epistemics")
     diagnostics = _bootstrap(monkeypatch, "maximal", None, populated=True, section="diagnostics_reading")
     assert epistemics["due_state"]["top"]
@@ -390,7 +390,21 @@ def test_the_full_blocks_are_served_by_the_sections_and_the_session(monkeypatch)
         session = commands.op_bootstrap(
             populated_root(), profile="session", skill_contract=workflow_skills.skill_contract()
         )
-    assert session["due_state"]["top"] and session["latency"]
+    assert session["due_state"]["top"]
+    assert session["latency"] == diagnostics["latency"]
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("profile", ("full", "diagnostics"))
+def test_full_profiles_retain_every_dominant_span_and_coverage(monkeypatch, surface, profile):
+    payload = _bootstrap(monkeypatch, "maximal", surface, populated=True, profile=profile)
+    for row in payload["latency"]:
+        spans = row["dominant_spans"]
+        assert len(spans) == 5
+        assert spans[0] == {"name": "recall.stage.span-name-7", "ms": 250_175, "calls": 25}
+        assert spans[-1] == {"name": "recall.stage.span-name-3", "ms": 250_075, "calls": 25}
+        assert row["coverage"]["population"] == "retained"
+        assert row["eligible_known_timings"] == row["samples"] == 25
 
 
 @pytest.mark.parametrize("surface", SURFACES)

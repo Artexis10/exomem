@@ -391,6 +391,7 @@ def log_activation_call(
     error_code: str | None = None,
     duration_ms: float | None = None,
     conversation: Mapping[str, Any] | None = None,
+    spans: list[dict[str, Any]] | None = None,
 ) -> None:
     """Append one host-local row for an activate_context call. Best-effort.
 
@@ -406,6 +407,21 @@ def log_activation_call(
     title text, the continuity token, the raw session, or any identity beyond
     a hash. Nothing in `usage` reads this file.
     """
+    # Observe even when the host-local content log is disabled. No disk read or write.
+    try:
+        from . import command_surface, latency_watch
+
+        latency_watch.observe(
+            tool="activate_context", client=command_surface.mcp_caller_identity().get("client_name")
+            or (declared_client(client) if declared_client(client) != "invalid" else None),
+            deep=False, total_ms=duration_ms, surface="activation", spans=spans,
+            outcome=outcome or ("abstained" if packet and packet.get("abstained") else "ok"),
+            correlated=bool(command_surface.peek_request_id()),
+        )
+    except Exception:  # noqa: BLE001 - observation cannot change activation
+        from . import latency_watch
+
+        latency_watch.current().record_failure()
     if _disabled():
         return
     try:
@@ -429,6 +445,9 @@ def log_activation_call(
         record: dict[str, Any] = {
             "ts": _now_iso(),
             **_correlation_fields(outcome=outcome, error_code=error_code, duration_ms=duration_ms),
+            "latency_boundary": "activation-leaf-v1",
+            "latency_profile": "runtime-observation",
+            "spans": spans or [],
             "door": principal.surface,
             "client": observed.get("client_name")
             or (declared if declared not in (None, "invalid") else None),

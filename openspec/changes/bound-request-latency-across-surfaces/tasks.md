@@ -1,0 +1,80 @@
+# Tasks
+
+## 1. Prove the source and public boundaries
+
+- [ ] 1.1 Reconcile final integrated source with current contracts; verify incoming connector-boundary checks and existing acknowledgement custody before product edits.
+- [ ] 1.2 Prove input, stored-row and returned-result counts and sampled identities on isolated reference state; record discrepancies before deriving latency.
+- [ ] 1.3 Capture installed baseline intervals for MCP, REST and activation leaves; verify each declared boundary includes its named work.
+- [ ] 1.4 Record profiles, populations, windows, coverage, CPU caps and RSS; verify model-free and live observations remain separate.
+
+## 2. Centralize bars and extend existing observations
+
+- [ ] 2.1 Add branch tests for pending bars, invalid readings, population mismatch, retention loss and mixed outcomes. Verify false passes fail first. Include 90 fast successes and 10 errors above the p95 bar; verify the all-request result fails despite healthy success-only timings.
+- [ ] 2.2 Package `request_latency_contract.json` and load it in existing consumers. Verify thresholds and outcome-inclusion rules resolve once with owning requirements and provenance.
+- [ ] 2.3 Extend `latency_watch` counts and summaries; verify unknown, partial, insufficient and evicted observations cannot establish complete-population acceptance.
+- [ ] 2.4 Wire MCP middleware, REST facade and activation observations; verify one sample per boundary, including refusal/error and nested activation cases.
+- [ ] 2.5 Update existing operator documentation; verify bootstrap isolation, doctor coverage and structured log output through real isolated calls.
+- [ ] 2.6 Project the nine-field caller-local advisory for compact and session bootstrap; retain full spans and coverage for full and diagnostics. Correct populated spans and verify unchanged ceilings on every maintained surface.
+
+## 3. Complete existing gates and repair attributed costs
+
+- [ ] 3.1 Complete `accelerate-governed-recall` task 6.1 through its existing gate; verify its owning reference, boundaries and source-loaded bars.
+- [ ] 3.2 Attribute remaining activation walks, matrix reloads, due-state and authorization costs; verify current spans and CPU support each proposed repair.
+- [ ] 3.3 Repair only attributed costs through existing incremental paths; verify unchanged results, packet content, authorization and pending-read visibility.
+- [ ] 3.4 Select residency from measured RSS and cold/warm costs; verify encoder output identity, CPU-cap compliance and documented rollback.
+- [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
+- [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
+
+## 4. Verify installed behavior and deliver
+
+- [ ] 4.1 Compare isolated installed arms on identical inputs; verify per-case confidence intervals, CPU, memory, data, quality, freshness and packet identity.
+- [ ] 4.2 Run the complete project corpus, lint, build, privacy and strict OpenSpec checks; record fresh output against delivered bytes.
+- [ ] 4.3 Obtain independent review of the exact integrated batch; resolve findings and verify each correction through a scoped recheck.
+- [ ] 4.4 Release and install through existing ownership and gates; verify live latency and custody read-only without enabling a flag.
+- [ ] 4.5 Record any actual switch's preconditions, owner, undo and post-switch evidence; verify rollback preserves existing terminals and receipts.
+- [ ] 4.6 Close only proven requirements after merge evidence; sync/archive this change through OpenSpec and verify strict validation before and after.
+
+Product work uses temporary runtime roots and an isolated tenant with external effects blocked. Existing acknowledgement acceptance and rollout tasks keep their owner. Pending bars do not invent defaults or third-party release holds. Metered evaluation follows the existing budget agreement; these artifacts authorize no provider run or held-out-key construction.
+
+## Source-loaded observation slice: verification scope
+
+The implementation packages the bar source and extends the existing watch,
+MCP dispatch, REST command, activation log, bootstrap and doctor surfaces.
+It retains the existing request-budget limits and canonical-write immunity. Activation collects existing
+named stages without exposing public timing payloads unless the caller opts in.
+The runtime observation profile remains pending because automatic observations
+cannot prove pre-call warmth or installed acceptance.
+
+The isolated model-free workflow tests prove separate dispatch and leaf samples,
+all terminal outcomes, response construction, finalization errors, caller isolation
+and partial source coverage. The initial contract branch run had 11 failures.
+The scoped observation run passed 196 tests. The adjacent activation, conversation
+and timing run passed 126 tests. These runs use Python 3.13.12 and disabled
+embedding, CLIP and warm-up lanes; they establish no served-model latency gain.
+
+The wheel and source distribution build with the pinned uv writer. The built
+wheel loads the contract through `importlib.resources`. The public-artifact gate,
+strict OpenSpec validation and harness-module generator checks pass.
+
+These checks do not complete installed baseline or live acceptance tasks.
+CPU caps, RSS, current warm residency, paired latency gains and deadline repair
+remain unproved. Task boxes remain open until integrated delivery supplies the
+required evidence. The foreground and durable-acknowledgement owners retain
+their unfinished acceptance work and default-off fast acknowledgement.
+
+## Attributed graph wait and budget custody
+
+An isolated reproduction found four diagnostic queue reads after graph unavailability.
+Activation discards those lag values, so it now omits that diagnostic work.
+Public graph diagnostics retain their existing default behavior.
+The graph expansion loop checks the existing budget between controllable steps.
+Finalization and logging now retain the same activation budget until the leaf exits.
+
+A real exclusive SQLite queue test returns before the remaining absolute deadline.
+Its nine packet blocks match the equivalent unavailable-graph reference.
+The final integrated scope passed 90 activation, graph, logging and watch tests.
+The existing finalization-error workflow also verifies budget custody and restoration.
+
+This bounded repair does not localize the installed service's recorded overruns.
+Other I/O, graph snapshot proof and publication waits remain unbounded.
+Task 3.5 stays open; neither a live gain nor full deadline acceptance is claimed.
