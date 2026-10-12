@@ -14,7 +14,6 @@ An armed destination SHALL meet its configured connector ceiling with existing g
 
 - **WHEN** a request has current RAW authority but its connector ceiling excludes the target
 - **THEN** the target remains unavailable
-- **AND** the hosted RAW exemption does not exempt the connector ceiling
 
 ### Requirement: Scope membership is consistent across canonical references and paths
 

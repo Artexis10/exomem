@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and historical-profile gates. Shared baseline doctrine and client acceptance remain in scope. Pending client traces and closure still require surviving implementation and merge evidence.
+
 ## Context
 
 The capture contract already treats conclusions, recurring entities, executed methods, intent, and observed outcomes as durable stepping stones, but it has no explicit class for stable personal or longitudinal context stated casually. That omission makes the active agent mistake conversational tone for low durability. The fix spans bootstrap, portable, and Hosted carriers, but it must preserve the no-nudge architecture: deterministic carriers can remind, while only the active conversation agent judges meaning and invokes existing governed leaves.

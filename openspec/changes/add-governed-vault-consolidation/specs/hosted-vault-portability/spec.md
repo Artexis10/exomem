@@ -57,7 +57,7 @@ Supported backup, export, and restore SHALL preserve the armed requirement in fr
 
 ### Requirement: Protected restore retries preserve exact destination evidence
 
-Restore retries SHALL preserve destination-owned Scope mirrors and append-only receipt evidence. Strict staging verification SHALL accept only exact canonical mirrors and residue verified against the actual destination authority, durable head, and exact restore proposal. It SHALL retain archive integrity checks and refuse unexplained extras without deleting them. A pending mutation marker SHALL require its canonical validator and the original linked operation. Hosted and standalone restore SHALL share durable journal mechanics. Before rename, the journal SHALL reserve the proposal ID. Before issuance, it SHALL persist the exact missing documents.
+Restore retries SHALL preserve destination-owned Scope mirrors and append-only receipt evidence. Strict staging verification SHALL accept only exact canonical mirrors and residue verified against the actual destination authority, durable head, and exact restore proposal. It SHALL retain archive integrity checks and refuse unexplained extras without deleting them. A pending mutation marker SHALL require its canonical validator and the original linked operation. Standalone restore SHALL use the existing durable journal owner. Before rename, the journal SHALL reserve the proposal ID. Before issuance, it SHALL persist the exact missing documents.
 
 #### Scenario: Protected publication fails after Scope installation
 
@@ -95,12 +95,6 @@ Restore retries SHALL preserve destination-owned Scope mirrors and append-only r
 - **WHEN** restore admission finds unavailable custody, activated vocabulary authority, or a substituted attachment
 - **THEN** publication refuses before replacing the destination
 - **AND** exact retry confers no authority to relocate or replace that attachment
-
-#### Scenario: A protected hosted restore retries
-
-- **WHEN** hosted publication bypasses the standalone publisher
-- **THEN** it reserves and resumes the same protection proposal through the shared journal owner
-- **AND** readiness follows complete destination protection recovery
 
 #### Scenario: An optional rebuild alters protected restore bytes
 

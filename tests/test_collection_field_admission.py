@@ -16,7 +16,7 @@ from exomem.governance.principal import (
     RequestPrincipal,
     owner_principal,
     request_scope,
-    resolve_hosted_principal,
+    resolve_rest_principal,
 )
 from exomem.query_engine import route, runtime
 from exomem.writer_lease import invoke_command
@@ -174,12 +174,12 @@ def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
     assert query(store, {**raw, "page": {"limit": 1, "after": first["next_cursor"]}})["rows"] == [{"count": 2}]
 
 
-def test_full_fields_require_verified_owner_not_hosted_raw_exemption(store):
-    """A hosted tenant or owner label that receives location via RAW's separate admission exemption."""
+def test_full_fields_require_verified_owner(store):
+    """Only a verified owner receives protected fields without a separate release."""
     create(store)
     for who in (OWNER, owner_principal(surface="rest")):
         assert query(store, {"select": ["place"]}, who)["rows"][0]["place"]["future"] == "private"
-    for who in (resolve_hosted_principal("tenant:unrelated"), replace(OWNER, issuer_family=None)):
+    for who in (resolve_rest_principal("tenant:unrelated"), replace(OWNER, issuer_family=None)):
         with pytest.raises(runtime.QueryError, match="QUERY_FIELD_UNAVAILABLE"):
             query(store, {"select": ["place"]}, who)
 

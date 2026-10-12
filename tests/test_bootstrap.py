@@ -835,3 +835,23 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     payload = json.loads(captured.out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert payload["data"]["contract_version"]
+
+
+@pytest.mark.parametrize("has_reason", [False, True])
+def test_unavailable_action_reason_follows_the_active_surface(has_reason: bool) -> None:
+    """An omitted action uses its served descriptor's reason when available."""
+    reason = "This active surface does not expose this route."
+    descriptor = ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="product",
+        tier2_enabled=True,
+        product_commands=(),
+        unavailable_reasons=(("adopt_vault", reason),) if has_reason else (),
+    )
+    with active_surface(descriptor):
+        action = commands.simple_action_catalog(available_tools=set())["adopt"]
+    assert action["available"] is False
+    if has_reason:
+        assert action["unavailable_reason"] == reason
+    else:
+        assert action["unavailable_reason"] == "No route for this action is exported by the active surface."

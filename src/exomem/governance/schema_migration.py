@@ -6,12 +6,10 @@ import base64
 import hashlib
 import hmac
 import json
-import os
-import re
 import sqlite3
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import find_corpus, mutation_lock, reserved_paths, state_migration, writer_lease
@@ -40,7 +38,6 @@ _RESTORE_PLAN_SCHEMA = "exomem.governance-v3-backup-restore-plan/v1"
 _RESTORE_PLAN_DOMAIN = b"exomem.governance-v3-backup-restore-plan.v1"
 _RESTORE_TARGET_DOMAIN = b"exomem.governance-v3-backup-restore-target.v1"
 _MAX_BACKUP_BYTES = 512 * 1024 * 1024
-_HOSTED_ATTACHMENT = re.compile(r"hosted-attachment-v1-[0-9a-f]{64}\Z")
 _RECEIPT_TABLES = (
     "receipt_instance",
     "receipts_head",
@@ -62,14 +59,6 @@ _PLAN_FIELDS = frozenset(
         "projection_rows_digest",
         "item_count",
         "plan_digest",
-    }
-)
-_HOSTED_PLAN_FIELDS = frozenset(
-    {
-        "hosted_custody_digest",
-        "hosted_identity_digest",
-        "hosted_membership_epoch",
-        "hosted_membership_digest",
     }
 )
 
@@ -100,10 +89,6 @@ class _MigrationIdentity:
     registry_attachment_id: str
     attachment_epoch: int
     staged_at: int
-    hosted_custody_digest: str | None = None
-    hosted_identity_digest: str | None = None
-    hosted_membership_epoch: int | None = None
-    hosted_membership_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,10 +101,6 @@ class ForwardMigrationPlan:
     projection_rows_digest: str
     item_count: int
     plan_digest: str
-    hosted_custody_digest: str | None = None
-    hosted_identity_digest: str | None = None
-    hosted_membership_epoch: int | None = None
-    hosted_membership_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +128,6 @@ class ForwardMigrationBackup:
     catalog_descriptor: bytes = field(repr=False)
     projection_namespace_evidence: bytes = field(repr=False)
     serialized_v3: bytes = field(repr=False)
-    hosted_custody_digest: str | None = None
-    hosted_identity_digest: str | None = None
-    hosted_membership_epoch: int | None = None
-    hosted_membership_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,135 +229,18 @@ def _source_store_digest(vault_root: Path) -> str:
     return _source_store_snapshot(vault_root)[1]
 
 
-def _hosted_custody_digests(
-    custody: authorization_custody.AuthorizationCustody,
-) -> tuple[str, str]:
-    """Bind authenticated source custody, allowing only later enrollment.
-
-    The separate stable identity survives the provisioner's schema-4 membership
-    publication; the complete source digest fences the schema-3 effect.
-    """
-
-    control = custody.control
-    record = custody.serving_membership
-    keyring_digest = authorization_custody.keyring_attestation_digest(custody.keyring)
-    control_digest = authorization_custody.control_attestation_digest(control)
-    expected_keys = tuple(sorted(key.key_id for key in custody.keyring.accepted_keys))
-    if (
-        record is None
-        or not record.replicas
-        or custody.local_replica_id is None
-        or record.issued_at != control.issued_at
-        or record.expires_at != control.expires_at
-        or any(
-            replica.control_digest != control_digest
-            or replica.keyring_digest != keyring_digest
-            or replica.active_key_id != custody.keyring.active_key_id
-            or replica.accepted_key_ids != expected_keys
-            for replica in record.replicas
-        )
-    ):
-        raise authorization_custody.AuthorizationCustodyUnavailable
-    identity_digest = _framed_digest(
-        b"exomem.hosted-governance-migration-identity.v1",
-        control_digest.encode("ascii"),
-        keyring_digest.encode("ascii"),
-        custody.local_replica_id.encode("utf-8"),
-    )
-    source_control = authorization_custody._control_value(control)  # noqa: SLF001
-    source_control.update(
-        governance_enrolled=False,
-        activation_store_id=None,
-        activation_epoch=None,
-        activation_state_digest=None,
-    )
-    custody_digest = _framed_digest(
-        b"exomem.hosted-governance-migration-source-custody.v1",
-        identity_digest.encode("ascii"),
-        projections.canonical_jcs(source_control),
-    )
-    return custody_digest, identity_digest
 
 
 def _migration_identity(
     vault_root: Path,
     *,
     now: int,
-    hosted_recovery: bool = False,
 ) -> tuple[
     _MigrationIdentity,
     authorization_custody.AuthorizationControlRecord | None,
 ]:
-    """Load Hosted identity or stage/recover the standalone equivalent."""
+    """Stage or recover the standalone migration identity."""
 
-    fixed_paths = {
-        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
-        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
-        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
-    }
-    configured = {variable: os.environ.get(variable, "") for variable in fixed_paths}
-    from ..hosted_runtime import hosted_mode_enabled
-
-    if hosted_mode_enabled() or any(
-        configured[variable] == str(path) for variable, path in fixed_paths.items()
-    ):
-        if any(configured[variable] != str(path) for variable, path in fixed_paths.items()):
-            raise authorization_custody.AuthorizationCustodyUnavailable
-        replica_id = os.environ.get(authorization_custody.REPLICA_ID_ENV, "")
-        load_custody = (
-            authorization_custody.load_hosted_migration_custody
-            if hosted_recovery
-            else authorization_custody.load_authorization_custody
-        )
-        custody = load_custody(
-            vault_root,
-            now=now,
-        )
-        membership_record = custody.serving_membership
-        control = custody.control
-        if (
-            custody.keyring_path != authorization_custody.HOSTED_KEYRING_FILE
-            or custody.control_path != authorization_custody.HOSTED_CONTROL_FILE
-            or custody.membership_path != authorization_custody.HOSTED_MEMBERSHIP_FILE
-            or custody.local_replica_id != replica_id
-            or _HOSTED_ATTACHMENT.fullmatch(control.registry_attachment_id) is None
-            or control.keyring_id != custody.keyring.keyring_id
-            or control.cell_id != custody.keyring.cell_id
-            or control.logical_vault_id != custody.keyring.logical_vault_id
-            or membership_record is None
-            or membership_record.epoch != control.serving_membership_epoch
-            or membership_record.cell_id != control.cell_id
-            or membership_record.logical_vault_id != control.logical_vault_id
-            or not membership_record.replicas
-            or any(
-                replica.state != "DRAINING"
-                or replica.schema_version != store.SCHEMA_USER_VERSION
-                or not replica.issuance_stopped
-                or not replica.no_in_flight
-                for replica in membership_record.replicas
-            )
-            or store.authorization_session_schema_version_if_readable(vault_root) != store.SCHEMA_USER_VERSION
-        ):
-            raise authorization_custody.AuthorizationCustodyUnavailable
-        custody_digest, identity_digest = _hosted_custody_digests(custody)
-        return (
-            _MigrationIdentity(
-                keyring_id=custody.keyring.keyring_id,
-                cell_id=custody.keyring.cell_id,
-                logical_vault_id=custody.keyring.logical_vault_id,
-                registry_attachment_id=control.registry_attachment_id,
-                attachment_epoch=control.attachment_epoch,
-                staged_at=custody.keyring.active_key.not_before,
-                hosted_custody_digest=custody_digest,
-                hosted_identity_digest=identity_digest,
-                hosted_membership_epoch=control.serving_membership_epoch,
-                hosted_membership_digest=control.serving_membership_digest,
-            ),
-            control if control.governance_enrolled else None,
-        )
-
-    if hosted_recovery:
-        raise authorization_custody.AuthorizationCustodyUnavailable
     try:
         staged = authorization_custody.stage_standalone_v3_custody(vault_root, now=now)
         return (
@@ -552,10 +412,6 @@ def _plan_value(
     source_store_digest: str,
     projection_rows_digest: str,
     item_count: int,
-    hosted_custody_digest: str | None = None,
-    hosted_identity_digest: str | None = None,
-    hosted_membership_epoch: int | None = None,
-    hosted_membership_digest: str | None = None,
 ) -> dict[str, str | int]:
     value: dict[str, str | int] = {
         "schema_version": 3,
@@ -572,21 +428,6 @@ def _plan_value(
         "projection_rows_digest": projection_rows_digest,
         "item_count": item_count,
     }
-    if any(
-        item is not None
-        for item in (
-            hosted_custody_digest,
-            hosted_identity_digest,
-            hosted_membership_epoch,
-            hosted_membership_digest,
-        )
-    ):
-        value.update(
-            hosted_custody_digest=_require_digest(hosted_custody_digest),
-            hosted_identity_digest=_require_digest(hosted_identity_digest),
-            hosted_membership_epoch=_bounded_integer(hosted_membership_epoch, minimum=1),
-            hosted_membership_digest=_require_digest(hosted_membership_digest),
-        )
     return value
 
 
@@ -604,12 +445,11 @@ def _prepare_forward_migration(
     vault_root: Path,
     *,
     now: int,
-    hosted_recovery: bool = False,
 ) -> ForwardMigrationPlan:
     root = Path(vault_root)
     try:
         staged, enrolled_control = _migration_identity(
-            root, now=now, hosted_recovery=hosted_recovery
+            root, now=now
         )
         before = policy.observe_authoring_snapshot(root)
         if before is None:
@@ -679,12 +519,8 @@ def _prepare_forward_migration(
             source_store_digest=source_store_digest,
             projection_rows_digest=manifest.rows_digest,
             item_count=len(items),
-            hosted_custody_digest=staged.hosted_custody_digest,
-            hosted_identity_digest=staged.hosted_identity_digest,
-            hosted_membership_epoch=staged.hosted_membership_epoch,
-            hosted_membership_digest=staged.hosted_membership_digest,
         )
-        if _migration_identity(root, now=now, hosted_recovery=hosted_recovery)[0] != staged:
+        if _migration_identity(root, now=now)[0] != staged:
             raise ForwardMigrationPlanMismatch
         plan_digest = _framed_digest(
             b"exomem.governance-schema-migration-plan.v1",
@@ -710,10 +546,6 @@ def _prepare_forward_migration(
         projection_rows_digest=manifest.rows_digest,
         item_count=len(items),
         plan_digest=plan_digest,
-        hosted_custody_digest=staged.hosted_custody_digest,
-        hosted_identity_digest=staged.hosted_identity_digest,
-        hosted_membership_epoch=staged.hosted_membership_epoch,
-        hosted_membership_digest=staged.hosted_membership_digest,
     )
 
 
@@ -728,10 +560,6 @@ def plan_summary(plan: ForwardMigrationPlan) -> dict[str, object]:
             source_store_digest=plan.source_store_digest,
             projection_rows_digest=plan.projection_rows_digest,
             item_count=plan.item_count,
-            hosted_custody_digest=plan.hosted_custody_digest,
-            hosted_identity_digest=plan.hosted_identity_digest,
-            hosted_membership_epoch=plan.hosted_membership_epoch,
-            hosted_membership_digest=plan.hosted_membership_digest,
         ),
         "plan_digest": plan.plan_digest,
     }
@@ -876,9 +704,7 @@ def forward_migration_backup_path(
         authorization_custody.KEYRING_FILE_ENV,
         root,
     )
-    from ..hosted_runtime import hosted_mode_enabled
-
-    if hosted_mode_enabled() or keyring_path == authorization_custody.HOSTED_KEYRING_FILE:
+    if keyring_path == authorization_custody.HOSTED_KEYRING_FILE:
         raise ForwardMigrationUnavailable
     backup_path = keyring_path.with_name(f"governance-v3-backup-{digest}.bin")
     custody_paths = {
@@ -984,15 +810,10 @@ def _bounded_integer(value: object, *, minimum: int = 0) -> int:
 
 def _target_from_plan(value: dict[str, object]) -> schema_v4.VerifiedActiveGovernanceState:
     if (
-        set(value) not in (_PLAN_FIELDS, _PLAN_FIELDS | _HOSTED_PLAN_FIELDS)
+        set(value) != _PLAN_FIELDS
         or value.get("schema_version") != 3
     ):
         raise ForwardMigrationUnavailable
-    for name in _HOSTED_PLAN_FIELDS & value.keys():
-        if name == "hosted_membership_epoch":
-            _bounded_integer(value[name], minimum=1)
-        else:
-            _require_digest(value[name])
     for name in (
         "activation_state_digest",
         "policy_fingerprint",
@@ -1167,26 +988,7 @@ def verify_forward_migration_backup(
         catalog_descriptor=catalog_descriptor,
         projection_namespace_evidence=namespace_evidence,
         serialized_v3=serialized,
-        hosted_custody_digest=(
-            str(plan_value["hosted_custody_digest"])
-            if "hosted_custody_digest" in plan_value
-            else None
-        ),
-        hosted_identity_digest=(
-            str(plan_value["hosted_identity_digest"])
-            if "hosted_identity_digest" in plan_value
-            else None
-        ),
-        hosted_membership_epoch=(
-            _bounded_integer(plan_value["hosted_membership_epoch"], minimum=1)
-            if "hosted_membership_epoch" in plan_value
-            else None
-        ),
-        hosted_membership_digest=(
-            str(plan_value["hosted_membership_digest"])
-            if "hosted_membership_digest" in plan_value
-            else None
-        ),
+
     )
 
 
@@ -2617,20 +2419,6 @@ def restore_forward_migration_backup(
     )
 
 
-def _require_hosted_pre_enrollment(
-    vault_root: Path,
-    plan: ForwardMigrationPlan,
-    *,
-    now: int,
-) -> None:
-    if plan.hosted_custody_digest is None:
-        return
-    custody = authorization_custody.load_authorization_custody(vault_root, now=now)
-    if (
-        custody.control.governance_enrolled
-        or _hosted_custody_digests(custody)[0] != plan.hosted_custody_digest
-    ):
-        raise ForwardMigrationUnavailable
 
 
 def prepare_forward_migration_backup(
@@ -2649,10 +2437,6 @@ def prepare_forward_migration_backup(
             plan = prepare_forward_migration(root, now=now)
             if not hmac.compare_digest(plan.plan_digest, expected):
                 raise ForwardMigrationPlanMismatch
-            # The provisioner must serialize enrollment after this successful
-            # terminal. Rechecks detect an independently racing signer; a
-            # read-only custody consumer cannot make their effects atomic.
-            _require_hosted_pre_enrollment(root, plan, now=now)
             key, _items, manifest = _stage_material(root, plan)
             if (
                 projection_store.verify_variant_store(
@@ -2671,7 +2455,6 @@ def prepare_forward_migration_backup(
                 plan_digest=expected,
                 backup_root=backup_root,
             )
-            _require_hosted_pre_enrollment(root, plan, now=now)
             authorization_custody._publish_private_artifact(  # noqa: SLF001
                 backup_path,
                 _backup_bytes(plan, serialized_v3=serialized),
@@ -2691,7 +2474,6 @@ def prepare_forward_migration_backup(
                 or prepare_forward_migration(root, now=now) != plan
             ):
                 raise ForwardMigrationPlanMismatch
-            _require_hosted_pre_enrollment(root, plan, now=now)
             return backup
     except (ForwardMigrationPlanMismatch, _ForwardMigrationCrash):
         raise
@@ -2723,21 +2505,6 @@ def commit_enrolled_forward_migration(
     )
 
 
-def commit_hosted_forward_migration(
-    vault_root: Path,
-    *,
-    expected_plan_digest: str,
-    now: int,
-    backup_root: Path,
-) -> ForwardMigrationResult:
-    """Recover one backed-up hosted enrollment while keeping serving fenced."""
-    return _commit_enrolled_forward_migration(
-        vault_root,
-        expected_plan_digest=expected_plan_digest,
-        now=now,
-        backup_root=backup_root,
-        hosted_recovery=True,
-    )
 
 
 def _commit_enrolled_forward_migration(
@@ -2746,15 +2513,10 @@ def _commit_enrolled_forward_migration(
     expected_plan_digest: str,
     now: int,
     backup_root: Path | None,
-    hosted_recovery: bool = False,
 ) -> ForwardMigrationResult:
     expected = _require_digest(expected_plan_digest)
     root = Path(vault_root)
-    load_custody = (
-        authorization_custody.load_hosted_migration_custody
-        if hosted_recovery
-        else authorization_custody.load_authorization_custody
-    )
+    load_custody = authorization_custody.load_authorization_custody
     try:
         with reserved_paths._identity_coordination_scope(root, identity_may_change=False):
             backup = verify_forward_migration_backup(
@@ -2775,48 +2537,6 @@ def _commit_enrolled_forward_migration(
                 or custody.serving_membership is None
             ):
                 raise ForwardMigrationUnavailable
-            if _HOSTED_ATTACHMENT.fullmatch(control.registry_attachment_id):
-                fixed_paths = {
-                    authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
-                    authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
-                    authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
-                }
-                if backup_root is None or any(
-                    os.environ.get(variable, "") != str(path)
-                    for variable, path in fixed_paths.items()
-                ):
-                    raise ForwardMigrationUnavailable
-                source_digest, identity_digest = _hosted_custody_digests(custody)
-                if backup.hosted_identity_digest != identity_digest or (
-                    version == store.SCHEMA_USER_VERSION
-                    and backup.hosted_custody_digest != source_digest
-                ):
-                    raise ForwardMigrationPlanMismatch
-                if (
-                    version == schema_v4.SCHEMA_USER_VERSION
-                    and source_digest != backup.hosted_custody_digest
-                ):
-                    record = custody.serving_membership
-                    if (
-                        backup.hosted_membership_epoch is None
-                        or record.epoch != backup.hosted_membership_epoch + 1
-                        or record.previous_epoch_digest != backup.hosted_membership_digest
-                        or any(replica.schema_version != 4 for replica in record.replicas)
-                    ):
-                        raise ForwardMigrationPlanMismatch
-                    if hosted_recovery:
-                        source_control = replace(
-                            control,
-                            serving_membership_epoch=backup.hosted_membership_epoch,
-                            serving_membership_digest=backup.hosted_membership_digest,
-                        )
-                        if (
-                            _hosted_custody_digests(replace(custody, control=source_control))[0]
-                            != backup.hosted_custody_digest
-                        ):
-                            raise ForwardMigrationPlanMismatch
-            elif backup.hosted_identity_digest is not None:
-                raise ForwardMigrationPlanMismatch
             _verify_live_source_material(root, backup)
             if version == schema_v4.SCHEMA_USER_VERSION:
                 if any(
@@ -2838,11 +2558,7 @@ def _commit_enrolled_forward_migration(
                 _verify_active_target(root, backup)
                 active = backup.target
             elif version == store.SCHEMA_USER_VERSION:
-                plan = (
-                    _prepare_forward_migration(root, now=now, hosted_recovery=True)
-                    if hosted_recovery
-                    else prepare_forward_migration(root, now=now)
-                )
+                plan = prepare_forward_migration(root, now=now)
                 if plan.plan_digest != expected or plan.target != backup.target:
                     raise ForwardMigrationPlanMismatch
                 key, _items, manifest = _stage_material(root, plan)
@@ -2855,12 +2571,7 @@ def _commit_enrolled_forward_migration(
                     != manifest
                 ):
                     raise ForwardMigrationPlanMismatch
-                commit_store = (
-                    store.commit_hosted_enrolled_v3_store
-                    if hosted_recovery
-                    else store.commit_enrolled_v3_store
-                )
-                active = commit_store(
+                active = store.commit_enrolled_v3_store(
                     root,
                     seed=plan.seed,
                     expected_source_store_digest=backup.source_store_digest,

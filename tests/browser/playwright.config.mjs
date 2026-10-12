@@ -1,7 +1,5 @@
 import {defineConfig} from "@playwright/test";
 
-const liveStorageState = process.env.EXOMEM_LIVE_STORAGE_STATE?.trim();
-
 export default defineConfig({
   testDir: ".",
   testMatch: "*.spec.mjs",
@@ -13,19 +11,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: "live-transfer.spec.mjs",
       use: {browserName: "chromium"},
-    },
-    {
-      name: "hosted-live-chromium",
-      testMatch: "live-transfer.spec.mjs",
-      use: {
-        browserName: "chromium",
-        baseURL: process.env.EXOMEM_LIVE_BASE_URL || "https://substratesystems.io",
-        ...(liveStorageState ? {storageState: liveStorageState} : {}),
-        // Transfer grants are short-lived credentials. Never retain them in a trace.
-        trace: "off",
-      },
     },
   ],
 });

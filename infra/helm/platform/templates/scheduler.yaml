@@ -1,5 +1,5 @@
 {{- $contractRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
-{{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
+{{- $runtimeImage := required "platformJobs.image is required" .Values.platformJobs.image -}}
 {{- $contract := $contractRaw | fromJson -}}
 {{- $contractSha256 := $contractRaw | sha256sum -}}
 {{- if ne (int .Values.scheduler.contractVersion) (int $contract.version) -}}
@@ -82,13 +82,10 @@ data:
 apiVersion: batch/v1
 kind: CronJob
 {{- /*
-  Prefixed like every other scheduler-owned object. The bare contract name
-  collides: the schedules contract carries a job called `exomem-export-gc`, and
-  durability-workloads.yaml independently renders a CronJob of that exact name
-  in the same namespace, so the chart emitted two objects with one identity and
-  `helm install --wait` failed with "no CronJob with the name exomem-export-gc
-  found". The job's logical name stays $job.name everywhere it is data -- the
-  state ConfigMap key, the runtime's JOB_NAME, the labels.
+  Prefixed like every other scheduler-owned object, so a job name never
+  collides with another CronJob in the namespace. The job's logical name stays
+  $job.name everywhere it is data -- the state ConfigMap key, the runtime's
+  JOB_NAME, the labels.
 */}}
 metadata:
   name: exomem-hosted-scheduler-{{ $job.name }}
@@ -100,7 +97,7 @@ metadata:
     exomem.io/contract-sha256: {{ $contractSha256 | quote }}
 spec:
   schedule: {{ $job.schedule | quote }}
-  suspend: {{ and (eq (include "exomem.legacyHostedPaused" $) "true") (not (and $cloudEnabled $jobPolicy.servesCloud)) }}
+  suspend: {{ not $cloudEnabled }}
   concurrencyPolicy: {{ $contract.kubernetesJobPolicy.concurrencyPolicy }}
   startingDeadlineSeconds: {{ $contract.kubernetesJobPolicy.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: {{ $contract.kubernetesJobPolicy.successfulJobsHistoryLimit }}

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "infra/scripts"))
 spec = importlib.util.spec_from_file_location(
     "release_recovery", ROOT / "infra/scripts/release_recovery.py"
 )
@@ -40,23 +38,22 @@ def test_pypi_retry_keeps_matching_bytes_and_rejects_conflicting_immutable_file(
         recovery.missing_distributions([wheel], [row])
 
 
-def test_partial_release_triplet_can_be_completed_from_original_artifact(tmp_path):
+def test_partial_release_receipts_can_be_completed_from_original_artifact(tmp_path):
     release = tmp_path / "release"
     artifact = tmp_path / "artifact"
     release.mkdir()
     artifact.mkdir()
-    candidate = "original.candidate-v1.json"
-    (release / candidate).write_bytes(b"original signed candidate")
+    receipt = "exomem-image-cloud-original.sigstore.json"
+    (release / receipt).write_bytes(b"original signed cloud receipt")
     for name, data in (
-        (candidate, b"original signed candidate"),
-        ("original.sigstore.json", b"image bundle"),
-        ("original.candidate.sigstore.json", b"candidate bundle"),
+        (receipt, b"original signed cloud receipt"),
+        ("exomem-image-cellctl-original.sigstore.json", b"original signed cellctl receipt"),
     ):
         (artifact / name).write_bytes(data)
     recovery.merge_evidence(artifact, release)
     assert sorted(p.name for p in release.iterdir()) == sorted(p.name for p in artifact.iterdir())
-    assert (release / candidate).read_bytes() == b"original signed candidate"
-    (artifact / candidate).write_bytes(b"retry identity")
+    assert (release / receipt).read_bytes() == b"original signed cloud receipt"
+    (artifact / receipt).write_bytes(b"retry identity")
     with pytest.raises(ValueError, match="immutable"):
         recovery.merge_evidence(artifact, release)
 
@@ -117,41 +114,6 @@ def test_dry_run_does_not_consult_an_unavailable_registry(tmp_path, monkeypatch)
         "v1.2.3", {"cloud": {"ref": "ghcr.io/example/runtime:1.2.3-cloud"}}, tmp_path, dry_run=True
     )
     assert plan["cloud"]["publish"] is True
-
-
-def test_hosted_recovery_keeps_original_candidate_identity_after_partial_upload(
-    tmp_path, monkeypatch
-):
-    import json
-
-    from test_hosted_image_candidates import COMMIT, DIGEST, _record
-
-    original = tmp_path / "original.candidate-v1.json"
-    image_bundle = tmp_path / "original.sigstore.json"
-    signature = tmp_path / "original.candidate.sigstore.json"
-    image_bundle.write_bytes(b"original image signature")
-    candidate = _record()
-    candidate["attestation"]["bundleSha256"] = recovery.sha256(image_bundle)
-    original.write_text(json.dumps(candidate))
-    original_bytes = original.read_bytes()
-    monkeypatch.setattr(recovery, "verify_build_target", lambda *args: None)
-    assert recovery.recovered_image(
-        "hosted", "ghcr.io/artexis10/exomem", "v0.35.1", COMMIT, tmp_path
-    ) == (None, [])
-    signature.write_bytes(b"original candidate signature")
-    verified = []
-    monkeypatch.setattr(
-        recovery.candidate_tool,
-        "verify_candidate",
-        lambda path, **kwargs: verified.append(path.read_bytes()),
-    )
-    digest, files = recovery.recovered_image(
-        "hosted", "ghcr.io/artexis10/exomem", "v0.35.1", COMMIT, tmp_path
-    )
-    assert digest == "sha256:" + DIGEST
-    assert {p.name for p in files} == {original.name, image_bundle.name, signature.name}
-    assert verified == [original_bytes]
-    assert original.read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize("other_target", ["lean", None, "cloud"])
@@ -242,6 +204,113 @@ def test_raw_bundle_uses_signed_producer_attempt_instead_of_filename_claim(tmp_p
         lambda *args: json.dumps([{"verificationResult": {"statement": statement}}]),
     )
     with pytest.raises(ValueError, match="producer"):
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
+
+
+@pytest.mark.parametrize(
+    "verification", [[], {}, [None], [{}], [{"verificationResult": None}],
+                     [{"verificationResult": {"statement": []}}]]
+)
+def test_image_recovery_rejects_empty_or_malformed_verification_results(
+    tmp_path, monkeypatch, verification
+):
+    """A successful verifier process must still authenticate a usable statement."""
+    import base64
+    import json
+
+    commit, digest = "a" * 40, "b" * 64
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-1.sigstore.json"
+    statement = {"subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}]}
+    bundle.write_text(json.dumps({
+        "dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}
+    }))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(verification))
+
+    with pytest.raises(ValueError, match="verification"):
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
+
+
+@pytest.mark.parametrize(
+    "subjects", [None, [], [None],
+                 [{"name": "ghcr.io/example/other", "digest": {"sha256": "b" * 64}}],
+                 [{"name": "ghcr.io/example/runtime", "digest": {"sha256": "c" * 64}}],
+                 [{"name": "ghcr.io/example/runtime", "digest": {"sha256": "b" * 64}}] * 2]
+)
+def test_image_recovery_rejects_a_different_or_additional_verified_subject(
+    tmp_path, monkeypatch, subjects
+):
+    """A retained receipt must authenticate exactly the image that recovery tags."""
+    import base64
+    import json
+
+    commit, digest = "a" * 40, "b" * 64
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-1.sigstore.json"
+    statement = {"subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}]}
+    bundle.write_text(json.dumps({
+        "dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}
+    }))
+    statement["subject"] = subjects
+    verification = [{"verificationResult": {"statement": statement}}]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(verification))
+
+    with pytest.raises(ValueError, match="subject"):
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
+
+
+@pytest.mark.parametrize("digest", ["", "b" * 63, "B" * 64, None])
+def test_image_recovery_rejects_a_malformed_digest_before_accepting_a_receipt(
+    tmp_path, monkeypatch, digest
+):
+    """Malformed receipt subjects must never become registry references."""
+    import base64
+    import json
+
+    commit = "a" * 40
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-1.sigstore.json"
+    statement = {
+        "subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}],
+        "predicate": {"runDetails": {"metadata": {
+            "invocationId": "https://github.com/example/runtime/actions/runs/123/attempts/1"
+        }}},
+    }
+    bundle.write_text(json.dumps({
+        "dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}
+    }))
+    verification = [{"verificationResult": {"statement": statement}}]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(verification))
+    monkeypatch.setattr(recovery, "verify_build_target", lambda *args: None)
+
+    with pytest.raises(ValueError, match="digest"):
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
+
+
+@pytest.mark.parametrize("run_id,attempt", [("0", "1"), ("123", "01"), ("abc", "1")])
+def test_image_recovery_rejects_an_invalid_signed_producer_run_or_attempt(
+    tmp_path, monkeypatch, run_id, attempt
+):
+    """Receipt filenames cannot legitimize invalid signed producer identities."""
+    import base64
+    import json
+
+    commit, digest = "a" * 40, "b" * 64
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-{run_id}-{attempt}.sigstore.json"
+    statement = {
+        "subject": [{"name": "ghcr.io/example/runtime", "digest": {"sha256": digest}}],
+        "predicate": {"runDetails": {"metadata": {
+            "invocationId": f"https://github.com/example/runtime/actions/runs/{run_id}/attempts/{attempt}"
+        }}},
+    }
+    bundle.write_text(json.dumps({
+        "dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}
+    }))
+    verification = [{"verificationResult": {"statement": statement}}]
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(verification))
+
+    with pytest.raises(ValueError, match="positive decimal"):
         recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/runtime", "cloud")
 
 

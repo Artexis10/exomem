@@ -38,7 +38,7 @@ The owner's decisions for this change:
 - One generic collection mechanism, with types as data: kind, fields, natural key, lifecycle, surfacing and default audience are declared, not coded (§14).
 - Relational guarantees from the engine: unique natural keys, atomic multi-row writes, row versions, append-only audit, and exactly-once by request identity.
 - Obsidian keeps working: views sit at today's paths and edits made in them come back through the governed write path.
-- Unchanged external tool contracts wherever possible, with every change listed (§8). Released frozen hosted candidates stay unchanged.
+- Unchanged external tool contracts wherever possible, with every change listed (§8). Hosted profiles are retired.
 - Row-level governance with withheld indistinguishable from absent, enforced before any reduction.
 - A verifiable, reversible, zero-downtime migration.
 - Consistent snapshots for backup, vault copies and hosted portability.
@@ -50,7 +50,7 @@ The owner's decisions for this change:
 - Moving the `dataset` strategy. CSV, TSV and JSON datasets stay human-owned, file-canonical and query-only.
 - A server database, replication protocol, or multi-writer store. The existing single-writer lease stays the only write authority.
 - A delete action or new policy language. New collection *types* are data (§14); new *kinds* change only by shipped revision.
-- Changing released frozen hosted candidates.
+- Reviving retired Hosted profiles.
 - Server-side interpretation of edited prose. Edit-back is deterministic parsing and validation only (pure substrate).
 
 ## Decisions
@@ -338,7 +338,7 @@ The same set feeds `snapshot` (§3). Withheld rows are indistinguishable from ab
 - The envelope projectors (`project_query_result`, `project_mutation_receipt`, `_LinkProjector`) are unchanged. They run over the store results.
 - **Egress of view files** through `get_page`, `find` and other tools resolves the file to its rows. An item view is released exactly as its row. A log view is released only when every row it renders is released to the caller; otherwise the whole file is withheld, so withheld stays absent. Filesystem readers are the owner, who is not subject to scope defaults.
 - **Held candidates** keep their rule: they are filtered like items before being disclosed or counted.
-- **Hosted cells** use the same code path.
+- **Cloud cells** use the same code path.
 
 ### 8. Tool contracts
 
@@ -451,7 +451,7 @@ Blockers are duplicate or ambiguous identities, schema violations, unsupported v
   - Re-render every view into a staging tree and compare it with the vault.
   - Publish the store, then drain the projector.
   - A restored store older than the vault's views surfaces the difference as held `VIEW_CONFLICT` corrections, never as silent overwrites.
-- **Hosted cells.** The live store sits in the cell state root on the tenant volume (`external-canonical`), one per cell, so tenant isolation is unchanged. Quiesce flushes the replica. Portability export includes the quiesced snapshot at its vault path as canonical data. It is a single-file `journal_mode=DELETE` backup-API copy, and the live store's files are never exported. Restore stages and validates as above before publication. `hosted-vault-portability` is modified accordingly.
+- **Cloud cells.** The live store sits in the cell state root on the tenant volume (`external-canonical`), one per cell, so tenant isolation is unchanged. Quiesce flushes the replica. Portability export includes the quiesced snapshot at its vault path as canonical data. It is a single-file `journal_mode=DELETE` backup-API copy, and the live store's files are never exported. Restore stages and validates as above before publication. `hosted-vault-portability` is modified accordingly.
 
 ### 12. Performance
 
@@ -736,7 +736,7 @@ If any item fails, or a recomputed natural key collides, the whole save refuses 
 **Declaring a type in conversation.** The flow for "I want to keep my recipes":
 1. The agent calls `validate`, then `diff` on its drafted declaration and shows the preview.
 2. On confirmation it calls `save-collection-type` with `why`, and optionally `scaffold` to create the first collection at `Knowledge Base/Recipes/_collection.md`.
-3. The very next call can add items (14.7). The type's placement is registered as a structured layer, so its views are excluded from ordinary recall like `Records` and `Planning` (`recall_policy`) and are pinned for the hosted gateway (`hosted_gateway`). Both read the type registry instead of hard-coded layer names.
+3. The very next call can add items (14.7). The type's placement is registered as a structured layer, so its views are excluded from ordinary recall like `Records` and `Planning` (`recall_policy`) and are pinned for the current command surfaces. Both read the type registry instead of hard-coded layer names.
 
 #### 14.6 Default audience and governance
 
@@ -767,7 +767,7 @@ The facades refuse a collection of the other built-in type (today's boundary sce
 - it gains `action: "transition"`;
 - `describe` takes an optional `collection_type` and teaches that type from its declaration.
 
-The frozen hosted candidates are unchanged: the new action and parameter appear only on the local surface and the v5 candidate.
+The retired Hosted profiles are unchanged: the new action and parameter appear only on the local surface and the v5 candidate.
 
 **Schema-byte budget.** The tool-description diet is cutting schema bytes, so the added surface is minimal. There are exactly two additions:
 - one enum value (`transition`) on the existing `action`;
@@ -876,7 +876,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 - **`find` and recall** already exclude Records and Planning descendants except manifests (`recall_policy`). Declared types join that exclusion (§14.5). Lexical, resolver and graph indexing of views therefore lagging the drain does not change any recall answer about item values.
 - **Plan links, supersession and pinned references** resolve through the store (§14.3), not through view files.
 
-**8. Hosted cells.**
+**8. Cloud cells.**
 - One writer lease per cell makes SQLite a natural fit, and the live store sits in the cell state root on the tenant volume.
 - Cell export and restore gain the store snapshot as canonical data: a single-file backup-API copy, never the live store's files (§11; the `hosted-vault-portability` delta). Restore stages, validates and re-renders before publication.
 - `cloud_import` of a file-canonical vault runs the §10 importer and proof in staging before the cell starts.
@@ -1052,7 +1052,7 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
 
 #### A8. Withheld-as-absent: the remaining leak surfaces
 
-- **The replica and markers are reserved.** `Knowledge Base/_Collections/` (the replica, `mode.json`, staging, aside, `.foreign-*` and `.exported-*` copies, and sync-conflict copies of any of them) is reserved in `reserved_paths`. It is denied on every egress path: `get_page`, `find`, `list_directory`, the hosted gateway, the lexical, embedding and graph indexes, and the resolver.
+- **The replica and markers are reserved.** `Knowledge Base/_Collections/` (the replica, `mode.json`, staging, aside, `.foreign-*` and `.exported-*` copies, and sync-conflict copies of any of them) is reserved in `reserved_paths`. It is denied on every egress path: `get_page`, `find`, `list_directory`, remote command surfaces, the lexical, embedding and graph indexes, and the resolver.
 - **History pages are rendered for the intersection of audiences** that can read the page's path. An effect appears only if every such audience can read its item. A mixed bulk transaction with any withheld effect is rendered without its `why`.
 - **Filename-recipe view paths** can carry titles. Each surface below authorizes the item behind a view path before exposing the path, and each has a test in P2.4:
   - `list_directory` and directory counts;

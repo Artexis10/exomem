@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes the Hosted adapter cases. MCP/REST maintenance admission and every surviving unchecked task remain in scope.
+
 ## 1. Admission Regressions
 
 - [x] 1.1 Add red tests proving MCP, REST, and hosted write-mode maintenance is refused before manager dispatch with stable non-committed remediation.

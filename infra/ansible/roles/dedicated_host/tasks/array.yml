@@ -66,7 +66,7 @@
     that: dedicated_host_disks_ours | int in [0, 2]
     fail_msg: >-
       Only one named data disk belongs to {{ dedicated_host_md_name }}; repair the
-      array by hand (docs/runbooks/hosted/dedicated-host.md) instead of rebuilding it.
+      array by hand (docs/runbooks/cloud-dedicated-host.md) instead of rebuilding it.
 
 - name: Assemble the existing array
   ansible.builtin.command:

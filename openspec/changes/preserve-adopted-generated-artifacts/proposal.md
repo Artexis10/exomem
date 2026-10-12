@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gateway forwarding. Exact adoption, no-handle truth, shared fixtures, and pending client traces remain in scope. Historical Hosted evidence does not close current client acceptance.
+
 ## Why
 
 Exomem already preserves exact client-supplied bytes, but active agents have no contract for recognising when a generated draft becomes durable work. A selected, approved, sent, or published output can therefore be reduced to a textual note or lost entirely, while naively preserving every generated draft would create uncontrolled Evidence clutter.

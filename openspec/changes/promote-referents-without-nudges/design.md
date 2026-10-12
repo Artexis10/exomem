@@ -187,7 +187,7 @@ It is paid for by a trim on both bootstrap limits of decision 2, item 9, never b
    It uses existing `connect_memory` parameters, and `connect_memory` stays additive.
 5. `edit_memory(path, why, operation={kind: "remove_relation", relation, target})` removes the bullets of that triple from the subject page.
    It is keyed by subject, predicate and target, takes no hash, and returns `absent` when no such edge exists.
-   The removal rides a tool that is already destructive (`command_surface.py:240-264`, `DESTRUCTIVE_OPS`), so every tool's MCP `destructiveHint` stays truthful, and `connect_memory` keeps its non-destructive marketplace text (`hosted_plugins.py:931-934`).
+   The removal rides a tool that is already destructive (`command_surface.py:240-264`, `DESTRUCTIVE_OPS`), so every tool's MCP `destructiveHint` stays truthful; `connect_memory` keeps its registry-defined non-destructive classification.
    `add-relation` and `remove_relation` are also curation step kinds that compensate each other.
 6. Endpoints never refuse a write; a mismatch adds a non-blocking `endpoint_mismatch` finding.
 7. When a committed write authors the generic relation between two entity pages, `relation_advisory` carries at most 4 `specific_options`.
@@ -239,8 +239,8 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
 - `maintain_memory` curation already takes `curation_action`, `review_ref`, `expected_plan_fingerprint` and `why` (`commands.py:10057-10100`), and curation cannot target schema or admin state (`commands.py:10110`).
 - `schema_memory` saves a registry delta with `expected_hash` and `why` (`commands.py:10515-10579`).
   Its `vocabulary_ref` and `vocabulary_fingerprint` binding accepts only a vocabulary review ref with a 64-hex fingerprint and grants no write (`commands.py:9535-9551`), so it cannot bind a promotion entry.
-- The pinned Hosted profile refuses curation when its `maintain_memory` schema has no `curation_action` (`server_hosted.py:1441-1448`).
-- `edit_memory`, `maintain_memory` and `schema_memory` are already destructive tools; `triage_memory` and `connect_memory` are not (`command_surface.py:240-264`), and their marketplace text says so (`hosted_plugins.py:927-934`).
+- Active surfaces derive curation arguments from the command registry.
+- `edit_memory`, `maintain_memory` and `schema_memory` are already destructive tools; `triage_memory` and `connect_memory` are not (`command_surface.py:240-264`), and generated capability text follows that registry.
 
 **Decision.**
 1. Provenance: an entity creation or typed edge writes a log entry on its page that names the originating write's path, operation id and episode key when present; a registry save keeps its history header and reason.
@@ -282,7 +282,7 @@ When every miss is such an activation miss, it runs before decision 1B; otherwis
    History and logs keep both the promotion and its revert.
    The leaves stay callable on their own: the `edit_memory` `remove_relation` operation for any edge, and an ordinary curation plan for any wider undo.
 7. No revert or removal lands on `triage_memory` or `connect_memory`, so both stay non-destructive and their marketplace text stays true.
-8. The pinned Hosted profile must admit `curation_action="revert"` on `maintain_memory`; otherwise a Cloud user's revert is refused (`server_hosted.py:1441-1448`).
+8. Active local and Cloud surfaces must expose `curation_action="revert"` through the command registry.
 
 ### 6. One display label (T5)
 

@@ -1,11 +1,10 @@
 # exomem — multi-stage container image.
 #
-# Five final targets share this one file:
+# Four final targets share this one file:
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
 #   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
-#   hosted (target `hosted` — fixed non-root identity and immutable release metadata)
-#   cloud (target `cloud` — Exomem Cloud cell runtime, derived from `hosted`)
+#   cloud (target `cloud` — Exomem Cloud cell runtime, derived from `cell-runtime`)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
@@ -107,39 +106,15 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
 FROM builder-lean AS builder-hosted
-# A hosted cell encodes recall with the English model; name it here, where no
-# cell flag is set, so the build fetches the model its cells load. The cloud
-# image adds the multilingual one (`builder-cloud-model`).
-ENV HF_HOME=/opt/exomem-models \
-    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
-# Resolve the model through the very backend the cell serves with, so the build
-# fetches exactly what that runtime opens — the ONNX export, the fast tokenizer,
-# and the sequence config — and never a torch serialization there is no loader
-# for. Then load once more with the network closed. That second load is the
-# gate: if anything the runtime needs is absent, the build fails here instead of
-# every cell failing on its first query.
+# Install the lean ONNX environment shared by Cloud, without fetching a model.
 RUN uv pip install --python /app/.venv/bin/python ".[embeddings-onnx]" \
- && EXOMEM_EMBED_BACKEND=onnx /app/.venv/bin/python -c "\
-from exomem.embeddings import MODEL_NAME; \
-from exomem import embedding_backend as backend; \
-backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
-print('fetched', MODEL_NAME)" \
- && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 EXOMEM_EMBED_BACKEND=onnx \
-    /app/.venv/bin/python -c "\
-import importlib.util; \
-from exomem.embeddings import MODEL_NAME; \
-from exomem import embedding_backend as backend, recall_space; \
-encoder = backend.load_encoder(MODEL_NAME, backend=backend.ONNX); \
-v = encoder.encode(['offline load gate'], batch_size=1); \
-assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
-assert importlib.util.find_spec('torch') is None, 'torch reached the hosted image'; \
-print('offline load verified', MODEL_NAME, v.shape)"
+ && /app/.venv/bin/python -c "import importlib.util; assert importlib.util.find_spec('torch') is None, 'torch reached the cell environment'"
 
 ########################################################################
 # builder-cloud-model — the multilingual recall model a cloud cell encodes
 # with: bge-m3's pinned int8 artefact and its tokenizer, the model a personal
 # server runs. Fetched through the same backend, then loaded once more with
-# the network closed, as `builder-hosted` does for the English model. It
+# the network closed. It
 # fetches into a root of its own, so the cloud stage copies bge-m3 alone: a
 # cloud cell never loads the English model, and re-embeds a legacy sidecar
 # with bge-m3.
@@ -244,14 +219,13 @@ ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
 
 ########################################################################
-# cell-runtime, and final: hosted (target `hosted`). `cell-runtime` is what
-# the hosted and cloud images share; each adds its own model. The platform
-# mounts only the bound vault/state/log roots plus native Secret/operator
-# projections. Kubernetes supplies readOnlyRootFilesystem; this image supplies
+# cell-runtime — the base of the cloud image, which adds its own model. The
+# platform mounts only the bound vault/state/log roots plus native
+# Secret/operator projections. Kubernetes supplies readOnlyRootFilesystem; this image supplies
 # the matching fixed runtime identity and avoids bytecode writes to the image
 # layer.
 #
-# The cell images carry the embedding runtime and pre-baked weights, not the lean venv:
+# The cell image carries the embedding runtime and pre-baked weights, not the lean venv:
 # a paying tenant gets the same semantic recall as the free local runtime.
 # The cell has no egress and no writable root, so the weights are a read-only
 # image layer under HF_HOME and the hub client is pinned offline — an
@@ -289,24 +263,13 @@ EXPOSE 8765
 ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
 
-# Each cell image adds only the model its cells encode with (see
-# `recall_space.configured_recall_model`): the English one here.
-FROM cell-runtime AS hosted
-COPY --from=builder-hosted /opt/exomem-models /opt/exomem-models
-ENV EXOMEM_CONTAINER_VARIANT=hosted \
-    EXOMEM_RECALL_MODEL=BAAI/bge-base-en-v1.5
-
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
-      org.opencontainers.image.description="exomem — isolated hosted cell runtime (fixed UID/GID, operator CLI, read-only-root compatible)"
-
 ########################################################################
 # Final: cloud (target `cloud`). Exomem Cloud cell runtime (design D1/D2/D8).
 #
-# Derived from `cell-runtime`, as `hosted` is: the same offline ONNX model
-# environment, `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with
-# bge-m3 as its only pre-baked model. It adds the media engines below, which
-# `hosted` never carries; each stays off until cellctl switches it on in a cell
+# Derived from `cell-runtime`: the offline ONNX model environment,
+# `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with bge-m3 as its
+# only pre-baked model (see `recall_space.configured_recall_model`). It adds the
+# media engines below; each stays off until cellctl switches it on in a cell
 # (EXOMEM_MEDIA_ENGINES). Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
 # thin seam over the standalone runtime (D1), so this stage exists to add the
 # identity, backup tooling and command the cell pod needs — not a different
@@ -396,7 +359,7 @@ RUN --network=none \
 # installed `fastmcp.settings.Settings` (`env_prefix="FASTMCP_"`).
 #
 # EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
-# a personal server runs; a hosted cell keeps the English one.
+# a personal server runs.
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #

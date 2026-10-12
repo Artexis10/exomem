@@ -30,7 +30,7 @@ Paddle, provisioning, encrypted backup retention, KMS, or destructive external d
 Paddle is never a cell request-path or package runtime dependency; Substrate projects its
 billing state into internal provider-neutral capabilities before routing.
 
-See [hosted-operations.md](hosted-operations.md) and the
+See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
 [Substrate control-plane contract](substrate-control-plane-contract.md).
 
 ## Product Command Registry

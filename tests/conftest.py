@@ -58,9 +58,9 @@ if _BENCHMARKS_DIR.is_dir() and str(_BENCHMARKS_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCHMARKS_DIR))
 
 # POSIX-only by construction. These modules reach `fcntl` or `os.O_DIRECTORY`
-# at *import* scope -- `exomem.hosted_restore` and `benchmarks/protocol/custody.py`
-# -- so on Windows they abort collection with ImportError rather than skipping,
-# and a single unimportable module interrupts the entire run. Declaring them
+# at *import* scope -- `benchmarks/protocol/custody.py` -- so on Windows they
+# abort collection with ImportError rather than skipping, and a single
+# unimportable module interrupts the entire run. Declaring them
 # here rather than passing `--ignore` on the command line keeps `pytest` one
 # command on every platform, for CI and for a developer on Windows alike.
 #: `benchmarks/protocol/custody.py` is a *Linux* capability, not merely POSIX
@@ -77,7 +77,6 @@ collect_ignore: list[str] = []
 if os.name == "nt":
     collect_ignore += [
         "test_dataset_identity_case_count.py",  # -> lme.runner -> protocol.custody
-        "test_hosted_restore_candidate.py",  # -> exomem.hosted_restore -> fcntl
         "test_lme_reader_gate.py",  # -> lme.runner -> protocol.custody
         "test_lme_runner.py",  # -> lme.runner -> protocol.custody
         "test_protocol_custody.py",  # imports fcntl directly
@@ -258,9 +257,7 @@ def _needs_an_absent_posix_api(error: BaseException | None) -> bool:
 #: refuses the directory the cell just made. The two only disagree on Windows;
 #: on Linux `prepare_windows_private_state_root` is a no-op and
 #: `mkdir(mode=0o700)` is genuinely private, so there is nothing to reconcile
-#: for the platform this component is deployed on. A hosted cell is a Linux
-#: container, which is the same reason `test_hosted_restore_candidate.py` is
-#: ignored outright here.
+#: for the platform this component is deployed on.
 _HOSTED_POSIX_OWNERSHIP_REFUSAL = (
     "HostedSecurityStateInvalid",
     "HostedSecurityUnavailable",

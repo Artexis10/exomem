@@ -32,9 +32,9 @@ reference returned from exact result lookup SHALL pass current authorization,
 release-plane, and secret-scrubbing policy at read time rather than inheriting
 the writer's earlier disclosure decision.
 
-#### Scenario: Hosted worker and caller are different processes
+#### Scenario: Background worker and caller are different processes
 
-- **WHEN** a hosted mutation is acknowledged by one process and drained by another
+- **WHEN** a governed mutation is acknowledged by one process and drained by another
 - **THEN** both resolve the same vault-scoped state root and exact receipt namespace
 - **AND** no job or result artifact appears under the governed Markdown tree
 

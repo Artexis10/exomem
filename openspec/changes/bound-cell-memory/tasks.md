@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted image and vector-extension activation. Current service resource policy owns bounded Cloud scoring. Unchecked profiling, structural memory, and rollout work remain open.
+
 # Tasks
 
 ## 1. Measure (D1)

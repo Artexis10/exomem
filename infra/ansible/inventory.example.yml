@@ -17,7 +17,7 @@ all:
               private_node_ip: 10.50.1.31
           children:
             # Agents Terraform does not create (generate_ansible_inventory.py
-            # --dedicated-hosts); see docs/runbooks/hosted/dedicated-host.md.
+            # --dedicated-hosts); see docs/runbooks/cloud-dedicated-host.md.
             dedicated_hosts:
               hosts:
                 exomem-agent-dx1:

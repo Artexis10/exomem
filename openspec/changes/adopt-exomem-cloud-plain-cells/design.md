@@ -77,7 +77,7 @@ Facts verified against the code, including by the independent critic review of 2
    - **Log directory.** The image defaults `EXOMEM_LOG_DIR` to `/tmp/exomem-logs`, so no runtime log ever lands on the tenant volume that D8 backs up, even without the manifest's setting. In cloud mode an unset or empty `EXOMEM_LOG_DIR` falls back to `<tmp>/exomem-logs`, never to a home- or checkout-derived path on the volume.
 3. **Tool surface.**
    - The members of `CLOUD_SURFACE_EXCLUSIONS` are removed from the MCP server after registration.
-   - Each entry uses the `HostedSurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
+   - Each entry uses the `SurfaceExclusion` shape: `command`; `reason`, stating what is technically broken; and `lifted_when`.
    - The current members are `transfer_artifact`, `process_media` and `read_media`; staged import enables `adopt_vault`.
    - Legacy MCP aliases (`EXOMEM_MCP_LEGACY_COMPAT`) are never registered in cloud mode. A cell has no legacy clients, and aliases would re-expose the leaves of excluded commands.
 4. **Read-only mode.** With `EXOMEM_CLOUD_READ_ONLY=1` the cell refuses every mutating command with `CLOUD_CELL_READ_ONLY`, before vault access. Mutation is classified from the command registry, not from a copied list. Reads keep working.
@@ -393,7 +393,11 @@ Each step retries until its check holds. A failed observation never counts as ab
 - **Client address.** Traefik `websecure` sets no `trustedIPs`, so it overwrites `X-Real-Ip` with the peer address that `hostPort` preserves. A NetworkPolicy admits ingress to the gateway only from the Traefik pods, which makes that header the gateway's trustworthy client address.
 - **Trusted ingress source.** The gateway applies its per-IP bucket only to requests carrying `EXOMEM_GATEWAY_TRUSTED_INGRESS_SOURCE_HEADER` (`x-exomem-ingress-source`) with the configured value. The gateway's IngressRoute sets it through a Traefik `headers` middleware, which overwrites any copy a client sends, so only requests that came through this route carry it.
 - **Legacy.** `cloudflared` stays only for the old platform's hostnames until retirement. The old provisioner is scaled to zero in the same step that deploys cellctl (task 6.2), so it never runs beside a Cloud cell namespace and its admission policy needs no `exo-cell-` exclusion. A rollback that scales the old provisioner back up scales cellctl to zero first.
-  The platform chart sets the old gateway, provisioner API/worker and volume worker to zero replicas and suspends every legacy-only CronJob whenever cellctl or the Cloud gateway is enabled, or `legacyHosted.paused` is true. Each scheduler job has an explicit Cloud-service policy: `exomem-reconcile`, the only caller of the Cloud lifecycle sweep, remains unsuspended while either Cloud control workload is enabled; `legacyHosted.paused` by itself, with Cloud off, still suspends it. Before that chart can deploy, Substrate must skip the mutating legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` while Cloud is enabled, because that lane can claim legacy operations and call the paused provisioner. The same pause omits the old provisioner database migration/validation Helm hook on both install and upgrade; hosted-only releases retain that hook. That flag defaults to false for existing hosted-only installations. Set it explicitly to true in the Cloud deployment overlay so disabling Cloud during rollback does not silently restart legacy actors. Preserve the old tunnel, CSI, ingress and monitoring workloads. A direct Kubernetes scale/suspend change is not sufficient: Helm must render the stopped state too.
+  The retirement removes the old gateway, provisioner, volume worker, and legacy pause flag from the chart.
+  The two retained scheduler jobs run while either Cloud control workload is enabled and suspend otherwise.
+  The signed scheduler contract still owns their exact schedules and external authentication.
+  Cloud lifecycle work uses cellctl; retirement does not revoke any provider key or delete live state.
+  The operator inventory records those pending actions separately.
 
 ### D12. Control database on its own server
 

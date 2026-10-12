@@ -96,16 +96,9 @@ def _schema_version(vault: Path) -> int:
         connection.close()
 
 
-@pytest.mark.parametrize("hosted_flag", [None, "0", "false", "no", "off", " FALSE "])
 def test_forward_migration_plan_is_replayable_and_inert(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hosted_flag: str | None,
 ) -> None:
-    if hosted_flag is None:
-        monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
-    else:
-        monkeypatch.setenv("EXOMEM_HOSTED_CELL", hosted_flag)
     vault = _vault(tmp_path)
     now = int(time.time())
 

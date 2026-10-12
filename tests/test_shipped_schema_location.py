@@ -297,23 +297,23 @@ def test_reclaim_declines_when_nothing_has_been_deployed_yet(tmp_path: Path) -> 
 # ------------------------------------------------------------- portability
 
 
-def test_the_moved_schema_still_survives_a_hosted_export() -> None:
+def test_the_moved_schema_still_survives_an_export() -> None:
     """Moving a file must not also change whether it survives an export.
 
     `_is_unregistered_hidden_state` fails ALL dot-prefixed paths closed --
     deliberately, so a new machine-local cache cannot silently enter an archive.
     The shipped contract used to live under `Knowledge Base/` and was canonical
     by default; putting it in a dot-directory without registering it would have
-    dropped it from every hosted export, and `_valid_vault_scaffold` requires
+    dropped it from every vault export, and the archive scaffold check requires
     `SKILL.md`, so the restored vault would then be refused outright.
     """
-    from exomem import hosted_portability
+    from exomem import vault_portability
 
-    classification = hosted_portability.classify_artifact(
+    classification = vault_portability.classify_artifact(
         ".exomem/schema/SKILL.md"
     )
 
-    assert classification.artifact_class is hosted_portability.ArtifactClass.CANONICAL
+    assert classification.artifact_class is vault_portability.ArtifactClass.CANONICAL
     assert classification.rule_id == "portable-shipped-schema"
 
 
@@ -323,24 +323,24 @@ def test_an_unregistered_dot_directory_is_still_disposable() -> None:
     Registering the schema must not turn the fail-closed default into a
     fail-open one for the next hidden sidecar somebody adds.
     """
-    from exomem import hosted_portability
+    from exomem import vault_portability
 
-    classification = hosted_portability.classify_artifact(
+    classification = vault_portability.classify_artifact(
         ".some-new-cache/state.bin"
     )
 
-    assert classification.artifact_class is hosted_portability.ArtifactClass.DISPOSABLE_RUNTIME
+    assert classification.artifact_class is vault_portability.ArtifactClass.DISPOSABLE_RUNTIME
 
 
 def test_an_archive_from_either_layout_passes_the_scaffold_check() -> None:
     """A vault exported before the move must still restore after it."""
-    from exomem import hosted_portability
+    from exomem import vault_portability
 
     legacy = [{"path": "Knowledge Base/index.md"}, {"path": "Knowledge Base/_Schema/SKILL.md"}]
     migrated = [{"path": "Knowledge Base/index.md"}, {"path": ".exomem/schema/SKILL.md"}]
 
-    hosted_portability._verify_required_scaffold(legacy)
-    hosted_portability._verify_required_scaffold(migrated)
+    vault_portability._verify_required_scaffold(legacy)
+    vault_portability._verify_required_scaffold(migrated)
 
 
 def test_the_real_schema_reader_works_on_both_layouts(tmp_path: Path) -> None:
@@ -370,24 +370,6 @@ def test_the_real_schema_reader_works_on_both_layouts(tmp_path: Path) -> None:
     assert vault_module.shipped_schema_root(tmp_path) == legacy
     legacy_schema = schema_module.load_source_schema(tmp_path)
     assert legacy_schema.source_types == migrated.source_types
-
-
-def test_the_hosted_scaffold_check_accepts_both_layouts(tmp_path: Path) -> None:
-    """It gates whether the hosted runtime will serve a vault at all."""
-    from exomem import hosted_runtime
-
-    init_module.init_vault(tmp_path)
-    assert hosted_runtime._valid_vault_scaffold(tmp_path) is True
-
-    target = vault_module.shipped_schema_target(tmp_path)
-    legacy = tmp_path / "Knowledge Base" / "_Schema"
-    legacy.mkdir(parents=True, exist_ok=True)
-    (legacy / "SKILL.md").write_bytes((target / "SKILL.md").read_bytes())
-    import shutil
-
-    shutil.rmtree(target)
-
-    assert hosted_runtime._valid_vault_scaffold(tmp_path) is True
 
 
 def test_the_new_location_is_skipped_by_the_vault_wide_walk(tmp_path: Path) -> None:

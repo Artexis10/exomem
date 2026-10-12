@@ -34,7 +34,7 @@ curation apply requires. Edge
 removal and promotion revert SHALL run only on tools that are already marked
 destructive. A resolved
 non-owner's registry save remains a pending item for the owner. An
-additive-authority grant that governs the caller, including the Hosted v2
+additive-authority grant that governs the caller, including the activated v2
 grants, applies unchanged and is neither widened nor replaced by this class. No
 upgrade, migration or default SHALL activate v2 or route a v1 owner's promotion
 to an approval step. No prominence level, envelope setting,

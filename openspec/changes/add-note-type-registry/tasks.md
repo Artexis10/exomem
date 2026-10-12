@@ -25,7 +25,7 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 - [ ] 2.3 Add promotion under a parent that supplies role and flags; verify promotion, history and restore through `schema_memory`.
 - [ ] 2.4 Move folders, partitions, stems, required fields, statuses, sections, claim sections and typed fields onto the registry for the typed writer. Verify that the existing suites pass unchanged.
 - [ ] 2.5 Create the notes index entry and count for a new compiled folder; verify that a promoted type's pages appear in `Notes/index.md`.
-- [ ] 2.6 Add the generic `fields` parameter to `remember` and `replace_memory` on the current surfaces and hosted v5 only. Verify the tool budgets, descriptor pins and frozen v1 to v4 parameters.
+- [ ] 2.6 Add the generic `fields` parameter to `remember` and `replace_memory` on the current local and Cloud surfaces. Verify the tool budgets and current descriptors.
 - [ ] 2.7 Replace the sink exemption of `entity` and `production-log` with a declared attribute; verify the episode sink report on both types.
 - [ ] 2.8 Replace the experiment-only lifecycle in audit, artifact-role state and due state with a declared attribute; verify unfinished-experiment findings and artifact-role origins unchanged.
 - [ ] 2.9 Move the experiment-owned `outcome` rule onto the registry's typed fields, and add its `note-type-contract` delta; verify every frontmatter write boundary.

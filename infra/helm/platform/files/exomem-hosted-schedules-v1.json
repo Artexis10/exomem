@@ -45,11 +45,6 @@
       "name": "exomem-reconcile",
       "path": "/api/cron/exomem-reconcile",
       "schedule": "*/5 * * * *"
-    },
-    {
-      "name": "exomem-export-gc",
-      "path": "/api/cron/exomem-export-gc",
-      "schedule": "17 * * * *"
     }
   ]
 }

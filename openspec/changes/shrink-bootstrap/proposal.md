@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes frozen Hosted profile hashes, candidate rendering, and package checks. Bootstrap size, doctrine, plugin generation, and every surviving unchecked task remain in scope.
+
 ## Why
 
 Every agent session on every client pays the compact bootstrap before its first real turn. Measured on this tree it is 63,055 bytes of served JSON at `maximal` (about 15,800 tokens), 62,698 at the default `balanced`, and 60,481 at `off`. The level barely matters: `off` is 96% of `maximal`, so a client that asked Exomem to stay quiet still pays for the whole operating manual.

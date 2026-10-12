@@ -98,7 +98,6 @@ def test_service_profile_refuses_hosted_runtime_before_initialization(monkeypatc
 
     _service_profile(monkeypatch)
     monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
-    monkeypatch.setattr(server_runtime, "_initialize_hosted_runtime", lambda: pytest.fail("Hosted runtime must not start"))
     with pytest.raises(CloudConfigError):
         server_runtime.initialize_runtime(load_dotenv_func=lambda **kwargs: None)
 

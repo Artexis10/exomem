@@ -65,7 +65,7 @@ A healthy running `service-v1` cell SHALL keep its actual serving core recall en
 
 Promotion of `service-v1` SHALL require measured ordinary-write and query outcomes on the maintained large-vault fixture both with and without sustained bulk work. Twenty ordinary-note samples in each workload, each no more than 1 KiB UTF-8 and three chunks plus three semantic units, SHALL publish the exact committed version into both projections within 5 seconds at p95 and 10 seconds for every sample after commit; request-to-publication SHALL be within 10 seconds at p95 and 20 seconds for every sample. Eligible warm hybrid queries over the maintained 25-query fixture SHALL retain core vector participation with p95 latency at most 3 seconds and no sample over 10 seconds or newly degraded/refused. Outcome checks SHALL distinguish canonical commit from derived publication and measure post-idle and durable restart recovery separately.
 
-The unchanged tenant CPU/memory limits SHALL bound acceptance. Cgroup peak memory SHALL remain at most 80% of the cell memory limit, with no workload-induced OOM or restart. New admissions SHALL use fresh simultaneous warm-cell and platform usage/reservation evidence, charge at least the greater of declared memory request and measured warm peak for each proposed cell, and preserve at least 20% node allocatable memory headroom. A missed gate SHALL block promotion rather than silently relax its threshold. Arbitrary bulk inputs and explicitly unavailable/migrating vector spaces SHALL remain visibly pending/degraded rather than be counted as passing ordinary samples.
+The unchanged tenant CPU/memory limits SHALL bound acceptance. Cgroup peak memory SHALL remain at most 80% of the cell memory limit, with no workload-induced OOM or restart. New admissions SHALL use fresh simultaneous warm-cell and platform usage/reservation evidence, charge at least the greater of declared memory request and the qualified worst-supported per-slot warm peak for each proposed cell, and preserve at least 20% node allocatable memory headroom. A missed gate SHALL block promotion rather than silently relax its threshold. Arbitrary bulk inputs and explicitly unavailable/migrating vector spaces SHALL remain visibly pending/degraded rather than be counted as passing ordinary samples.
 
 #### Scenario: Ordinary save during an import
 - **WHEN** a service-profile cell accepts the bounded ordinary-note workload while bulk import runs
@@ -103,9 +103,19 @@ Browser and OAuth admission SHALL count only capacity observations from the prec
 
 Shared-worker selection SHALL default off and support selective qualification followed by explicit promotion for ordinary future admissions. Selective qualification SHALL preserve unselected resources, templates and render digests; dedicated placement SHALL remain independent. Serving, backup and restore SHALL use the same compatible worker profile and CSI attachability domain. Conflicting operator selections SHALL fail configuration before changing workloads.
 
-Selected qualification SHALL publish a complete zero-slot general-admission snapshot and retire incompatible positive rows before changing ordinary placement authority. This cutover SHALL serialize with the existing admission transaction lock, and the migration inventory SHALL be established after publication so an earlier redemption cannot commit outside it. Existing cells SHALL migrate through the established stop/change/start protocol, completing active holds and releasing volume users before changing resource or placement inputs. Selected migration SHALL finish before all-shared promotion. Promotion SHALL replace the advertised legacy domain atomically and publish qualified capacity only once a fresh ordinary cell ID can use the shared profile/domain. Rollback SHALL retire shared capacity and use the same stopped-cell protocol before restoring legacy placement/capacity. Capacity closure SHALL defer prospective admissions automatically, preserve unconsumed invitations and leave existing access unaffected; complete all-shared reconciliation SHALL reopen qualified admission without a manual unlock.
+Selected qualification SHALL start with an empty selected-cell list and publish a complete zero-slot general-admission snapshot and retire incompatible positive rows before changing ordinary placement authority. This cutover SHALL serialize with the existing admission transaction lock, and the migration inventory SHALL be established after publication so an earlier redemption cannot commit outside it. Existing cells SHALL migrate through the established stop/change/start protocol, completing active holds and releasing volume users before changing resource or placement inputs. Selected migration SHALL finish before all-shared promotion. Promotion SHALL replace the advertised legacy domain atomically and publish qualified capacity only once a fresh ordinary cell ID can use the shared profile/domain. Rollback SHALL retire shared capacity and use the same stopped-cell protocol before restoring legacy placement/capacity. Capacity closure SHALL defer prospective admissions automatically, preserve unconsumed invitations and leave existing access unaffected; complete all-shared reconciliation SHALL reopen qualified admission without a manual unlock.
 
 Within the initial scalar admission contract, shared capacity SHALL represent one interchangeable qualified resource/topology envelope. Absolute capacity SHALL be the per-node minimum of qualified occupancy, CPU, memory and cell attachment capacity, summed only after per-node floors and minima. Scheduler requests SHALL cover the qualified footprint; platform reserves, Pending commitments and supported lifecycle overlap SHALL be charged without double-counting ordinary cells already charged by admission. Deletion-in-progress SHALL retain its commitment until physical lifecycle cleanup releases it. The complete capacity pass, including absent-node zeroing, SHALL publish atomically. Missing or incomplete observations MUST NOT acquire a fresh positive capacity timestamp.
+
+The current controller SHALL remain a scheduler-request calculator, not a dynamic peak estimator.
+Qualification SHALL cover the worst supported per-slot warm workload, ordinary writes and queries, restart and supported maintenance overlap.
+Operators SHALL encode the measured footprint through conservative qualified occupancy and fixed additional reserves.
+For the admitted occupancy, their settings SHALL charge at least `max(request, qualified peak)` per slot and retain at least 20% node memory headroom.
+Node Allocatable SHALL already account for kubelet reservations; additional reserves SHALL avoid deducting those values twice.
+Numeric requests, occupancy and reserves SHALL come from qualification evidence rather than a fixed fleet size or idle sample.
+A production change to `512Mi/125m` SHALL require separate operator restart authorization.
+Failed request qualification SHALL preserve `1Gi/250m` for an image-only roll, with limits `3Gi/2CPU` unchanged.
+Shared-node MemoryQoS SHALL remain disabled during this qualification and migration.
 
 The initial cohort SHALL be bounded to one shared worker until the runtime, resources and intended occupancy pass the fixed outcome gates. Multiple workers SHALL require qualification of the occupancy Kubernetes can actually concentrate under their real requests and allocatable resources; a published slot ceiling or preferred spread SHALL NOT substitute for that proof. A second independent resource class or storage domain SHALL require a compatible admission extension before its slots are added.
 
@@ -138,6 +148,20 @@ The initial cohort SHALL be bounded to one shared worker until the runtime, reso
 ### Requirement: Safe service-policy rollback
 
 An operator SHALL be able to return a canary to a verified compatible legacy deployment while preserving post-upgrade canonical writes and outstanding durable index work. Rollback MUST NOT restore an older vault snapshot over newer committed data or relax tenant identity, authorization or publication fences.
+
+Historical rollback qualification SHALL use a fresh pre-attempt backup S1 that includes post-upgrade writes and copy both vault and host state.
+It SHALL NOT use the earlier S0 backup as a rollback source.
+The historical image SHALL prove route-level reads, governed writes, custody and durable-debt recovery against that copied state before a live pin.
+Readiness and manifest compatibility IDs SHALL NOT substitute for route compatibility across collection schema versions.
+The QA cell SHALL use an exclusive writer window because the entitlement sweep can overwrite a direct `read_only` row change.
+No durable maintenance override SHALL be inferred from such a database write.
+If the historical image refuses the copy, qualification SHALL prove copied-state refusal and recovery with the current image, avoid a live pin and leave successful historical rollback unproven.
+This procedure SHALL add neither a product endpoint nor a downmigration.
+
+#### Scenario: A historical image cannot read the copied state
+- **WHEN** a historical image rejects the copied current collection schema
+- **THEN** the operator does not pin that image on the live cell
+- **AND** the current image recovers the copied vault and host state while historical rollback remains unproven
 
 #### Scenario: Canary misses its outcome budget
 - **WHEN** a canary fails service acceptance after accepting new canonical writes
