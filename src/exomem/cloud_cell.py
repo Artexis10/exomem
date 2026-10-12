@@ -18,6 +18,13 @@ CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
 RESOURCE_POLICY_ENV = "EXOMEM_CLOUD_RESOURCE_POLICY"
 CLOUD_CELL_ISSUER = "exomem-cloud-cell"
+#: The gateway names the authenticated OAuth client of each request here. A
+#: stateless request from a handshake-protocol client carries no `clientInfo`,
+#: and the gateway forwards no `User-Agent`, so without it every such call looks
+#: like an unknown coding client. Trusted only in cloud mode: there the cell
+#: bearer proves the request came through the gateway, which sets this header
+#: itself and never forwards a caller's copy. It tunes eagerness only.
+GATEWAY_CLIENT_HEADER = "x-exomem-oauth-client"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 

@@ -673,6 +673,9 @@ def mcp_caller_identity() -> dict[str, str | None]:
     "which client?" while protecting nothing. The per-principal identity stays
     hashed and separate.
 
+    The name comes from `clientInfo`, then (cloud mode only) the gateway's
+    `cloud_cell.GATEWAY_CLIENT_HEADER`, then `User-Agent`.
+
     Never raises. Outside an MCP call every field is simply `None`.
     """
     identity: dict[str, str | None] = {
@@ -706,6 +709,14 @@ def mcp_caller_identity() -> dict[str, str | None]:
         # transport signal; there is no separate flag to read.
         headers = get_http_headers()
         identity["transport"] = "http" if headers else "stdio"
+        if not identity["client_name"]:
+            from . import cloud_cell
+
+            if cloud_cell.cloud_mode_enabled():
+                gateway_client = str(
+                    headers.get(cloud_cell.GATEWAY_CLIENT_HEADER, "") or ""
+                ).strip()
+                identity["client_name"] = gateway_client or None
         agent = str(headers.get("user-agent", "") or "").strip()
         if agent and not identity["client_name"]:
             identity["client_name"] = agent

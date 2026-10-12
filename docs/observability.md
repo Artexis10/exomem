@@ -216,7 +216,9 @@ it with `exomem logs verify`.
   client's calls separable when several are connected to one vault at once. It
   is client-declared, so treat it as a diagnostic hint, not an authorization
   input. `caller_principal_hash` is the separate, hashed, authenticated
-  identity.
+  identity. A stateless request carries no handshake; there the name comes
+  from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
+  header comes first, because the gateway forwards no `User-Agent`.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An
