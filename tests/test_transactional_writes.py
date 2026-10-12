@@ -1755,7 +1755,7 @@ def test_batch_atomic_write_preserves_create_only_conflict(tmp_path: Path) -> No
     assert _workspaces(tmp_path) == []
 
 
-def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
+def test_batch_atomic_write_restores_owned_targets_and_preserves_new_census_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guarded = tmp_path / "guarded"
@@ -1769,9 +1769,7 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     safe.write_bytes(b"safe-old")
     guarded_target.write_bytes(b"guarded-old")
     pending.write_bytes(b"pending-old")
-    real_replace_artifact = vault_module._BatchWorkspace.replace_artifact
     flips = 0
-    restore_targets: list[str] = []
     concurrent = guarded / "concurrent"
 
     real_publish_hook = vault_module._after_batch_destination_published
@@ -1783,20 +1781,10 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
         if flips == 2:
             concurrent.write_bytes(b"concurrent-owned")
 
-    def observe_restore(self, artifact, final, **kwargs):  # noqa: ANN001
-        if artifact.name.startswith("restore-"):
-            restore_targets.append(final.name)
-        return real_replace_artifact(self, artifact, final, **kwargs)
-
     monkeypatch.setattr(
         vault_module, "_after_batch_destination_published", inject_census_change
     )
-    monkeypatch.setattr(
-        vault_module._BatchWorkspace,
-        "replace_artifact",
-        observe_restore,
-    )
-    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+    with pytest.raises(vault_module.PathGuardError) as refused:
         vault_module.batch_atomic_write(
             [
                 vault_module.PlannedWrite(safe, "safe-new"),
@@ -1807,27 +1795,177 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
             required_guards=(census,),
         )
 
-    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
-    assert incomplete.value.committed is False
-    assert incomplete.value.as_public_dict()["outcome"] == {
-        "kind": "rollback_incomplete",
-        "committed": False,
-        "incomplete": True,
-        "affected_count": 3,
-        "targets": ["safe.md", "guarded/guarded.md", "pending.md"],
-        "omitted_target_count": 0,
-    }
-    assert isinstance(incomplete.value.__cause__, vault_module.PathGuardError)
-    assert incomplete.value.__cause__.code == "PATH_GUARD_CHANGED"
-    assert restore_targets == ["safe.md"]
+    assert refused.value.code == "PATH_GUARD_CHANGED"
     assert safe.read_bytes() == b"safe-old"
-    assert guarded_target.read_bytes() == b"guarded-new"
+    assert guarded_target.read_bytes() == b"guarded-old"
     assert pending.read_bytes() == b"pending-old"
     assert concurrent.read_bytes() == b"concurrent-owned"
     assert _workspaces(tmp_path) == []
-    retained = _workspaces(guarded)
-    assert len(retained) == 1
-    assert list(retained[0].iterdir()) == []
+    assert _workspaces(guarded) == []
+
+
+@pytest.mark.parametrize("intervention", ["before_publish", "held_publish", "retry"])
+def test_held_batch_restore_preserves_an_intervening_owned_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intervention: str,
+) -> None:
+    first = tmp_path / "first.txt"
+    pending = tmp_path / "pending.txt"
+    first.write_bytes(b"before-batch")
+    pending.write_bytes(b"pending-old")
+    restoring = False
+    edited = False
+    real_publish = vault_module.held_fs.publish_bytes
+    real_retry = vault_module.replace_tolerating_transient_sharing
+
+    def before_publish(destination: Path, *, restoring: bool) -> None:
+        nonlocal edited
+        if destination == pending:
+            raise OSError("forward publication stopped")
+        if restoring and intervention == "before_publish":
+            first.write_bytes(b"concurrent-owned")
+            edited = True
+        if restoring and intervention == "retry" and not edited:
+            raise PermissionError("transient restore refusal")
+
+    def publish_with_edit(filesystem, parent, leaf, data, **kwargs):  # noqa: ANN001
+        nonlocal edited
+        if restoring and intervention == "held_publish":
+            prepare = kwargs["prepare"]
+
+            def prepare_then_edit(file):  # noqa: ANN001
+                nonlocal edited
+                prepare(file)
+                first.write_bytes(b"concurrent-owned")
+                edited = True
+
+            kwargs["prepare"] = prepare_then_edit
+        return real_publish(filesystem, parent, leaf, data, **kwargs)
+
+    def retry_with_edit(replace_once, *, recheck):  # noqa: ANN001
+        nonlocal edited
+        if restoring and intervention == "retry":
+            try:
+                replace_once()
+            except PermissionError:
+                first.write_bytes(b"concurrent-owned")
+                edited = True
+                recheck()
+                replace_once()
+            return 1
+        return real_retry(replace_once, recheck=recheck)
+
+    real_replace = vault_module._BatchWorkspace.replace_artifact
+
+    def observe_restore(self, artifact, final, **kwargs):  # noqa: ANN001
+        nonlocal restoring
+        restoring = artifact.name.startswith("restore-")
+        return real_replace(self, artifact, final, **kwargs)
+
+    monkeypatch.setattr(vault_module, "_before_batch_destination_published", before_publish)
+    monkeypatch.setattr(vault_module.held_fs, "publish_bytes", publish_with_edit)
+    monkeypatch.setattr(vault_module, "replace_tolerating_transient_sharing", retry_with_edit)
+    monkeypatch.setattr(vault_module._BatchWorkspace, "replace_artifact", observe_restore)
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(first, "installed"), vault_module.PlannedWrite(pending, "pending-new")],
+            vault_root=tmp_path, post_commit_fanout=False,
+        )
+    assert edited
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert incomplete.value.committed is False
+    assert first.read_bytes() == b"concurrent-owned"
+    assert pending.read_bytes() == b"pending-old"
+
+
+@pytest.mark.parametrize("intervention", ["reopen", "read"])
+def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intervention: str,
+) -> None:
+    created = tmp_path / "created.txt"
+    pending = tmp_path / "pending.txt"
+    pending.write_bytes(b"pending-old")
+    with vault_module.held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_file = filesystem_type.file
+    real_read = filesystem_type.read
+    edited = False
+    rolling_back = False
+
+    def fail_pending(destination: Path, *, restoring: bool) -> None:
+        nonlocal rolling_back
+        if destination == pending:
+            rolling_back = True
+            raise OSError("forward publication stopped")
+
+    def edit_reopened(self, parent, leaf, **kwargs):  # noqa: ANN001
+        nonlocal edited
+        current = real_file(self, parent, leaf, **kwargs)
+        if (
+            intervention == "reopen" and rolling_back and leaf == created.name
+            and kwargs.get("access") == "mutate" and created.exists()
+        ):
+            created.write_bytes(b"concurrent-owned")
+            edited = True
+        return current
+
+    def edit_during_read(self, file):  # noqa: ANN001
+        nonlocal edited
+        if intervention == "read" and rolling_back and file.name == created.name:
+            created.write_bytes(b"concurrent-owned")
+            edited = True
+        return real_read(self, file)
+
+    monkeypatch.setattr(vault_module, "_before_batch_destination_published", fail_pending)
+    monkeypatch.setattr(filesystem_type, "file", edit_reopened)
+    monkeypatch.setattr(filesystem_type, "read", edit_during_read)
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, "installed"), vault_module.PlannedWrite(pending, "pending-new")],
+            vault_root=tmp_path, post_commit_fanout=False,
+        )
+    assert edited
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert created.read_bytes() == b"concurrent-owned"
+    assert pending.read_bytes() == b"pending-old"
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+def test_held_batch_inverse_refuses_a_replaced_ancestor_above_its_retained_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guarded: bool,
+) -> None:
+    ancestor = tmp_path / "outer"
+    target = ancestor / "inner/target.txt"
+    pending = tmp_path / "pending.txt"
+    pending.write_bytes(b"pending-old")
+    if not guarded:
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"before-batch")
+    guard = (
+        vault_module.PathGuard.capture(tmp_path, "outer/inner/target.txt", leaf_policy="absent")
+        if guarded else None
+    )
+    displaced = tmp_path / "displaced"
+    swapped = False
+
+    def substitute_ancestor(destination: Path, *, restoring: bool) -> None:
+        nonlocal swapped
+        if destination == pending:
+            ancestor.rename(displaced)
+            ancestor.mkdir()
+            (displaced / "inner").rename(ancestor / "inner")
+            swapped = True
+            raise OSError("forward publication stopped after ancestor change")
+
+    monkeypatch.setattr(vault_module, "_before_batch_destination_published", substitute_ancestor)
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "installed", guard=guard), vault_module.PlannedWrite(pending, "pending-new")],
+            vault_root=tmp_path, post_commit_fanout=False,
+        )
+    assert swapped
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert target.read_bytes() == b"installed"
+    assert pending.read_bytes() == b"pending-old"
 
 
 def test_directory_census_ignores_exact_valid_residue_without_touching_it(

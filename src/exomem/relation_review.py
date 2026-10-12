@@ -948,14 +948,18 @@ def serialize_lifecycle_prepared(prepared: LifecyclePreparedTransition) -> str:
 
 
 def _validate_lifecycle_entry(
-    directory: Path, entry: vault.PathIdentity, name: str
+    directory: Path, entry: vault.PathIdentity, name: str,
+    admission: Callable[[str], bool] | None = None,
 ) -> None:
+    _require_artifact_admission(admission, entry.relative_path)
     try:
         info = (directory / name).lstat()
     except OSError as error:
+        _require_artifact_admission(admission, entry.relative_path)
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
         ) from error
+    _require_artifact_admission(admission, entry.relative_path)
     if not vault._same_identity(entry, info):
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
@@ -971,7 +975,8 @@ def _validate_lifecycle_entry(
 
 
 def _inspect_lifecycle_identity(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[Path, tuple[str, ...], vault.DirectoryCensusGuard]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
@@ -981,6 +986,7 @@ def _inspect_lifecycle_identity(
             root,
             relative,
             max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+            admission=admission,
         )
     except vault.PathGuardError as error:
         if error.code == "PATH_GUARD_LIMIT":
@@ -1001,7 +1007,7 @@ def _inspect_lifecycle_identity(
     residue = 0
     names: list[str] = []
     for entry, name in zip(census.entries, raw_names, strict=True):
-        _validate_lifecycle_entry(current, entry, name)
+        _validate_lifecycle_entry(current, entry, name, admission)
         if _LIFECYCLE_ATOMIC_RESIDUE.fullmatch(name):
             residue += 1
             continue
@@ -1195,28 +1201,33 @@ def _parse_lifecycle_prepared(
 
 
 def _load_lifecycle_decision_bound(
-    vault_root: Path, page_identity: str, after_fingerprint: str
+    vault_root: Path, page_identity: str, after_fingerprint: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[LifecycleDecision | None, vault.PathGuard | None]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     fingerprint = _canonical_fingerprint(after_fingerprint)
     root = Path(vault_root).absolute()
-    inspected = _inspect_lifecycle_identity(root, identity)
+    name = f"{fingerprint}.json"
+    _require_artifact_admission(admission, _lifecycle_reference(identity, name))
+    inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return None, None
-    name = f"{fingerprint}.json"
     if name not in names:
         return None, None
     with _open_review_directory(
         root,
         nested=("lifecycle", identity),
         max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+        admission=admission,
     ) as opened:
+        census.recheck(root)
         if opened is None:
             raise RelationReviewError(
                 "RELATION_REVIEW_SWAPPED", "review directory changed during access"
             )
         raw, guard = _read_artifact_bytes(opened, name)
+        census.recheck(root)
     return (
         _parse_lifecycle_decision(
             raw, page_identity=identity, after_fingerprint=fingerprint
@@ -1226,20 +1237,23 @@ def _load_lifecycle_decision_bound(
 
 
 def load_lifecycle_decision(
-    vault_root: Path, page_identity: str, after_fingerprint: str
+    vault_root: Path, page_identity: str, after_fingerprint: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> LifecycleDecision | None:
     decision, _ = _load_lifecycle_decision_bound(
-        vault_root, page_identity, after_fingerprint
+        vault_root, page_identity, after_fingerprint, admission=admission,
     )
     return decision
 
 
 def _load_lifecycle_prepared_bound(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> tuple[LifecyclePreparedTransition | None, vault.PathGuard | None]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
-    inspected = _inspect_lifecycle_identity(root, identity)
+    _require_artifact_admission(admission, _lifecycle_reference(identity, "prepared.json"))
+    inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return None, None
@@ -1249,19 +1263,23 @@ def _load_lifecycle_prepared_bound(
         root,
         nested=("lifecycle", identity),
         max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+        admission=admission,
     ) as opened:
+        census.recheck(root)
         if opened is None:
             raise RelationReviewError(
                 "RELATION_REVIEW_SWAPPED", "review directory changed during access"
             )
         raw, guard = _read_artifact_bytes(opened, "prepared.json")
+        census.recheck(root)
     return _parse_lifecycle_prepared(raw, page_identity=identity), guard
 
 
 def load_lifecycle_prepared(
-    vault_root: Path, page_identity: str
+    vault_root: Path, page_identity: str,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> LifecyclePreparedTransition | None:
-    prepared, _ = _load_lifecycle_prepared_bound(vault_root, page_identity)
+    prepared, _ = _load_lifecycle_prepared_bound(vault_root, page_identity, admission=admission)
     return prepared
 
 
@@ -2053,8 +2071,10 @@ def cleanup_stale_lifecycle_prepared_batch(
     return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
 
 
-def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
-    inspected = _inspect_lifecycle_identity(root, page_identity)
+def _ensure_lifecycle_decision_capacity(
+    root: Path, page_identity: str, *, admission: Callable[[str], bool] | None = None,
+) -> None:
+    inspected = _inspect_lifecycle_identity(root, page_identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
         return
@@ -2068,9 +2088,11 @@ def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
 
 
 def _plan_lifecycle_decision_install(
-    root: Path, decision: LifecycleDecision
+    root: Path, decision: LifecycleDecision,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> vault.PlannedWrite:
-    _ensure_lifecycle_decision_capacity(root, decision.page_identity)
+    _require_artifact_admission(admission, decision.reference)
+    _ensure_lifecycle_decision_capacity(root, decision.page_identity, admission=admission)
     decision_path = lifecycle_decision_path(
         root, decision.page_identity, decision.after_fingerprint
     )
@@ -2148,14 +2170,15 @@ def _validate_prepared_decision_binding(
 
 
 def _load_prepared_decision_guard(
-    root: Path, prepared: LifecyclePreparedTransition
+    root: Path, prepared: LifecyclePreparedTransition,
+    *, admission: Callable[[str], bool] | None = None,
 ) -> vault.PathGuard | None:
     """Validate the immutable decision referenced by an existing prepared slot."""
     if prepared.decision_reference is None:
         return None
     fingerprint = prepared.decision_reference.rsplit("/", 1)[-1].removesuffix(".json")
     decision, guard = _load_lifecycle_decision_bound(
-        root, prepared.page_identity, fingerprint
+        root, prepared.page_identity, fingerprint, admission=admission,
     )
     if (
         decision is None
@@ -2287,6 +2310,7 @@ def plan_lifecycle_transition(
     prepared: LifecyclePreparedTransition,
     current: LifecyclePrimaryBinding,
     trashed_committed: LifecycleTrashProof | None = None,
+    admission: Callable[[str], bool] | None = None,
 ) -> LifecycleTransitionPlan:
     """Plan decision/slot writes without mutating lifecycle or primary state."""
     _validate_lifecycle_prepared(prepared)
@@ -2301,16 +2325,19 @@ def plan_lifecycle_transition(
         )
 
     writes: list[vault.PlannedWrite] = []
-    _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity)
+    _require_artifact_admission(admission, prepared.reference)
+    if decision is not None:
+        _require_artifact_admission(admission, decision.reference)
+    _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity, admission=admission)
     read_guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = [
         identity_guard
     ]
     existing_prepared, prepared_guard = _load_lifecycle_prepared_bound(
-        root, prepared.page_identity
+        root, prepared.page_identity, admission=admission,
     )
     if existing_prepared is not None:
         existing_decision_guard = _load_prepared_decision_guard(
-            root, existing_prepared
+            root, existing_prepared, admission=admission,
         )
         if existing_decision_guard is not None:
             read_guards.append(existing_decision_guard)
@@ -2372,7 +2399,7 @@ def plan_lifecycle_transition(
     decision_guard: vault.PathGuard | None = None
     if decision is not None:
         existing_decision, decision_guard = _load_lifecycle_decision_bound(
-            root, decision.page_identity, decision.after_fingerprint
+            root, decision.page_identity, decision.after_fingerprint, admission=admission,
         )
         if existing_decision is not None and existing_decision != decision:
             raise RelationReviewError(
@@ -2391,7 +2418,7 @@ def plan_lifecycle_transition(
                 "new transition does not bind the current primary",
             )
         if decision is not None and existing_decision is None:
-            writes.append(_plan_lifecycle_decision_install(root, decision))
+            writes.append(_plan_lifecycle_decision_install(root, decision, admission=admission))
         writes.append(
             vault.PlannedWrite(
                 prepared_path,
@@ -2413,7 +2440,7 @@ def plan_lifecycle_transition(
             "next transition does not bind the committed primary",
         )
     if decision is not None and existing_decision is None:
-        writes.append(_plan_lifecycle_decision_install(root, decision))
+        writes.append(_plan_lifecycle_decision_install(root, decision, admission=admission))
     writes.append(
         vault.PlannedWrite(
             prepared_path,
@@ -2434,6 +2461,12 @@ class _OpenReviewDirectory:
     names: tuple[str, ...]
     chain: tuple[vault.PathIdentity, ...]
     descriptor_relative: bool
+    admission: Callable[[str], bool] | None = None
+
+
+def _require_artifact_admission(admission: Callable[[str], bool] | None, path: str) -> None:
+    if admission is not None and not admission(path):
+        raise ValueError("WRITE_REFUSED: target is unavailable")
 
 
 def _capture_review_directory(
@@ -2491,6 +2524,7 @@ def _open_review_directory(
     *,
     nested: tuple[str, ...] = (),
     max_entries: int | None = None,
+    admission: Callable[[str], bool] | None = None,
 ) -> Iterator[_OpenReviewDirectory | None]:
     directory, chain = _capture_review_directory(root, nested)
     if chain is None:
@@ -2523,6 +2557,7 @@ def _open_review_directory(
                     root,
                     directory.relative_to(root).as_posix(),
                     max_entries=max_entries,
+                    admission=admission,
                 )
             except vault.PathGuardError as error:
                 code = (
@@ -2534,10 +2569,18 @@ def _open_review_directory(
                     code, "review directory cannot be enumerated safely"
                 ) from error
             raw_names = [Path(entry.relative_path).name for entry in census.entries]
+        if admission is not None:
+            relative = directory.relative_to(root).as_posix()
+            if max_entries is None:
+                raw_names = [name for name in raw_names if admission(f"{relative}/{name}")]
+            else:
+                # Retain the captured admitted census; revocation must not refilter it.
+                for name in raw_names:
+                    _require_artifact_admission(admission, f"{relative}/{name}")
         names = tuple(sorted(raw_names, key=lambda name: name.encode("utf-8")))
         _recheck_review_directory(root, chain)
         yield _OpenReviewDirectory(
-            root, directory, descriptor, names, chain, descriptor_relative
+            root, directory, descriptor, names, chain, descriptor_relative, admission,
         )
     except UnicodeEncodeError as error:
         raise RelationReviewError(
@@ -2566,6 +2609,8 @@ def _read_artifact_bytes(
     opened: _OpenReviewDirectory, name: str
 ) -> tuple[bytes, vault.PathGuard]:
     path = opened.path / name
+    relative = path.relative_to(opened.root).as_posix()
+    _require_artifact_admission(opened.admission, relative)
     try:
         before = (
             os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
@@ -2573,9 +2618,11 @@ def _read_artifact_bytes(
             else path.lstat()
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be inspected"
         ) from error
+    _require_artifact_admission(opened.admission, relative)
     if (
         stat.S_ISLNK(before.st_mode)
         or vault._is_reparse(before)
@@ -2594,11 +2641,13 @@ def _read_artifact_bytes(
             else os.open(path, flags)
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be opened"
         ) from error
     try:
         opened_info = os.fstat(descriptor)
+        _require_artifact_admission(opened.admission, relative)
         if not stat.S_ISREG(opened_info.st_mode):
             raise RelationReviewError("RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe")
         if not vault._same_identity(vault._identity(name, before), opened_info):
@@ -2607,9 +2656,11 @@ def _read_artifact_bytes(
             )
         raw = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1)
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError("RELATION_REVIEW_IO", "review artifact cannot be read") from error
     finally:
         os.close(descriptor)
+    _require_artifact_admission(opened.admission, relative)
     try:
         after = (
             os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
@@ -2617,17 +2668,18 @@ def _read_artifact_bytes(
             else path.lstat()
         )
     except OSError as error:
+        _require_artifact_admission(opened.admission, relative)
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
         ) from error
     if not vault._same_identity(vault._identity(name, before), after):
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
     _recheck_review_directory(opened.root, opened.chain)
+    _require_artifact_admission(opened.admission, relative)
     if len(raw) > _MAX_ARTIFACT_BYTES:
         raise RelationReviewError(
             "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
         )
-    relative = path.relative_to(opened.root).as_posix()
     try:
         guard = vault.PathGuard.capture(
             opened.root,
@@ -2640,6 +2692,7 @@ def _read_artifact_bytes(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
         ) from error
     _recheck_review_directory(opened.root, opened.chain)
+    _require_artifact_admission(opened.admission, relative)
     return raw, guard
 
 
@@ -2804,7 +2857,16 @@ def _parse_record(
 
 
 def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, str | None]:
-    with _open_review_directory(root) as opened:
+    from . import access
+    from .governance import connector_boundary
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+
+    def admission(path: str) -> bool:
+        return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
+
+    with _open_review_directory(root, admission=admission) as opened:
         matches = _artifact_children_for(opened, identity)
         if not matches or opened is None:
             return None, None
@@ -2856,6 +2918,7 @@ def load_relation_review(
     page_state: semantic_contract.SemanticPageState,
     *,
     corpus: semantic_contract.SemanticCorpusContext,
+    admission: Callable[[str], bool] | None = None,
 ) -> semantic_contract.RelationReviewState | None:
     try:
         if page_state.identity_kind != "exomem_id":
@@ -2868,6 +2931,7 @@ def load_relation_review(
                 vault_root,
                 page_state.identity,
                 page_state.review_fingerprint,
+                admission=admission,
             )
             if decision is not None:
                 return semantic_contract.RelationReviewState(
