@@ -56,6 +56,7 @@ from .report import (
     StepRecord,
     failure_record,
     innermost,
+    stage,
 )
 from .shell import run
 from .substrate import PUBLIC_BASE_URL, Substrate
@@ -132,6 +133,7 @@ class Context:
     images: BuiltImages
     resolver: Resolver
     report: Report
+    cli_image: str | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -284,6 +286,7 @@ class Context:
         return boto3.client(
             "s3", endpoint_url=store.endpoint(from_host=True), aws_access_key_id=store.access_key,
             aws_secret_access_key=store.secret_key, region_name="us-east-1",
+            verify=str(store.ca_path) if store.ca_path else True,
             # proxies={} keeps an ambient HTTP(S)_PROXY off the S3 double.
             config=Config(s3={"addressing_style": "path"}, proxies={}),
         )
@@ -1083,6 +1086,11 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         snapshot_logs(ctx)
         detail = "" if record.status == PASSED else f" -- {record.failure.get('message', '')[:300]}"  # type: ignore[union-attr]
         print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
+        if number == 2 and ctx.cli_image:
+            from .native_import import import_folder
+
+            with stage(ctx.report, "cloud_import"):
+                ctx.report.stages["cloud_import"]["evidence"] = await import_folder(ctx, ctx.cli_image)
 
 
 async def close_clients(ctx: Context) -> None:
