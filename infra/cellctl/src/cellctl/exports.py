@@ -14,7 +14,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from botocore.exceptions import ClientError
 
@@ -39,6 +39,10 @@ SIZE_MARGIN_PERCENT = 102
 # API server's request size limit. A larger cell gets larger parts instead.
 MAX_PARTS = 1000
 _MIB = 1024 * 1024
+# C6: CELLCTL_EXPORT_DEADLINE_MINUTES is the deadline for each started 10 GiB of
+# an export's cap, the size of a default cell, so a larger cell gets the time
+# that packing and uploading more bytes takes.
+DEADLINE_STEP_BYTES = 10 * GIB
 _HEX64 = re.compile(r"[0-9a-f]{64}")  # SHA-256 wire format; always fullmatch
 
 
@@ -141,6 +145,13 @@ def export_size(row: CellRow) -> ExportSize:
     return ExportSize(max_bytes=max_bytes, part_bytes=part_bytes, parts=-(-covered // part_bytes))
 
 
+def export_deadline(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> timedelta:
+    """The export hold's deadline, which the Job's activeDeadlineSeconds and the
+    part URLs' expiry share: the configured deadline per started 10 GiB of cap."""
+
+    return config.export_deadline * -(-export_size(row).max_bytes // DEADLINE_STEP_BYTES)
+
+
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,
                   now: datetime, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> Decision | None:
     """One pass of the export being packed, or of the newest one while its hold
@@ -211,12 +222,12 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         })
         decision.row_updates.update(report_usage(job.report, job.finished_at or now))
         return decision
-    if held and now - start >= config.export_deadline:
+    if held and now - start >= export_deadline(row, config):
         return end("failed", EXPORT_HOLD_EXPIRED)
     if job.failed:
         reported = job.report.get("error")
         decision = end("failed", reported if reported in JOB_FAILURE_CODES else EXPORT_FAILED)
-        # A refused export still measured the volume: the next request sizes its parts from it.
+        # A refused export still measured the volume, and C1 keeps the measurement.
         decision.row_updates.update(report_usage(job.report, job.finished_at or now))
         return decision
     decision = hold()

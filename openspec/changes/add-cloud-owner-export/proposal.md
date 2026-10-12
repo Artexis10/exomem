@@ -14,7 +14,7 @@ Home's storage bar also needs the real disk use. Every backup Job already measur
   - it keeps a ready export for `EXOMEM_EXPORT_TTL_HOURS` (default 24) and gives a 300-second, version-pinned download link on request;
   - it deletes every object version at expiry, at supersede and when the cell is deleted.
 - **Measured disk use.** cellctl records the filesystem's used and total bytes on the cell row from every backup and export Job report.
-- **Settings.** The export TTL and the export deadline (default 30 minutes) are cellctl settings with chart values.
+- **Settings.** The export TTL and the export deadline (default 30 minutes per started 10 GiB of the cell) are cellctl settings with chart values.
 
 ## Capabilities
 

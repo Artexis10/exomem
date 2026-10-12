@@ -4,7 +4,7 @@
 
 cellctl SHALL pack an owner export only while the cell carries an `export` hold and no runtime pod uses the cell's volume. The hold SHALL stop a running or read-only cell and SHALL keep a stopped cell at zero replicas. cellctl SHALL record the hold on the row with its start time and SHALL resume it after a restart. An export SHALL wait while another hold owns the volume.
 
-The hold SHALL have a deadline. Past it, the export SHALL fail with `EXPORT_HOLD_EXPIRED`. When the export ends, cellctl SHALL release the hold only after the export Job and its pods are gone, and the cell SHALL return to its desired replicas. When the cell is deleted, the export SHALL fail with `EXPORT_INTERRUPTED` and SHALL NOT delay the deletion. cellctl SHALL retry a failed abort of its upload on every pass while the cell has a key.
+The hold SHALL have a deadline that grows with the export's cap: the configured deadline for each started 10 GiB. The export Job and its part URLs SHALL NOT outlast it. Past it, the export SHALL fail with `EXPORT_HOLD_EXPIRED`. When the export ends, cellctl SHALL release the hold only after the export Job and its pods are gone, and the cell SHALL return to its desired replicas. When the cell is deleted, the export SHALL fail with `EXPORT_INTERRUPTED` and SHALL NOT delay the deletion. cellctl SHALL retry a failed abort of its upload on every pass while the cell has a key.
 
 #### Scenario: A suspended account exports
 

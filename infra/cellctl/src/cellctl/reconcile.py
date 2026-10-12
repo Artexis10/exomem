@@ -51,6 +51,7 @@ from .exports import (
     ExportStorage,
     accepted_report,
     decide_export,
+    export_deadline,
     export_size,
     settle_step,
 )
@@ -1839,7 +1840,7 @@ async def _reconcile_row(
                                                 deadline_seconds=int((config.import_deadline if decision.import_action == "import"
                                                                       else config.import_cleanup_deadline).total_seconds())), job_refused)
             if decision.run_export_job:
-                deadline = int(config.export_deadline.total_seconds())
+                deadline = int(export_deadline(row, config).total_seconds())
                 size = export_size(row)
                 part_urls = await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
                                                     expires_in=deadline)

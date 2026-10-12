@@ -21,6 +21,7 @@ from cellctl.exports import (
     ExportSize,
     decide_export,
     etag_digest,
+    export_deadline,
     export_size,
 )
 from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
@@ -110,6 +111,17 @@ def test_an_export_past_its_deadline_fails_and_frees_the_cell():
     failed = replace(PACKING, observed_state="failed", error_code="EXPORT_HOLD_EXPIRED")
     assert decide_export(held_row, failed, DRAINED, running_job, now=late).hold_kind == "export"
     assert decide_export(held_row, failed, DRAINED, ExportJob(), now=late).replicas == 1
+
+
+def test_a_larger_cell_gets_the_deadline_once_per_started_10_gib():
+    """Defect: a flat deadline fails every export of a cell grown past 10 GiB."""
+    assert export_deadline(_row()) == timedelta(minutes=30)
+    assert export_deadline(_row(grown_storage_gib=11)) == timedelta(minutes=60)
+    large = _row(grown_storage_gib=110, hold_kind="export", hold_started_at=NOW)
+    running_job = ExportJob(exists=True, active=True, pods_present=True)
+    assert decide_export(large, PACKING, DRAINED, running_job, now=NOW + timedelta(minutes=329)).export_updates == {}
+    expired = decide_export(large, PACKING, DRAINED, running_job, now=NOW + timedelta(minutes=330))
+    assert expired.export_updates == {"observed_state": "failed", "error_code": "EXPORT_HOLD_EXPIRED"}
 
 
 # The controller branches only on whether the Job's token is a C6 code.
@@ -427,6 +439,17 @@ async def test_deleting_the_cell_aborts_its_export_upload_until_the_abort_succee
         harness.s3.abort_error = None
         await harness.run()
         assert (await harness.export(export_id))["upload_id"] is None and harness.s3.uploads == {}
+
+
+async def test_a_large_cells_job_and_part_urls_last_as_long_as_its_hold(cell_db, monkeypatch):
+    """Defect: a large cell's export Job or part URLs expire long before its hold deadline."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        await harness.cellctl.execute("UPDATE exomem_cloud_cells SET grown_storage_gib=110 WHERE cell_id=$1", CELL)
+        export_id = await harness.request(CELL)
+        packed = await harness.pack(CELL, export_id, b"PK archive")
+        assert packed["job"]["spec"]["activeDeadlineSeconds"] == 330 * 60
+        assert {parse_qs(urlsplit(url).query)["expires"][0] for url in packed["urls"]} == {str(330 * 60)}
 
 
 async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkeypatch):

@@ -56,9 +56,10 @@ class ReconcileConfig:
     import_deadline: timedelta = timedelta(hours=2)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
-    # C6: an export hold not finished this long after it started fails, and
-    # the cell starts again. A ready export is kept for export_ttl
-    # (EXOMEM_EXPORT_TTL_HOURS), and each download link lasts export_link_ttl.
+    # C6: an export hold not finished this long per started 10 GiB of its cap
+    # (exports.export_deadline) fails, and the cell starts again. A ready export
+    # is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each download link
+    # lasts export_link_ttl.
     export_deadline: timedelta = timedelta(minutes=30)
     export_ttl: timedelta = timedelta(hours=24)
     export_link_ttl: timedelta = timedelta(seconds=300)
@@ -204,8 +205,10 @@ def decide(
         # convergence never restarts their volume. An unowned hold still ends:
         # every Job of its kind starts before the kind's deadline and runs at
         # most that long, so after twice the deadline none can use the volume.
+        from .exports import export_deadline  # exports.py imports this module
+
         started = observation.statefulset_hold_started_at or row.hold_started_at or now
-        deadline = config.import_deadline if active_hold == "import" else config.export_deadline
+        deadline = config.import_deadline if active_hold == "import" else export_deadline(row, config)
         if now - started < 2 * deadline:
             decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
                                 hold_kind=active_hold, hold_started_at=row.hold_started_at,
