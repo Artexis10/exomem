@@ -566,44 +566,47 @@ def default_for_surface(surface: str | None = None) -> str:
     return DEFAULT_PROMINENCE
 
 
-def _saved_context_level(surface: str | None) -> str | None:
-    """The saved level for the context this request belongs to, if any.
+def default_for_context(context: str) -> str:
+    """The shipped default for an engagement context: the hookless surfaces are
+    exactly the conversation context, so this is `default_for_surface` keyed by
+    the context instead of a detected client."""
+    return WEB_DEFAULT_PROMINENCE if context == CONVERSATION_CONTEXT else DEFAULT_PROMINENCE
 
-    The context is derived from the surface — the detected one when the caller
-    passes none — never from a request argument. `surface` is an internal
-    "what would this surface get?" knob and is not reachable from the public
-    MCP/REST/CLI parameter set.
+
+def resolve_context(context: str) -> dict[str, str]:
+    """The level one engagement context resolves to, and where it came from.
+
+    The single precedence rule: environment → this context's saved value → the
+    identity-wide saved value → machine config → unreadable-record floor → the
+    context default. `resolve` and `_active_source` both answer through here, so
+    the level a request gets and the level reported for its context cannot
+    disagree. The context is a parameter rather than detected, so a caller can
+    ask about both contexts at once (`levels`); it still tunes eagerness only.
     """
-    contexts = _saved_preference().get("contexts")
-    if not isinstance(contexts, dict):
-        return None
-    applied = context_for_surface(surface if surface is not None else detect_surface())
-    return normalize(contexts.get(applied))
-
-
-def resolve(surface: str | None = None) -> str:
-    """Active level: environment → this context's saved value → the identity-wide
-    saved value → machine config → surface default."""
+    if context not in CONTEXTS:
+        raise ValueError(f"unknown engagement context: {context!r}")
     from_env = normalize(os.environ.get(_PROMINENCE_ENV))
     if from_env:
-        return from_env
+        return {"level": from_env, "source": "env"}
 
-    by_context = _saved_context_level(surface)
+    saved = _saved_preference()
+    contexts = saved.get("contexts")
+    by_context = normalize(contexts.get(context)) if isinstance(contexts, dict) else None
     if by_context:
-        return by_context
+        return {"level": by_context, "source": "preference:context"}
 
-    stored = normalize(_saved_preference().get("stored"))
+    stored = normalize(saved.get("stored"))
     if stored:
-        return stored
+        return {"level": stored, "source": "preference"}
 
     raw = mode.read_config().get(_CONFIG_KEY)
     from_config = normalize(raw if isinstance(raw, str) else None)
     if from_config:
-        return from_config
+        return {"level": from_config, "source": "config"}
     if raw not in (None, ""):
         log.warning("ignoring invalid %s=%r in config; using default", _CONFIG_KEY, raw)
 
-    if _saved_preference().get("unavailable"):
+    if saved.get("unavailable"):
         # An unreadable record must never hand a user MORE proactivity than they
         # last chose. The client default is `maximal` on hookless surfaces, so
         # falling through to it turned an identity that may well have saved `off`
@@ -611,9 +614,27 @@ def resolve(surface: str | None = None) -> str:
         # floor: the record is gone, so the client's own default cannot be the
         # thing that widens it. `effective_capture_level` withholds proactive
         # writes on top, in every projection that speaks about capture authority.
-        return DEFAULT_PROMINENCE
+        return {"level": DEFAULT_PROMINENCE, "source": "preference:unavailable"}
 
-    return default_for_surface(surface)
+    return {"level": default_for_context(context), "source": "default"}
+
+
+def levels() -> dict[str, dict[str, str]]:
+    """Every engagement context's level and source, for a settings view."""
+    return {context: resolve_context(context) for context in CONTEXTS}
+
+
+def _applied_context(surface: str | None) -> str:
+    """The context a request belongs to: from the surface — the detected one when
+    the caller passes none — never from a request argument. `surface` is an
+    internal "what would this surface get?" knob and is not reachable from the
+    public MCP/REST/CLI parameter set."""
+    return context_for_surface(surface if surface is not None else detect_surface())
+
+
+def resolve(surface: str | None = None) -> str:
+    """Active level for this request's context; see `resolve_context`."""
+    return resolve_context(_applied_context(surface))["level"]
 
 
 def contract(level: str | None = None, surface: str | None = None) -> ProminenceContract:
@@ -817,18 +838,7 @@ def custom_instructions_route() -> str:
 
 def _active_source(surface: str | None = None) -> str:
     """Where the active level came from — useful when a setting appears not to apply."""
-    if normalize(os.environ.get(_PROMINENCE_ENV)):
-        return "env"
-    if _saved_context_level(surface):
-        return "preference:context"
-    if normalize(_saved_preference().get("stored")):
-        return "preference"
-    raw = mode.read_config().get(_CONFIG_KEY)
-    if isinstance(raw, str) and normalize(raw):
-        return "config"
-    if _saved_preference().get("unavailable"):
-        return "preference:unavailable"
-    return "default"
+    return resolve_context(_applied_context(surface))["source"]
 
 
 def write_prominence(value: str) -> Path:

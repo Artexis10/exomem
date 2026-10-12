@@ -799,6 +799,9 @@ def op_configure_memory(
         # surface. `contexts` (from `saved`) is the saved map; this is the one
         # that applied. They are deliberately different questions.
         "context": engagement["context"],
+        # What each context resolves to and why, whichever client is asking: a
+        # settings view must show both contexts, not only the one it runs in.
+        "levels": prominence_module.levels(),
         "before_hash": before["revision"],
         "after_hash": saved["revision"],
         "engagement": engagement,
