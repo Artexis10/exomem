@@ -91,3 +91,16 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - when a returned row fails `is_recall_candidate` or no longer parses, drop it as today, and when a parent no longer parses, give its frame children their own keys as today; then read the next group in order, so a drop costs one read and never shortens or reorders the list.
 
   Run the query on 6.4's catalogue session. Verify, against the unbounded path on the reference corpus and in the parity suite: identical hits, order, excerpts and frame annotations, frame children included; Markdown reads within the returned hits' pages, their frame pages and the pending rows; and the 6.2 keyword-recall read count within its bound. If an identity case shows that today's order depends on data that only the page holds, record the difference as a contract change in this change's `recall-latency-contract` delta, with a scenario, before the slice lands.
+
+### Task 6.1: source-loaded bar reconciliation
+
+The existing runner now loads the current hybrid and keyword ceilings, diagnostic
+targets and reference premise from `request_latency_contract.json`. It reports
+unknown timings separately from typed warming and labels full acceptance as
+not measured. Later process load remains diagnostic after initial quiescence.
+Missed targets and stage budgets diagnose their rows without failing a ceiling.
+
+Task 6.1 remains open. The legacy runner still lacks the complete reference query
+mix, principal proof, served encoder proof, interval unions and live run-queue
+attribution that the owning contract requires. Model-free injected transport
+checks prove the runner's bar comparisons; they establish no live acceptance.

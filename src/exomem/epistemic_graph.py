@@ -8481,6 +8481,7 @@ def graph_context(
     keep: Callable[[str], bool] | None = None,
     seed_keep: Callable[[str], bool] | None = None,
     registry_scope: str | None = None,
+    include_lag: bool = True,
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query.
 
@@ -8492,6 +8493,8 @@ def graph_context(
     authority. Every unit and edge keeps its authoring page's own meaning.
     `seed_keep` admits unit parents for diagnostics too; missing ordinary
     owner paths can report drift without admitting their stored summaries.
+    `include_lag` controls the unavailable-graph explanation; activation does
+    not consume it and must not wait for its queue reads.
     """
 
     def _allowed(rel_path: str) -> bool:
@@ -8508,11 +8511,12 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
-        try:
-            lag = graph_lag(vault_root)
-        except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
-            log.debug("graph lag unreadable", exc_info=True)
-            lag = None
+        lag = None
+        if include_lag:
+            try:
+                lag = graph_lag(vault_root)
+            except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
+                log.debug("graph lag unreadable", exc_info=True)
         if lag is not None and lag["catching_up"]:
             # Still a refusal: the rows behind the queue are stale. The reason
             # says it is convergence in progress, and the lag says how far.

@@ -1,21 +1,8 @@
-"""Rolling recall-latency watch, fed where the call-ledger row is written.
+"""Advisory latency observations from the existing public boundaries.
 
-Two latency regressions on the personal service went unnoticed for days
-although every row in `ledger.jsonl` carried the evidence (`total_ms` and the
-per-stage `spans` that named the cause). Nothing read the ledger back. This
-module keeps a bounded, in-memory, content-free ring of recent recall calls,
-turns it into a verdict per (tool, client, deep) over a trailing window, and
-puts that verdict where it is seen: the `bootstrap` response of the client
-that is paying for the latency, one structured log event per breach per hour,
-and `exomem doctor`, which reads the ledger on disk through the same
-summariser so it sees across restarts.
-
-The ceilings are PROVISIONAL and live here, in one place, on purpose. There is
-no environment override: a ceiling that can be raised from the environment is
-a ceiling nobody trusts. Revise the constants through a spec change.
-
-Everything here follows the ledger's own rule: a failure in the watch never
-raises into, and never measurably slows, the call it observed.
+The bounded content-free ring and disk readers share one summarizer. Bars come
+from the packaged contract; retained or unreadable traffic is never a census.
+Observation failures cannot change the request that produced them.
 """
 
 from __future__ import annotations
@@ -27,25 +14,36 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .request_latency_contract import LatencyBar, load_contract
+
 log = logging.getLogger("exomem.latency_watch")
 
-# --- PROVISIONAL constants (see openspec change watch-recall-latency-from-the-ledger, D2)
-RECALL_P90_CEILING_MS = 1000.0
-"""`ask_memory` without `deep`, `read_memory`, `find`: the sub-second target."""
-DEEP_RECALL_P90_CEILING_MS = 5000.0
-"""`ask_memory` with `deep`: the pack stage alone is 3.5 to 4.5 s today."""
-MIN_SAMPLES = 20
-WINDOW_SECONDS = 86400.0
+
+def _bar(bar_id: str) -> LatencyBar | None:
+    try:
+        return load_contract().bar(bar_id)
+    except Exception:  # noqa: BLE001 - malformed contract disables observation only
+        return None
+
+
+# Compatibility exports resolve the old watch values from their sole source.
+_ORDINARY = _bar("watch-ordinary")
+_DEEP = _bar("watch-deep")
+RECALL_P90_CEILING_MS = _ORDINARY.threshold_ms if _ORDINARY else None
+DEEP_RECALL_P90_CEILING_MS = _DEEP.threshold_ms if _DEEP else None
+MIN_SAMPLES = _ORDINARY.min_samples if _ORDINARY else None
+WINDOW_SECONDS = _ORDINARY.window_seconds if _ORDINARY else None
 STARTUP_GRACE_SECONDS = 600.0
 REPORT_INTERVAL_SECONDS = 3600.0
 SWEEP_SECONDS = 600.0
 """How long a key may go without a verdict when only fast calls arrive."""
 RING_SIZE = 2048
 DOMINANT_SPANS = 5
-WATCHED_TOOLS = frozenset({"ask_memory", "read_memory", "find"})
+WATCHED_TOOLS = frozenset(_ORDINARY.operations if _ORDINARY else ())
 EVENT = "latency_ceiling_exceeded"
 
 
@@ -58,8 +56,20 @@ class Sample:
     tool: str
     client: str
     deep: bool
-    total_ms: float
+    total_ms: float | None
     spans: tuple[tuple[str, float], ...]
+
+    bar_id: str | None
+    surface: str
+    boundary: str
+    profile: str
+    population: str
+    reference: str
+    outcome: str
+    source: str
+    correlated: bool
+    invalid_timing: bool
+    excluded: bool
 
 
 #: Every value of `deep` that means "yes". The live path reads it from the real
@@ -84,10 +94,19 @@ def deep_flag(arguments: Any) -> bool:
     return isinstance(value, str) and value in DEEP_TRUE_VALUES
 
 
-def ceiling_for(tool: str, deep: bool) -> float:
-    if tool == "ask_memory" and deep:
-        return DEEP_RECALL_P90_CEILING_MS
-    return RECALL_P90_CEILING_MS
+def ceiling_for(tool: str, deep: bool) -> float | None:
+    bar = _bar("watch-deep" if tool == "ask_memory" and deep else "watch-ordinary")
+    return bar.threshold_ms if bar else None
+
+
+def _timing(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return milliseconds if math.isfinite(milliseconds) and milliseconds >= 0 else None
 
 
 def _top_spans(spans: Iterable[Any] | None) -> tuple[tuple[str, float], ...]:
@@ -98,13 +117,18 @@ def _top_spans(spans: Iterable[Any] | None) -> tuple[tuple[str, float], ...]:
         name = span.get("name")
         if not isinstance(name, str) or not name:
             continue
-        try:
-            ms = float(span.get("ms") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        out.append((name, ms))
+        ms = _timing(span.get("ms"))
+        if ms is not None:
+            out.append((name, ms))
     out.sort(key=lambda item: -item[1])
     return tuple(out[:DOMINANT_SPANS])
+
+
+@lru_cache(maxsize=1)
+def _registered_operations() -> frozenset[str]:
+    from .commands import COMMANDS, PRODUCT_COMMANDS
+
+    return frozenset(command.name for command in (*COMMANDS, *PRODUCT_COMMANDS))
 
 
 def make_sample(
@@ -113,16 +137,67 @@ def make_sample(
     tool: str,
     client: str | None,
     deep: bool,
-    total_ms: float,
+    total_ms: Any,
     spans: Iterable[Any] | None,
+    bar_id: str | None = None,
+    surface: str | None = None,
+    boundary: str | None = None,
+    profile: str | None = None,
+    population: str | None = None,
+    reference: str | None = None,
+    outcome: str = "ok",
+    source: str = "live-ring",
+    correlated: bool = False,
+    excluded: bool = False,
 ) -> Sample:
+    # Registry names are trusted metadata; an unknown request name can contain content.
+    tool = tool if tool in _registered_operations() else "unknown-operation"
+    if bar_id is None:
+        try:
+            bar = load_contract().observation_bar(surface=surface or "mcp", tool=tool, deep=deep)
+        except Exception:  # noqa: BLE001 - unavailable contract is not a caller failure
+            bar = None
+    else:
+        bar = _bar(bar_id)
+    # Producer aliases are closed codes from the existing ledger and activation log.
+    canonical_outcome = (
+        {"success": "ok", "served": "ok"}.get(outcome, outcome)
+        if isinstance(outcome, str)
+        else "unknown"
+    )
     return Sample(
         at=float(at),
         tool=str(tool),
         client=str(client or "unknown"),
         deep=bool(deep),
-        total_ms=float(total_ms),
+        total_ms=_timing(total_ms),
         spans=_top_spans(spans),
+        bar_id=bar.id if bar else bar_id,
+        surface=surface or (bar.surface if bar else "unknown"),
+        boundary=boundary or (bar.boundary.id if bar else "unknown"),
+        profile=profile or (bar.profile if bar else "unknown"),
+        population=population or (bar.population if bar else "unknown"),
+        reference=reference or (bar.reference if bar else "unknown"),
+        outcome=canonical_outcome,
+        source=source,
+        correlated=bool(correlated),
+        invalid_timing=total_ms is not None and _timing(total_ms) is None,
+        excluded=excluded,
+    )
+
+
+def _key(sample: Sample) -> tuple:
+    return (
+        sample.tool,
+        sample.client,
+        sample.deep,
+        sample.bar_id,
+        sample.surface,
+        sample.boundary,
+        sample.profile,
+        sample.population,
+        sample.reference,
+        sample.source,
     )
 
 
@@ -136,50 +211,137 @@ def summarize(
     samples: Iterable[Sample],
     *,
     now: float,
-    window_seconds: float = WINDOW_SECONDS,
-    min_samples: int = MIN_SAMPLES,
+    window_seconds: float | None = None,
+    min_samples: int | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Per (tool, client, deep) figures over the trailing window, with the
-    verdict and the spans that dominate the calls over the ceiling.
-
-    Pure: the ring and the doctor's file reader both come through here, so a
-    figure means the same thing on every surface.
-    """
-    floor = now - window_seconds
-    grouped: dict[tuple[str, str, bool], list[Sample]] = collections.defaultdict(list)
+    """Independent bar populations, with explicit unknown and partial evidence."""
+    source_coverage = coverage or getattr(samples, "coverage", {})
+    grouped: dict[tuple, list[Sample]] = collections.defaultdict(list)
     for sample in samples:
-        if sample.at < floor or sample.at > now:
+        bar = _bar(sample.bar_id) if sample.bar_id else None
+        window = window_seconds or (bar.window_seconds if bar else WINDOW_SECONDS)
+        if window is None or not math.isfinite(sample.at) or not now - window <= sample.at <= now:
             continue
-        if sample.tool not in WATCHED_TOOLS:
-            continue
-        grouped[(sample.tool, sample.client, sample.deep)].append(sample)
-
-    out: list[dict[str, Any]] = []
-    for (tool, client, deep), group in sorted(grouped.items()):
-        values = sorted(item.total_ms for item in group)
-        p50 = _percentile(values, 50)
-        p90 = _percentile(values, 90)
-        ceiling = ceiling_for(tool, deep)
-        breach = len(values) >= min_samples and p90 > ceiling
+        grouped[_key(sample)].append(sample)
+    out = []
+    for _group_key, group in sorted(grouped.items(), key=lambda item: str(item[0])):
+        sample = group[0]
+        bar = _bar(sample.bar_id) if sample.bar_id else None
+        included = [
+            item
+            for item in group
+            if not item.excluded
+            and bar
+            and item.outcome in bar.outcome_inclusion
+            and item.total_ms is not None
+        ]
+        values = sorted(item.total_ms for item in included)
+        unknown = sum(
+            item.total_ms is None and not item.invalid_timing and not item.excluded
+            for item in group
+        )
+        invalid = sum(item.invalid_timing for item in group)
+        unknown_outcomes = sum(
+            item.outcome not in (bar.outcome_inclusion if bar else ()) for item in group
+        )
+        matches = bool(
+            bar
+            and sample.surface == bar.surface
+            and sample.boundary == bar.boundary.id
+            and sample.profile == bar.profile
+            and sample.population == bar.population
+            and sample.reference == bar.reference
+            and (sample.tool in bar.operations or "*" in bar.operations)
+        )
+        ceiling = bar.threshold_ms if bar else None
+        percentile = _percentile(values, bar.percentile) if values and bar else None
+        breach = bool(
+            matches
+            and ceiling is not None
+            and percentile is not None
+            and len(values) >= (min_samples or bar.min_samples)
+            and (percentile >= ceiling if bar.comparison == "<" else percentile > ceiling)
+        )
+        info = dict(source_coverage)
+        info.setdefault("population", "retained" if sample.source == "live-ring" else "read-source")
+        info.setdefault("oldest_retained_at", min(item.at for item in group))
+        info.setdefault("evictions", None if sample.source == "live-ring" else 0)
+        partial = bool(
+            info.get("partial_reads")
+            or info.get("failed_reads")
+            or info.get("malformed_rows")
+            or info.get("unknown_window_rows")
+            or info.get("observation_failures")
+            or info.get("evictions") is None
+            or info.get("evictions", 0) > 0
+        )
+        if not matches:
+            verdict = "unavailable"
+        elif ceiling is None:
+            verdict = "pending"
+        elif breach:
+            verdict = "failed"
+        elif unknown or invalid or unknown_outcomes:
+            verdict = "unavailable"
+        elif len(values) < (min_samples or bar.min_samples):
+            verdict = "insufficient"
+        elif partial:
+            verdict = "partial"
+        else:
+            verdict = "observed-within-bar"
         by_name: dict[str, list[float]] = collections.defaultdict(lambda: [0.0, 0])
-        for item in group:
-            if item.total_ms <= ceiling:
+        for item in included:
+            if ceiling is None or item.total_ms <= ceiling:
                 continue
             for name, ms in item.spans:
-                entry = by_name[name]
-                entry[0] += ms
-                entry[1] += 1
+                by_name[name][0] += ms
+                by_name[name][1] += 1
         dominant = sorted(by_name.items(), key=lambda kv: (-kv[1][0], kv[0]))[:DOMINANT_SPANS]
         out.append(
             {
-                "tool": tool,
-                "client": client,
-                "deep": deep,
+                "tool": sample.tool,
+                "client": sample.client,
+                "deep": sample.deep,
+                "contract_revision": contract_revision(),
+                "bar_id": sample.bar_id,
+                "surface": sample.surface,
+                "boundary": sample.boundary,
+                "boundary_start": bar.boundary.start if bar else None,
+                "boundary_end": bar.boundary.end if bar else None,
+                "profile": sample.profile,
+                "population": sample.population,
+                "reference": sample.reference,
+                "source": sample.source,
+                "window_seconds": window_seconds or (bar.window_seconds if bar else None),
+                "min_samples": min_samples or (bar.min_samples if bar else None),
+                "outcome_inclusion": list(bar.outcome_inclusion) if bar else [],
+                "requirement": bar.requirement if bar else None,
+                "establishment": bar.establishment if bar else "unavailable",
                 "samples": len(values),
-                "p50_ms": round(p50),
-                "p90_ms": round(p90),
-                "ceiling_ms": round(ceiling),
+                "eligible_known_timings": len(values),
+                "observed": len(group),
+                "errors": sum(item.outcome == "error" for item in group),
+                "refusals": sum(item.outcome == "refused" for item in group),
+                "abstentions": sum(item.outcome == "abstained" for item in group),
+                "unknown_timings": unknown,
+                "invalid_timings": invalid,
+                "unknown_outcomes": unknown_outcomes,
+                "excluded": sum(
+                    item.excluded or bar is not None and item.outcome not in bar.outcome_inclusion
+                    for item in group
+                ),
+                "unavailable_joins": sum(not item.correlated for item in group),
+                "p50_ms": round(_percentile(values, 50), 3) if values else None,
+                "p90_ms": round(_percentile(values, 90), 3) if values else None,
+                "p95_ms": round(_percentile(values, 95), 3) if values else None,
+                "percentile": bar.percentile if bar else None,
+                "percentile_ms": round(percentile, 3) if percentile is not None else None,
+                "comparison": bar.comparison if bar else None,
+                "ceiling_ms": ceiling,
                 "breach": breach,
+                "verdict": verdict,
+                "coverage": info,
                 "dominant_spans": [
                     {"name": name, "ms": round(ms), "calls": int(calls)}
                     for name, (ms, calls) in dominant
@@ -187,6 +349,13 @@ def summarize(
             }
         )
     return out
+
+
+def contract_revision() -> str | None:
+    try:
+        return load_contract().revision
+    except Exception:  # noqa: BLE001 - observation must stay advisory
+        return None
 
 
 class Watch:
@@ -199,7 +368,8 @@ class Watch:
         self._lock = threading.Lock()
         self._reported: dict[tuple[str, str, bool], float] = {}
         self._seen: dict[tuple[str, str, bool], int] = {}
-        self._swept: dict[tuple[str, str, bool], float] = {}
+        self._swept: dict[tuple, float] = {}
+        self._evicted: dict[tuple, list[float]] = {}
         self.failures = 0
 
     @property
@@ -212,42 +382,65 @@ class Watch:
         tool: str,
         client: str | None,
         deep: bool,
-        total_ms: float,
+        total_ms: Any,
         spans: Iterable[Any] | None = None,
         at: float | None = None,
+        **metadata,
     ) -> None:
-        """Record one call. Never raises; a failure is counted, not surfaced."""
+        """Record one terminal. Never raises; unknown timing remains unknown."""
         try:
-            self._observe(tool=tool, client=client, deep=deep, total_ms=total_ms, spans=spans, at=at)
+            self._observe(
+                tool=tool,
+                client=client,
+                deep=deep,
+                total_ms=total_ms,
+                spans=spans,
+                at=at,
+                **metadata,
+            )
         except Exception:  # noqa: BLE001 - the watch must never break a call
+            self.record_failure()
+
+    def record_failure(self) -> None:
+        with self._lock:
             self.failures += 1
 
-    def _observe(self, *, tool, client, deep, total_ms, spans, at) -> None:
-        if tool not in WATCHED_TOOLS:
+    def _observe(self, *, tool, client, deep, total_ms, spans, at, **metadata) -> None:
+        if not metadata and tool not in WATCHED_TOOLS:
             return
         now = float(self._clock() if at is None else at)
-        sample = make_sample(at=now, tool=tool, client=client, deep=deep, total_ms=total_ms, spans=spans)
-        key = (sample.tool, sample.client, sample.deep)
+        if not math.isfinite(now):
+            raise ValueError("Invalid observation timestamp")
+        sample = make_sample(
+            at=now, tool=tool, client=client, deep=deep, total_ms=total_ms, spans=spans, **metadata
+        )
+        key = _key(sample)
+        bar = _bar(sample.bar_id) if sample.bar_id else None
         with self._lock:
+            if len(self._ring) == RING_SIZE:
+                lost = self._ring[0]
+                entry = self._evicted.setdefault(_key(lost), [0, lost.at, lost.at])
+                entry[0] += 1
+                entry[1] = min(entry[1], lost.at)
+                entry[2] = max(entry[2], lost.at)
             self._ring.append(sample)
             seen = self._seen[key] = self._seen.get(key, 0) + 1
             swept = self._swept.get(key)
-            if swept is None:
-                self._swept[key] = now  # one sample cannot breach; start the sweep clock
-                due = False
-            else:
-                due = now - swept >= SWEEP_SECONDS
-                if due:
-                    self._swept[key] = now
-        # A call under its ceiling cannot raise the p90, so it cannot create a
-        # breach by itself; the call that completes the minimum sample count
-        # can make an existing breach reportable, and so can the window aging
-        # old fast calls out from under old slow ones. So a slow call always
-        # gets a verdict, the MIN_SAMPLES call gets one, and otherwise a key
-        # gets one at most every SWEEP_SECONDS: a healthy service pays a dict
-        # update per call and one ring scan per key per sweep, never a summary
-        # per call.
-        if sample.total_ms > ceiling_for(sample.tool, sample.deep) or seen == MIN_SAMPLES or due:
+            due = swept is not None and now - swept >= SWEEP_SECONDS
+            if swept is None or due:
+                self._swept[key] = now
+        # Preserve the cheap conditional sweep: fast calls do not scan the ring.
+        slow = bool(
+            bar
+            and bar.threshold_ms is not None
+            and sample.total_ms is not None
+            and (
+                sample.total_ms >= bar.threshold_ms
+                if bar.comparison == "<"
+                else sample.total_ms > bar.threshold_ms
+            )
+        )
+        if slow or bar and seen == bar.min_samples or due:
             self._maybe_report(sample, now)
 
     def _eligible(self, now: float) -> list[Sample]:
@@ -255,14 +448,48 @@ class Watch:
         with self._lock:
             return [sample for sample in self._ring if sample.at >= grace_until]
 
-    def verdicts(self, *, now: float | None = None, client: str | None = None) -> list[dict[str, Any]]:
+    def verdicts(
+        self, *, now: float | None = None, client: str | None = None
+    ) -> list[dict[str, Any]]:
         """Figures per (tool, client, deep) for the window, startup grace applied."""
         current = float(self._clock() if now is None else now)
-        rows = summarize(self._eligible(current), now=current)
-        if client is None:
-            return rows
-        wanted = str(client or "unknown")
-        return [row for row in rows if row["client"] == wanted]
+        eligible = self._eligible(current)
+        with self._lock:
+            evicted = {key: list(value) for key, value in self._evicted.items()}
+        rows = []
+        groups: dict[tuple, list[Sample]] = collections.defaultdict(list)
+        for sample in eligible:
+            if client is None or sample.client == str(client or "unknown"):
+                groups[_key(sample)].append(sample)
+        for key, samples in groups.items():
+            bar = _bar(samples[0].bar_id) if samples[0].bar_id else None
+            floor = (
+                max(self._started_at + STARTUP_GRACE_SECONDS, current - bar.window_seconds)
+                if bar
+                else current
+            )
+            losses = evicted.get(key)
+            count = (
+                0
+                if losses is None or losses[2] < floor
+                else (int(losses[0]) if losses[1] >= floor else None)
+            )
+            rows.extend(
+                summarize(
+                    samples,
+                    now=current,
+                    coverage={
+                        "population": "retained",
+                        "evictions": count,
+                        "evictions_since_start": int(losses[0]) if losses else 0,
+                        "eviction_window_known": count is not None,
+                        "observation_failures": self.failures if client is None else None,
+                    },
+                )
+            )
+        return sorted(
+            rows, key=lambda row: (row["tool"], row["client"], row["deep"], str(row["bar_id"]))
+        )
 
     def breaches(self, *, client: str | None, now: float | None = None) -> list[dict[str, Any]]:
         """This one client's breaches. An unnamed client is the `unknown` bucket,
@@ -271,13 +498,18 @@ class Watch:
         return [row for row in self.verdicts(now=now, client=wanted) if row["breach"]]
 
     def _maybe_report(self, sample: Sample, now: float) -> None:
-        key = (sample.tool, sample.client, sample.deep)
+        key = _key(sample)
         with self._lock:
             last = self._reported.get(key)
         if last is not None and now - last < REPORT_INTERVAL_SECONDS:
             return
         for row in self.verdicts(now=now, client=sample.client):
-            if row["tool"] != sample.tool or row["deep"] != sample.deep or not row["breach"]:
+            if (
+                row["tool"] != sample.tool
+                or row["bar_id"] != sample.bar_id
+                or row["boundary"] != sample.boundary
+                or not row["breach"]
+            ):
                 continue
             with self._lock:
                 # Check-and-set under the lock: two request threads crossing
@@ -287,24 +519,12 @@ class Watch:
                     return
                 self._reported[key] = now
             from .log_events import log_event
-            from .privacy_log import log_client_label
 
             log_event(
                 log,
                 logging.WARNING,
                 EVENT,
-                fields={
-                    "tool": row["tool"],
-                    # Keyed by the caller's own name above, so bootstrap_block
-                    # still matches it; only the logged value is bounded.
-                    "client": log_client_label(row["client"]),
-                    "deep": row["deep"],
-                    "samples": row["samples"],
-                    "p50_ms": row["p50_ms"],
-                    "p90_ms": row["p90_ms"],
-                    "ceiling_ms": row["ceiling_ms"],
-                    "dominant_spans": row["dominant_spans"],
-                },
+                fields={key: value for key, value in row.items() if key != "client"},
             )
             return
 
@@ -322,18 +542,36 @@ def _deep_argument_digests() -> frozenset[str]:
     )
 
 
-def _row_sample(row: Any, *, deep_digests: frozenset[str]) -> Sample | None:
+class SourceRead(list[Sample]):
+    """Samples and read coverage from one independent persisted boundary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.coverage = {
+            "population": "read-source",
+            "evictions": 0,
+            "read_segments": 0,
+            "failed_reads": 0,
+            "partial_reads": 0,
+            "malformed_rows": 0,
+            "unknown_window_rows": 0,
+            "rows_read": 0,
+        }
+
+
+def _row_sample(
+    row: Any, *, deep_digests: frozenset[str], activation: bool = False
+) -> Sample | None:
     if not isinstance(row, dict):
         return None
-    tool = row.get("tool")
-    if not isinstance(tool, str) or tool not in WATCHED_TOOLS:
+    tool = "activate_context" if activation else row.get("tool")
+    if not isinstance(tool, str):
         return None
     try:
         from datetime import datetime
 
         at = datetime.fromisoformat(str(row.get("ts_utc"))).timestamp()
-        total_ms = float(row.get("total_ms") if row.get("total_ms") is not None else row.get("duration_ms"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     args = row.get("args")
     deep_shape = args.get("deep") if isinstance(args, dict) else None
@@ -341,59 +579,83 @@ def _row_sample(row: Any, *, deep_digests: frozenset[str]) -> Sample | None:
     return make_sample(
         at=at,
         tool=tool,
-        client=row.get("client_name"),
+        client=row.get("client") if activation else row.get("client_name"),
         deep=deep,
-        total_ms=total_ms,
+        total_ms=row.get("duration_ms") if activation else row.get("total_ms"),
         spans=row.get("spans"),
+        surface="activation" if activation else "mcp",
+        outcome=row.get("outcome", "unknown"),
+        source="activation-log" if activation else "call-ledger",
+        correlated=bool(row.get("request_id") and row.get("request_id") != "unknown"),
+        boundary=row.get("latency_boundary", "activation-leaf-legacy") if activation else None,
     )
 
 
-def samples_from_ledger(
-    path: Path,
-    *,
-    archive_dir: Path | None,
-    now: float,
-    window_seconds: float = WINDOW_SECONDS,
-) -> list[Sample]:
-    """Recall samples from the ledger on disk for the trailing window.
-
-    Reads the active file, then archive generations newest first until one
-    holds nothing inside the window. Malformed lines are skipped, never
-    raised: this feeds a doctor check, and a half-written row is not a
-    finding. Nothing but the content-free fields of a row is retained.
-    """
+def _read_sources(
+    paths: Iterable[Path], *, now: float, window_seconds: float | None, activation: bool = False
+) -> SourceRead:
     import json
 
+    out = SourceRead()
     deep_digests = _deep_argument_digests()
-    floor = now - window_seconds
-    out: list[Sample] = []
-
-    def read(file: Path) -> bool:
-        """Append this file's in-window samples; True when any row was inside the window."""
-        inside = False
+    window = window_seconds or WINDOW_SECONDS
+    if window is None:
+        out.coverage["failed_reads"] += 1
+        return out
+    for file in paths:
         try:
-            text = file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            sample = _row_sample(row, deep_digests=deep_digests)
-            if sample is None:
-                continue
-            if sample.at >= floor:
-                inside = True
-                out.append(sample)
-        return inside
+            # Stream each segment independently; one unreadable segment cannot hide older rows.
+            with file.open("r", encoding="utf-8") as handle:
+                out.coverage["read_segments"] += 1
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    out.coverage["rows_read"] += 1
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        out.coverage["malformed_rows"] += 1
+                        continue
+                    try:
+                        sample = _row_sample(row, deep_digests=deep_digests, activation=activation)
+                    except (TypeError, ValueError, OverflowError):
+                        out.coverage["malformed_rows"] += 1
+                        continue
+                    if sample is None:
+                        out.coverage["unknown_window_rows"] += 1
+                    elif now - window <= sample.at <= now:
+                        out.append(sample)
+        except (OSError, UnicodeError):
+            out.coverage["failed_reads"] += 1
+            out.coverage["partial_reads"] += 1
+    return out
 
-    read(path)
-    for generation in _archive_generations_newest_first(archive_dir):
-        if not read(generation):
-            break
+
+def samples_from_ledger(
+    path: Path, *, archive_dir: Path | None, now: float, window_seconds: float | None = None
+) -> SourceRead:
+    paths = [path]
+    failed_scan = False
+    try:
+        paths.extend(_archive_generations_newest_first(archive_dir))
+    except OSError:
+        failed_scan = True
+    out = _read_sources(paths, now=now, window_seconds=window_seconds)
+    if failed_scan:
+        out.coverage["failed_reads"] += 1
+    out.coverage["archive_scan_failed"] = failed_scan
+    return out
+
+
+def samples_from_activations(path: Path, *, now: float) -> SourceRead:
+    paths = [path]
+    rotated = path.with_name(path.name + ".1")
+    if rotated.exists():
+        paths.append(rotated)
+    out = _read_sources(paths, now=now, window_seconds=None, activation=True)
+    out.coverage["retention_loss"] = (
+        None  # Only one prior generation exists; older loss is unknown.
+    )
     return out
 
 
@@ -411,20 +673,20 @@ def _archive_generations_newest_first(archive_dir: Path | None) -> list[Path]:
 
     if archive_dir is None:
         return []
-    try:
-        if not archive_dir.is_dir():
-            return []
-        placed: list[tuple[int, Path]] = []
-        for candidate in archive_dir.glob("ledger-*.jsonl"):
-            try:
-                with candidate.open("r", encoding="utf-8", errors="replace") as handle:
-                    first = handle.readline().strip()
-                sequence = int(json.loads(first)["sequence"]) if first else 0
-            except (OSError, ValueError, KeyError, TypeError):
-                sequence = 0
-            placed.append((sequence, candidate))
-    except OSError:
+    if not archive_dir.exists():
         return []
+    placed: list[tuple[int, Path]] = []
+    # These filenames are the ledger rotation protocol, not inferred vocabulary.
+    for candidate in archive_dir.iterdir():
+        if not candidate.name.startswith("ledger-") or not candidate.name.endswith(".jsonl"):
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                first = handle.readline().strip()
+            sequence = int(json.loads(first)["sequence"]) if first else 0
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            sequence = 0
+        placed.append((sequence, candidate))
     return [path for _sequence, path in sorted(placed, key=lambda item: -item[0])]
 
 
@@ -436,19 +698,27 @@ def observe(**kwargs: Any) -> None:
     try:
         _WATCH.observe(**kwargs)
     except Exception:  # noqa: BLE001 - belt and braces: even a bad kwarg must not escape
-        pass
+        _WATCH.record_failure()
 
 
-def bootstrap_block(client: str | None, *, now: float | None = None) -> list[dict[str, Any]] | None:
-    """The `latency` block for one client's bootstrap, or None when nothing breaches."""
+def bootstrap_block(
+    client: str | None, *, now: float | None = None, full: bool = False
+) -> list[dict[str, Any]] | None:
+    """One client's retained-ring advisory, or full detail; None when nothing breaches."""
     try:
         rows = _WATCH.breaches(client=client, now=now)
     except Exception:  # noqa: BLE001 - a watch failure never breaks a bootstrap
         return None
     if not rows:
         return None
+    if full:
+        return [{key: value for key, value in row.items() if key != "client"} for row in rows]
+    # Advisory fields are closed protocol fields in the agent-bootstrap contract.
     return [
-        {key: row[key] for key in ("tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms", "dominant_spans")}
+        {key: row[key] for key in (
+            "tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms",
+            "bar_id", "contract_revision", "source",
+        )}
         for row in rows
     ]
 
