@@ -28,16 +28,16 @@
 
   Verify: reconcile tests against a disposable Postgres with the fake object store, including a restart mid-import that resumes the hold, a hold past its deadline, and a routine convergence pass that must not clear an import hold.
 - [ ] 3.4 Record cleanup_running before local cleanup and cleanup_stopping for keep-adoption cleanup or cleanup_discard_stopping for full discard before removing completion Jobs. Rearm full discard under the C1 and C5 locks when newer intent follows ordinary cleanup. Delete ciphertext versions, abort multipart uploads, and clear upload URLs. Wait for all phase Jobs and Pods, then publish current intent and release C1 atomically. Add a B2 lifecycle rule on the `cells/` prefix that sets only `daysFromStartingToCancelingUnfinishedLargeFiles`. B2 rules match a literal prefix, so the rule cannot name `imports/` alone, and it also clears restic's abandoned uploads. Verify: tests that no object, upload or identity remains after `done`, `failed`, `cancelled` and `expired`.
-- [ ] 3.5 Extend the live-K3s suite with an import: prepare, upload with presigned URLs, complete with the reported ETags, then import into a running cell. Also cover a refused archive, a wrong-key archive and a substituted part. Verify: the scenario passes in the live job, and the vault is unchanged after each refusal.
+- [x] 3.5 Extend the live-K3s suite with an import: prepare, upload with presigned URLs, complete with the reported ETags, then import into a running cell. Also cover a refused archive, a wrong-key archive and a substituted part. Verify: the scenario passes in the live job, and the vault is unchanged after each refusal.
 - [ ] 3.6 Add a CORS rule on the Cloud bucket for the web app's origin: `PUT`, with `ETag` exposed. Verify: against B2 itself, with a disposable prefix, a preflight and a part upload from the origin succeed and one from another origin is refused.
 
 ## 4. Substrate flow (its own change) and rollout
 
 - [ ] 4.1 Open the Substrate change for C5 and the C1 `hold_kind` value: migrations and grants, a "Bring your notes" flow that tars and age-encrypts a chosen folder in the browser, uploads it in parts and reports the ETags and digest, import status on the Cloud home page, and a discard action. Verify: the Substrate change is merged and deployed, and its tests cover encryption round-trips, resumable parts and the reported ETags.
-- [ ] 4.2 Add `exomem cloud import <folder>` for technical tenants, on the same C5 flow. Verify: an end-to-end run against a rehearsal cell imports a folder into `_Imports/`.
+- [x] 4.2 Add `exomem cloud import <folder>` for technical tenants, on the same C5 flow. Verify: an end-to-end run against a rehearsal cell imports a folder into `_Imports/`.
 - [ ] 4.3 Import a friend-sized vault end to end in production with the owner's account, then adopt it through Adoption Studio and discard the staged folder. Verify: files are staged, adoption proposals appear, a filed note carries provenance to its original path, and nothing is left behind.
 
-## Implementation evidence (2026-10-11, pending integrated review)
+## Implementation evidence (2026-10-11, merged in PR #1692)
 
 The source implements concrete Cloud owner binding, its persisted-job recheck,
 the protected encrypted envelope, private receipts, age commands, C5 controller
@@ -64,9 +64,25 @@ The controller kept admission occupied until all phase Jobs and Pods disappeared
 The maintained live suite now runs the accepted import and all three refusals
 through one workflow. All four cases passed against the reviewed controller
 and built Cloud image. Each refusal kept all 77 canonical vault entries
-unchanged through cleanup and restart. Task 3.5 awaits the integrated merge.
+unchanged through cleanup and restart. PR #1692 merged this suite and the
+reviewed import implementation. Task 3.5 is complete.
 Production OAuth registration, bucket lifecycle/CORS and production rollout
 also remain open. The one-node local storage rehearsal does not prove multi-node
 storage behavior, large multipart uploads or production bucket restrictions.
 The owner restore was previously performed; unchecked historical tasks do not
 authorize repeating it.
+
+## Native CLI acceptance (2026-10-12)
+
+The optional native CLI journey passed against committed source `36632b461`.
+The ordinary CLI used real OAuth with S256 PKCE and its loopback callback.
+The real Substrate app recorded one completed C5 import through cellctl and K3s.
+Both invented files matched their source hashes in `_Imports/`.
+The private receipt recorded the declared two files and 90 bytes.
+The identity, staging, checkpoint material, phase Jobs, Pods, ciphertext versions and
+multipart uploads were absent after completion. The cell resumed running and ready.
+
+The disposable CA layer preserved the source image's product and model bytes.
+This bounded run selected only provisioning steps 1 and 2 plus the import journey.
+It does not close the twelve-step launch rehearsal or its node gate.
+Task 4.2 is complete; production OAuth, large imports, adoption and discard remain open.

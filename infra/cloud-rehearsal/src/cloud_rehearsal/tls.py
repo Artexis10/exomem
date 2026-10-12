@@ -9,6 +9,7 @@ that CA. The private keys live in the run's work directory and die with it.
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def make_pki(workdir: Path, hostnames: tuple[str, ...] = (SUBSTRATE_HOST, MCP_HO
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - dt.timedelta(minutes=5))
             .not_valid_after(now + dt.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([_subject_name(hostname)]), critical=False)
             .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
             .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
             .add_extension(
@@ -92,3 +93,10 @@ def make_pki(workdir: Path, hostnames: tuple[str, ...] = (SUBSTRATE_HOST, MCP_HO
     ca_path = tls_dir / "ca.pem"
     ca_path.write_text(ca_cert.public_bytes(serialization.Encoding.PEM).decode(), encoding="utf-8")
     return RehearsalPki(ca_path=ca_path, leaves=leaves)
+
+
+def _subject_name(hostname: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(hostname))
+    except ValueError:
+        return x509.DNSName(hostname)
