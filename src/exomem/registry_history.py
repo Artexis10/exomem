@@ -78,10 +78,28 @@ def _one_line(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
-def read_previous(root: Path, path: Path) -> tuple[str | None, vault_module.PathGuard | None]:
+class RegistryFileTooLarge(ValueError):
+    """A regular override exceeds its registry's existing read limit."""
+
+
+def read_previous(
+    root: Path, path: Path, *, max_bytes: int | None = None
+) -> tuple[str | None, vault_module.PathGuard | None]:
     """Inspect the overlay without mutation; bind a guard when the root exists."""
     try:
-        return vault_module.read_guarded_text(root, path)
+        if max_bytes is None:
+            return vault_module.read_guarded_text(root, path)
+        info = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        guard = vault_module.PathGuard.capture(root, relative, leaf_policy="stable")
+        # Aliases cannot supply registry bytes or an oversized-file finding.
+        if info.st_nlink != 1:
+            raise vault_module.PathGuardError("PATH_GUARD_UNSAFE", "registry override is aliased")
+        guard.recheck(root)
+        if info.st_size > max_bytes:
+            raise RegistryFileTooLarge("registry override exceeds its read limit")
+        raw, guard = vault_module.read_bounded_guarded_bytes(root, relative, limit=max_bytes)
+        return raw.decode("utf-8"), guard
     except FileNotFoundError:
         try:
             root.lstat()
