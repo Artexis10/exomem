@@ -1373,3 +1373,16 @@ def test_an_upgraded_ledger_verifies_across_its_version_1_rows(ledger_dir: Path)
     assert upgraded["schema_version"] == 2
     assert upgraded["prev_hash"] == second["row_hash"]
     assert obs_cli.verify_ledger() == []
+
+
+def test_two_long_paths_that_share_their_start_are_two_pages(ledger_dir: Path) -> None:
+    """A row bounds each path it shows. A move of two pages deep in one long folder
+    must still count two pages, not one."""
+    folder = "Notes/" + "a-very-long-folder-name/" * 30
+    row = call_ledger.build_row(
+        sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
+        tool="move_memory", outcome="ok", duration_ms=1.0, access="write",
+        arguments={"paths": [folder + "first.md", folder + "second.md"]},
+    )
+
+    assert row["item_count"] == 2

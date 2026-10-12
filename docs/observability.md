@@ -235,9 +235,11 @@ it with `exomem logs verify`.
 - **`access`** and **`item_count`** arrive with schema version 2. `access` is
   `read` or `write`, as the dispatcher classified the call, or null when no
   classification reached the row. `item_count` counts what a successful call
-  touched: the distinct items a read released, or the distinct targets a write
-  addressed or reported committing; the dispatcher reports the pages a commit
-  names, so a write whose destination the server chose still counts. It is null
+  touched: the distinct items a read released, or the distinct pages a write
+  committed. The dispatcher reports the pages a commit names, so a write whose
+  destination the server chose still counts. Only when a commit reports no page
+  does a write count the distinct targets its arguments name; the two are never
+  added, because an argument can name a committed page by its reference. It is null
   for any other outcome and for a write that names no page. Null means
   unknown, never zero. Both fields carry no content, so a cloud cell keeps
   them. A version 1 row lacks both; readers treat them as unknown, and

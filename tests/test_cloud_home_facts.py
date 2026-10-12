@@ -162,6 +162,32 @@ def test_a_save_whose_path_the_server_chose_still_reports_its_note(cell, tool, a
     assert [(e["action"], e["items"]) for e in activity["events"]] == [("saved", 1)]
 
 
+def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, vault):
+    """An assistant may address a page by its `exomem://` reference. The commit
+    then reports the page's path, which is the same page under another name."""
+    from exomem import memory_refs
+
+    async def scenario(client):
+        saved = await _call(client, "remember", {
+            "content": "The second build fixed the flaky upload.",
+            "title": "Flaky upload fixed", "status": "draft",
+        }, oauth_client="ChatGPT")
+        ref = memory_refs.ref_from_markdown((vault / saved["path"]).read_text(encoding="utf-8"))
+        assert ref, "sanity: the saved page has a reference"
+        await _call(client, "edit_memory", {
+            "path": ref, "why": "name the fixing build",
+            "operation": {"kind": "replace_string", "old_string": "second build",
+                          "new_string": "second build (1.4.2)"},
+        }, oauth_client="claude.ai")
+        return await _call(client, "bootstrap", {"section": "activity"})
+
+    activity = cell(scenario)
+
+    assert [(e["client"], e["items"]) for e in activity["events"]] == [
+        ("claude-ai", 1), ("chatgpt", 1),
+    ]
+
+
 def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:
     """What one real HTTP tool call sees as its caller and its applied context."""
     if cloud:

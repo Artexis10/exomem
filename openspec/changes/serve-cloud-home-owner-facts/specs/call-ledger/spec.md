@@ -7,7 +7,8 @@
 Ledger rows SHALL use schema version 2 and carry `access` and `item_count`.
 `access` SHALL be `read` or `write` as the dispatcher classified the invocation, or null when no classification reached the row.
 For a successful read, `item_count` SHALL be the number of distinct items the call's disclosure boundary released, whatever the governance policy.
-For a successful write, `item_count` SHALL be the number of distinct targets the call addressed or reported committing, or null when none is known.
+For a successful write, `item_count` SHALL be the number of distinct pages the commit reported, or, when it reported none, the number of distinct targets the call addressed. It SHALL be null when neither names a page.
+Targets SHALL be compared whole; a bound on the paths a row shows MUST NOT merge distinct targets.
 For any other outcome, `item_count` SHALL be null. A null count MUST NOT be written as zero.
 Both fields SHALL survive content-private logging, because neither carries content.
 
@@ -20,6 +21,11 @@ Both fields SHALL survive content-private logging, because neither carries conte
 
 - **WHEN** a write commits a note at a path that the server derived, such as `remember`
 - **THEN** its row records `access: write` and `item_count: 1`
+
+#### Scenario: A write that names its page by reference
+
+- **WHEN** an edit addresses a page by its `exomem://` reference and commits that page
+- **THEN** its row records `item_count: 1`
 
 #### Scenario: A write that names no page
 

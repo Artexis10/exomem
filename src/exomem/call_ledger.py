@@ -211,27 +211,31 @@ def _target_paths(
         # target paths at all, the same way mutation_journal keeps only
         # `target_count` (see its docstring).
         return [], False
-    targets = _known_targets(arguments, committed)
-    return targets[:_MAX_TARGET_PATHS], len(targets) > _MAX_TARGET_PATHS
-
-
-def _known_targets(arguments: dict[str, Any], committed: Sequence[str] | None) -> list[str]:
-    """Every distinct page the call addressed or reported committing, unbounded."""
-    found: list[str] = []
-    for name in _TARGET_ARG_NAMES:
-        value = arguments.get(name)
-        if isinstance(value, str) and value.strip():
-            found.append(_clip(value.strip()))
-        elif isinstance(value, (list, tuple)):
-            found.extend(_clip(item) for item in value if isinstance(item, str) and item.strip())
     # An artifact write addresses no path-shaped argument: its destination is
     # assembled from `scope`/`category` and a filename the server derives, so
     # every `preserve_artifacts` row said `target_paths: []` and the ledger
     # could not state what landed. The outcome knows; the arguments never did.
-    for value in committed or ():
-        if isinstance(value, str) and value.strip():
-            found.append(_clip(value.strip()))
-    return list(dict.fromkeys(found))
+    targets = _distinct([*_addressed_targets(arguments), *(committed or ())])
+    return [_clip(target) for target in targets[:_MAX_TARGET_PATHS]], (
+        len(targets) > _MAX_TARGET_PATHS
+    )
+
+
+def _addressed_targets(arguments: dict[str, Any]) -> list[object]:
+    """What the call's arguments name as targets: paths or page references."""
+    found: list[object] = []
+    for name in _TARGET_ARG_NAMES:
+        value = arguments.get(name)
+        found.extend(value if isinstance(value, (list, tuple)) else [value])
+    return found
+
+
+def _distinct(values: Iterable[object]) -> list[str]:
+    """Distinct non-empty target strings, compared whole. A display bound applied
+    first would merge distinct long paths into one."""
+    return list(
+        dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip())
+    )
 
 
 #: Facts about one in-flight call, keyed by the call token: committed target
@@ -294,11 +298,7 @@ def note_committed_targets(paths: Iterable[Any]) -> None:
     row's `target_paths` applies its own bound.
     """
     try:
-        clean = [
-            _clip(value.strip())
-            for value in paths
-            if isinstance(value, str) and value.strip()
-        ]
+        clean = _distinct(paths)
     except Exception:  # noqa: BLE001 - the ledger must never break a call
         return
     if clean:
@@ -337,19 +337,21 @@ def _item_count(
     arguments: dict[str, Any],
     committed: Sequence[str],
 ) -> int | None:
-    """Items a successful call touched: released for a read, targets for a write.
+    """Items a successful call touched: released for a read, pages for a write.
 
-    `None` is unknown, never zero: a call that failed touched nothing it can
-    vouch for, and a write whose destination the server derived and did not
-    report has no known target to count.
+    A write counts the distinct pages its commit reported. Only when the commit
+    reported none does it count the distinct targets its arguments name: an
+    argument may name a committed page by its reference, and adding the two
+    would count one page twice. `None` is unknown, never zero: a call that
+    failed touched nothing it can vouch for, and a write that names no page and
+    reported none has nothing to count.
     """
     if outcome != "ok":
         return None
     if access == "read":
         return released
     if access == "write":
-        targets = _known_targets(arguments, committed)
-        return len(targets) if targets else None
+        return len(_distinct(committed) or _distinct(_addressed_targets(arguments))) or None
     return None
 
 

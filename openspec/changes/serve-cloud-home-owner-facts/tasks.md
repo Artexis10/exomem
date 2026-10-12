@@ -15,6 +15,7 @@
 
 - [x] 3.1 Serve the owner-only activity section from ledger rows; prove the merge window, success-only, newest-first, the cap and unknown counts.
 - [x] 3.2 Serve the compiled-note count, cached against the commit counter on a cloud cell; prove zero on a fresh vault, null on a failed read and growth after a save.
+- [x] 3.4 Count each written page once; prove an edit by reference and two long paths with one shared start.
 
 ## 4. Gateway client header
 
