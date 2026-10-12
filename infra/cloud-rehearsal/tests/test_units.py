@@ -44,6 +44,36 @@ def test_cited_recall_records_valid_hit_list_and_envelope(enveloped) -> None:
     assert record.evidence["cited_paths"] == [path]
 
 
+def test_cited_recall_reports_wrapped_refusal_without_private_content() -> None:
+    """A product refusal must keep its code rather than become a harness exception."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+    from cloud_rehearsal.mcp_client import ToolResult
+
+    async def recall(*_args):
+        return ToolResult(
+            structured={"result": {"success": False, "error": {
+                "code": "QUERY_TIMEOUT", "message": "Private source details",
+            }}},
+            is_error=False, seconds=0.1,
+        )
+
+    @asynccontextmanager
+    async def mcp():
+        yield SimpleNamespace(call=recall)
+
+    ctx = SimpleNamespace(
+        a=SimpleNamespace(client=SimpleNamespace(mcp=mcp), phrase="invented observation"),
+        report=report.Report(run_id="recall-refusal"),
+    )
+    record = report.StepRecord(number=5, name="paraphrased_cited_recall")
+    with pytest.raises(report.StepFailure, match="^ask_memory failed: QUERY_TIMEOUT$"):
+        asyncio.run(scenarios.step_5_cited_recall(ctx, record))
+
+
 def test_upgrade_gate_excludes_pre_release_diagnostics(monkeypatch) -> None:
     """Slow log collection must not falsely fail a timely cell upgrade."""
     import asyncio

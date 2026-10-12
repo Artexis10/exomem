@@ -174,6 +174,9 @@ class ToolResult:
     @property
     def error_code(self) -> str | None:
         error = self.structured.get("error")
+        if error is None and isinstance(self.structured.get("result"), dict):
+            # The MCP producer wraps non-object output schemas under result.
+            error = self.structured["result"].get("error")
         return error.get("code") if isinstance(error, dict) else None
 
 

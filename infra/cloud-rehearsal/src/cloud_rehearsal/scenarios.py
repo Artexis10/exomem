@@ -58,7 +58,7 @@ from .report import (
     innermost,
     stage,
 )
-from .shell import run
+from .shell import run, wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
 WARM_ITERATIONS = 20
@@ -475,14 +475,16 @@ async def step_3_oauth_mcp(ctx: Context, record: StepRecord) -> None:
         raise StepFailure("the connector did not complete exactly one OAuth authorization")
     if ctx.a.client.verifier_seen is None:
         raise StepFailure("no PKCE code_verifier was seen at the token endpoint")
-    # Read the tested cell's policy instead of maintaining another command list.
-    pod = ctx.runtime_pod(ctx.a.cell_id)
-    _require(pod)
-    exclusions = json.loads(ctx.exec_in(
-        namespace_name(ctx.a.cell_id), pod["metadata"]["name"], "python3", "-c",
-        "import json;from exomem.commands import CLOUD_SURFACE_EXCLUSIONS;"
-        "print(json.dumps(list(CLOUD_SURFACE_EXCLUSIONS)))",
-    ).stdout)
+    # The stable workload and existing retry allow normal Pod replacement.
+    policy = wait_for(
+        lambda: ctx.exec_in(
+            namespace_name(ctx.a.cell_id), "statefulset/cell", "python3", "-c",
+            "import json;from exomem.commands import CLOUD_SURFACE_EXCLUSIONS;"
+            "print(json.dumps(list(CLOUD_SURFACE_EXCLUSIONS)))",
+        ).stdout,
+        timeout=120, description="tenant A's runtime policy to be readable",
+    )
+    exclusions = json.loads(policy)
     exposed = set(exclusions) & set(tools)
     record.evidence.update(
         {
