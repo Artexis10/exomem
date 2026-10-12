@@ -54,8 +54,9 @@ def payload(vault_root: Path) -> dict[str, Any]:
     if not call_ledger.enabled():
         raise _unavailable("the call ledger is disabled on this server")
     try:
-        since, events = _events(_lines_newest_first(call_ledger.ledger_path()))
-    except OSError as error:
+        failed_at = call_ledger.last_append_failure()
+        since, events = _events(_lines_newest_first(call_ledger.ledger_path()), failed_at)
+    except (OSError, ValueError) as error:
         raise _unavailable("the call ledger could not be read") from error
     return {
         "since": _iso(since),
@@ -65,7 +66,9 @@ def payload(vault_root: Path) -> dict[str, Any]:
     }
 
 
-def _events(lines: Iterator[bytes]) -> tuple[dt.datetime, list[dict[str, Any]]]:
+def _events(
+    lines: Iterator[bytes], failed_at: dt.datetime | None = None
+) -> tuple[dt.datetime, list[dict[str, Any]]]:
     """The newest merged events, and the moment from which they are complete.
 
     The scan reads intact rows, newest first, and stops at the first row the
@@ -73,7 +76,8 @@ def _events(lines: Iterator[bytes]) -> tuple[dt.datetime, list[dict[str, Any]]]:
     or wrote (version 1), or a call the full list has no room for. Every row the
     scan did not read was appended earlier, so its time is no later than the
     boundary: the stopping row's time, or the oldest time read when the
-    stopping row is damaged or rotation archived the older rows.
+    stopping row is damaged or rotation archived the older rows. A failed
+    append (`failed_at`) left a call with no row, so it is a boundary too.
     """
     from . import commands
     from .privacy_log import client_family
@@ -107,6 +111,9 @@ def _events(lines: Iterator[bytes]) -> tuple[dt.datetime, list[dict[str, Any]]]:
             newer["sequence"] == 1 and newer.get("prev_hash") == call_ledger.GENESIS_HASH
         ):
             boundary = read[-1][0]  # rotation archived the older rows
+    if failed_at is not None:
+        failed_at = _floor_ms(failed_at)
+        boundary = failed_at if boundary is None else max(boundary, failed_at)
     return _interval(read, boundary)
 
 

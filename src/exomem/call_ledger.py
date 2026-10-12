@@ -102,9 +102,14 @@ _MAX_TARGET_PATHS = 32
 _LEDGER_FILENAME = "ledger.jsonl"
 _ARCHIVE_DIRNAME = "ledger-archive"
 
+_GAP_MARKER_FILENAME = "ledger.gap"
+
 _lock = threading.Lock()
 #: Chain head, cached in-process. `None` means "not yet loaded from disk".
 _state: dict[str, Any] = {"sequence": None, "prev_hash": None, "path": None}
+#: When this process last failed to append a call's row. A call with no row
+#: leaves no gap in the sequence, so only this record shows it is missing.
+_append_failure: dict[str, dt.datetime | None] = {"at": None}
 
 
 def enabled() -> bool:
@@ -134,6 +139,47 @@ def ledger_path() -> Path:
 
 def archive_dir() -> Path:
     return ledger_dir() / _ARCHIVE_DIRNAME
+
+
+def gap_marker_path() -> Path:
+    """The time of the latest failed append, beside the ledger, for a reader in
+    another process."""
+    return ledger_dir() / _GAP_MARKER_FILENAME
+
+
+def _note_append_failure() -> None:
+    """Record that a call has no row: in memory, and beside the ledger if possible.
+
+    The marker write is best effort. If it fails too, a reader in another
+    process cannot know about this call; design.md states that residual.
+    """
+    at = dt.datetime.now(dt.UTC)
+    with _lock:
+        _append_failure["at"] = at
+    try:
+        from . import durable_write
+
+        durable_write.replace_text(gap_marker_path(), at.isoformat(timespec="milliseconds"))
+    except Exception:  # noqa: BLE001 - this process still holds the time in memory
+        pass
+
+
+def last_append_failure() -> dt.datetime | None:
+    """The latest failed append that this process saw or that any process marked.
+
+    Raises `OSError` or `ValueError` when the marker exists but cannot be read:
+    a reader then cannot know whether a call is missing.
+    """
+    with _lock:
+        seen = _append_failure["at"]
+    try:
+        text = gap_marker_path().read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return seen
+    marked = dt.datetime.fromisoformat(text)
+    if marked.tzinfo is None:
+        raise ValueError("the ledger gap marker has no time zone")
+    return marked if seen is None else max(seen, marked)
 
 
 def canonical_json(payload: dict[str, Any]) -> bytes:
@@ -719,6 +765,7 @@ def record_call(
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])
             return row
     except Exception:  # noqa: BLE001 - a ledger write must never break a call
+        _note_append_failure()
         return None
 
 
@@ -731,9 +778,11 @@ def _int_env(name: str, default: int) -> int:
 
 
 def reset_chain_cache() -> None:
-    """Drop the in-process chain head. For tests that move the ledger path."""
+    """Drop the in-process chain head and failed-append time, as a fresh process
+    has them. For tests that move the ledger path or start a new process."""
     with _lock:
         _state.update(sequence=None, prev_hash=None, path=None)
+        _append_failure["at"] = None
 
 
 def verify(path: Path | None = None) -> list[str]:

@@ -31,7 +31,7 @@ Rows of one client family and action SHALL join the newest event of that pair wh
 `note_count` SHALL be null when any part of the Knowledge Base cannot be read, and MUST NOT be older than a committed write.
 The list SHALL stop at the first row it cannot represent: a row that does not match its `row_hash`, a broken link to the newer row, a version 1 row or a call the full list has no room for.
 `since` SHALL be the oldest ledger row the list accounts for, or the ledger writer's start when there is none.
-`since` MUST be strictly later, at millisecond precision, than every row the list omits, and the counts SHALL include only the rows the list accounts for.
+`since` MUST be strictly later, at millisecond precision, than every row the list omits and every call whose row the ledger failed to append. The counts SHALL include only the rows the list accounts for.
 A disabled or unreadable ledger, or a history with no intact row later than where the list stops, SHALL be refused with `ACTIVITY_UNAVAILABLE`.
 The cell MUST NOT register a route for these facts.
 

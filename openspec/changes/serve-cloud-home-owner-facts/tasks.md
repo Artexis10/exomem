@@ -18,6 +18,7 @@
 - [x] 3.3 Stop the activity interval at the first row the list cannot represent, strictly later than every omitted row; prove a full list, an unreadable, removed or changed row sharing a millisecond with an intact one, a rotated file and a version 1 row from a running older writer.
 - [x] 3.4 Count each written page once; prove an edit by reference and two long paths with one shared start.
 - [x] 3.5 Keep the count unknown when a directory cannot be entered.
+- [x] 3.6 Start the activity interval after a call whose row failed to append; prove it in the failing process when no marker can be written, and in another process through the marker.
 
 ## 4. Gateway client header
 

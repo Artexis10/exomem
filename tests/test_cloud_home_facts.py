@@ -9,13 +9,15 @@ way the gateway forwards them: no `initialize` first, the gateway's own
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import os
 from pathlib import Path
 
 import httpx
 import pytest
 from test_cloud_cell import LEGACY_VERSION, TOKEN, _build_cloud_server, _teardown_activation
 
-from exomem import cloud_cell, command_surface, prominence, server
+from exomem import call_ledger, cloud_cell, command_surface, prominence, server
 
 
 @pytest.fixture
@@ -25,6 +27,7 @@ def cell(vault, monkeypatch, tmp_path):
     for key in ("EXOMEM_PROMINENCE", "EXOMEM_SURFACE", "EXOMEM_HOSTED_CELL",
                 "EXOMEM_DISABLE_CALL_LEDGER"):
         monkeypatch.delenv(key, raising=False)
+    call_ledger.reset_chain_cache()  # an earlier test's failed append is not this cell's
     mcp, _ = _build_cloud_server(monkeypatch)
     app = mcp.http_app(stateless_http=True, json_response=True)
 
@@ -189,6 +192,43 @@ def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, va
     assert [(e["client"], e["items"]) for e in activity["events"]] == [
         ("claude-ai", 1), ("chatgpt", 1),
     ]
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller",
+)
+def test_a_recall_the_ledger_could_not_record_is_never_inside_an_idle_interval(
+    cell, tmp_path
+):
+    """When the ledger volume refuses writes, a recall still succeeds but leaves no
+    row and no marker. Home must not then say "No assistant activity since" a
+    time before that recall."""
+    ledger_dir = tmp_path / "ledger"
+
+    async def scenario(client):
+        await _call(client, "bootstrap", {"section": "activity"})
+        locked = [ledger_dir / "ledger.jsonl", ledger_dir]
+        modes = [path.stat().st_mode for path in locked]
+        locked[0].chmod(0o400)
+        locked[1].chmod(0o500)
+        try:
+            recall = await _call(client, "ask_memory", {"query": "project"}, oauth_client="Codex")
+        finally:
+            for path, mode in zip(locked, modes, strict=True):
+                path.chmod(mode)
+        recalled_by = dt.datetime.now(dt.UTC)
+        assert recall["result"], "sanity: the recall returned notes"
+        assert not call_ledger.gap_marker_path().exists(), "sanity: no marker was written"
+        first = await _call(client, "bootstrap", {"section": "activity"})
+        second = await _call(client, "bootstrap", {"section": "activity"})
+        return recalled_by, first, second
+
+    recalled_by, first, second = cell(scenario)
+
+    assert first["error"]["code"] == "ACTIVITY_UNAVAILABLE"
+    assert second["events"] == []
+    assert second["since"] > recalled_by.isoformat(timespec="milliseconds")
 
 
 def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:

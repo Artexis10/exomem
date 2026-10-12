@@ -43,3 +43,14 @@ Every reader SHALL treat the missing `access` and `item_count` of a version 1 ro
 - **WHEN** a version 2 writer appends to a ledger that holds version 1 rows
 - **THEN** its first row chains on the last version 1 row
 - **AND** the anchored verification reports no problem
+
+### Requirement: A Failed Append Leaves A Coverage Boundary
+
+When the ledger cannot append a call's row, the call SHALL still succeed.
+The failing process SHALL keep the time of the failure in memory, and SHALL write it beside the ledger when it can.
+Every reader of recent activity SHALL treat the latest such time as a boundary, and MUST NOT claim an interval that starts at or before it.
+
+#### Scenario: A recall the ledger could not record
+
+- **WHEN** a recall succeeds but its row cannot be appended
+- **THEN** the next activity interval starts strictly after that recall, or the activity section is unavailable

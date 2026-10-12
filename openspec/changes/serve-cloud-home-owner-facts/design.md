@@ -61,6 +61,14 @@ When no kept row remains, `since` is the writer's start if the boundary is earli
 Otherwise the section is `ACTIVITY_UNAVAILABLE`, as for a damaged newest row or a version 1 row from an older process that still writes.
 Measured on a laptop, a verified scan of an 8 MB live file with no qualifying call takes 114 ms (median of five).
 The reader skips the text after the file's last newline, which is a row still being appended.
+A failed append writes no row and leaves no gap in the sequence, so the file cannot show the missing call.
+The failing process therefore records the time of each failed append in memory, and best effort in a marker file beside the ledger (`ledger.gap`).
+The reader treats the later of the two times as a boundary: the interval starts strictly after the failed call.
+With no row after that time, the section is `ACTIVITY_UNAVAILABLE` until the next call that the ledger records.
+The memory call itself still succeeds.
+On a Cloud cell one MCP server process serves the recalls, the saves and the activity section, so its memory covers every call.
+The marker covers a reader in another process, such as a second server beside a local service.
+An unreadable marker makes the section `ACTIVITY_UNAVAILABLE`, because the reader cannot know whether a call is missing.
 The section is owner-only: it shows when and how much the owner's other assistants used memory.
 A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an empty list.
 
@@ -96,4 +104,8 @@ Home then saves a level to exactly the context the cell applies to that app, bef
 ## Risks / Trade-offs
 
 A local install still depends on surface detection, which matches only some client names.
-A call whose ledger append fails leaves no row and no gap in the sequence, so the activity list cannot show it.
+If the marker write fails as well, for example on a full or read-only volume, only the failing process knows about the lost call.
+A reader in a different process can then claim an interval that holds that call.
+On a Cloud cell this needs a second process that records calls, and the cell runs only one.
+The ledger does not sync each row, so a power loss can drop rows that the kernel had not yet written.
+The next process continues the chain from the last surviving row, and the activity list cannot see the lost calls.

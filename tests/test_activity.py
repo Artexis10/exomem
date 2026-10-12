@@ -31,6 +31,7 @@ def ledger(tmp_path, monkeypatch):
     monkeypatch.delenv("EXOMEM_HOSTED_CELL", raising=False)
     directory.mkdir()
     path = directory / "ledger.jsonl"
+    call_ledger.reset_chain_cache()  # an earlier test's failed append is not this ledger's
 
     def append(tool, at, *, access, outcome="ok", released=None, arguments=None,
                client="claude.ai"):
@@ -251,6 +252,38 @@ def test_version_1_rows_written_after_this_writer_started_make_history_unavailab
 
     with pytest.raises(OpError, match="ACTIVITY_UNAVAILABLE"):
         _activity(vault)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller",
+)
+def test_a_call_another_process_could_not_record_starts_the_interval_after_it(
+    vault, ledger, tmp_path
+):
+    """A failed append leaves no row and no gap in the sequence. The writer marks
+    the failure beside the ledger, so a reader in another process must not claim
+    the time of that call."""
+    ledger("ask_memory", _at(0), access="read", released=2)
+    path = tmp_path / "logs" / "ledger.jsonl"
+    path.chmod(0o400)
+    try:
+        lost = call_ledger.record_call(
+            request_id="request", tool="ask_memory", outcome="ok", duration_ms=1.0
+        )
+    finally:
+        path.chmod(0o600)
+    failed_at = dt.datetime.now(dt.UTC)
+    call_ledger.reset_chain_cache()  # the reader is another process: nothing in memory
+    assert lost is None, "sanity: the append failed"
+
+    with pytest.raises(OpError, match="ACTIVITY_UNAVAILABLE"):
+        _activity(vault)
+    ledger("ask_memory", failed_at + dt.timedelta(seconds=1), access="read", released=3)
+    payload = _activity(vault)
+
+    assert [event["items"] for event in payload["events"]] == [3]
+    assert payload["since"] > _iso(failed_at)
 
 
 def test_activity_is_refused_to_anyone_but_the_owner(vault, ledger):
