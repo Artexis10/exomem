@@ -261,11 +261,16 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Price any rental before obtaining its authority; no rental is authorized by this task record.
 - [ ] 6.9 Resilience 5: rehearse a server move with the existing backup, stop, volume-release, placement and resume procedures.
   Compare canonical vault and host state, preserve post-backup writes and report downtime after the replacement node exists.
-- [ ] 6.10 Resilience 6: verify control database recovery from pgBackRest and WAL in an isolated environment.
+- [x] 6.10 Resilience 6: verify control database recovery from pgBackRest and WAL in an isolated environment.
   The 2026-10-08 isolated restore replayed nine WAL segments, matched database lineage and passed `pg_amcheck`.
   Network isolation, no TCP listener, unchanged source processes and scratch removal also passed.
   Reconcile provider, stored-row and derived counts and ownership before closing this task; the restore receipt does not prove those comparisons.
   Price any rental before obtaining its authority and keep production writes disabled during the drill.
+  Evidence (2026-10-11): the isolated restore matched the captured table scope, complete-row digests, row counts, spot checks, and stored tenant/cell ownership.
+  The archived backup and WAL inputs corresponded to the restored database and its selected exclusive recovery cut.
+  The comparison ran while recovery was paused. Source process identities matched, and the isolated unit, scratch data, and jail were removed.
+  An independent saved-artifact recheck on 2026-10-12 confirmed those comparisons.
+  This closes the one-time recovery scope. Catalog ownership/grants, sequence values, view outputs, current-run physical integrity, promotion, and recurring weekly execution remain unclaimed.
 - [ ] 6.11 Resilience 7: qualify memory and CPU admission through the existing shared-worker envelope, default off.
   Measure the worst supported warm peak per slot and select conservative occupancy and fixed reserves.
   Charge `max(request, qualified peak)` and retain at least 20% node memory headroom; do not introduce a dynamic estimator or ledger.
@@ -291,7 +296,10 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   The original boundary had five blocked specs: `hosted-gateway-contract`, `hosted-agent-surface`,
   `hosted-marketplace-release`, `hosted-vault-portability` and `hosted-tenant-cell`.
   The reviewer-bootstrap change is now archived as superseded, with three historical gaps still unchecked.
-  `hosted-marketplace-release` has no active delta and is retired. Four capabilities remain blocked by active deltas.
+  `hosted-marketplace-release` has no active delta and is retired.
+  `hosted-agent-surface` also has no active delta and is retired after its generic contracts were reconciled.
+  Registry, bootstrap, capture doctrine, and Cloud parity remain in their current command-surface, bootstrap, portable-agent, and Cloud cell contracts.
+  Historical Hosted packages and their original receipts remain immutable. Three capabilities remain blocked by active deltas.
   Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
   Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
   Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
