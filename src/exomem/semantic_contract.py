@@ -217,6 +217,8 @@ class SemanticPageState:
     body: str = field(default="", repr=False)
     candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
+    # An explicit operation witness retains staged definitions in an unarmed corpus.
+    definitions_explicit: bool = False
     definitions_unavailable: bool = False
     neutral_document: SemanticUnitDocument | None = field(default=None, repr=False)
 
@@ -1225,6 +1227,7 @@ def build_page_state(
     complete_authored_effects: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    page_definitions: instances.PageDefinitions | None = None,
 ) -> SemanticPageState:
     """Parse and classify a target before evaluating lifecycle-dependent obligations."""
     state = _parse_page_state(
@@ -1243,6 +1246,7 @@ def build_page_state(
         type_basis,
         relation_definitions=relation_registry,
         language=language_registry,
+        page_definitions=page_definitions,
     )
 
 
@@ -1259,6 +1263,7 @@ def enrich_page_state(
     relation_definitions: relation_registry.RelationRegistry | None = None,
     language: semantic_language_registry.SemanticLanguageRegistry | None = None,
     require_status: bool = True,
+    page_definitions: instances.PageDefinitions | None = None,
 ) -> SemanticPageState:
     """Interpret detached facts with this page's admitted instance, lifecycle and note types.
 
@@ -1267,15 +1272,31 @@ def enrich_page_state(
     refusing the corpus, and only a decision that reads it refuses.
     """
     type_basis = type_basis or note_types.Basis(root)
-    definitions = None
+    definitions = page_definitions or (state.definitions if state.definitions_explicit else None)
+    definitions_explicit = definitions is not None
     unavailable = False
+    if definitions is not None:
+        if (definitions.path != state.path or definitions.frontmatter != state.frontmatter
+                or not set(_PAGE_DEFINITION_SUBJECTS) <= definitions.snapshots.keys()
+                or (instances.page_scope(root, state.path, dict(state.frontmatter))
+                    or instances.PUBLIC_INSTANCE) != definitions.instance_id):
+            raise ValueError("REGISTRY_UNAVAILABLE: staged page definitions do not match the page")
+        from .vocabulary import registry_spec
+
+        for subject, snapshot in definitions.snapshots.items():
+            spec = instances.select(root, registry_spec(subject), definitions.instance_id)
+            if (spec.binding_revision != definitions.binding_revision
+                    or snapshot.registry != subject or snapshot.instance_id != spec.instance_id):
+                raise ValueError("REGISTRY_UNAVAILABLE: staged page definitions changed selection")
+            instances.recheck(root, spec)
     try:
-        definitions = instances.page_definitions(
-            root, state.path, dict(state.frontmatter), _PAGE_DEFINITION_SUBJECTS,
-        )
-        if definitions.binding_revision is not None or relation_definitions is None:
+        if definitions is None:
+            definitions = instances.page_definitions(
+                root, state.path, dict(state.frontmatter), _PAGE_DEFINITION_SUBJECTS,
+            )
+        if definitions_explicit or definitions.binding_revision is not None or relation_definitions is None:
             relation_definitions = definitions.snapshots["relations"].typed
-        if definitions.binding_revision is not None or language is None:
+        if definitions_explicit or definitions.binding_revision is not None or language is None:
             language = definitions.snapshots["categories"].typed
     except ValueError:
         # Core meanings remain public; missing assignment never makes an overlay public.
@@ -1323,6 +1344,7 @@ def enrich_page_state(
         language_registry_hash=language_hash,
         relation_registry_hash=relation_hash,
         definitions=definitions,
+        definitions_explicit=definitions_explicit,
         definitions_unavailable=unavailable,
         eligible_governed=governed and live,
         eligible_compiled=compiled and live,
@@ -3737,8 +3759,11 @@ def _authored_relations(
     unavailable keeps core meaning only. Otherwise the vault is unarmed and the
     corpus registry, which a caller may supply, is the public instance.
     """
-    if state is not None and state.definitions is not None and state.definitions.binding_revision is not None:
-        return state.definitions.snapshots["relations"].typed
+    if (state is not None and state.definitions is not None
+            and (state.definitions.binding_revision is not None or state.definitions_explicit)):
+        selected = state.definitions.snapshots["relations"].typed
+        if state.relation_registry_hash == f"{selected.core_version}:{selected.extension_hash}":
+            return selected
     if state is not None and state.definitions_unavailable:
         return relation_registry.core_registry()
     return registry

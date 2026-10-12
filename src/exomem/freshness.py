@@ -1308,8 +1308,10 @@ def _key(vault_root: Path, scope: str) -> tuple[str, str]:
 
 
 def _canon(vault_root: Path) -> str:
+    from .state_paths import resolved_vault_path
+
     try:
-        return str(vault_root.resolve())
+        return str(resolved_vault_path(vault_root, expanduser=False))
     except OSError:
         return str(vault_root)
 

@@ -131,7 +131,7 @@ def _plan_payload(tmp_path: Path, *, fresh_runtime: bool = True) -> dict[str, An
         "dataset_path": str(dataset),
         "provider_checkout": {
             "root": str(provider_checkout),
-            "repository": "https://github.com/hugoa/exomem",
+            "repository": "https://github.com/example-owner/example-repository",
             "commit": "a" * 40,
             "tree": "b" * 40,
             "lock_sha256": "c" * 64,

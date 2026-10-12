@@ -39,12 +39,12 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
         scope="Yolo",
         category="letters",
         filename="2026-05-25-warning-letter.txt",
-        content="Dear Mr. Kivi, please cease and desist.",
+        content="Dear Ms. Vale, please withdraw the notice.",
         today=TODAY,
     )
     written = vault / result.path
     assert written.exists()
-    assert "cease and desist" in _read(written)
+    assert "withdraw the notice" in _read(written)
 
     assert result.sidecar_path == (
         "Knowledge Base/Evidence/Yolo/letters/2026-05-25-warning-letter.txt.md"
@@ -61,7 +61,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert "## Artifact" in page
     assert _ARTIFACT_SENTINEL in page
     # The artifact's own bytes are pointed at, never copied into the page.
-    assert "cease and desist" not in page
+    assert "withdraw the notice" not in page
     descriptor = vault_module.parse_frontmatter(page, strict=True)[0][
         "governance_companion"
     ]
@@ -160,10 +160,10 @@ def test_raw_rollback_survivor_keeps_its_intrinsic_floor(vault: Path, monkeypatc
             assert companion.is_file()
             raise OSError("synthetic publication failure")
 
-    def fail_original_cleanup(workspace, final, identity):
+    def fail_original_cleanup(workspace, final, identity, **kwargs):
         if final == original:
             raise OSError("synthetic cleanup failure")
-        return unlink(workspace, final, identity)
+        return unlink(workspace, final, identity, **kwargs)
 
     monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_original)
     monkeypatch.setattr(vault_module._BatchWorkspace, "unlink_installed", fail_original_cleanup)

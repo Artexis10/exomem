@@ -22,10 +22,12 @@ When no typed edge qualifies, the disposition MAY be satisfied by an **outbound
 connectivity signal**: an authored outbound connection whose target resolves unambiguously
 to a connectable governed page, whose canonical registry entry is active and scope-valid,
 and whose origin is `wikilink`, `markdown_relation`, `semantic_relation`, or
-`semantic_block`, irrespective of registry family. The connectable set SHALL be the
-eligible governed set widened to admit append-only `Sources/` material, and SHALL be
-computed separately from the eligible governed set so that the empty-corpus bootstrap
-disposition is unaffected by captured sources.
+`semantic_block`, irrespective of registry family. A resolved outbound body wikilink SHALL
+also satisfy this lane by normalized membership in the connectable target set without
+requiring a relation fact. The connectable set SHALL be the eligible governed set widened
+to admit append-only `Sources/` material, and SHALL be computed separately from the
+eligible governed set so that the empty-corpus bootstrap disposition is unaffected by
+captured sources.
 
 Frontmatter origin SHALL NOT satisfy connectivity. This keeps the disposition aligned with
 the relation-debt measurement, which clears a page on authored relation rows or body
@@ -76,10 +78,11 @@ imposed in either lane.
 - **AND** a typed-edge-absent warning is emitted at warning severity
 - **AND** the write is not blocked
 
-#### Scenario: Body wikilinks are measured but not yet a disposition signal
-- **WHEN** an active compiled page carries only body wikilinks and no authored relation row
-- **THEN** the links are recorded on page state for measurement
-- **AND** the disposition remains unsatisfied, because emitting them as relation facts regressed the semantic write-latency gate and the fact emission was withdrawn pending a cheaper resolution path
+#### Scenario: Resolved body wikilink satisfies connectivity
+- **WHEN** an active compiled page carries only an outbound body wikilink that resolves unambiguously to a connectable governed page
+- **THEN** the disposition is satisfied and reports the connectivity signal rather than a typed edge
+- **AND** a typed-edge-absent warning is emitted at warning severity
+- **AND** the write is not blocked
 
 #### Scenario: Cited provenance alone does not satisfy the disposition
 - **WHEN** an active compiled page carries no typed relation and no body wikilink, but names existing `Sources/` pages in its `sources:` frontmatter
@@ -110,7 +113,30 @@ imposed in either lane.
 - **THEN** the relation remains visible with its resolution finding but does not satisfy relation review
 - **AND** it does not satisfy connectivity
 
+#### Scenario: Self wikilink does not qualify
+- **WHEN** a page's only outbound body wikilink resolves back to that same page
+- **THEN** the disposition remains unsatisfied and enters ordinary relation review
+- **AND** the self-link does not satisfy connectivity
+
 #### Scenario: Reviewed-none is not applicable to a connected page
 - **WHEN** a caller submits a reviewed-none decision for a page that satisfies the disposition through connectivity
 - **THEN** the write reports the decision as not applicable and names the connectivity satisfaction
 - **AND** the page commits without a review artifact
+
+#### Scenario: Generic links do not satisfy typed relation review
+- **WHEN** a page contains only inline wikilinks, `links_to`, or source/evidence provenance
+- **THEN** those connections do not qualify as typed epistemic edges
+- **AND** an eligible resolved outbound connection may satisfy the separate connectivity lane, while frontmatter provenance alone does not
+
+#### Scenario: Inactive or excluded-family relation does not qualify
+- **WHEN** a page has only an inactive relation or a relation in the `citation`, `evidence`, or `link` family
+- **THEN** the edge remains visible in its own semantics but does not qualify as a typed edge
+- **AND** an active scope-valid excluded-family relation to a connectable target may satisfy connectivity, while an inactive relation satisfies neither lane
+
+#### Scenario: Supersession frontmatter qualifies narrowly
+- **WHEN** a registered active scope-valid supersession edge is authored through the supported frontmatter lifecycle field
+- **THEN** it qualifies without making other frontmatter links relation-review eligible
+
+#### Scenario: Inactive body wikilink target does not connect
+- **WHEN** a compiled page's only outbound body wikilink resolves to an inactive page
+- **THEN** that link does not satisfy connectivity or qualify as a typed edge

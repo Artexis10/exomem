@@ -17,14 +17,22 @@ appears once and asks for nothing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import instances, registry
 from .registry import Entry, RegistryError, RegistrySpec, Snapshot
+
+if TYPE_CHECKING:
+    from ..governance.membership import MembershipOutcome
+    from ..governance.principal import RequestPrincipal
+    from ..vault import PathGuard
 
 INSPECT_DEFAULT_LIMIT = 20
 INSPECT_MAX_LIMIT = 200
@@ -75,6 +83,18 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
     A withheld overlay makes the operation unavailable until domain-aware delivery.
     """
     from ..governance import egress
+
+    return _admission_refusal(
+        vault_root, spec,
+        release_level=lambda path: egress.release_level_for_path_only(vault_root, path),
+    )
+
+
+def _admission_refusal(
+    vault_root: Path, spec: RegistrySpec, *, release_level: Callable[[str], int],
+) -> dict[str, Any] | None:
+    """Keep instance admission branches shared by readers and publication witnesses."""
+    from ..governance.egress import LEVEL_FULL
     from ..governance.principal import effective_principal
     from ..governance.raw_protection import is_owner
 
@@ -88,8 +108,7 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
         from .. import registry_history
 
         paths = (spec.overlay(root), registry_history.history_dir(root, spec.stem))
-        if any(egress.release_level_for_path_only(root, path.relative_to(root).as_posix())
-               < egress.LEVEL_FULL for path in paths):
+        if any(release_level(path.relative_to(root).as_posix()) < LEVEL_FULL for path in paths):
             return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
         return None
     if is_owner(who) and restricted_reason(root) is None:
@@ -99,9 +118,156 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
         # the shipped pack is the whole public instance: nothing is withheld.
         return None
     path = spec.overlay(root).relative_to(root).as_posix()
-    if egress.release_level_for_path_only(root, path) < egress.LEVEL_FULL:
+    if release_level(path) < LEVEL_FULL:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     return None
+
+
+@dataclass(frozen=True)
+class RegistryAdmission:
+    """Revalidate one admitted preimage during its synchronous publication only."""
+
+    root: Path
+    spec: RegistrySpec
+    principal: RequestPrincipal
+    purpose: str | None
+    policy_fingerprint: str
+    before_sha256: str | None
+    memberships: tuple[MembershipOutcome, ...]
+    requirement_guard: PathGuard
+
+    def _recheck_requirement(self) -> None:
+        from .. import vault
+
+        guard = self.requirement_guard
+        try:
+            if guard.missing_parents:
+                # The writer pins new parents; retain old ancestry and prove the requirement still absent.
+                guard.recheck_ancestors(self.root)
+                vault.PathGuard.capture(self.root, guard.target, leaf_policy="absent").recheck(self.root)
+            else:
+                guard.recheck(self.root)
+        except vault.PathGuardError as error:
+            raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable") from error
+
+    def recheck(self) -> None:
+        from .. import registry_history
+        from ..governance import (
+            authorization_custody,
+            authorization_session_lifecycle,
+            egress,
+            membership,
+            policy,
+            store,
+        )
+        from ..governance.principal import effective_principal
+
+        root = self.root
+        who = effective_principal()
+        self._recheck_requirement()
+        instances.recheck_binding(root, self.spec)
+        compiled = policy.load(root)
+        if (who != self.principal or compiled.fingerprint != self.policy_fingerprint
+                or egress._declared_purpose(root, who, None) != self.purpose):
+            raise RegistryError("REGISTRY_UNAVAILABLE: publication admission changed")
+        context = who.verified_authorization_session
+        if context is not None:
+            if (not who.resolved or who.audience_id != context.principal_id
+                    or who.authorization_session_id != context.session_id
+                    or who.issuer_family != context.issuer_family):
+                raise RegistryError("REGISTRY_UNAVAILABLE: publication session principal changed")
+            # Owner and open-policy shortcuts must still prove current session custody.
+            now = int(time.time())
+            custody = authorization_custody.load_authorization_custody(root, now=now)
+            connection = store.open_authorization_session_connection(root)
+            try:
+                authorization_session_lifecycle.status_verified_session(
+                    connection, custody=custody, context=context, now=now,
+                )
+            finally:
+                connection.close()
+        paths = (self.spec.overlay(root).relative_to(root).as_posix(),)
+        if self.spec.binding_revision is not None:
+            paths += (registry_history.history_dir(root, self.spec.stem).relative_to(root).as_posix(),)
+        current_memberships = tuple(
+            membership.evaluate_path_only(root, path, compiled) for path in paths
+        )
+        # Creating missing parents can change a refusal reason without changing its authority.
+        if any(current.state != before.state or current.scope_ids != before.scope_ids
+               for current, before in zip(current_memberships, self.memberships, strict=True)):
+            raise RegistryError("REGISTRY_UNAVAILABLE: publication membership changed")
+        overlay = paths[0]
+        refusal = _admission_refusal(
+            root, self.spec,
+            release_level=lambda path: (
+                egress._release_level_for_path_only_snapshot(
+                    root, path, principal=who, purpose=self.purpose, policy=compiled,
+                    content_fingerprint=self.before_sha256,
+                ) if path == overlay else egress.release_level_for_path_only(
+                    root, path, principal=who, purpose=self.purpose, policy=compiled,
+                )
+            ),
+        )
+        if refusal is not None:
+            raise RegistryError("REGISTRY_UNAVAILABLE: publication admission is unavailable")
+        self._recheck_requirement()
+        if policy.load(root).fingerprint != self.policy_fingerprint:
+            raise RegistryError("REGISTRY_UNAVAILABLE: publication policy changed")
+
+
+def capture_admission(root: Path, spec: RegistrySpec, before: bytes | None) -> RegistryAdmission:
+    """Prove ordinary admission and the exact preimage before retaining a witness."""
+    from .. import registry_history, vault
+    from ..governance import connector_boundary, egress, membership, policy
+    from ..governance.principal import effective_principal
+
+    root = Path(root)
+    requirement_path = connector_boundary.requirement_relative_path()
+    try:
+        (root / requirement_path).lstat()
+    except FileNotFoundError:
+        requirement = None
+        requirement_guard = vault.PathGuard.capture(root, requirement_path, leaf_policy="absent")
+    else:
+        raw, requirement_guard = vault.read_bounded_guarded_bytes(
+            root, requirement_path, limit=connector_boundary._MAX_CONFIG_BYTES,
+        )
+        requirement = connector_boundary.parse_requirement(raw)
+    if requirement != connector_boundary.read_requirement(root):
+        raise RegistryError("REGISTRY_UNAVAILABLE: publication binding changed")
+    instances.recheck_binding(root, spec)
+    who = effective_principal()
+    compiled = policy.load(root)
+    purpose = egress._declared_purpose(root, who, None)
+    refusal = _admission_refusal(
+        root, spec,
+        release_level=lambda path: egress.release_level_for_path_only(
+            root, path, principal=who, purpose=purpose, policy=compiled,
+        ),
+    )
+    if refusal is not None:
+        raise RegistryError("REGISTRY_UNAVAILABLE: publication admission is unavailable")
+    path = spec.overlay(root).relative_to(root).as_posix()
+    try:
+        (root / path).lstat()
+    except FileNotFoundError:
+        current = None
+        preimage_guard = vault.PathGuard.capture(root, path, leaf_policy="absent")
+    else:
+        current, preimage_guard = vault.read_bounded_guarded_bytes(root, path, limit=registry.MAX_OVERLAY_BYTES)
+    if current != before:
+        raise vault.PathGuardError("PATH_GUARD_CONTENT", "publication preimage changed")
+    paths = (path,)
+    if spec.binding_revision is not None:
+        paths += (registry_history.history_dir(root, spec.stem).relative_to(root).as_posix(),)
+    witness = RegistryAdmission(
+        root, spec, who, purpose, compiled.fingerprint,
+        hashlib.sha256(before).hexdigest() if before is not None else None,
+        tuple(membership.evaluate_path_only(root, item, compiled) for item in paths), requirement_guard,
+    )
+    witness.recheck()
+    preimage_guard.recheck(root)
+    return witness
 
 
 def selection_refusal(subject: str, error: RegistryError) -> dict[str, Any]:
@@ -483,6 +649,8 @@ def queue_for_owner(
             f"{PENDING_MAX_CHARS} characters; save one entry at a time"
         )
     root = Path(vault_root)
+    if spec.binding_revision is None:
+        spec = instances.select(root, spec, authoring=True)
     target = spec.overlay(root).relative_to(root).as_posix()
     item = make_item(
         family=spec.family,
@@ -496,7 +664,7 @@ def queue_for_owner(
         projection_status="current",
         paths={target: target},
         question=question,
-        logical_identity=f"registry-proposal:{spec.name}:{registry.content_hash(question)[:32]}",
+        logical_identity=f"registry-proposal:{spec.name}:{registry.content_hash(target + ':' + question)[:32]}",
     )
     VocabularyState(root).observe(item)
     return {
@@ -564,7 +732,7 @@ def save(
         added=added,
     )
     _mark_committed()
-    after = registry.load(spec, root)
+    after = registry._build(spec, rendered)
     return {
         "subject": spec.name,
         "valid": True,
@@ -682,7 +850,7 @@ def restore(
         added=added,
     )
     _mark_committed()
-    after = registry.load(spec, root)
+    after = registry._build(spec, text)
     return {
         "subject": spec.name,
         "valid": True,

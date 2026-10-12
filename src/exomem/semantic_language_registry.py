@@ -615,8 +615,11 @@ def save_registry(
             f"{[item.as_dict() for item in errors]!r}"
         )
 
-    path = registry_path(vault_root)
-    inspected = vocabulary_registry.load(CATEGORY_SPEC, Path(vault_root))
+    from .vocabulary import instances
+
+    spec = instances.select(Path(vault_root), CATEGORY_SPEC, authoring=True)
+    path = spec.overlay(Path(vault_root))
+    inspected = vocabulary_registry.load(spec, Path(vault_root))
     current_hash: str | None = None
     if inspected.overlay_text is not None:
         current_hash = inspected.content_hash
@@ -641,7 +644,7 @@ def save_registry(
         sort_keys=True,
     )
     history = vocabulary_registry.commit(
-        CATEGORY_SPEC,
+        spec,
         Path(vault_root),
         rendered,
         operation=operation,
@@ -650,7 +653,7 @@ def save_registry(
         previous=inspected.overlay_text,
         added=vocabulary_registry.added_keys(
             inspected.entries,
-            CATEGORY_SPEC.adapter.entries(registry),
+            spec.adapter.entries(registry),
         ),
     )
     return {

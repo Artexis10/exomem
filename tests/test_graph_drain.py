@@ -153,7 +153,7 @@ def test_a_slow_availability_proof_does_not_block_a_canonical_write(
         conn.close()
 
 
-@pytest.mark.parametrize("change", ["source", "policy", "registry", "sidecar"])
+@pytest.mark.parametrize("change", ["source", "policy", "sidecar"])
 def test_availability_rejects_changes_after_its_source_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
@@ -173,12 +173,6 @@ def test_availability_rejects_changes_after_its_source_proof(
             os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         elif change == "policy":
             (root / "Knowledge Base/_access.yaml").write_text("default_tier: public\n")
-        elif change == "registry":
-            from exomem.relation_registry import extension_registry_path
-
-            path = extension_registry_path(root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("version: 1\n")
         else:
             with sqlite3.connect(index.path) as writer:
                 writer.execute("UPDATE graph_nodes SET source_hash = ? WHERE kind = 'file'", ("0" * 64,))
@@ -193,6 +187,27 @@ def test_availability_rejects_changes_after_its_source_proof(
         ).fetchone() is None
     finally:
         conn.close()
+
+
+def test_neutral_graph_republication_survives_an_unrelated_overlay_edit(tmp_path, monkeypatch):
+    """Definition changes must not strand neutral topology whose source seal still holds."""
+    root = _published_vault(tmp_path)
+    index = EpistemicGraphIndex(root)
+    index.withdraw_availability()
+    real_proof = EpistemicGraphIndex._snapshot_sources_match_disk
+
+    def changed_overlay(self, conn, **kwargs):
+        result = real_proof(self, conn, **kwargs)
+        path = root / "Knowledge Base/_Schema/relation-registry.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("schema_version: 1\nextensions: {}\n")
+        return result
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_snapshot_sources_match_disk", changed_overlay)
+    assert index.republish_availability_if_current() is True
+    snapshot = index._open_read_snapshot()
+    assert snapshot is not None
+    snapshot.close()
 
 
 def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(

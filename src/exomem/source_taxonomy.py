@@ -27,7 +27,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -223,6 +223,9 @@ class Resolution:
     definition: Definition | None = None
     replaced_by: str | None = None
     close_match: str | None = None
+    selected_spec: vocabulary_registry.RegistrySpec | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def requires_url(self) -> bool:
@@ -388,6 +391,9 @@ class SourceTaxonomy:
     kind_aliases: Mapping[str, str] = field(default_factory=dict)
     domain_aliases: Mapping[str, str] = field(default_factory=dict)
     findings: tuple[str, ...] = ()
+    selected_spec: vocabulary_registry.RegistrySpec | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         for name in ("kinds", "domains", "kind_aliases", "domain_aliases"):
@@ -430,6 +436,7 @@ class SourceTaxonomy:
                     path_label=resolution.path_label,
                     status=resolution.status,
                     close_match=close[0],
+                    selected_spec=self.selected_spec,
                 )
         return resolution
 
@@ -452,6 +459,7 @@ class SourceTaxonomy:
                 label=derive_label(key),
                 path_label=derive_path_label(key),
                 status="unregistered",
+                selected_spec=self.selected_spec,
             )
         if definition.status == "deprecated":
             status = "deprecated"
@@ -470,6 +478,7 @@ class SourceTaxonomy:
             status=status,
             definition=definition,
             replaced_by=definition.replaced_by,
+            selected_spec=self.selected_spec,
         )
 
     # -- browsing ----------------------------------------------------------
@@ -517,15 +526,18 @@ def load_taxonomy(vault_root: Path, *, registry_scope: str | None = None) -> Sou
     vocabulary, so a broken registry degrades to defaults with a finding rather
     than refusing every capture. Read and cached through the vocabulary loader.
     """
+    selected = None
     try:
         from .vocabulary import instances
 
         selected = instances.select(Path(vault_root), KIND_SPEC, registry_scope)
-        return vocabulary_registry.load(selected, Path(vault_root)).typed
+        return replace(
+            vocabulary_registry.load(selected, Path(vault_root)).typed, selected_spec=selected
+        )
     except OSError as exc:
         path = registry_path(vault_root)
         log.warning("%s unreadable (%s); using built-in source taxonomy", path, exc)
-        return _unreadable(exc)
+        return replace(_unreadable(exc), selected_spec=selected)
 
 
 def _unreadable(exc: Exception) -> SourceTaxonomy:
@@ -756,6 +768,13 @@ class TaxonomyPlan:
     source_text: str | None = None
     #: The kept version of the replaced registry, when there are writes.
     version: str | None = None
+    selected_spec: vocabulary_registry.RegistrySpec | None = None
+
+    def recheck_bindings(self, root: Path) -> None:
+        if self.selected_spec is not None:
+            from .vocabulary import instances
+
+            instances.recheck(root, self.selected_spec)
 
     @property
     def introduced_keys(self) -> tuple[str, ...]:
@@ -808,16 +827,41 @@ def plan_registrations(
     does, so a capture and its vocabulary land together or not at all.
     """
     root = Path(vault_root)
-    path = registry_path(root)
     pending = [
         resolution
         for resolution in (kind, domain)
         if resolution is not None and resolution.status == "unregistered"
     ]
-    taxonomy = load_taxonomy(root)
-    if not pending:
-        return TaxonomyPlan(taxonomy)
+    from .vocabulary import instances
 
+    # Resolutions retain the first consumed binding; planning must never repin them.
+    observed = [resolution.selected_spec for resolution in (kind, domain)
+                if resolution is not None and resolution.selected_spec is not None]
+    selected = observed[0] if observed else instances.select(root, KIND_SPEC)
+    for previous in observed:
+        instances.recheck(root, previous)
+        if (
+            previous.instance_id,
+            previous.binding_revision,
+            previous.stem,
+            previous.overlay(root),
+        ) != (
+            selected.instance_id,
+            selected.binding_revision,
+            selected.stem,
+            selected.overlay(root),
+        ):
+            raise vocabulary_registry.RegistryError(
+                "REGISTRY_UNAVAILABLE: taxonomy resolutions have different bindings"
+            )
+    taxonomy = replace(vocabulary_registry.load(selected, root).typed, selected_spec=selected)
+    if not pending:
+        return TaxonomyPlan(taxonomy, selected_spec=selected)
+
+    instances.select(root, KIND_SPEC, selected.instance_id, authoring=True)
+    spec = selected
+    instances.recheck(root, spec)
+    path = spec.overlay(root)
     try:
         text, guard = read_guarded_text(root, path)
         path_exists = True
@@ -851,7 +895,7 @@ def plan_registrations(
         )
 
     if not introductions:
-        return TaxonomyPlan(taxonomy)
+        return TaxonomyPlan(taxonomy, selected_spec=spec)
 
     updated = _append_introductions(text, introductions)
     write = PlannedWrite(
@@ -868,7 +912,7 @@ def plan_registrations(
     version, kept = registry_history.plan_snapshot(
         root,
         path=path,
-        stem=KIND_SPEC.stem,
+        stem=spec.stem,
         previous=text if path_exists else None,
         operation="auto-register",
         before_hash=(
@@ -886,11 +930,13 @@ def plan_registrations(
             kind_aliases=_alias_table(definitions["source_kind"].values()),
             domain_aliases=_alias_table(definitions["domain"].values()),
             findings=taxonomy.findings,
+            selected_spec=spec,
         ),
         introductions=tuple(introductions),
         writes=(write, kept),
         source_text=text if path_exists else None,
         version=version,
+        selected_spec=spec,
     )
 
 
@@ -957,7 +1003,11 @@ def register(
         vault_root, kind=kind_resolution, domain=domain_resolution
     )
     if plan.writes:
-        batch_atomic_write(list(plan.writes), vault_root=Path(vault_root))
+        batch_atomic_write(
+            list(plan.writes),
+            vault_root=Path(vault_root),
+            _validate_prepared_bindings=lambda: plan.recheck_bindings(Path(vault_root)),
+        )
     return plan.introductions
 
 

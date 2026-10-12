@@ -79,6 +79,7 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
 def test_the_internal_activation_writes_no_activation_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     turns: list[str] = []
 
     def body(_root, turn, *_args, **kwargs):
@@ -97,6 +98,8 @@ def test_the_internal_activation_writes_no_activation_log(
 def test_a_failed_internal_activation_never_stops_activation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+
     def body(*_args, **_kwargs):
         raise RuntimeError("cold index")
 
@@ -107,6 +110,7 @@ def test_a_failed_internal_activation_never_stops_activation(
 def test_the_matrix_warm_is_skipped_without_embeddings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     from exomem import embeddings
 
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
@@ -122,6 +126,7 @@ def test_the_matrix_warm_runs_only_for_a_resident_corpus(
 ) -> None:
     from exomem import embeddings
 
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", policy)
@@ -137,3 +142,25 @@ def test_the_matrix_warm_runs_only_for_a_resident_corpus(
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: Index())
     server_runtime._warm_embedding_matrix(tmp_path)
     assert searches == expected
+
+
+def test_explicitly_disabled_warmup_does_not_build_request_or_matrix_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import cloud_cell, embeddings
+
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(cloud_cell, "resource_policy", lambda: "legacy")
+    touched: list[str] = []
+    monkeypatch.setattr(
+        commands, "_op_activate_context_body", lambda *_args, **_kwargs: touched.append("request")
+    )
+    monkeypatch.setattr(
+        embeddings, "get_embedding_index", lambda _root: touched.append("matrix")
+    )
+
+    server_runtime._warm_request_path(tmp_path)
+    server_runtime._warm_embedding_matrix(tmp_path)
+
+    assert touched == []

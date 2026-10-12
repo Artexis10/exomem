@@ -122,6 +122,10 @@ already injected this turn's working set. For a known information gap, use
 `ask_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
+An optional `relevant_due_refs` candidate names due work on released current material.
+Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
+Use `review_item_context(ref, expected_fingerprint)` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
+
 Only if needed to resolve the turn, pass relevant `conversation`: up to six
 recent excerpts and 2,400 characters total, `focus` up to 240 characters and
 `refs` up to twelve. Never send full history or unrelated personal data. If a

@@ -305,6 +305,7 @@ def move_file(
     content_transform: Callable[[str], str] | None = None,
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -315,6 +316,7 @@ def move_file(
     rewrite mutating append-only bytes, not to stop a caller that has already
     justified the change. `extra_writes` joins the same atomic batch so a
     caller's own registry updates commit with the move or not at all.
+    A caller's binding witness is checked before rename and batch publication.
     """
     try:
         old_abs, old_rel = resolve_under_vault(
@@ -895,6 +897,8 @@ def move_file(
                     combined.extend(log_plan.writes)
                 # The moved page is the move's one piece of work, on its new
                 # path; the link rewrites around it earn nothing (review F1).
+                if _validate_prepared_bindings is not None:
+                    _validate_prepared_bindings()
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
                     _held_rename(vault_root, old_rel, new_rel)
@@ -919,6 +923,7 @@ def move_file(
                                 vault_root=vault_root,
                                 required_guards=required_guards,
                                 index_reports=batch_index_reports,
+                                _validate_prepared_bindings=_validate_prepared_bindings,
                                 semantic_states={
                                     write.path.relative_to(vault_root).as_posix(): semantic_states[
                                         write.path.relative_to(vault_root).as_posix()
@@ -1024,12 +1029,17 @@ def move_file(
                 code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 reason=str(error),
             ) from error
+        if _validate_prepared_bindings is not None:
+            _validate_prepared_bindings()
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
                 # Link rewrites are the move's bookkeeping, nobody's work.
                 with working_set_heat.primary_paths(()):
-                    batch_atomic_write(writes, vault_root=vault_root)
+                    batch_atomic_write(
+                        writes, vault_root=vault_root,
+                        _validate_prepared_bindings=_validate_prepared_bindings,
+                    )
         except Exception as e:
             log.exception(
                 "move_file: link-update batch failed for %s -> %s", old_rel, new_rel

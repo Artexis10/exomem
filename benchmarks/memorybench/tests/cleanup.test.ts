@@ -64,7 +64,7 @@ async function fixture(provider: "exomem" | "basic-memory" = "exomem"): Promise<
   await writeFile(datasetPath, datasetBytes, { mode: 0o600 })
   const variant = provider === "exomem" ? "exomem-source-only" : "basic-memory-controlled"
   const providerRepository = provider === "exomem"
-    ? "https://github.com/hugoa/exomem"
+    ? "https://github.com/example-owner/example-repository"
     : "https://github.com/basicmachines-co/basic-memory"
   const providerCommit = provider === "exomem"
     ? "a".repeat(40)

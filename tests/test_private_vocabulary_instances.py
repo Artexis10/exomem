@@ -42,6 +42,426 @@ def private_instances(configured_boundary, vault):
     return authenticate
 
 
+@pytest.mark.parametrize("failure", [None, "duplicate", "definition", "untouched-race", "selected-race"])
+def test_complete_batch_uses_each_staged_instance_definition(private_instances, vault, warm_managed_cell, monkeypatch, failure):
+    """A private entity must use its own staged folder and relation meaning."""
+    from test_vocabulary_authority import (
+        _activate,
+        _approve_request,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
+
+    from exomem import (
+        epistemic_graph,
+        find,
+        freshness,
+        reserved_paths,
+        vocabulary_authority,
+        vocabulary_effects,
+        vocabulary_gate,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance import principal
+
+    images = []
+    for instance, folder, identifier in (
+        ("public", "PublicVenues", "11111111-1111-4111-8111-111111111111"),
+        ("private", "PrivateVenues", "22222222-2222-4222-8222-222222222222"),
+    ):
+        images.extend((
+            vocabulary_effects.CanonicalWriteImage(
+                f"Knowledge Base/_Schema/{instance}/entity-types.yaml", None,
+                ("schema_version: 1\nentity_types:\n  venue:\n"
+                 f"    folder: {folder}\n    label: Venue\n    aliases: []\n"
+                 "    capture_guidance: A recurring meeting place.\n").encode(),
+            ),
+            vocabulary_effects.CanonicalWriteImage(
+                f"Knowledge Base/_Schema/{instance}/relation-registry.yaml", None,
+                (b"schema_version: 1\nextensions:\n  venue.near:\n"
+                 b"    parent: relates_to\n    description: Nearby places\n"),
+            ),
+            vocabulary_effects.CanonicalWriteImage(
+                f"Knowledge Base/Entities/{folder}/station.md", None,
+                (f"---\ntype: entity\nentity_type: venue\nexomem_id: {identifier}\n"
+                 "title: Station\nstatus: active\n"
+                 + (f"projects: [private-project]\nregistry_scope: {SCOPE}\n" if instance == "private" else "")
+                 + "---\n# Station\n"
+                 + ("\n- venue.near: [[Entities/PublicVenues/station]]\n" if instance == "private" else "")).encode(),
+            ),
+        ))
+    if failure == "duplicate":
+        image = images[-1]
+        images[-1] = replace(image, after=image.after.replace(
+            b"22222222-2222-4222-8222-222222222222", b"11111111-1111-4111-8111-111111111111",
+        ), after_sha256=None)
+    if failure == "definition":
+        image = images[0]
+        before = image.after.replace(b"label: Venue", b"label: Old venue")
+        (vault / image.path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / image.path).write_bytes(before)
+        images[0] = replace(image, before=before, before_sha256=None)
+    with principal.request_scope(private_instances("full")):
+        result = vocabulary_effects.classify_additive_effects(
+            vault, images, identity_paths_for_id=lambda identifier: (),
+        )
+    if failure in ("duplicate", "definition"):
+        assert any(reason.code == ("duplicate_batch_identity" if failure == "duplicate" else "entity_type_definition_changed")
+                   for reason in result.reasons)
+    else:
+        assert result.state == "reviewed", result.reasons
+        assert [effect.action for effect in result.effects].count("entity.create") == 2
+        assert [effect.action for effect in result.effects].count("entity_type.add") == 2
+        assert [effect.action for effect in result.effects].count("relation_type.add") == 2
+        assert [effect.action for effect in result.effects].count("edge.add") == 1
+    with principal.request_scope(private_instances("full")):
+        warm_managed_cell(vault)
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        checkpoint = freshness.live_recall_checkpoint(vault, "vault")
+        assert find.recall_resolver_snapshot(vault, allow_fallback=False, expected_checkpoint=checkpoint) is not None
+        install_unit_session_boundary(monkeypatch)
+        actor = _principal()
+        authority = _store(vault)
+        _activate(authority, actor)
+        monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda root: authority)
+
+        def write():
+            with reserved_paths._owner_authority_scope("schema_memory"), vocabulary_gate.operation_context(
+                vault, idempotency_key="complete-selected-batch", command_digest="a" * 64,
+                receipt_id="complete-selected-receipt", principal=actor,
+            ) as operation:
+                vault_module.batch_atomic_write(
+                    [vault_module.PlannedWrite(vault / image.path, image.after.decode(), create_only=image.before is None) for image in images],
+                    vault_root=vault, post_commit_fanout=False,
+                )
+                return operation.uses
+
+        with pytest.raises(vocabulary_authority.VocabularyAuthorityDenied) as denied:
+            write()
+        for image in images:
+            assert ((vault / image.path).read_bytes() if (vault / image.path).exists() else None) == image.before
+        if failure in ("duplicate", "definition"):
+            assert "vocabulary_request_id" not in denied.value.details
+            return
+        _approve_request(authority, actor, denied.value.details["vocabulary_request_id"])
+        if failure in ("untouched-race", "selected-race"):
+            original = vault_module._after_batch_destination_published
+
+            def race(path):
+                original(path)
+                if path == vault / images[-1].path:
+                    changed = (vault / "Knowledge Base/_Schema/private/semantic-language-registry.yaml"
+                               if failure == "untouched-race" else vault / images[1].path)
+                    changed.parent.mkdir(parents=True, exist_ok=True)
+                    changed.write_text("schema_version: 1\ncategories: {}\nkinds: {}\n" if failure == "untouched-race"
+                                       else images[1].after.decode() + "# concurrent edit\n")
+
+            monkeypatch.setattr(vault_module, "_after_batch_destination_published", race)
+            with pytest.raises(ValueError):
+                write()
+            for image in images:
+                if failure == "selected-race" and image.path == images[1].path:
+                    continue  # The writer preserves an external editor's replaced target during rollback.
+                assert not (vault / image.path).exists()
+            return
+        uses = write()
+        assert {use["action"] for use in uses[0]["authorities"]} == {
+            "entity.create", "entity_type.add", "relation_type.add", "edge.add",
+        }
+        for image in images:
+            assert (vault / image.path).read_bytes() == image.after
+
+
+def test_identical_selected_proposals_review_and_apply_to_their_own_instance(private_instances, vault, tmp_path):
+    """The queue must retain both proposals and apply each reviewed target exactly."""
+    from exomem import commands, vocabulary_review, writer_lease
+    from exomem.governance import principal
+    from exomem.vocabulary import contract, instances
+    from exomem.vocabulary_state import VocabularyState
+
+    delta = {"upsert": {"venue": {"label": "Venue", "guidance": "A recurring place.",
+                                  "attributes": {"folder": "Venues"}}}}
+    full, limited = private_instances("full"), private_instances("limited")
+    with principal.request_scope(limited):
+        withheld_before = vocabulary_review.review(vault)
+        public_before = commands.op_schema_memory(vault, "inspect", subject="entity-types")
+    queued = {}
+    with principal.request_scope(full):
+        for scope in ("public", SCOPE):
+            spec = instances.select(vault, entity_types.SPEC, scope, authoring=True)
+            queued[scope] = contract.queue_for_owner(
+                vault, spec, registry.load(spec, vault), delta, "Recurring places", "audience_restricted",
+            )["item_ref"]
+        assert queued["public"] != queued[SCOPE]
+        assert {item["ref"] for item in vocabulary_review.review(vault)["items"]} == set(queued.values())
+    with principal.request_scope(limited):
+        assert vocabulary_review.review(vault) == withheld_before
+        with pytest.raises(ValueError, match="VOCABULARY_ITEM_NOT_FOUND"):
+            vocabulary_review.context(vault, ref=queued[SCOPE])
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory")
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "proposal-leases"))
+    with principal.request_scope(full):
+        for scope in (SCOPE, "public"):
+            context = vocabulary_review.context(vault, ref=queued[scope])
+            item = context["item"]
+            spec = instances.select(vault, entity_types.SPEC, scope)
+            target = spec.overlay(vault).relative_to(vault).as_posix()
+            assert context["targets"][0]["path"] == target
+            decision = {"item_ref": item["ref"], "fingerprint": item["fingerprint"],
+                        "family": item["family"], "registry_hashes": item["registry_hashes"],
+                        "target_versions": item["target_versions"], "outcome": "propose-new",
+                        "choice": {"canonical": "venue", "definition": delta["upsert"]["venue"]},
+                        "rationale": "A recurring place needs a durable type."}
+            vocabulary_review.decide(vault, ref=item["ref"], decision=decision)
+            route = context["definitions"]["registration"]["save"].copy()
+            assert route.pop("tool") == "schema_memory"
+            assert route["registry_scope"] == scope
+            result = manager.invoke(command, (vault,), route, idempotency_key=f"apply-{scope}", read_only=False)
+            assert result["state"] == "committed", result
+            applied = VocabularyState(vault).get(item["ref"])
+            assert applied["state"] == "applied", applied
+            assert applied["decision"]["application"]["result_currency"]["target_versions"][target] == registry.load(spec, vault).content_hash
+            if scope == SCOPE:
+                with principal.request_scope(limited):
+                    assert commands.op_schema_memory(vault, "inspect", subject="entity-types") == public_before
+                    assert vocabulary_review.review(vault) == withheld_before
+
+
+def test_private_registry_evidence_checks_its_snapshots_without_loading_public_storage(
+    private_instances, configured_boundary, vault, monkeypatch,
+):
+    """A private-only save must not consume public definitions or retain a changed binding."""
+    from exomem import state_migration, vocabulary_gate_evidence
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+    from exomem.vocabulary_effects import CanonicalWriteImage
+
+    with principal.request_scope(private_instances("full")):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        path = spec.overlay(vault).relative_to(vault).as_posix()
+        raw = b"schema_version: 1\nentity_types:\n  venue:\n    folder: Venues\n    label: Venue\n    aliases: []\n    capture_guidance: Places.\n"
+        original = registry.load
+
+        def selected_only(selected, root):
+            if root is not None:
+                assert selected.instance_id == SCOPE, "private evidence consumed a public registry"
+            return original(selected, root)
+
+        monkeypatch.setattr(registry, "load", selected_only)
+        evidence = vocabulary_gate_evidence.classify(vault, (CanonicalWriteImage(path, None, raw),))
+        try:
+            assert set(evidence.transitions) == {(entity_types.SPEC.name, SCOPE)}
+            evidence.recheck(phase="before")
+            spec.overlay(vault).parent.mkdir(parents=True, exist_ok=True)
+            spec.overlay(vault).write_bytes(raw)
+            evidence.recheck(phase="after")
+            with pytest.raises(ValueError, match="operation definitions changed"):
+                evidence.recheck(phase="before")
+            config, _authenticate = configured_boundary
+            document = json.loads(config.read_text())
+            document["vocabulary"]["private"][SCOPE]["history"] = "private-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+            with pytest.raises(ValueError, match="selected instance changed"):
+                evidence.recheck(phase="after")
+        finally:
+            evidence.close()
+
+
+@pytest.mark.parametrize("domain", [None, "meteorology"])
+def test_capture_keeps_the_binding_used_to_resolve_a_registered_kind(
+    private_instances, configured_boundary, vault, source_schema, monkeypatch, domain,
+):
+    """Rearming between resolution and planning must not repin a capture's meaning."""
+    from test_source_taxonomy import _capture
+
+    from exomem import source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    original = source_taxonomy.plan_registrations
+    with principal.request_scope(private_instances("full")):
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC)
+        source_taxonomy.register(vault, kind="field-notebook", domain=domain)
+        before = selected.overlay(vault).read_bytes()
+
+        def rearm_before_plan(*args, **kwargs):
+            config, _authenticate = configured_boundary
+            document = json.loads(config.read_text())
+            document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable resolution binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(source_taxonomy, "plan_registrations", rearm_before_plan)
+        with pytest.raises(ValueError):
+            _capture(vault, source_schema, source_type="field-notebook", title="Retained resolution", domain=domain)
+        assert selected.overlay(vault).read_bytes() == before
+        assert not instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault).exists()
+        assert not list((vault / "Knowledge Base/Sources").rglob("*retained-resolution.md"))
+
+
+@pytest.mark.parametrize("race", ["planning", "prepared", "same-path"])
+def test_reclassification_keeps_its_binding_through_source_publication(
+    private_instances, configured_boundary, vault, source_schema, monkeypatch, race,
+):
+    """A stopped rearm must refuse a correction and restore an already renamed source."""
+    from test_source_taxonomy import _capture
+
+    from exomem import move_file, reclassify_source, source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    with principal.request_scope(private_instances("full")):
+        config, _authenticate = configured_boundary
+        document = json.loads(config.read_text())
+        document["capture_paths"] = [path for path in document["capture_paths"] if "/_Schema/" not in path]
+        config.write_text(json.dumps(document))
+        authority = state_migration.assert_offline_migration_authority(source="disposable unrestricted registry destination")
+        state_migration.arm_connector_boundary_offline(vault, authority=authority)
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC)
+        captured = _capture(vault, source_schema, source_type="field-notebook", title="Original classification")
+        source_before = (vault / captured.path).read_bytes()
+        registry_before = selected.overlay(vault).read_bytes()
+
+        def rearm_selection():
+            document = json.loads(config.read_text())
+            document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable correction binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+
+        if race == "prepared":
+            original = move_file.batch_atomic_write
+
+            def rearm_before_batch(*args, **kwargs):
+                rearm_selection()
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(move_file, "batch_atomic_write", rearm_before_batch)
+        else:
+            original = source_taxonomy.plan_registrations
+
+            def rearm_after_plan(*args, **kwargs):
+                planned = original(*args, **kwargs)
+                rearm_selection()
+                return planned
+
+            monkeypatch.setattr(source_taxonomy, "plan_registrations", rearm_after_plan)
+
+        with pytest.raises(ValueError):
+            reclassify_source.reclassify(
+                vault, path=captured.path,
+                source_kind="field-notebook" if race == "same-path" else "observation-diary",
+                reason="Correct the source kind",
+            )
+        assert (vault / captured.path).read_bytes() == source_before
+        assert selected.overlay(vault).read_bytes() == registry_before
+        assert not instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault).exists()
+        assert not list((vault / "Knowledge Base/Sources/Observation Diary").rglob("*.md"))
+
+
+def test_capture_refuses_a_binding_rearmed_after_its_registration_plan(
+    private_instances, configured_boundary, vault, source_schema, monkeypatch,
+):
+    """A retained capture plan cannot publish into storage from a previous binding."""
+    from test_source_taxonomy import _capture
+
+    from exomem import add, source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    original = add.batch_atomic_write
+    with principal.request_scope(private_instances("full")):
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC)
+
+        def rearm_then_publish(*args, **kwargs):
+            config, _authenticate = configured_boundary
+            document = json.loads(config.read_text())
+            document["vocabulary"]["public"]["namespace"] = "Knowledge Base/_Schema/public-next"
+            config.write_text(json.dumps(document))
+            authority = state_migration.assert_offline_migration_authority(source="disposable capture binding race")
+            state_migration.arm_connector_boundary_offline(vault, authority=authority)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(add, "batch_atomic_write", rearm_then_publish)
+        with pytest.raises(ValueError):
+            _capture(vault, source_schema, source_type="field-notebook", title="Rearmed registration")
+        assert not selected.overlay(vault).exists()
+        assert not source_taxonomy.registry_path(vault).exists()
+        assert not list((vault / "Knowledge Base/Sources").rglob("*rearmed-registration.md"))
+
+
+@pytest.mark.parametrize(("relation", "changed"), [("venue.near", True), ("relates_to", False)])
+def test_instance_moves_change_extension_meaning_but_keep_core_meaning(private_instances, vault, relation, changed):
+    """A move between instances must not relabel a private extension as an unchanged public edge."""
+    from exomem import memory_refs, relation_registry, vocabulary_effects
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    path = "Knowledge Base/Notes/Insights/connection.md"
+    target = "Knowledge Base/Notes/Insights/target.md"
+    before = ("---\ntype: insight\nstatus: active\nexomem_id: 11111111-1111-4111-8111-111111111111\n"
+              f"title: Connection\n---\n# Connection\n\n- {relation}: [[Notes/Insights/target]]\n")
+    after = before.replace("title: Connection\n", f"title: Connection\nprojects: [private-project]\nregistry_scope: {SCOPE}\n")
+    with principal.request_scope(private_instances("full")):
+        for scope in ("public", SCOPE):
+            spec = instances.select(vault, relation_registry.SPEC, scope)
+            spec.overlay(vault).parent.mkdir(parents=True, exist_ok=True)
+            spec.overlay(vault).write_text("schema_version: 1\nextensions:\n  venue.near:\n"
+                                          "    parent: relates_to\n    description: Nearby places\n")
+        result = vocabulary_effects.classify_additive_effects(
+            vault, (vocabulary_effects.CanonicalWriteImage(path, before.encode(), after.encode()),),
+            resolver_entries=((target, "Target"),),
+            identity_reader=lambda current: memory_refs.memory_ref("22222222-2222-4222-8222-222222222222"),
+        )
+    assert any(reason.code == "edge_removed_or_changed" for reason in result.reasons) == changed
+    assert bool(result.effects) == changed
+
+
+@pytest.mark.parametrize("operation", ["save-entity-types", "save-relations"])
+def test_legacy_queued_registry_request_applies_to_selected_public_storage(private_instances, vault, tmp_path, operation):
+    """A legacy request retains its original public writer and review schema."""
+    from exomem import commands, relation_registry, vocabulary_review, writer_lease
+    from exomem.governance import principal
+    from exomem.vocabulary import contract, instances
+
+    if operation == "save-entity-types":
+        base = entity_types.SPEC
+        canonical = "venue"
+        definition = {"folder": "Venues", "label": "Venue", "aliases": [], "capture_guidance": "Recurring places."}
+        document = {"schema_version": 1, "entity_types": {canonical: definition}}
+    else:
+        base = relation_registry.SPEC
+        canonical = "venue.near"
+        definition = {"parent": "relates_to", "description": "Nearby places"}
+        document = {"upsert": {canonical: definition}}
+    with principal.request_scope(private_instances("full")):
+        spec = instances.select(vault, base)
+        queued = contract.queue_for_owner(vault, base, registry.load(spec, vault),
+                                         document, "Recurring places", "audience_restricted", operation=operation)
+        item = vocabulary_review.context(vault, ref=queued["item_ref"])["item"]
+        vocabulary_review.decide(vault, ref=item["ref"], decision={
+            "item_ref": item["ref"], "fingerprint": item["fingerprint"], "family": item["family"],
+            "registry_hashes": item["registry_hashes"], "target_versions": item["target_versions"],
+            "outcome": "propose-new", "choice": {"canonical": canonical, "definition": definition},
+            "rationale": "A recurring place needs a durable type.",
+        })
+        manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "legacy-leases"))
+        command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory")
+        result = manager.invoke(command, (vault,), {"operation": operation, "subject": base.name,
+                                "proposal": document, "expected_hash": next(iter(item["target_versions"].values())),
+                                "why": "Recurring places", "vocabulary_ref": item["ref"],
+                                "vocabulary_fingerprint": item["fingerprint"]},
+                                idempotency_key="legacy-selected-public", read_only=False)
+        assert result["state"] == "committed", result
+        assert spec.overlay(vault).exists()
+        assert not base.overlay(vault).exists()
+
+
 def test_authenticated_private_promotion_cannot_change_public_observations(private_instances, vault):
     from exomem import commands
     from exomem.governance import egress, principal

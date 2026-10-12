@@ -2,7 +2,7 @@
 
 ## Why
 
-Records collections are passive today: a manifest says what a collection stores, but nothing deterministic can tell that an Evidence artifact or a compiled observation *belongs* to one, so routing depends on the agent remembering the contract on every turn, coverage cannot be counted, and a recurring longitudinal domain (subscriptions changing over months across several notes) is never proposed as a collection because no sensor watches for it. Two live dogfood cases on 2026-09-09 (KB: `Notes/Research/Exomem/repeated-mutable-domains-automatic-records-promotion-routing-subscriptions-public-posts-dogfood`) showed both halves: a published post preserved as Evidence with no Record and nothing representing the gap, and months of subscription state living in prose with no ledger and no proposal.
+Records collections are passive today: a manifest says what a collection stores, but nothing deterministic can tell that an Evidence artifact or a compiled observation *belongs* to one, so routing depends on the agent remembering the contract on every turn, coverage cannot be counted, and a recurring longitudinal domain (subscriptions changing over months across several notes) is never proposed as a collection because no sensor watches for it. A 2026-09-09 incident exposed two gaps: preserved Evidence lacked a matching Record, and recurring mutable state stayed in prose without a ledger proposal.
 
 ## What Changes
 

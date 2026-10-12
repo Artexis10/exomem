@@ -34,7 +34,7 @@
       pytest -q` green (full suite, no regression).
 - [x] 4.2 `uvx ruff check .` clean (no new findings).
 - [x] 4.3 `openspec validate order-contradiction-queue --strict` passes.
-- [ ] 4.4 Live-vault smoke (Hugo, GPU/embeddings box): run
+- [ ] 4.4 Live-vault smoke (operator, GPU/embeddings box): run
       `audit(categories=["corpus_contradictions"])` and confirm the top of the
       queue is dominated by cross-family dormant-close pairs, same-family
       architecture pairs sink, and the omitted-count line reports the remainder.

@@ -625,9 +625,11 @@ def add(
                 required_guards=required_guards,
                 post_commit_fanout=False,
                 publication_intents_out=publication_intents,
+                _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root),
             )
         else:
-            batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards)
+            batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
+                               _validate_prepared_bindings=lambda: taxonomy_plan.recheck_bindings(vault_root))
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")

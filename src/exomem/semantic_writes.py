@@ -2029,9 +2029,24 @@ def _preflight_existing(
     before_review: semantic_contract.RelationReviewState | None = None
     after_review: semantic_contract.RelationReviewState | None = None
     if applicability == "full":
+        from . import vocabulary_auxiliaries
+
+        admission = None
+        if after.identity_kind == "exomem_id":
+            admission = vocabulary_auxiliaries.lifecycle_admission(
+                root,
+                primary_path=path,
+                current_source=before_source,
+                proposed_source=after_source,
+                primary_guard=primary_guard,
+            )
         with mutation_timing_span(timings, "preflight.relation_review"):
-            before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
-            after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+            before_review = relation_review.load_relation_review(
+                root, before, corpus=before_corpus, admission=admission,
+            )
+            after_review = relation_review.load_relation_review(
+                root, after, corpus=after_corpus, admission=admission,
+            )
 
     token = transition_token or _existing_transition_token(
         operation=operation,
@@ -2224,6 +2239,14 @@ def _commit_existing_locked(
     The batch's index fan-out runs as the namespace is released, so its report
     lands in `index_reports` after this returns; the caller attaches it.
     """
+    from . import vocabulary_auxiliaries
+
+    admission = None
+    if preflight.applicability == "full" and preflight.after.identity_kind == "exomem_id":
+        admission = vocabulary_auxiliaries.lifecycle_admission(
+            root, primary_path=preflight.path, current_source=preflight.before_source,
+            proposed_source=preflight.after_source, primary_guard=preflight.primary_guard,
+        )
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2246,7 +2269,11 @@ def _commit_existing_locked(
                 "committed replay requires the exact stable resulting identity",
             )
         try:
-            prepared = relation_review.load_lifecycle_prepared(root, preflight.after.identity)
+            prepared = relation_review.load_lifecycle_prepared(
+                root, preflight.after.identity, admission=admission,
+            )
+            if prepared is not None:
+                relation_review._load_prepared_decision_guard(root, prepared, admission=admission)
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
         token_value = _decode_existing_transition_token(preflight.transition_token)
@@ -2276,6 +2303,8 @@ def _commit_existing_locked(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "committed replay does not match the prepared transition",
             )
+        if admission is not None and not admission(prepared.reference):
+            raise ValueError("WRITE_REFUSED: target is unavailable")
         return ExistingCommit(
             preflight.applicability,
             preflight.operation,
@@ -2323,6 +2352,7 @@ def _commit_existing_locked(
                 decision=preflight.requested_decision,
                 prepared=prepared,
                 current=current,
+                admission=admission,
             )
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
@@ -2374,13 +2404,27 @@ def _commit_existing_locked(
             str(error),
         ) from error
     reports: list[Any] = [] if index_reports is None else index_reports
-    from . import vocabulary_auxiliaries
-
     manifest = vocabulary_auxiliaries.seal(
         root,
         primary=primary_write,
         derived=(*derived_auxiliaries, *(("lifecycle-review", item) for item in lifecycle_writes)),
     )
+    publication_entered = False
+
+    def validate_bindings() -> None:
+        nonlocal publication_entered
+        if preflight.origin_inputs is not None:
+            _validate_origin_inputs(root, preflight.origin_inputs)
+        if admission is not None:
+            if not admission(relation_review.lifecycle_prepared_path(root, preflight.after.identity).relative_to(root).as_posix()):
+                raise ValueError("WRITE_REFUSED: target is unavailable")
+            if publication_entered:
+                # The completion seam binds the after image, never the replaced before guard.
+                source, _ = vault.read_guarded_text(root, root / preflight.path)
+                if vault.content_hash(source) != vault.content_hash(preflight.after_source):
+                    raise ValueError("WRITE_REFUSED: target is unavailable")
+        publication_entered = True
+
     try:
         written = vault.batch_atomic_write(
             writes,
@@ -2389,9 +2433,7 @@ def _commit_existing_locked(
             index_reports=reports,
             semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
             _vocabulary_auxiliaries=manifest,
-            _validate_prepared_bindings=(
-                lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-            ) if preflight.origin_inputs is not None else None,
+            _validate_prepared_bindings=validate_bindings,
         )
     except vault.PathGuardError:
         _recheck_origin_guards(root, origin_guards)

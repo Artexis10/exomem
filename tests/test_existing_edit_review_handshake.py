@@ -12,9 +12,9 @@ from exomem import commands, relation_review, semantic_contract, temporal, vault
 
 PAGE_ID = "00000000-0000-4000-8000-000000000091"
 PAGE = "Knowledge Base/Notes/Research/edit-review-handshake.md"
-ABERDEEN = (
+TRIP = (
     "Knowledge Base/Notes/Research/Travel/"
-    "rita-aberdeen-trip-accommodation-strategy-august-2026.md"
+    "mira-harbor-trip-accommodation-plan-june-2024.md"
 )
 REVIEW_REASON = "No honest typed relation applies to this isolated transition."
 
@@ -402,12 +402,12 @@ def test_full_bootstrap_and_edit_description_teach_both_recovery_paths(
     )
 
 
-def test_aberdeen_style_append_commits_four_observations(
+def test_travel_append_commits_four_observations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = _source("2026-08-09", title="Rita Aberdeen accommodation strategy")
-    source = source.replace("Before section.", "Accommodation baseline.")
-    page = _write(tmp_path, ABERDEEN, source)
+    source = _source("2024-06-02", title="Mira Harbor accommodation plan")
+    source = source.replace("Before section.", "Transport baseline.")
+    page = _write(tmp_path, TRIP, source)
     _save_current_review(tmp_path, source)
     ticks = iter(
         [
@@ -417,29 +417,29 @@ def test_aberdeen_style_append_commits_four_observations(
     )
     monkeypatch.setattr(temporal, "now", lambda: next(ticks))
     addition = (
-        "Accommodation baseline.\n\n"
-        "## Booking approach\n\nBook refundable inventory first.\n\n"
+        "Transport baseline.\n\n"
+        "## Route options\n\nCompare train and ferry schedules.\n\n"
         "## Observations\n\n"
-        "- [constraint] Keep the first booking refundable #travel\n"
-        "- [preference] Prefer a central base over a car-dependent stay #travel\n"
-        "- [risk] August inventory can tighten quickly #travel\n"
-        "- [next action] Compare the short list before committing #travel"
+        "- [constraint] Reserve a late arrival option #travel\n"
+        "- [preference] Choose a stop near the exhibition hall #travel\n"
+        "- [risk] The last ferry can sell out #travel\n"
+        "- [next action] Check transfer times before reserving #travel"
     )
     operation = {
         "kind": "replace_string",
-        "old_string": "Accommodation baseline.",
+        "old_string": "Transport baseline.",
         "new_string": addition,
     }
     semantic = commands.op_edit_memory(
         tmp_path,
-        path=ABERDEEN,
-        why="validate Aberdeen additions",
+        path=TRIP,
+        why="validate travel additions",
         operation={**operation, "validate_only": True},
     )["semantic"]
     commands.op_edit_memory(
         tmp_path,
-        path=ABERDEEN,
-        why="commit Aberdeen additions",
+        path=TRIP,
+        why="commit travel additions",
         operation={
             **operation,
             "transition_token": semantic["transition_token"],
@@ -450,6 +450,6 @@ def test_aberdeen_style_append_commits_four_observations(
     )
 
     written = page.read_text(encoding="utf-8")
-    assert "## Booking approach" in written
+    assert "## Route options" in written
     assert written.count("#travel") == 4
     assert semantic.get("after_hash") == vault.content_hash(written)

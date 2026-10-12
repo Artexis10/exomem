@@ -339,10 +339,8 @@ def test_intent_boundary_separates_prediction_from_records_and_planning(
 def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
     """A hookless client sees this payload and nothing else.
 
-    The dogfood session carried the evidence in ordinary language every turn and
-    the boundary named only the three nouns, so nothing told the agent that
-    "let's do the next one" is a Planning write and "Kim posted it" is a Records
-    one. Asserted with the ROUTE, because a class without one is a label.
+    The boundary must name each lifecycle class and its route so the client
+    can act on stated intent and observed outcomes.
     """
     boundary = _op(vault)["records"]["intent_boundary"]
 

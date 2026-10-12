@@ -1610,6 +1610,21 @@ def _upkeep_lines(packet: dict) -> list[str]:
     return lines
 
 
+def _relevant_due_lines(packet: dict) -> list[str]:
+    """Keep the candidate identity and its handling instruction on one whole line."""
+    items = packet.get("relevant_due_refs")
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        return []
+    candidate = json.dumps(items[0], ensure_ascii=True, separators=(",", ":"))
+    return [
+        f"- relevant due: {candidate}. Judge semantic relevance; raise at most one due item "
+        "per maintained client conversation, remembering any mention through continuation, "
+        "compaction and OAuth renewal. Read review_item_context(ref, expected_fingerprint). "
+        "Use one applicable authored writer with its unit/parent guards to resolve, or one "
+        "triage_memory(ref, action=dismiss, expected_fingerprint, why) for presentation disposition."
+    ]
+
+
 #: The evidence kinds that mean the TURN'S OWN WORDS reached an anchor, and
 #: the ranking engine's. Spelled here rather than imported, because this hook
 #: runs as a standalone script.
@@ -1739,6 +1754,7 @@ def _packet_lines(packet: dict) -> list[str]:
         if label:
             lines.append(_packet_line("pointer", label, ref))
     lines.extend(_upkeep_lines(packet))
+    lines.extend(_relevant_due_lines(packet))
     return lines
 
 

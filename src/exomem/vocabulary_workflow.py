@@ -397,7 +397,7 @@ def _requires_live_registry(
     )
 
 
-def _choice(family: str, outcome: str, value: Any) -> str | None:
+def _choice(family: str, outcome: str, value: Any, *, registry_spec: Any = None) -> str | None:
     if outcome in {"generic", "no-edge", "defer"}:
         if value is not None:
             raise ValueError("VOCABULARY_DECISION_INVALID: abstention has no selected meaning")
@@ -416,7 +416,19 @@ def _choice(family: str, outcome: str, value: Any) -> str | None:
         definition = value["definition"]
         if not isinstance(definition, dict):
             raise ValueError("VOCABULARY_DECISION_INVALID: a typed definition is required")
-        if family == "relation-type/v1":
+        if registry_spec is not None:
+            from .vocabulary import registry
+
+            try:
+                document, _touched = registry.apply_delta(
+                    registry_spec, registry._build(registry_spec, None),
+                    {"upsert": {canonical: definition}},
+                )
+                typed = registry_spec.adapter.parse_document(document)
+                findings = registry_spec.adapter.findings(typed)
+            except ValueError as error:
+                raise ValueError("VOCABULARY_DECISION_INVALID: " + str(error)) from None
+        elif family == "relation-type/v1":
             from . import relation_registry
 
             findings = relation_registry.validate_proposal(
@@ -512,7 +524,18 @@ def validate_decision(item: WorkItem, payload: Mapping[str, Any]) -> VocabularyD
         raise ValueError("VOCABULARY_DECISION_STALE: refresh the item and review current evidence")
     if item.projection_status != "current" and outcome != "defer":
         raise ValueError("VOCABULARY_EVIDENCE_UNAVAILABLE: refresh evidence or defer")
-    selected = _choice(item.family, outcome, payload["choice"])
+    spec = None
+    from .vocabulary_review import REGISTRY_PROPOSAL_SIGNAL
+
+    if item.signal == REGISTRY_PROPOSAL_SIGNAL:
+        from .vocabulary import registry_spec
+
+        request = json.loads(item.question or "{}")
+        if request.get("operation") == "save":
+            spec = registry_spec(request["registry"])
+            if spec.family != item.family:
+                raise ValueError("VOCABULARY_DECISION_INVALID: queued registry family changed")
+    selected = _choice(item.family, outcome, payload["choice"], registry_spec=spec)
     return VocabularyDecision(
         item.ref,
         item.fingerprint,

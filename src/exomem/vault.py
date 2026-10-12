@@ -1219,16 +1219,10 @@ class PathGuard:
             expected_generation=self.expected_generation,
         )
 
-    def recheck(
+    def recheck_ancestors(
         self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
     ) -> None:
-        """Re-prove the guard.
-
-        `verified_ancestors` lets a caller that rechecks many guards in one round
-        (`recheck_path_guards`) prove each distinct ancestor directory once: they
-        share almost all of their chain, and re-stat'ing it per guard was six
-        probes per item file on every round.
-        """
+        """Re-prove retained ancestry without testing the destination leaf."""
         root = Path(vault_root)
         # Plain string joins: a round rechecks thousands of leaves and pathlib
         # construction was most of each one.
@@ -1254,6 +1248,14 @@ class PathGuard:
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
             if verified_ancestors is not None:
                 verified_ancestors.add(expected)
+
+    def recheck(
+        self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
+    ) -> None:
+        """Re-prove the guard, sharing ancestor proofs within one round."""
+        root = Path(vault_root)
+        root_text = os.fspath(root)
+        self.recheck_ancestors(root, verified_ancestors)
         for relative in self.missing_parents:
             if os.path.lexists(os.path.join(root_text, relative)):
                 raise PathGuardError("PATH_GUARD_CHANGED", "missing guard ancestor appeared")
@@ -1517,6 +1519,8 @@ class _BatchReplaceContext:
     vault_root: Path | None
     expected_destination: PathIdentity | None
     published_metadata: _BatchSnapshot | None = None
+    inverse_recheck: Callable[[], None] | None = None
+    expected_content_hash: str | None = None
 
 
 _BATCH_REPLACE_CONTEXT: ContextVar[_BatchReplaceContext | None] = ContextVar(
@@ -1529,11 +1533,17 @@ def _batch_replace_context(
     vault_root: Path | None,
     expected_destination: PathIdentity | None,
     published_metadata: _BatchSnapshot | None = None,
+    *,
+    inverse_recheck: Callable[[], None] | None = None,
+    expected_content_hash: str | None = None,
 ) -> Iterator[None]:
     """Carry held-publication inputs without widening the legacy test seam."""
 
     token = _BATCH_REPLACE_CONTEXT.set(
-        _BatchReplaceContext(vault_root, expected_destination, published_metadata)
+        _BatchReplaceContext(
+            vault_root, expected_destination, published_metadata,
+            inverse_recheck, expected_content_hash,
+        )
     )
     try:
         yield
@@ -2282,6 +2292,8 @@ class _BatchWorkspace:
         published_metadata: _BatchSnapshot | None = None,
     ) -> PathIdentity:
         context = _BATCH_REPLACE_CONTEXT.get()
+        inverse_recheck = context.inverse_recheck if context is not None else None
+        expected_content_hash = context.expected_content_hash if context is not None else None
         if context is not None:
             if vault_root is None:
                 vault_root = context.vault_root
@@ -2289,6 +2301,8 @@ class _BatchWorkspace:
                 expected_destination = context.expected_destination
             if published_metadata is None:
                 published_metadata = context.published_metadata
+        if inverse_recheck is not None:
+            inverse_recheck()
         self.recheck()
         artifact.recheck()
         if vault_root is not None:
@@ -2351,6 +2365,8 @@ class _BatchWorkspace:
                     published: held_fs.HeldResult[held_fs.StableIdentity] | None = None
 
                     def recheck_publish_precondition() -> None:
+                        if inverse_recheck is not None:
+                            inverse_recheck()
                         self.recheck()
                         artifact.recheck()
                         current = filesystem.file(parent, relative.name)
@@ -2380,6 +2396,8 @@ class _BatchWorkspace:
 
                     def publish_once() -> None:
                         nonlocal published
+                        if inverse_recheck is not None:
+                            inverse_recheck()
 
                         def prepare_published(file: held_fs.HeldFile) -> None:
                             if published_metadata is not None:
@@ -2388,12 +2406,15 @@ class _BatchWorkspace:
                         _before_batch_destination_published(
                             final, restoring=published_metadata is not None
                         )
+                        if inverse_recheck is not None:
+                            inverse_recheck()
                         published = held_fs.publish_bytes(
                             filesystem,
                             parent,
                             relative.name,
                             content,
                             expected_identity=expected_stable,
+                            expected_sha256=expected_content_hash,
                             prepare=prepare_published,
                         )
                         if (
@@ -2457,8 +2478,18 @@ class _BatchWorkspace:
         # already closed on Windows and its identity was proved immediately
         # above, and the mutation boundary is held throughout, so no other
         # governed writer can intervene.
+        def replace_once() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self._replace_once(artifact, final)
+
+        def recheck_replace_precondition() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self.recheck()
+
         replace_tolerating_transient_sharing(
-            lambda: self._replace_once(artifact, final), recheck=self.recheck
+            replace_once, recheck=recheck_replace_precondition
         )
         artifact.close()
         self.artifacts.pop(artifact.name)
@@ -2565,10 +2596,12 @@ class _BatchWorkspace:
         except (OSError, PathGuardError):
             return None
 
-    def unlink_installed(self, final: Path, expected: PathIdentity) -> None:
+    def unlink_installed(
+        self, final: Path, expected: _BatchArtifactGuard, *, inverse_recheck: Callable[[], None]
+    ) -> None:
         """Remove one exact batch-created destination through its held parent."""
 
-        self.recheck()
+        inverse_recheck()
         absolute_final = Path(os.path.abspath(final))
         if absolute_final.parent != self.parent:
             raise PathGuardError(
@@ -2588,11 +2621,20 @@ class _BatchWorkspace:
                 descriptor = getattr(installed, "descriptor", None)
                 if (
                     not isinstance(descriptor, int)
-                    or not _same_identity(expected, os.fstat(descriptor))
+                    or not _same_identity(expected.identity, os.fstat(descriptor))
                     or installed.identity.link_count != 1
                 ):
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "batch rollback target changed"
+                    )
+                inverse_recheck()
+                observed = self.held_filesystem.read(installed)
+                if (
+                    not observed.ok
+                    or hashlib.sha256(observed.require()).hexdigest() != expected.content_hash
+                ):
+                    raise PathGuardError(
+                        "PATH_GUARD_CONTENT", "batch rollback content changed"
                     )
                 removed = self.held_filesystem.unlink(installed)
                 if not removed.ok:
@@ -2611,6 +2653,7 @@ class _BatchWorkspace:
                 )
             self.recheck()
             return
+        inverse_recheck()
         if os.unlink in getattr(os, "supports_dir_fd", set()):
             os.unlink(absolute_final.name, dir_fd=self.parent_descriptor)
         else:  # pragma: no cover - legacy rootless Windows route
@@ -3067,15 +3110,13 @@ def _recheck_rollback_directory_guards(
     guards: Iterable[DirectoryCensusGuard],
     vault_root: Path,
     final: Path,
-    *,
-    allowed_changes: Iterable[Path],
 ) -> None:
-    """Recheck censuses whose guarded namespace contains this direct child."""
+    """Recheck retained identities without observing unrelated sibling state."""
     final_parent = os.path.abspath(final.parent)
     for guard in guards:
         guarded_directory = Path(vault_root) / guard.target
         if final_parent == os.path.abspath(guarded_directory):
-            guard.recheck(vault_root, allowed_changes=allowed_changes)
+            guard.recheck_identity(vault_root)
 
 
 #: Windows refuses `os.replace` onto a target another handle holds open without
@@ -3447,6 +3488,7 @@ def _bounded_directory_entries(
     expected: PathIdentity,
     max_entries: int,
     ignored_names: frozenset[str] = frozenset(),
+    admission: Callable[[str], bool] | None = None,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
     try:
@@ -3465,6 +3507,9 @@ def _bounded_directory_entries(
         ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
+            entry_relative = f"{relative}/{name}" if relative else name
+            if admission is not None and not admission(entry_relative):
+                continue
             if name in ignored_names:
                 continue
             if name.startswith(_BATCH_RESIDUE_PREFIX):
@@ -3472,7 +3517,6 @@ def _bounded_directory_entries(
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
                 continue
-            entry_relative = f"{relative}/{name}" if relative else name
             if _is_registered_internal_state_artifact(entry_relative):
                 continue
             if len(ordinary_names) <= max_entries:
@@ -3481,12 +3525,16 @@ def _bounded_directory_entries(
         iterator = None
 
         for name in sorted(residue_names):
+            if admission is not None and not admission(f"{relative}/{name}"):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             _classify_batch_residue(path, descriptor, name)
         if len(ordinary_names) > max_entries:
             raise PathGuardError("PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit")
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
+            if admission is not None and not admission(f"{relative}/{name}"):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             try:
                 encoded = name.encode("utf-8")
             except UnicodeEncodeError as error:
@@ -3544,6 +3592,7 @@ class DirectoryCensusGuard:
     directory_identity: PathIdentity | None
     entries: tuple[PathIdentity, ...]
     max_entries: int
+    admission: Callable[[str], bool] | None = None
 
     @classmethod
     def capture(
@@ -3552,6 +3601,7 @@ class DirectoryCensusGuard:
         target: str,
         *,
         max_entries: int,
+        admission: Callable[[str], bool] | None = None,
     ) -> DirectoryCensusGuard:
         parts = _safe_guard_target(target)
         if type(max_entries) is not int or max_entries < 0:
@@ -3594,6 +3644,7 @@ class DirectoryCensusGuard:
                 relative=relative,
                 expected=directory_identity,
                 max_entries=max_entries,
+                admission=admission,
             )
             guard = cls(
                 target,
@@ -3602,19 +3653,16 @@ class DirectoryCensusGuard:
                 directory_identity,
                 entries,
                 max_entries,
+                admission,
             )
             guard.recheck(root)
             return guard
-        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries)
+        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries, admission)
         guard.recheck(root)
         return guard
 
-    def recheck(
-        self,
-        vault_root: Path,
-        *,
-        allowed_changes: Iterable[Path] = (),
-    ) -> None:
+    def recheck_identity(self, vault_root: Path) -> None:
+        """Re-prove retained directories without admission or child enumeration."""
         root = Path(vault_root)
         for expected in self.ancestors:
             path = root if expected.relative_path == "." else root / expected.relative_path
@@ -3629,6 +3677,28 @@ class DirectoryCensusGuard:
                 or _is_reparse(info)
             ):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
+        if self.directory_identity is None:
+            return
+        try:
+            info = (root / self.target).lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
+        if (
+            not _same_identity(self.directory_identity, info)
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+
+    def recheck(
+        self,
+        vault_root: Path,
+        *,
+        allowed_changes: Iterable[Path] = (),
+    ) -> None:
+        root = Path(vault_root)
+        self.recheck_identity(root)
         if self.directory_identity is None:
             for relative in self.missing_paths[:-1]:
                 path = root / relative
@@ -3669,22 +3739,12 @@ class DirectoryCensusGuard:
                     expected=_identity(self.target, info),
                     max_entries=self.max_entries,
                     ignored_names=allowed_names,
+                    admission=self.admission,
                 )
                 if current:
                     raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
             return
         directory = root / self.target
-        try:
-            info = directory.lstat()
-        except OSError as error:
-            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
-        if (
-            not _same_identity(self.directory_identity, info)
-            or not stat.S_ISDIR(info.st_mode)
-            or stat.S_ISLNK(info.st_mode)
-            or _is_reparse(info)
-        ):
-            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
         allowed_names = _allowed_census_names(directory, allowed_changes)
         current = _bounded_directory_entries(
             directory,
@@ -3692,6 +3752,7 @@ class DirectoryCensusGuard:
             expected=self.directory_identity,
             max_entries=self.max_entries,
             ignored_names=allowed_names,
+            admission=self.admission,
         )
         expected_entries = tuple(
             entry for entry in self.entries if Path(entry.relative_path).name not in allowed_names
@@ -4984,7 +5045,7 @@ def _batch_atomic_write_locked(
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
     if vault_root is not None:
-        _validate_batch_write_access(Path(vault_root), writes)
+        _validate_batch_write_access(Path(vault_root), writes, auxiliary_manifest=_vocabulary_auxiliaries)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -5059,6 +5120,7 @@ def _batch_atomic_write_locked(
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
     staged: list[tuple[Path, _BatchWorkspace, _WorkspaceArtifact]] = []
+    rollback_ancestry: list[tuple[Path, PathGuard]] = []
     snapshots: list[_BatchSnapshot | None] = []
     source_guards: list[_BatchArtifactGuard | None] = []
     fast_receipt: Any | None = None
@@ -5099,6 +5161,22 @@ def _batch_atomic_write_locked(
                 )
         for index, write in enumerate(writes):
             workspace = workspace_by_parent[Path(os.path.abspath(write.path.parent))]
+            ancestry_root = (
+                Path(os.path.abspath(vault_root))
+                if vault_root is not None else workspace.parent
+            )
+            if vault_root is not None and _batch_state_target(Path(vault_root), write.path):
+                from . import state_paths
+
+                ancestry_root = Path(os.path.abspath(state_paths.vault_state_dir(vault_root)))
+            ancestry_guard = bound_guards[index]
+            if ancestry_guard is None:
+                ancestry_guard = PathGuard.capture(
+                    ancestry_root,
+                    Path(os.path.abspath(write.path)).relative_to(ancestry_root).as_posix(),
+                    leaf_policy="stable" if os.path.lexists(write.path) else "absent",
+                )
+            rollback_ancestry.append((ancestry_root, ancestry_guard))
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
                     f"stage-{index}.tmp", write.content.encode("utf-8")
@@ -5322,6 +5400,8 @@ def _batch_atomic_write_locked(
         for index, (final, workspace, artifact) in enumerate(staged):
             if index == 0 and _validate_prepared_bindings is not None:
                 _validate_prepared_bindings()
+            if index == 0 and additive_guard is not None:
+                additive_guard.before_publication()
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
             for _pending_final, _pending_workspace, pending_artifact in staged[index:]:
@@ -5347,7 +5427,9 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
-                _validate_batch_write_access(root, writes[index:], proposed=writes)
+                _validate_batch_write_access(
+                    root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                )
                 recheck_path_guards(
                     root,
                     (
@@ -5459,28 +5541,38 @@ def _batch_atomic_write_locked(
                     raise PathGuardError(
                         "PATH_GUARD_CHANGED", "committed batch artifact is unbound"
                     )
-                final_guard.recheck()
-                workspace.recheck()
-                if vault_root is not None:
-                    _recheck_rollback_directory_guards(
-                        directory_guards,
-                        Path(vault_root),
-                        final,
-                        allowed_changes=allowed_census_changes,
-                    )
+                def recheck_inverse(
+                    ancestry: tuple[Path, PathGuard] = rollback_ancestry[replaced_index],
+                    destination: Path = final,
+                    installed: _BatchArtifactGuard = final_guard,
+                    owner: _BatchWorkspace = workspace,
+                ) -> None:
+                    # Inverse custody survives caller revocation; forward admission stays live.
+                    ancestry_root, ancestry_guard = ancestry
+                    ancestry_guard.recheck_ancestors(ancestry_root)
+                    if vault_root is not None:
+                        _recheck_rollback_directory_guards(
+                            directory_guards, Path(vault_root), destination
+                        )
+                    installed.recheck()
+                    owner.recheck()
+
+                recheck_inverse()
                 if snapshot is None:
-                    workspace.unlink_installed(final, final_guard.identity)
+                    workspace.unlink_installed(final, final_guard, inverse_recheck=recheck_inverse)
                 else:
                     restore = workspace.create_artifact(
                         f"restore-{replaced_index}.tmp", snapshot.content
                     )
                     _apply_snapshot_metadata(restore, snapshot)
                     restore.recheck(verify_content=False)
-                    final_guard.recheck()
+                    recheck_inverse()
                     with _batch_replace_context(
                         Path(vault_root) if vault_root is not None else None,
                         final_guard.identity,
                         snapshot,
+                        inverse_recheck=recheck_inverse,
+                        expected_content_hash=final_guard.content_hash,
                     ):
                         restored_identity = workspace.replace_artifact(restore, final)
                     _BatchArtifactGuard.capture(
@@ -5648,15 +5740,31 @@ def _validate_batch_write_access(
     writes: Iterable[PlannedWrite],
     *,
     proposed: Iterable[PlannedWrite] | None = None,
+    auxiliary_manifest: Any | None = None,
 ) -> None:
     """Fail closed when any planned target is outside or newly write-protected."""
-    from . import access
+    from . import access, vocabulary_auxiliaries
     from .governance import connector_boundary
 
     vault_resolved = vault_root.resolve()
     writes = tuple(writes)
+    full_plan = writes if proposed is None else tuple(proposed)
+    roles = vocabulary_auxiliaries.validate(
+        vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
+    )
+    lifecycle_admission = None
+    if "lifecycle-review" in roles.values():
+        primary = next(
+            write for write in full_plan
+            if Path(os.path.abspath(write.path)) == vault_resolved / auxiliary_manifest.primary_path
+        )
+        lifecycle_admission = vocabulary_auxiliaries.lifecycle_admission(
+            vault_root, primary_path=auxiliary_manifest.primary_path,
+            current_source=auxiliary_manifest.primary_before_source,
+            proposed_source=primary.content, primary_guard=auxiliary_manifest.primary_guard,
+        )
     proposed_by_path = {}
-    for write in (writes if proposed is None else proposed):
+    for write in full_plan:
         try:
             proposed_by_path[write.path.resolve().relative_to(vault_resolved).as_posix()] = write
         except (ValueError, OSError):
@@ -5674,11 +5782,15 @@ def _validate_batch_write_access(
                     f"WRITE_REFUSED: {target} resolves outside the vault root"
                 ) from error
             if target == write.path:
-                connector_boundary.require_write(
-                    vault_root, rel,
-                    content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
-                    proposed=proposed_by_path,
-                )
+                if roles.get(rel) == "lifecycle-review" and lifecycle_admission is not None:
+                    if not lifecycle_admission(rel):
+                        raise ValueError("WRITE_REFUSED: target is unavailable")
+                else:
+                    connector_boundary.require_write(
+                        vault_root, rel,
+                        content=write.content.encode("utf-8") if isinstance(write.content, str) else None,
+                        proposed=proposed_by_path,
+                    )
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
@@ -6780,8 +6892,8 @@ class WikilinkResolver:
     - `stems`: filename stem (no path) → list of full paths (multi-match if
       the basename collides across folders).
     - `titles`: frontmatter `title:` lower-cased → list of full paths. This
-      lets `[[North-Led Content Manual]]` resolve to a source file whose
-      stem is date-prefixed (`2026-05-15-tu-north-led-content-manual`) but
+      lets `[[Test Content Manual]]` resolve to a source file whose
+      stem is date-prefixed (`2026-05-15-tu-test-manual`) but
       whose title matches.
     """
 

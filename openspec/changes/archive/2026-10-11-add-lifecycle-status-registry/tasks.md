@@ -2,7 +2,7 @@
 
 Hosted retirement supersedes only this change's frozen-profile artifact and bootstrap obligations.
 The checked receipts below describe historical work.
-Shared vocabulary and classification requirements remain active, and release and archive tasks 3.3 and 3.4 remain pending.
+Shared vocabulary and classification requirements remain active.
 
 Delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/1630).
 [CI run 37888048092](https://github.com/Artexis10/exomem/actions/runs/37888048092) passed every test cited below on head `7c37c37cd5c459ba83a5fef79b898f3dfd3dc82d`, with one exception.
@@ -46,5 +46,35 @@ The core and harness shards of that run reported 29,168 test cases: no failures,
 
 - [x] 3.1 Regenerate affected skills and surfaces through existing producers; verify budgets, frozen artifact identities and only available bootstrap or registry routes.
 - [x] 3.2 Obtain exact independent review; record C6 reasons, product/proof weight, scoped baseline failure differences and the net shipping call.
-- [ ] 3.3 Pass required full repository CI and installed workflow proof; merge the cohesive batch and verify the ordinary release outcome.
-- [ ] 3.4 Synchronize and archive this change with shipped evidence; verify strict OpenSpec checks and leave incomplete parent tasks open.
+- [x] 3.3 Pass required full repository CI and installed workflow proof; merge the cohesive batch and verify the ordinary release outcome.
+- [x] 3.4 Synchronize every delta into canonical specs, verify strict OpenSpec checks, and leave incomplete parent tasks open.
+
+### Released delivery evidence
+
+[PR #1630](https://github.com/Artexis10/exomem/pull/1630) merged as
+`7b242bfa8499d59a130c00b333da12df022740ee` after final head
+`b14a57bac39bfd30befa779197275446484cab3d` passed 30 checks, with 13 skipped and none failed.
+The [exact review](https://github.com/Artexis10/exomem/pull/1630#issuecomment-6082668019)
+approved the final batch with no blocking findings and a ship verdict.
+
+The merge is an ancestor of [v0.115.0](https://github.com/Artexis10/exomem/releases/tag/v0.115.0),
+commit `5abed4438ae767af5c89ccd1438c63e35df107d8`.
+The published PyPI wheel has SHA-256
+`b7b9a602d76f056835463edddf8ebc85a0eeb765fd4cc1094f01a1a0f6e6f49d`.
+All 573 package members matched both that tag and the installed distribution.
+An isolated CPython 3.13.12 run passed the unchanged maintained workflow
+`tests/test_working_set_carry.py::test_status_save_and_restore_change_warm_carry_without_rewriting_pages`.
+It proved warm save and restore change selection while preserving page bytes.
+The two registry workflows passed together: 2 passed in 13.88 seconds, with no skips or failures.
+The run made no provider calls and used private runtime state that was removed afterward.
+This proves the installed release workflow; desktop acceptance and production rollout remain outside this evidence.
+Incomplete parent changes remain open.
+
+## Closure operation
+
+Archiving remains required after canonical sync and strict verification.
+Run `openspec archive add-lifecycle-status-registry --skip-specs --json` after those checks.
+OpenSpec CLI 1.14.0 completed that command on 2026-10-11 and returned
+`archivedAs: 2026-10-11-add-lifecycle-status-registry`.
+Its `specsUpdated: false` records the skipped mechanical sync; every delta was
+already merged into canonical specs and checked for preservation before archive.

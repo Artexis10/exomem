@@ -13,6 +13,7 @@ scorer reasoning about time says no.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -23,19 +24,15 @@ from membench.agreement import _kappa  # noqa: E402
 from membench.native import load_corpus_view  # noqa: E402
 from membench.schema import ExpectedRecord, load_jsonl  # noqa: E402
 
-SCRATCH = Path(
-    "/tmp/claude-1000/-home-hugoa-projects-exomem/"
-    "97233617-39a5-4c51-93cc-900b7b0e90f1/scratchpad"
-)
 CORPUS = Path("benchmarks/corpus/generated/s1")
 RUN = Path("benchmarks/runs/20260801T115138Z-exomem-local-postfix-lexical-v2-30586b")
 
 
-def load_judge() -> dict[str, bool]:
+def load_judge(judge_dir: Path) -> dict[str, bool]:
     verdicts: dict[str, bool] = {}
     errors = 0
     for k in range(1, 7):
-        path = SCRATCH / f"judge_out_{k}.jsonl"
+        path = judge_dir / f"judge_out_{k}.jsonl"
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -69,7 +66,10 @@ def agreement(pairs: list[tuple[bool, bool]], label: str) -> None:
 
 
 def main() -> None:
-    judge = load_judge()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--judge-dir", type=Path, required=True, help="directory of judge outputs")
+    args = parser.parse_args()
+    judge = load_judge(args.judge_dir)
     scores = json.loads((RUN / "deterministic-scores.json").read_text(encoding="utf-8"))
     value = gate_status(scores, {"value"})
     state = gate_status(scores, {"current_state", "as_of"})

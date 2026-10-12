@@ -31,23 +31,23 @@ def test_markdown_log_adapter_uses_declared_fence_aware_grammar_and_exact_spans(
     assert adapter.mutable is True
     assert len(parsed.records) == 6
     assert [record.values["occurred_on"] for record in parsed.records] == [
-        "2026-08-02",
-        "2026-06-25",
-        "2026-06-24",
-        "2026-06-08",
-        "2026-06-04",
-        "2026-06-03",
+        "2024-11-19",
+        "2024-10-14",
+        "2024-10-13",
+        "2024-10-02",
+        "2024-09-28",
+        "2024-09-27",
     ]
     assert parsed.records[0].identity.inferred is True
     assert source[parsed.records[0].span.start : parsed.records[0].span.end].startswith(
-        b"### 2026-08-02 \xc2\xb7 Push\n"
+        b"### 2024-11-19 \xc2\xb7 Push\n"
     )
     assert all(record.ambiguous is False for record in parsed.records)
     assert [child.values["movement"] for child in parsed.records[0].children[:2]] == [
         "Overhead Press",
         "Split Squat L",
     ]
-    assert parsed.insertion_offset == source.index(b"### 2026-08-02")
+    assert parsed.insertion_offset == source.index(b"### 2024-11-19")
     assert (fixture / "Training Log.md").read_bytes() == source
 
 
@@ -66,7 +66,7 @@ def test_markdown_log_query_expands_declared_child_rows_without_domain_logic(
     )
 
     assert result.returned == 20
-    assert {row["repetitions"] for row in result.rows}.issuperset({"", "8", "15", "21"})
+    assert {row["repetitions"] for row in result.rows}.issuperset({"", "10?", "14+4", "19"})
     assert all(row["parent_record_id"] == row["record_id"] for row in result.rows)
 
 
@@ -137,25 +137,25 @@ def test_markdown_log_identity_survives_manual_reorder_and_date_correction(tmp_p
     log = fixture / "Training Log.md"
     log.write_text(
         log.read_text(encoding="utf-8").replace(
-            "### 2026-08-02 · Push\n",
-            "### 2026-08-02 · Push\n<!-- exomem-record-id: 14d2bdca-e145-425b-9e4b-df86f7172efa -->\n",
+            "### 2024-11-19 · Push\n",
+            "### 2024-11-19 · Push\n<!-- exomem-record-id: 14d2bdca-e145-425b-9e4b-df86f7172efa -->\n",
         ),
         encoding="utf-8",
     )
     original = record_formats.load_adapter(tmp_path, manifest).read().records[0]
 
     text = log.read_text(encoding="utf-8")
-    text = text.replace("2026-08-02 · Push", "2026-08-03 · Push")
-    start = text.index("### 2026-08-03 · Push")
-    end = text.index("### 2026-06-25 · Push")
+    text = text.replace("2024-11-19 · Push", "2024-11-20 · Push")
+    start = text.index("### 2024-11-20 · Push")
+    end = text.index("### 2024-10-14 · Push")
     block = text[start:end]
     text = text[:start] + text[end:]
-    insert = text.index("### 2026-06-24 · Pull")
+    insert = text.index("### 2024-10-13 · Pull")
     log.write_text(text[:insert] + block + text[insert:], encoding="utf-8")
 
     changed = record_formats.load_adapter(tmp_path, manifest).read().records
     same = next(record for record in changed if record.identity.key == original.identity.key)
-    assert same.values["occurred_on"] == "2026-08-03"
+    assert same.values["occurred_on"] == "2024-11-20"
     assert same.source.hash != original.source.hash
 
 

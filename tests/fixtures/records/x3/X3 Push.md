@@ -1,6 +1,6 @@
 ### {{date}} · Push
-- Overhead Press | white short paraforce | 
-- Split Squat L | grey short paraforce | 
-- Chest Press | grey short paraforce | 
-- Tricep Press | white short paraforce | 
-- Split Squat R | grey short paraforce | 
+- Overhead Press | blue short | 
+- Split Squat L | green short | 
+- Chest Press | green short | 
+- Tricep Press | blue short | 
+- Split Squat R | green short | 
