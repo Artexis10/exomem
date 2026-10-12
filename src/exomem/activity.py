@@ -54,9 +54,8 @@ def payload(vault_root: Path) -> dict[str, Any]:
     if not call_ledger.enabled():
         raise _unavailable("the call ledger is disabled on this server")
     try:
-        failed_at = call_ledger.last_append_failure()
-        since, events = _events(_lines_newest_first(call_ledger.ledger_path()), failed_at)
-    except (OSError, ValueError) as error:
+        since, events = _events(_lines_newest_first(call_ledger.ledger_path()), _known_from())
+    except OSError as error:
         raise _unavailable("the call ledger could not be read") from error
     return {
         "since": _iso(since),
@@ -66,8 +65,27 @@ def payload(vault_root: Path) -> dict[str, Any]:
     }
 
 
+def _known_from() -> dt.datetime | None:
+    """The time after which every call left a row, as far as the reader can know.
+
+    A failed append left a call with no row. On a Cloud cell, a restarted
+    container reads the same pod-scoped ledger as the process before it, which
+    may have lost a call with neither a row nor a marker: on a full or read-only
+    volume, or when it was killed between a commit and its append. So a cell
+    claims nothing before this writer started; replacing the pod discards the
+    older history anyway.
+    """
+    from . import cloud_cell
+
+    bounds = [call_ledger.last_append_failure()]
+    if cloud_cell.cloud_mode_enabled():
+        bounds.append(call_ledger.WRITER_STARTED_AT - dt.timedelta(milliseconds=1))
+    known = [bound for bound in bounds if bound is not None]
+    return max(known) if known else None
+
+
 def _events(
-    lines: Iterator[bytes], failed_at: dt.datetime | None = None
+    lines: Iterator[bytes], known_from: dt.datetime | None = None
 ) -> tuple[dt.datetime, list[dict[str, Any]]]:
     """The newest merged events, and the moment from which they are complete.
 
@@ -76,8 +94,8 @@ def _events(
     or wrote (version 1), or a call the full list has no room for. Every row the
     scan did not read was appended earlier, so its time is no later than the
     boundary: the stopping row's time, or the oldest time read when the
-    stopping row is damaged or rotation archived the older rows. A failed
-    append (`failed_at`) left a call with no row, so it is a boundary too.
+    stopping row is damaged or rotation archived the older rows. `known_from`
+    (see `_known_from`) is a boundary too.
     """
     from . import commands
     from .privacy_log import client_family
@@ -111,9 +129,9 @@ def _events(
             newer["sequence"] == 1 and newer.get("prev_hash") == call_ledger.GENESIS_HASH
         ):
             boundary = read[-1][0]  # rotation archived the older rows
-    if failed_at is not None:
-        failed_at = _floor_ms(failed_at)
-        boundary = failed_at if boundary is None else max(boundary, failed_at)
+    if known_from is not None:
+        known_from = _floor_ms(known_from)
+        boundary = known_from if boundary is None else max(boundary, known_from)
     return _interval(read, boundary)
 
 

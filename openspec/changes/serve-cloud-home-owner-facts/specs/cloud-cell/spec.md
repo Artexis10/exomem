@@ -32,6 +32,7 @@ Rows of one client family and action SHALL join the newest event of that pair wh
 The list SHALL stop at the first row it cannot represent: a row that does not match its `row_hash`, a broken link to the newer row, a version 1 row or a call the full list has no room for.
 `since` SHALL be the oldest ledger row the list accounts for, or the ledger writer's start when there is none.
 `since` MUST be strictly later, at millisecond precision, than every row the list omits and every call whose row the ledger failed to append. The counts SHALL include only the rows the list accounts for.
+On a cloud cell, `since` MUST NOT be earlier than the start of the ledger writer that answers, because a restarted container cannot see a call that its predecessor failed to record.
 A disabled or unreadable ledger, or a history with no intact row later than where the list stops, SHALL be refused with `ACTIVITY_UNAVAILABLE`.
 The cell MUST NOT register a route for these facts.
 

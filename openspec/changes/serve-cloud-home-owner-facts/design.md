@@ -69,8 +69,12 @@ The reader needs no parser for it, and a marker that cannot be stat'ed makes the
 The reader treats the later of the two times as a boundary: the interval starts strictly after the failed call.
 With no row after that time, the section is `ACTIVITY_UNAVAILABLE` until the next call that the ledger records.
 The memory call itself still succeeds.
-On a Cloud cell one MCP server process serves the recalls, the saves and the activity section, so its memory covers every call.
 The marker covers a reader in another process, such as a second server beside a local service.
+A full or read-only volume usually refuses the marker as well as the row.
+A process killed between a committed write and its append also leaves neither.
+On a Cloud cell, a restarted container is a new process that reads the same pod-scoped ledger, so it cannot see either loss.
+A cell therefore claims no interval that starts before its ledger writer started.
+Replacing the pod discards the older history anyway, so the cell loses only the history across an in-place container restart.
 The section is owner-only: it shows when and how much the owner's other assistants used memory.
 A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an empty list.
 
@@ -106,8 +110,25 @@ Home then saves a level to exactly the context the cell applies to that app, bef
 ## Risks / Trade-offs
 
 A local install still depends on surface detection, which matches only some client names.
-If the marker write fails as well, for example on a full or read-only volume, only the failing process knows about the lost call.
-A reader in a different process can then claim an interval that holds that call.
-On a Cloud cell this needs a second process that records calls, and the cell runs only one.
+
+On a local install, a lost call can still fall inside a claimed interval.
+This happens when the marker write fails as well, or when a process is killed between a commit and its append, and a different process reads the ledger later.
+A local ledger keeps its history across restarts, and a local install has no writer-start boundary.
+
 The ledger does not sync each row, so a power loss can drop rows that the kernel had not yet written.
-The next process continues the chain from the last surviving row, and the activity list cannot see the lost calls.
+On a local install, the next process continues the chain from the last surviving row, and the activity list cannot see the lost calls.
+On a Cloud cell, a power loss replaces the pod and its ledger.
+
+The reader assumes that the ledger appends rows in time order.
+A backward step of the wall clock that is larger than the gap between calls breaks that assumption, and a damaged row can then fall inside the interval.
+Without a monotonic time in each row, no sound check exists.
+
+`append_row` does not check how many bytes `os.write` wrote.
+On a full volume, Linux can write part of a row and return without an error, so no failure is recorded.
+The reader then skips the partial last line as a row still being appended, and the call stays invisible until the next append.
+
+## Follow-up debt
+
+`reserved_paths.matches` takes about 44 % of a corpus walk: a 10,000-page walk calls it 342,176 times.
+It checks every registry descriptor's trees and patterns against every entry.
+Compiling the static registry once, into an exact set, a tree trie and one combined pattern per kind, keeps every decision and speeds up every `walk_md` caller, including the note count.

@@ -199,11 +199,12 @@ def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, va
     reason="needs POSIX permissions that bind the caller",
 )
 def test_a_recall_the_ledger_could_not_record_is_never_inside_an_idle_interval(
-    cell, tmp_path
+    cell, tmp_path, monkeypatch
 ):
     """When the ledger volume refuses writes, a recall still succeeds but leaves no
     row and no marker. Home must not then say "No assistant activity since" a
-    time before that recall."""
+    time before that recall: not from this server, and not from the server that
+    a container restart starts on the same pod-scoped ledger."""
     ledger_dir = tmp_path / "ledger"
 
     async def scenario(client):
@@ -222,13 +223,18 @@ def test_a_recall_the_ledger_could_not_record_is_never_inside_an_idle_interval(
         assert not call_ledger.gap_marker_path().exists(), "sanity: no marker was written"
         first = await _call(client, "bootstrap", {"section": "activity"})
         second = await _call(client, "bootstrap", {"section": "activity"})
-        return recalled_by, first, second
+        # A container restart: a new process, with nothing in memory, on the same ledger.
+        monkeypatch.setattr(call_ledger, "WRITER_STARTED_AT", dt.datetime.now(dt.UTC))
+        call_ledger.reset_chain_cache()
+        restarted = await _call(client, "bootstrap", {"section": "activity"})
+        return recalled_by, first, second, restarted
 
-    recalled_by, first, second = cell(scenario)
+    recalled_by, first, second, restarted = cell(scenario)
 
     assert first["error"]["code"] == "ACTIVITY_UNAVAILABLE"
     assert second["events"] == []
     assert second["since"] > recalled_by.isoformat(timespec="milliseconds")
+    assert restarted["since"] > recalled_by.isoformat(timespec="milliseconds")
 
 
 def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:
