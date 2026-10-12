@@ -27,9 +27,9 @@
   - `cancelled`, `discard_requested` and expiry → hold → discard Job.
 
   Verify: reconcile tests against a disposable Postgres with the fake object store, including a restart mid-import that resumes the hold, a hold past its deadline, and a routine convergence pass that must not clear an import hold.
-- [ ] 3.4 Record cleanup_running before local cleanup and cleanup_stopping for keep-adoption cleanup or cleanup_discard_stopping for full discard before removing completion Jobs. Rearm full discard under the C1 and C5 locks when newer intent follows ordinary cleanup. Delete ciphertext versions, abort multipart uploads, and clear upload URLs. Wait for all phase Jobs and Pods, then publish current intent and release C1 atomically. Add a B2 lifecycle rule on the `cells/` prefix that sets only `daysFromStartingToCancelingUnfinishedLargeFiles`. B2 rules match a literal prefix, so the rule cannot name `imports/` alone, and it also clears restic's abandoned uploads. Verify: tests that no object, upload or identity remains after `done`, `failed`, `cancelled` and `expired`.
+- [x] 3.4 Record cleanup_running before local cleanup and cleanup_stopping for keep-adoption cleanup or cleanup_discard_stopping for full discard before removing completion Jobs. Rearm full discard under the C1 and C5 locks when newer intent follows ordinary cleanup. Delete ciphertext versions, abort multipart uploads, and clear upload URLs. Wait for all phase Jobs and Pods, then publish current intent and release C1 atomically. Add a B2 lifecycle rule on the `cells/` prefix that sets only `daysFromStartingToCancelingUnfinishedLargeFiles`. B2 rules match a literal prefix, so the rule cannot name `imports/` alone, and it also clears restic's abandoned uploads. Verify: tests that no object, upload or identity remains after `done`, `failed`, `cancelled` and `expired`.
 - [x] 3.5 Extend the live-K3s suite with an import: prepare, upload with presigned URLs, complete with the reported ETags, then import into a running cell. Also cover a refused archive, a wrong-key archive and a substituted part. Verify: the scenario passes in the live job, and the vault is unchanged after each refusal.
-- [ ] 3.6 Add a CORS rule on the Cloud bucket for the web app's origin: `PUT`, with `ETag` exposed. Verify: against B2 itself, with a disposable prefix, a preflight and a part upload from the origin succeed and one from another origin is refused.
+- [x] 3.6 Add a CORS rule on the Cloud bucket for the web app's origin: `PUT`, with `ETag` exposed. Verify: against B2 itself, with a disposable prefix, a preflight and a part upload from the origin succeed and one from another origin is refused.
 
 ## 4. Substrate flow (its own change) and rollout
 
@@ -66,8 +66,8 @@ through one workflow. All four cases passed against the reviewed controller
 and built Cloud image. Each refusal kept all 77 canonical vault entries
 unchanged through cleanup and restart. PR #1692 merged this suite and the
 reviewed import implementation. Task 3.5 is complete.
-Production OAuth registration, bucket lifecycle/CORS and production rollout
-also remain open. The one-node local storage rehearsal does not prove multi-node
+Production OAuth registration and production rollout remain open.
+The one-node local storage rehearsal does not prove multi-node
 storage behavior, large multipart uploads or production bucket restrictions.
 The owner restore was previously performed; unchecked historical tasks do not
 authorize repeating it.
@@ -86,3 +86,25 @@ The disposable CA layer preserved the source image's product and model bytes.
 This bounded run selected only provisioning steps 1 and 2 plus the import journey.
 It does not close the twelve-step launch rehearsal or its node gate.
 Task 4.2 is complete; production OAuth, large imports, adoption and discard remain open.
+
+## Bucket acceptance (2026-10-12)
+
+PR #1703 added the bucket policy. The reviewed production plan changed only
+CORS and lifecycle rules. Provider inspection confirmed private storage,
+encryption and disabled completed-file expiry after the apply.
+The lifecycle rule cancels unfinished uploads under `cells/` after two days.
+Timed cancellation was not observed.
+
+A real Chromium check used an invented disposable prefix against B2.
+The configured origin passed preflight and uploaded one 32-byte multipart part.
+JavaScript read the exposed ETag; it matched provider metadata and source bytes.
+Another origin failed preflight and browser fetch; its different bytes did not
+change the stored part. Cleanup removed the multipart upload and temporary key.
+These results complete task 3.6.
+
+PR #1692 supplies the cleanup implementation and its cancellation, expiry,
+restart, late-intent and atomic-publication checks.
+The live import rehearsal verified identity, staging and ciphertext cleanup.
+The applied cancellation-only bucket policy completes task 3.4.
+Production OAuth, the product browser flow, adoption, discard and large imports
+remain open. This check did not run the production C5 flow.
