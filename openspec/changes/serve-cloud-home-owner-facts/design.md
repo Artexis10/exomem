@@ -49,11 +49,17 @@ An event's `items` is null when any joined row's count is null.
 `since` is the oldest row the returned list accounts for, or the ledger writer's start when there is none.
 The reader stops at the first row the list cannot represent, so `since` never covers an omitted row:
 - a qualifying call that the full list has no room for;
-- a damaged row: not JSON, no valid time, or a break in the sequence, which shows a removed row;
+- a damaged row: not JSON, no valid time, a `row_hash` that `call_ledger.row_hash` does not reproduce, or a `sequence` and `prev_hash` that do not link to the newer row, which shows a removed row;
 - a version 1 row, which cannot say whether it read or wrote.
-The ledger appends rows in time order, so a damaged row is older than every row after it.
-A damaged newest row leaves no complete interval, so it is `ACTIVITY_UNAVAILABLE`.
-A version 1 row that is not older than `since` shows an older process still writing, which is also `ACTIVITY_UNAVAILABLE`.
+The ledger appends rows in time order, so every row that the reader did not read is no later than a boundary time:
+- the stopping row's own time, when that row is intact;
+- the oldest time read, when the stopping row is damaged or rotation archived the older rows.
+Rows can share a millisecond, the API's precision, so the list accounts only for rows strictly later than the boundary.
+This drops the whole millisecond group that can hold the damage.
+The reader counts the events again over the rows it keeps, so a dropped row adds nothing to a count.
+When no kept row remains, `since` is the writer's start if the boundary is earlier than that start.
+Otherwise the section is `ACTIVITY_UNAVAILABLE`, as for a damaged newest row or a version 1 row from an older process that still writes.
+Measured on a laptop, a verified scan of an 8 MB live file with no qualifying call takes 114 ms (median of five).
 The reader skips the text after the file's last newline, which is a row still being appended.
 The section is owner-only: it shows when and how much the owner's other assistants used memory.
 A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an empty list.

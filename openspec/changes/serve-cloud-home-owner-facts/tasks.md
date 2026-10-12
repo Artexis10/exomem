@@ -15,7 +15,7 @@
 
 - [x] 3.1 Serve the owner-only activity section from ledger rows; prove the merge window, success-only, newest-first, the cap and unknown counts.
 - [x] 3.2 Serve the count of saved pages, walked on every call; prove zero on a fresh vault, null on a failed read and growth after a save.
-- [x] 3.3 Stop the activity interval at the first row the list cannot represent; prove a full list, a damaged row, a removed row and a version 1 row from a running older writer.
+- [x] 3.3 Stop the activity interval at the first row the list cannot represent, strictly later than every omitted row; prove a full list, an unreadable, removed or changed row sharing a millisecond with an intact one, a rotated file and a version 1 row from a running older writer.
 - [x] 3.4 Count each written page once; prove an edit by reference and two long paths with one shared start.
 - [x] 3.5 Keep the count unknown when a directory cannot be entered.
 

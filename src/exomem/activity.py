@@ -68,79 +68,95 @@ def payload(vault_root: Path) -> dict[str, Any]:
 def _events(lines: Iterator[bytes]) -> tuple[dt.datetime, list[dict[str, Any]]]:
     """The newest merged events, and the moment from which they are complete.
 
-    The scan stops at the first row the list cannot represent: a damaged row
-    (not JSON, no valid time, or a break in the sequence), a version 1 row,
-    which cannot say whether it read or wrote, or a call the full list has no
-    room for. `since` is then the oldest row the list accounts for. Rows are
-    appended in time order, so a damaged row is older than every row after it;
-    a version 1 row has a time, which must be older than `since`.
+    The scan reads intact rows, newest first, and stops at the first row the
+    list cannot represent: a damaged row, a row that cannot say whether it read
+    or wrote (version 1), or a call the full list has no room for. Every row the
+    scan did not read was appended earlier, so its time is no later than the
+    boundary: the stopping row's time, or the oldest time read when the
+    stopping row is damaged or rotation archived the older rows.
     """
     from . import commands
     from .privacy_log import client_family
 
     registry = {command.name: command for command in commands.PRODUCT_COMMANDS}
-    events: list[dict[str, Any]] = []
-    newest_by_key: dict[tuple[str | None, str], dict[str, Any]] = {}
-    oldest_accounted: dt.datetime | None = None
-    stopped_at: dt.datetime | None = None
-    damaged = False
-    expected_sequence: int | None = None
+    listing = _Listing()
+    read: list[tuple[dt.datetime, tuple[str | None, str] | None, int | None]] = []
+    boundary: dt.datetime | None = None
+    newer: dict[str, Any] | None = None
     for line in lines:
         if not line.strip():
-            continue  # a blank line holds no row; a removed row breaks the sequence
+            continue  # a blank line holds no row; a removed row breaks the chain
         row = _parse_row(line)
-        sequence = row.get("sequence") if row is not None else None
         at = _parse_time(row.get("ts_utc")) if row is not None else None
-        if (
-            row is None
-            or at is None
-            or type(sequence) is not int
-            or (expected_sequence is not None and sequence != expected_sequence)
+        if row is None or at is None or not _intact(row, newer):
+            if not read:
+                raise _unavailable("the call ledger's newest row is damaged")
+            boundary = read[-1][0]
+            break
+        newer = row
+        if "access" not in row or "item_count" not in row or listing.closed(at):
+            boundary = at
+            break
+        key, items = _event_key(row, registry, client_family)
+        if key is not None and not listing.add(at, key, items):
+            boundary = at
+            break
+        read.append((at, key, items))
+    else:
+        if newer is not None and not (
+            newer["sequence"] == 1 and newer.get("prev_hash") == call_ledger.GENESIS_HASH
         ):
-            damaged = True
-            break
-        expected_sequence = sequence - 1
-        if row.get("schema_version") == 1:
-            stopped_at = at
-            break
-        if "access" not in row or "item_count" not in row:
-            damaged = True
-            break
-        if len(events) == EVENT_LIMIT and at < events[-1]["_newest"] - MERGE_WINDOW:
-            stopped_at = at
-            break  # nothing older can join a listed event
-        tool = row.get("tool")
-        action = _action(registry.get(tool) if isinstance(tool, str) else None, row.get("access"))
-        if row.get("outcome") == "ok" and action is not None:
-            key = (client_family(row.get("client_name")), action)
-            items = row["item_count"] if type(row["item_count"]) is int else None
-            event = newest_by_key.get(key)
-            if event is not None and event["_newest"] - at <= MERGE_WINDOW:
-                # Unknown is contagious: a sum over a call of unknown size is not a count.
-                event["items"] = (
-                    None if event["items"] is None or items is None else event["items"] + items
-                )
-            elif len(events) == EVENT_LIMIT:
-                stopped_at = at
-                break  # the first call the list cannot show ends what it accounts for
-            else:
-                event = {
-                    "client": key[0], "action": action, "items": items, "at": _iso(at),
-                    "_newest": at,
-                }
-                events.append(event)
-                newest_by_key[key] = event
-        oldest_accounted = at
-    if damaged and oldest_accounted is None:
-        # No row is newer than the damage, so no interval can be claimed complete.
-        raise _unavailable("the call ledger's newest row is damaged")
-    since = oldest_accounted if oldest_accounted is not None else call_ledger.WRITER_STARTED_AT
-    if stopped_at is not None and stopped_at >= since:
-        # The row that stopped the scan is not older than what the list claims to
-        # cover, as when an older process still appends version 1 rows: no
-        # interval can be claimed complete.
-        raise _unavailable("the call ledger's order does not cover a complete interval")
-    return since, [{k: v for k, v in event.items() if k != "_newest"} for event in events]
+            boundary = read[-1][0]  # rotation archived the older rows
+    return _interval(read, boundary)
+
+
+def _interval(
+    read: list[tuple[dt.datetime, tuple[str | None, str] | None, int | None]],
+    boundary: dt.datetime | None,
+) -> tuple[dt.datetime, list[dict[str, Any]]]:
+    """`since` and the events over the rows strictly later than the boundary.
+
+    Strictly later at the API's millisecond precision: a row the scan did not
+    read can share the boundary's millisecond. The events are counted again
+    over the kept rows, so a dropped row adds nothing to a listed count.
+    """
+    writer_started = _floor_ms(call_ledger.WRITER_STARTED_AT)
+    kept = read if boundary is None else [entry for entry in read if entry[0] > boundary]
+    if kept:
+        since = kept[-1][0]
+    elif boundary is None or boundary < writer_started:
+        # Every call this writer recorded is later than the boundary, so none is missing.
+        since = writer_started
+    else:
+        raise _unavailable("no intact call ledger row is later than where its history stops")
+    listing = _Listing()
+    for at, key, items in kept:
+        if key is not None:
+            listing.add(at, key, items)
+    return since, listing.public()
+
+
+def _intact(row: dict[str, Any], newer: dict[str, Any] | None) -> bool:
+    """The row hashes to its own `row_hash`, and the newer row read before it
+    links to it by sequence and `prev_hash`."""
+    sequence = row.get("sequence")
+    if type(sequence) is not int or row.get("row_hash") != call_ledger.row_hash(row):
+        return False
+    return newer is None or (
+        newer["sequence"] == sequence + 1 and newer.get("prev_hash") == row["row_hash"]
+    )
+
+
+def _event_key(
+    row: dict[str, Any], registry: dict[str, Any], client_family: Any
+) -> tuple[tuple[str | None, str] | None, int | None]:
+    """The (client family, action) a successful memory call lists under, and its count."""
+    tool = row.get("tool")
+    action = _action(registry.get(tool) if isinstance(tool, str) else None, row.get("access"))
+    if row.get("outcome") != "ok" or action is None:
+        return None, None
+    items = row["item_count"] if type(row["item_count"]) is int else None
+    return (client_family(row.get("client_name")), action), items
 
 
 def _action(command: Any, access: object) -> str | None:
@@ -152,6 +168,38 @@ def _action(command: Any, access: object) -> str | None:
     if access == "write" and actions & _SAVE_ACTIONS:
         return "saved"
     return None
+
+
+class _Listing:
+    """Merged events, newest first, at most `EVENT_LIMIT`."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+        self._newest_by_key: dict[tuple[str | None, str], dict[str, Any]] = {}
+
+    def closed(self, at: dt.datetime) -> bool:
+        """Full, and a row this old can join no listed event."""
+        return len(self.events) == EVENT_LIMIT and at < self.events[-1]["_newest"] - MERGE_WINDOW
+
+    def add(self, at: dt.datetime, key: tuple[str | None, str], items: int | None) -> bool:
+        """Join the newest event of the key or list a new one; False when the full
+        list has no room for it."""
+        event = self._newest_by_key.get(key)
+        if event is not None and event["_newest"] - at <= MERGE_WINDOW:
+            # Unknown is contagious: a sum over a call of unknown size is not a count.
+            event["items"] = (
+                None if event["items"] is None or items is None else event["items"] + items
+            )
+            return True
+        if len(self.events) == EVENT_LIMIT:
+            return False
+        event = {"client": key[0], "action": key[1], "items": items, "at": _iso(at), "_newest": at}
+        self.events.append(event)
+        self._newest_by_key[key] = event
+        return True
+
+    def public(self) -> list[dict[str, Any]]:
+        return [{k: v for k, v in event.items() if k != "_newest"} for event in self.events]
 
 
 def _lines_newest_first(path: Path) -> Iterator[bytes]:
@@ -199,7 +247,12 @@ def _parse_time(value: object) -> dt.datetime | None:
         parsed = dt.datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed.astimezone(dt.UTC) if parsed.tzinfo is not None else None
+    return _floor_ms(parsed.astimezone(dt.UTC)) if parsed.tzinfo is not None else None
+
+
+def _floor_ms(value: dt.datetime) -> dt.datetime:
+    """The API's precision: `since` and `at` are reported in milliseconds."""
+    return value.replace(microsecond=value.microsecond // 1000 * 1000)
 
 
 def _iso(value: dt.datetime) -> str:

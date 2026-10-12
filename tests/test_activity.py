@@ -173,37 +173,62 @@ def test_a_full_list_never_claims_to_cover_a_call_it_omits(vault, ledger):
     assert payload["since"] == _iso(_at(0.5)) > _iso(_at(0))
 
 
-@pytest.mark.parametrize("damage", ["unreadable row", "removed row"])
-def test_damaged_history_is_never_inside_the_interval_home_claims(vault, ledger, tmp_path, damage):
-    """Home's empty list says "No assistant activity since ...". A recall whose row
-    cannot be read, or is gone, must not fall inside that interval."""
-    ledger("bootstrap", _at(0), access="read", released=0)
-    ledger("ask_memory", _at(1), access="read", released=2)
-    ledger("bootstrap", _at(2), access="read", released=0)
-    path = tmp_path / "logs" / "ledger.jsonl"
+def _damage(path: Path, index: int, damage: str) -> None:
+    """Damage one row the way a torn write, a deleted row or a changed byte would."""
     lines = path.read_text("utf-8").splitlines()
     if damage == "unreadable row":
-        lines[1] = lines[1][:40]
-    else:
-        del lines[1]
+        lines[index] = lines[index][:40]
+    elif damage == "removed row":
+        del lines[index]
+    else:  # a changed count that still parses as JSON
+        assert '"item_count":2' in lines[index]
+        lines[index] = lines[index].replace('"item_count":2', '"item_count":3')
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("damage", ["unreadable row", "removed row", "altered row"])
+def test_damaged_history_is_never_inside_the_interval_home_claims(vault, ledger, tmp_path, damage):
+    """Home's list says what happened "since ...". A recall whose row cannot be
+    read, is gone or was changed must not fall inside that interval, nor add to
+    a count, even when a readable row shares its millisecond."""
+    ledger("bootstrap", _at(0), access="read", released=0)
+    ledger("ask_memory", _at(1), access="read", released=2)
+    ledger("bootstrap", _at(1), access="read", released=0)
+    ledger("ask_memory", _at(2), access="read", released=3)
+    _damage(tmp_path / "logs" / "ledger.jsonl", 1, damage)
 
     payload = _activity(vault)
 
-    assert payload["events"] == []
+    assert [event["items"] for event in payload["events"]] == [3]
     assert payload["since"] == _iso(_at(2))
 
 
-def test_a_damaged_newest_row_makes_history_unavailable(vault, ledger, tmp_path):
-    """With no readable row after the damage, no interval is known to be complete."""
-    ledger("ask_memory", _at(0), access="read", released=2)
-    ledger("ask_memory", _at(1), access="read", released=3)
-    path = tmp_path / "logs" / "ledger.jsonl"
-    lines = path.read_text("utf-8").splitlines()
-    path.write_text("\n".join([lines[0], lines[1][:40]]) + "\n", encoding="utf-8")
+@pytest.mark.parametrize("damage", ["unreadable row", "altered row"])
+def test_a_damaged_newest_row_makes_history_unavailable(vault, ledger, tmp_path, damage):
+    """With no intact row after the damage, no interval is known to be complete."""
+    ledger("ask_memory", _at(0), access="read", released=3)
+    ledger("ask_memory", _at(1), access="read", released=2)
+    _damage(tmp_path / "logs" / "ledger.jsonl", 1, damage)
 
     with pytest.raises(OpError, match="ACTIVITY_UNAVAILABLE"):
         _activity(vault)
+
+
+def test_after_rotation_the_oldest_live_millisecond_is_outside_the_interval(
+    vault, ledger, tmp_path
+):
+    """Rotation moves older rows to the archive, and one of them can share the
+    oldest live row's millisecond. The list must not claim to cover it."""
+    ledger("ask_memory", _at(1), access="read", released=1)
+    ledger("ask_memory", _at(1), access="read", released=2)
+    ledger("ask_memory", _at(3), access="read", released=3)
+    path = tmp_path / "logs" / "ledger.jsonl"
+    path.write_text("".join(path.read_text("utf-8").splitlines(keepends=True)[1:]), "utf-8")
+
+    payload = _activity(vault)
+
+    assert [event["items"] for event in payload["events"]] == [3]
+    assert payload["since"] == _iso(_at(3))
 
 
 def test_a_row_still_being_appended_is_not_yet_history(vault, ledger, tmp_path):
