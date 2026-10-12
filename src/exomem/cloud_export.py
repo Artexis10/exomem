@@ -136,10 +136,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     usage: dict[str, int] = {}
     try:
+        # Measured first, so a failure report still carries the volume's use. A
+        # platform without statvfs fails here and is reported like any failure.
         usage = filesystem_use(args.vault.parent)
-    except OSError:
-        pass  # The report then carries no use; the export itself does not depend on it.
-    try:
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         _check_cell(args.vault.parent, cell_id)
         # A plain-HTTP part URL would carry the owner's plaintext archive unencrypted;

@@ -22,6 +22,9 @@ from cryptography.x509.oid import NameOID
 
 from exomem import cloud_export, vault_portability
 
+# The export Job runs only on a Linux cell: it measures its volume with statvfs.
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the cell export Job runs only on Linux cells")
+
 CELL = "abcdefghijklmnop"
 # Shared with cellctl's own test (infra/cellctl/tests/test_exports.py).
 DIGEST_VECTOR = "91124627b9b8d6bffcbbfb35d09b5fb3cea67f87e4e84d341fac87ba0d0586da"
