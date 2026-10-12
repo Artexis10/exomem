@@ -54,7 +54,14 @@ At expiry, at supersede and when the cell is deleted, cellctl first clears the l
 
 On a failure, at the deadline or on cell deletion, cellctl records the C6 outcome, deletes the Job, and then removes the upload with the cell's own key. The row keeps `upload_id` until the abort succeeds, and every pass retries it while the cell has a key. A failed removal never holds the cell.
 
-On a deleted cell the final mechanism is the deleted-cell prefix deletion. cellctl lists every file version under `cells/<id>/` with the controller key, deletes each one, and deletes the cell's key only when the listing is empty. The bucket has no lifecycle rule for unfinished large files. Task 4.2 checks on B2 that this prefix deletion lists and removes an unfinished multipart upload.
+On a deleted cell the final mechanism is the deleted-cell prefix deletion. cellctl lists every file version under `cells/<id>/` with the controller key, deletes each one, and deletes the cell's key only when the listing is empty. The bucket has no lifecycle rule for unfinished large files.
+
+Backblaze's API documentation (read on 2026-10-12) says that this deletion also removes an unfinished upload:
+
+- [`b2_list_file_versions`](https://www.backblaze.com/apidocs/b2-list-file-versions) returns unfinished large files with the action `start` ("a large file has been started, but not finished or canceled"). It needs `listFiles`.
+- [`b2_delete_file_version`](https://www.backblaze.com/apidocs/b2-delete-file-version), used on an unfinished large file, "has the same effect as `b2_cancel_large_file`". It needs `deleteFiles`.
+
+The controller key has both capabilities. Task 4.2's live check on B2 is the proof.
 
 ### D6. Disk use is an observed column group on C1
 
