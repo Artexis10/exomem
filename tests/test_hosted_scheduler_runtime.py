@@ -147,7 +147,7 @@ def test_scheduler_request_still_refuses_another_jobs_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load()
-    foreign = module.initial_state("exomem-export-gc", 300)
+    foreign = module.initial_state("exomem-access-delivery", 300)
     written: list[dict[str, object]] = []
     requested: list[str] = []
     _request_environment(monkeypatch, job="exomem-reconcile", cadence=300)

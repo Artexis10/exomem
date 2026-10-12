@@ -32,11 +32,9 @@ from .server_assets import (
 )
 from .server_auth import (  # noqa: F401 - re-exported for compatibility
     CloudCellTokenVerifier,
-    HostedCellTokenVerifier,
     SingleUserGitHubVerifier,
     build_oauth,
 )
-from .server_hosted import register_hosted_routes
 from .server_rest import register_rest_facade
 from .server_runtime import LocalRuntimeActivation, initialize_runtime
 from .server_transfer import register_transfer_routes
@@ -59,17 +57,11 @@ class ExomemFastMCP(FastMCP):
     so expose the method on the same OAuth-protected route.
     """
 
-    def __init__(
-        self,
-        *args,
-        parse_mcp_authorization: bool = True,
-        **kwargs,
-    ) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         # SDK v2's explicit lax default overrides field-level StrictInt, etc.
         # Keep MCP inputs faithful to the published JSON types before dispatch.
         kwargs["strict_input_validation"] = True
         super().__init__(*args, **kwargs)
-        self._parse_mcp_authorization = parse_mcp_authorization
 
     def http_app(self, *args, stateless_http=None, **kwargs):
         import fastmcp
@@ -89,11 +81,7 @@ class ExomemFastMCP(FastMCP):
             0,
             ASGIMiddleware(
                 AuthorizationCarrierMiddleware,
-                mcp_path=(
-                    str(carrier_path).rstrip("/") or "/"
-                    if self._parse_mcp_authorization
-                    else None
-                ),
+                mcp_path=str(carrier_path).rstrip("/") or "/",
             )
         )
         kwargs["middleware"] = middleware
@@ -557,182 +545,158 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         # The writer lease is state ownership. A standby acquires it only at
         # promotion (`seamless-managed-worker-handoff` D7).
         start_server_lifecycle()
-    hosted = runtime.hosted_config is not None
-    if hosted:
-        assert runtime.hosted_config is not None
-        assert runtime.hosted_lifecycle is not None
-        security_authority = runtime.hosted_security_authority
-        if runtime.hosted_config.requires_dynamic_security and security_authority is None:
-            raise RuntimeError("hosted security authority is required for a v2 cell")
-        auth = HostedCellTokenVerifier(
-            runtime.hosted_config,
-            authenticator=security_authority,
-        )
-        mcp = ExomemFastMCP(
-            "exomem",
-            instructions=SERVER_INSTRUCTIONS,
-            auth=auth,
-            parse_mcp_authorization=False,
-            lifespan=runtime_resources.lifespan(),
-        )
-        mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
-        mcp.add_middleware(CallTraceMiddleware(hosted=True))
-        expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
-        register_hosted_routes(
-            mcp,
-            config=runtime.hosted_config,
-            lifecycle=runtime.hosted_lifecycle,
-            source_schema=runtime.source_schema,
-            expose_tier2=expose_tier2,
-            private_authenticator=security_authority,
-            transfer_security_authority=security_authority,
+    # Cloud mode (design D1): EXOMEM_CLOUD_CELL=1 selects a thin seam over
+    # this exact standalone path. LocalRuntimeActivation,
+    # AuthorizationSessionMiddleware and the local writer lease are the
+    # unmodified standalone objects built below; only auth, logging, the
+    # registered routes, the tool surface and read-only enforcement
+    # differ for a cloud cell.
+    cloud = cloud_cell.cloud_mode_enabled()
+    runtime_activation = LocalRuntimeActivation(runtime.vault_root, deferred=standby)
+    service_standby.register_activation(runtime_activation)
+    if cloud:
+        credentials = cloud_cell.CloudCellCredentials.from_env()
+        auth = CloudCellTokenVerifier(
+            cell_id=credentials.cell_id,
+            token=credentials.token,
+            previous_token=credentials.previous_token,
         )
     else:
-        # Cloud mode (design D1): EXOMEM_CLOUD_CELL=1 selects a thin seam over
-        # this exact standalone path. EXOMEM_HOSTED_CELL and every hosted
-        # module above stay unused. LocalRuntimeActivation,
-        # AuthorizationSessionMiddleware and the local writer lease are the
-        # unmodified standalone objects built below; only auth, logging, the
-        # registered routes, the tool surface and read-only enforcement
-        # differ for a cloud cell.
-        cloud = cloud_cell.cloud_mode_enabled()
-        runtime_activation = LocalRuntimeActivation(runtime.vault_root, deferred=standby)
-        service_standby.register_activation(runtime_activation)
-        if cloud:
-            credentials = cloud_cell.CloudCellCredentials.from_env()
-            auth = CloudCellTokenVerifier(
-                cell_id=credentials.cell_id,
-                token=credentials.token,
-                previous_token=credentials.previous_token,
-            )
-        else:
-            auth = build_oauth(
-                require_auth=require_auth,
-                base_url=runtime.base_url,
-                # Only a supervisor-owned worker can receive the local stamp.
-                local_ingress=worker_socket is not None,
-            )
-        mcp = ExomemFastMCP(
-            "exomem",
-            instructions=SERVER_INSTRUCTIONS,
-            auth=auth,
-            icons=server_icons(),
-            lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
+        auth = build_oauth(
+            require_auth=require_auth,
+            base_url=runtime.base_url,
+            # Only a supervisor-owned worker can receive the local stamp.
+            local_ingress=worker_socket is not None,
         )
-        mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
-        # The call-trace middleware runs in its content-free form for a cloud
-        # cell too (as `hosted=True` does), so no `query=` is logged (D1.2).
-        mcp.add_middleware(CallTraceMiddleware(hosted=cloud))
+    mcp = ExomemFastMCP(
+        "exomem",
+        instructions=SERVER_INSTRUCTIONS,
+        auth=auth,
+        icons=server_icons(),
+        lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
+    )
+    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
+    # The call-trace middleware runs in its content-free form for a cloud
+    # cell too (as `hosted=True` does), so no `query=` is logged (D1.2).
+    mcp.add_middleware(CallTraceMiddleware(hosted=cloud))
 
-        if cloud:
-            # Only MCP (`/mcp`), `/health` and `/health/ready` are registered
-            # (D1.5): REST (`/api/*`), `/upload`, `/download` and the OAuth
-            # metadata routes are never registered on a cloud cell.
-            register_health_routes(mcp, on_liveness=runtime_activation.start)
-        else:
-            register_asset_routes(
-                mcp,
-                on_liveness=runtime_activation.start,
-                vault_root=runtime.vault_root if worker_socket is not None else None,
-            )
-        if standby:
-            service_standby.start_warm(runtime.vault_root)
-        mcp._exomem_local_runtime_activation = runtime_activation
-        if cloud:
-            expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
-        else:
-            register_oauth_metadata_route(
-                mcp, base_url=runtime.base_url, auth_enabled=auth is not None
-            )
-            transfer_config = register_transfer_routes(
-                mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
-            )
-            expose_tier2 = register_rest_facade(
-                mcp,
-                vault_root=runtime.vault_root,
-                source_schema=runtime.source_schema,
-                transfer_config=transfer_config,
-            )
-        product_commands = commands_module.product_commands_for(
-            "mcp", expose_tier2=expose_tier2
+    if cloud:
+        # Only MCP (`/mcp`), `/health` and `/health/ready` are registered
+        # (D1.5): REST (`/api/*`), `/upload`, `/download` and the OAuth
+        # metadata routes are never registered on a cloud cell.
+        register_health_routes(mcp, on_liveness=runtime_activation.start)
+    else:
+        register_asset_routes(
+            mcp,
+            on_liveness=runtime_activation.start,
+            vault_root=runtime.vault_root if worker_socket is not None else None,
         )
-        if cloud:
-            # The served surface is the product surface minus the technical
-            # exclusions (D1.3); tool registration below never sees them.
-            product_commands = tuple(
-                command
-                for command in product_commands
-                if command.name not in commands_module.CLOUD_SURFACE_EXCLUSIONS
-            )
-        legacy_commands = (
-            # A cell has no legacy clients, and a leaf's alias would re-expose
-            # a command CLOUD_SURFACE_EXCLUSIONS just removed (design D1.3) --
-            # so cloud mode never registers legacy aliases, even with the
-            # operator-env opt-in set.
-            _legacy_mcp_commands(expose_tier2=expose_tier2)
-            if _legacy_mcp_compat_enabled() and not cloud
-            else ()
+    if standby:
+        service_standby.start_warm(runtime.vault_root)
+    mcp._exomem_local_runtime_activation = runtime_activation
+    if cloud:
+        expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
+    else:
+        register_oauth_metadata_route(
+            mcp, base_url=runtime.base_url, auth_enabled=auth is not None
         )
-        surface_descriptor = capabilities.ActiveSurfaceDescriptor(
-            surface="mcp",
-            profile=(
-                "product-cloud"
-                if cloud
-                else "product-with-legacy-aliases"
-                if legacy_commands
-                else "product"
+        transfer_config = register_transfer_routes(
+            mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
+        )
+        expose_tier2 = register_rest_facade(
+            mcp,
+            vault_root=runtime.vault_root,
+            source_schema=runtime.source_schema,
+            transfer_config=transfer_config,
+        )
+    product_commands = commands_module.product_commands_for(
+        "mcp", expose_tier2=expose_tier2
+    )
+    if cloud:
+        # The served surface is the product surface minus the technical
+        # exclusions (D1.3); tool registration below never sees them.
+        product_commands = tuple(
+            command
+            for command in product_commands
+            if command.name not in commands_module.CLOUD_SURFACE_EXCLUSIONS
+        )
+    legacy_commands = (
+        # A cell has no legacy clients, and a leaf's alias would re-expose
+        # a command CLOUD_SURFACE_EXCLUSIONS just removed (design D1.3) --
+        # so cloud mode never registers legacy aliases, even with the
+        # operator-env opt-in set.
+        _legacy_mcp_commands(expose_tier2=expose_tier2)
+        if _legacy_mcp_compat_enabled() and not cloud
+        else ()
+    )
+    surface_descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile=(
+            "product-cloud"
+            if cloud
+            else "product-with-legacy-aliases"
+            if legacy_commands
+            else "product"
+        ),
+        tier2_enabled=expose_tier2,
+        product_commands=tuple(command.name for command in product_commands),
+        exported_aliases=tuple(command.name for command in legacy_commands),
+        hand_registered_tools=tuple(
+            sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
+        ),
+        unavailable_reasons=tuple(
+            (
+                exclusion.command,
+                f"The active surface withholds `{exclusion.command}`. {exclusion.reason} "
+                f"Lifted when {exclusion.lifted_when}.",
+            )
+            for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values()
+        ) if cloud else (),
+    )
+    for cmd in product_commands:
+        if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
+            continue
+        injected = (
+            (runtime.vault_root, runtime.source_schema)
+            if cmd.needs_schema
+            else (runtime.vault_root,)
+        )
+        description = cmd.doc
+        tool_kwargs = {
+            "annotations": cmd.mcp_annotations,
+            **(
+                {"meta": {key: list(value) for key, value in cmd.mcp_meta.items()}}
+                if cmd.mcp_meta
+                else {}
             ),
-            tier2_enabled=expose_tier2,
-            product_commands=tuple(command.name for command in product_commands),
-            exported_aliases=tuple(command.name for command in legacy_commands),
-            hand_registered_tools=tuple(
-                sorted(commands_module.HAND_REGISTERED_EXCEPTIONS)
-            ),
-        )
-        for cmd in product_commands:
-            if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
-                continue
-            injected = (
-                (runtime.vault_root, runtime.source_schema)
-                if cmd.needs_schema
-                else (runtime.vault_root,)
-            )
-            description = cmd.doc
-            tool_kwargs = {
-                "annotations": cmd.mcp_annotations,
-                **(
-                    {"meta": {key: list(value) for key, value in cmd.mcp_meta.items()}}
-                    if cmd.mcp_meta
-                    else {}
-                ),
-            }
-            mcp.tool(
-                commands_module.bind_vault(
-                    cmd.leaf,
-                    *injected,
-                    name=cmd.name,
-                    description=description,
-                    command=cmd,
-                    surface_descriptor=surface_descriptor,
-                ),
-                **tool_kwargs,
-            )
-
-        if legacy_commands:
-            _register_legacy_mcp_tools(
-                mcp,
-                vault_root=runtime.vault_root,
-                source_schema=runtime.source_schema,
-                legacy_commands=legacy_commands,
+        }
+        mcp.tool(
+            commands_module.bind_vault(
+                cmd.leaf,
+                *injected,
+                name=cmd.name,
+                description=description,
+                command=cmd,
                 surface_descriptor=surface_descriptor,
-                project_keys_hint=runtime.project_keys_hint,
-            )
+            ),
+            **tool_kwargs,
+        )
 
-        register_adoption_mcp(mcp, vault_root=runtime.vault_root)
-        _compact_published_input_schemas(mcp)
+    if legacy_commands:
+        _register_legacy_mcp_tools(
+            mcp,
+            vault_root=runtime.vault_root,
+            source_schema=runtime.source_schema,
+            legacy_commands=legacy_commands,
+            surface_descriptor=surface_descriptor,
+            project_keys_hint=runtime.project_keys_hint,
+        )
 
-    # Retain hosted lifetime ownership for exactly as long as the composed
-    # server object can serve requests. Process exit releases the underlying FD.
+    register_adoption_mcp(mcp, vault_root=runtime.vault_root)
+    _compact_published_input_schemas(mcp)
+
+    # Keep the runtime (and the workers it holds) reachable for exactly as long
+    # as the composed server object can serve requests.
     mcp._exomem_server_runtime = runtime
     return mcp
 

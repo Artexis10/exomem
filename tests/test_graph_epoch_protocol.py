@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from exomem import epistemic_graph, graph_sync, vault, writer_lease
-from exomem import hosted_portability as portability
+from exomem import vault_portability as portability
 
 
 def _checkpoint_payload(**changes: object) -> str:

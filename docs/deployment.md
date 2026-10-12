@@ -11,8 +11,8 @@ don't need mobile access.
 This personal remote profile is still one user and one vault. The managed hosted
 service uses the same single-vault runtime as a private tenant cell behind a
 separate shared control plane; it is not made multi-tenant by pointing several
-accounts at the server configured below. Hosted operators should also read
-[hosted-operations.md](hosted-operations.md) and the
+accounts at the server configured below. Exomem Cloud operators should also
+read the Cloud runbooks in [runbooks/](runbooks/) and the
 [Substrate control-plane contract](substrate-control-plane-contract.md).
 
 Throughout, replace `<your-host>` / `example.com` with your own hostname.

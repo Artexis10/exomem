@@ -14,7 +14,6 @@ from exomem import (
     record_memory,
     records,
 )
-from exomem import hosted_gateway as gateway
 from exomem import structured_collections as collections
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
@@ -33,15 +32,6 @@ RECORD_ACTIONS = (
     "import",
     "history",
 )
-
-#: What `hosted-alpha-agent-v2` published, frozen. A historical Hosted candidate
-#: is an immutable release identity whose contract must not follow the live
-#: registry (see `hosted_legacy_schemas`), so a new action lands on the current
-#: profile and leaves this list where its promotion record found it.
-HOSTED_V2_RECORD_ACTIONS = tuple(
-    action for action in RECORD_ACTIONS if action not in {"discard", "bulk_upsert", "import", "history"}
-)
-
 
 def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -> None:
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "record_memory")
@@ -159,24 +149,6 @@ def test_the_hook_cadence_block_does_not_push_record_past_the_proxy(monkeypatch)
     assert payload["engagement"]["hook_cadence"]["saved_preference_reaches_hooks"] is False
     assert serialized.find(b'"record"') < 12_288
     assert serialized.find(b'"record"') < serialized.find(b'"semantic_authoring"')
-
-
-def test_hosted_records_v2_is_additive_and_v1_remains_unchanged() -> None:
-    v1 = commands.product_commands_for_profile("hosted-alpha-agent-v1", "rest")
-    v2 = commands.product_commands_for_profile("hosted-alpha-agent-v2", "rest")
-
-    assert tuple(command.name for command in v2) == (*tuple(command.name for command in v1), "record_memory")
-    assert "record_memory" not in {command.name for command in v1}
-    descriptor = gateway.hosted_agent_surface_descriptor("hosted-alpha-agent-v2")
-    assert descriptor.profile == "hosted-alpha-agent-v2"
-    assert descriptor.product_commands == tuple(command.name for command in v2)
-    contract = gateway.build_agent_gateway_contract(profile="hosted-alpha-agent-v2")
-    record_tool = next(entry["mcp_tool"] for entry in contract["commands"] if entry["name"] == "record_memory")
-    assert record_tool["inputSchema"]["properties"]["action"]["enum"] == list(
-        HOSTED_V2_RECORD_ACTIONS
-    )
-    assert "held" not in record_tool["inputSchema"]["properties"]
-    assert "hold" not in record_tool["inputSchema"]["properties"]
 
 
 def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay(

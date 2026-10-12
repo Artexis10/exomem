@@ -2,7 +2,7 @@
 
 ### Requirement: Compact bootstrap serves a core and on-demand sections
 
-For every surface whose bootstrap contract is not published as a frozen hosted profile, `bootstrap` with `profile="compact"` SHALL return a core operating contract and an index of named sections, not the full reference payload. The core SHALL carry every rule named in the core rule manifest at every engagement level the manifest assigns it to. Each section SHALL be retrievable through `bootstrap(profile="compact", section=<name>)` and SHALL contain the blocks it names byte-identically to their pre-core form. `section="index"` SHALL list every section with its size in served-JSON bytes. The core SHALL name every section with its size, and its workflow loop SHALL name the section that holds `vocabulary_workflow`. The vault-derived blocks SHALL be bounded in the core: `due_state` as a counts summary (total and largest category, at most 200 bytes) that names the `epistemics` section holding the list, `latency` not at all (it is served by `diagnostics_reading`, and to a session client), and the vocabulary as a pointer to the `vocabulary` section, never as a list of entity types (amended by `add-vocabulary-registries`, which renamed the `entities` section). The core's digest of the delegation envelope SHALL keep the unclassified-action rule and name the section that holds the full protocol. An unknown section SHALL fail with a validation error naming the accepted sections. The `full` and `diagnostics` profiles SHALL be unchanged. The `session` profile SHALL serve the core's forms of `engagement` (the delegation envelope digested, its full protocol in the `envelope` section) and `server` (`compute_policy` moved to the `diagnostics_reading` section), plus the `sections` index, and is otherwise unchanged; its served size moves from 21,974 to 21,270 bytes.
+For every active surface, `bootstrap` with `profile="compact"` SHALL return a core operating contract and an index of named sections, not the full reference payload. The core SHALL carry every rule named in the core rule manifest at every engagement level the manifest assigns it to. Each section SHALL be retrievable through `bootstrap(profile="compact", section=<name>)` and SHALL contain the blocks it names byte-identically to their pre-core form. `section="index"` SHALL list every section with its size in served-JSON bytes. The core SHALL name every section with its size, and its workflow loop SHALL name the section that holds `vocabulary_workflow`. The vault-derived blocks SHALL be bounded in the core: `due_state` as a counts summary (total and largest category, at most 200 bytes) that names the `epistemics` section holding the list, `latency` not at all (it is served by `diagnostics_reading`, and to a session client), and the vocabulary as a pointer to the `vocabulary` section, never as a list of entity types (amended by `add-vocabulary-registries`, which renamed the `entities` section). The core's digest of the delegation envelope SHALL keep the unclassified-action rule and name the section that holds the full protocol. An unknown section SHALL fail with a validation error naming the accepted sections. The `full` and `diagnostics` profiles SHALL be unchanged. The `session` profile SHALL serve the core's forms of `engagement` (the delegation envelope digested, its full protocol in the `envelope` section) and `server` (`compute_policy` moved to the `diagnostics_reading` section), plus the `sections` index, and is otherwise unchanged; its served size moves from 21,974 to 21,270 bytes.
 
 #### Scenario: The core carries the incident-preventing rules at every level that owes them
 
@@ -38,15 +38,6 @@ The compact core SHALL stay at or under its ruled byte ceiling at every engageme
 - **WHEN** a change adds bytes to the core past its headroom warning
 - **THEN** the budget test warns before the ceiling and fails at it
 - **AND** the change must name the manifest rule the bytes carry
-
-### Requirement: Released hosted profiles keep their bootstrap payload
-
-`hosted-alpha-agent-v1` through `hosted-alpha-agent-v4` SHALL serve the same compact bootstrap payload after the core split as before it, at every engagement level, and SHALL keep their pinned `bootstrap` parameter schema without a `section` argument. The released hosted plugin candidates and their compatibility descriptors for those profiles SHALL NOT change.
-
-#### Scenario: A frozen profile is byte-stable across the split
-
-- **WHEN** compact bootstrap is served under a frozen hosted profile at any level
-- **THEN** its digest, with only the server version and tool-surface digests normalised, equals the digest recorded before the split
 
 ### Requirement: Injected agent context stays inside a per-item byte budget
 

@@ -14,8 +14,7 @@ creation (a new identity through the entity writer's resolve-before-create
 path, which refuses or prepares a decision on an existing exact name) belongs
 to `proactive_capture` and follows the vault's capture prominence; merging,
 superseding or deleting an entity stays under `restructure_execution`. An
-additive-authority grant that governs the caller, including the Hosted v2
-grants, applies unchanged and is neither widened nor replaced by this class. No prominence level, envelope setting,
+additive-authority grant that governs the caller, including its transport-bound grants, applies unchanged and is neither widened nor replaced by this class. No prominence level, envelope setting,
 disposition, configuration value, or adaptation SHALL authorize behaviour above
 a class's ceiling.
 

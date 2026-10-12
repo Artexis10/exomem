@@ -6,7 +6,6 @@ import pytest
 
 from exomem.governance import (
     authorization_custody,
-    authorization_hosted_mount,
     schema_downmigration,
     schema_migration,
 )
@@ -65,93 +64,6 @@ def test_new_custody_identity_refuses_existing_authority_sqlite_sidecar(
         )
 
 
-def test_hosted_republish_refuses_identity_change_with_authority_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    destination = tmp_path / "private"
-    destination.mkdir()
-    (destination / "keyring.json").write_bytes(b"old-keyring")
-    (destination / "control.json").write_bytes(b"old-control")
-    marker = tmp_path / "retained.vocabulary-authority.activation.json"
-    database = tmp_path / "database"
-    marker.write_text("retained", encoding="utf-8")
-
-    class _Record:
-        def __init__(self, *, cell_id: str, logical_vault_id: str, keyring_id: str) -> None:
-            self.cell_id = cell_id
-            self.logical_vault_id = logical_vault_id
-            self.keyring_id = keyring_id
-
-    monkeypatch.setattr(
-        authorization_custody, "parse_keyring", lambda raw: raw
-    )
-    monkeypatch.setattr(
-        authorization_custody,
-        "parse_control_record",
-        lambda raw, **_kwargs: _Record(
-            cell_id="old-cell" if raw == b"old-control" else "new-cell",
-            logical_vault_id="old-vault" if raw == b"old-control" else "new-vault",
-            keyring_id="old-key" if raw == b"old-control" else "new-key",
-        ),
-    )
-    monkeypatch.setattr(
-        "exomem.vocabulary_authority.authority_artifact_paths",
-        lambda _control, logical: (marker, database)
-        if logical == "old-vault"
-        else (tmp_path / "other-marker", tmp_path / "other-database"),
-    )
-
-    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
-        authorization_hosted_mount._refuse_authority_identity_change(
-            destination,
-            {
-                "keyring.json": b"new-keyring",
-                "control.json": b"new-control",
-            },
-        )
-
-
-def test_hosted_republish_refuses_identity_change_with_retained_authority_sidecar(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    destination = tmp_path / "private"
-    destination.mkdir()
-    (destination / "keyring.json").write_bytes(b"old-keyring")
-    (destination / "control.json").write_bytes(b"old-control")
-    database = tmp_path / "retained.vocabulary-authority.sqlite"
-    database.with_name(f"{database.name}-wal").write_text("retained", encoding="utf-8")
-
-    class _Record:
-        def __init__(self, *, cell_id: str, logical_vault_id: str, keyring_id: str) -> None:
-            self.cell_id = cell_id
-            self.logical_vault_id = logical_vault_id
-            self.keyring_id = keyring_id
-            self.vocabulary_authority_floor = 1
-
-    monkeypatch.setattr(authorization_custody, "parse_keyring", lambda raw: raw)
-    monkeypatch.setattr(
-        authorization_custody,
-        "parse_control_record",
-        lambda raw, **_kwargs: _Record(
-            cell_id="old-cell" if raw == b"old-control" else "new-cell",
-            logical_vault_id="old-vault" if raw == b"old-control" else "new-vault",
-            keyring_id="old-key" if raw == b"old-control" else "new-key",
-        ),
-    )
-    monkeypatch.setattr(
-        "exomem.vocabulary_authority.authority_artifact_paths",
-        lambda _control, logical: (tmp_path / f"{logical}.marker", database)
-        if logical == "old-vault"
-        else (tmp_path / "new.marker", tmp_path / "new.sqlite"),
-    )
-
-    with pytest.raises(authorization_hosted_mount.HostedCustodyMountUnavailable):
-        authorization_hosted_mount._refuse_authority_identity_change(
-            destination,
-            {"keyring.json": b"new-keyring", "control.json": b"new-control"},
-        )
-
-
 def test_downmigration_refuses_before_rollback_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -201,10 +113,3 @@ def test_forward_restore_refuses_before_rollback_session(
         )
 
     assert entered is False
-
-
-def test_hosted_operator_keeps_vocabulary_restore_codes_stable() -> None:
-    from exomem.hosted_operator import OperatorFailure
-
-    for code in ("VOCABULARY_AUTHORITY_UNAVAILABLE", "VOCABULARY_RESTORE_REQUIRES_AUTHORITY"):
-        assert OperatorFailure(code, command="restore-candidate").code == code

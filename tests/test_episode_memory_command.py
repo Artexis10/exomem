@@ -145,13 +145,6 @@ def test_the_tool_is_registered_on_all_three_surfaces() -> None:
     assert commands.invocation_is_read_only(command, {"action": "record"}) is False
 
 
-def test_hosted_surfaces_exclude_the_tool() -> None:
-    assert "episode_memory" in commands.HOSTED_SURFACE_EXCLUSIONS
-    assert "episode_memory" not in commands.hosted_complete_surface_names()
-    for profile in commands.PRODUCT_SURFACE_PROFILES.values():
-        assert "episode_memory" not in profile.command_names
-
-
 # --------------------------------------------------------------------------- #
 # record
 # --------------------------------------------------------------------------- #

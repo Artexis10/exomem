@@ -87,8 +87,7 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
 # Subcommands `_dispatch_main` routes explicitly, before falling through to
 # `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
 # command gets its own log file; `serve` configures server-role logging
-# itself from `server.run()`, and `hosted` emits a JSON-only operator protocol,
-# so they are deliberately excluded here.
+# itself from `server.run()`, so it is deliberately excluded here.
 # nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
     {
@@ -223,14 +222,6 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
 
 
 def _dispatch_main(raw: list[str]) -> int:
-    if raw and raw[0] == "hosted-fingerprint":
-        from .hosted_fingerprint import main as hosted_fingerprint_main
-
-        return hosted_fingerprint_main(raw[1:])
-    if raw and raw[0] == "hosted":
-        from .hosted_operator import main as hosted_operator_main
-
-        return hosted_operator_main(raw[1:])
     if raw and raw[0] == "setup":
         from .setup_wizard import setup_main
 
@@ -3889,45 +3880,6 @@ def _run_offline_state_migration(
     """Run the sole state-mutating entrypoint under explicit offline authority."""
 
     from . import state_migration
-    from .hosted_runtime import (
-        HostedBindingV2,
-        HostedCellConfig,
-        hosted_mode_enabled,
-    )
-
-    if hosted_mode_enabled():
-        from .hosted_restore import acquire_hosted_lifetime_lock
-
-        config = HostedCellConfig.from_env(require_provisioned=True)
-        if vault is not None and Path(vault).expanduser().resolve(strict=False) != (
-            config.vault_root.resolve(strict=False)
-        ):
-            raise ValueError("--vault must match the immutable hosted vault binding")
-        config.apply_process_environment()
-        binding = None
-        if config.requires_dynamic_security:
-            assert config.vault_id is not None
-            binding = HostedBindingV2(
-                cell_id=config.cell_id,
-                vault_id=config.vault_id,
-                vault_root=config.vault_root,
-                state_root=config.state_root,
-                log_root=config.log_root,
-                runtime_uid=config.runtime_uid,
-                runtime_gid=config.runtime_gid,
-            )
-        with acquire_hosted_lifetime_lock(config.state_root, binding=binding):
-            authority = state_migration.assert_offline_migration_authority(
-                source="hosted target-image offline migration job",
-            )
-            if arm_connector_boundary:
-                return state_migration.arm_connector_boundary_offline(config.vault_root, authority=authority)
-            return state_migration.migrate_vault_state_offline(
-                config.vault_root,
-                authority=authority,
-                adopt=adopt,
-            )
-
     from .vault import resolve_vault
 
     vault_root = Path(vault).expanduser() if vault is not None else resolve_vault()

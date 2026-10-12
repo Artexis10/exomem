@@ -25,7 +25,6 @@ from exomem.governance.principal import (
     normalize_audience,
     owner_principal,
     request_scope,
-    resolve_hosted_principal,
     resolve_mcp_principal,
     resolve_rest_principal,
 )
@@ -184,37 +183,12 @@ def test_same_human_matches_across_mcp_and_rest(
     assert mcp.audience_id == rest.audience_id
 
 
-def test_hosted_cell_principal_scope() -> None:
-    resolved = resolve_hosted_principal("principal-scope-abc")
-    assert resolved.resolved is True
-    assert resolved.surface == "hosted"
-    assert resolved.audience_id not in (OWNER_AUDIENCE, MOST_RESTRICTIVE_AUDIENCE)
 
 
-def test_hosted_missing_principal_fails_closed() -> None:
-    """The hosted cell surface always expects a gateway principal scope; a
-    missing one is a resolution failure, never the owner."""
-    resolved = resolve_hosted_principal(None)
-    assert resolved.resolved is False
-    assert resolved.audience_id == MOST_RESTRICTIVE_AUDIENCE
 
 
-def test_no_hosted_gateway_scope_resolves_to_the_owner() -> None:
-    """RAW admits the owner audience on any surface, so a hosted gateway scope
-    must never fold into it, however it is spelled: a cell caller is always a
-    principal, which needs a whole-artifact release."""
-    from exomem.governance import raw_protection
-
-    for scope in ("owner", f" {OWNER_AUDIENCE} ", "principal:owner", "cf-access:owner"):
-        assert not raw_protection.is_owner(resolve_hosted_principal(scope)), scope
 
 
-def test_hosted_principal_is_stable_for_same_scope() -> None:
-    a = resolve_hosted_principal("principal-scope-abc")
-    b = resolve_hosted_principal("principal-scope-abc")
-    c = resolve_hosted_principal("principal-scope-xyz")
-    assert a.audience_id == b.audience_id
-    assert a.audience_id != c.audience_id
 
 
 def test_trusted_surface_resolvers_bind_closed_issuer_families(
@@ -232,10 +206,6 @@ def test_trusted_surface_resolvers_bind_closed_issuer_families(
     assert (
         resolve_rest_principal("cf-access:principal-digest").issuer_family
         == "rest-cf-access"
-    )
-    assert (
-        resolve_hosted_principal("principal-scope-abc").issuer_family
-        == "hosted-gateway"
     )
     assert owner_principal(surface="cli").issuer_family == "cli-local-owner"
 

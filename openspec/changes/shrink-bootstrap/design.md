@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes frozen Hosted profile hashes, candidate rendering, and package checks. Bootstrap size, doctrine, plugin generation, and every surviving unchecked task remain in scope.
+
 ## Context
 
 The compact bootstrap is the entire operating contract a hookless or skill-less client receives, which is why it grew: each change that needed agents to behave differently added a block. Measurements are in `measurements.md`. The cost is paid once per session on every client, in context, latency (the payload is built and serialised on the first call) and attention (a rule at byte 40,000 of a 63,000-byte blob is a weak rule).

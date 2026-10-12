@@ -12,11 +12,11 @@ import test_governance_schema_migration_plan as migration_tests
 from test_connector_boundary import PRIVATE, SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_schema_migration_plan import _stage_reviewed_migration
-from test_hosted_portability import _context
+from test_vault_portability import _context
 
-from exomem import hosted_portability as portability
 from exomem import init as init_module
 from exomem import state_migration
+from exomem import vault_portability as portability
 from exomem.governance import (
     authorization_custody,
     policy,

@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted image and vector-extension activation. Current service resource policy owns bounded Cloud scoring. Unchecked profiling, structural memory, and rollout work remain open.
+
 ## Context
 
 A cell is one Python process per tenant: MCP server, file watcher, derived-index drains, and an ONNX embedding model. At proposal time the hosted runtime used bge-base fp32; Cloud cells now use bge-m3 int8 through the separate ONNX change. The vault is Markdown on an encrypted volume, with derived SQLite sidecars under the state directory. Historical measurements on the owner's vault (about 9,300 files, 3.6 GB), before these optimisations:

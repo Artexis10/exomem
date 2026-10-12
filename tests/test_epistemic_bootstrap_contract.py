@@ -24,9 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, hosted_gateway, semantic_blocks, semantic_units, workflow_skills
-from exomem.capabilities import ActiveSurfaceDescriptor, active_surface, current_active_surface
-from exomem.hosted_legacy_schemas import LEGACY_PROFILE_CONTRACTS
+from exomem import commands, semantic_blocks, semantic_units, workflow_skills
+from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 #: Every commitment the portable contract has to carry, keyed by payload key.
 _COMMITMENTS = (
@@ -43,9 +42,7 @@ def _op(vault, **kwargs):
     Since `shrink-bootstrap` compact is the always-served core; these tests pin the
     reference blocks, which the `all` section returns byte-identically.
     """
-    active = current_active_surface()
-    frozen = active is not None and active.profile in LEGACY_PROFILE_CONTRACTS
-    if kwargs.get("profile", "compact") == "compact" and "section" not in kwargs and not frozen:
+    if kwargs.get("profile", "compact") == "compact" and "section" not in kwargs:
         kwargs["section"] = "all"
     return commands.op_bootstrap(vault, **kwargs)
 
@@ -455,18 +452,24 @@ def test_reduced_surface_keeps_every_commitment(vault: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("profile", sorted(commands.PRODUCT_SURFACE_PROFILES))
-def test_every_shipped_hosted_profile_keeps_the_doctrine(
-    profile: str, vault: Path
-) -> None:
-    """A synthetic descriptor proves the filter; the shipped profiles are the product.
+def test_the_cloud_cell_surface_keeps_the_doctrine(vault: Path) -> None:
+    """A synthetic descriptor proves the filter; the Cloud cell surface is the product.
 
-    Parametrised over the live profile registry rather than a hand-listed pair, so
-    adding or narrowing a hosted profile cannot regress the doctrine with this suite
-    still green.
+    The surface is the one `server.build_server` publishes for a cloud cell: the
+    product surface minus `CLOUD_SURFACE_EXCLUSIONS`.
     """
     _assert_doctrine_intact(
-        hosted_gateway.hosted_agent_surface_descriptor(profile), vault
+        ActiveSurfaceDescriptor(
+            surface="mcp",
+            profile="product-cloud",
+            tier2_enabled=True,
+            product_commands=tuple(
+                command.name
+                for command in commands.product_commands_for("mcp")
+                if command.name not in commands.CLOUD_SURFACE_EXCLUSIONS
+            ),
+        ),
+        vault,
     )
 
 

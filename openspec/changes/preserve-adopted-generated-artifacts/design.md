@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gateway forwarding. Exact adoption, no-handle truth, shared fixtures, and pending client traces remain in scope. Historical Hosted evidence does not close current client acceptance.
+
 ## Context
 
 `preserve_artifacts` already stages hostile client handles before the mutation lock, streams and hashes exact bytes, commits append-only through `preserve_stream`, and returns a bounded receipt. The missing product transition is semantic: active agents are not told that generated variants stay ephemeral until the user adopts one, nor that the adopted bytes and a later delivery event are separate facts. As a result, a final output can be lost or reduced to prose even though the binary path already works.

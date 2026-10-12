@@ -12,7 +12,6 @@ classes:
     - "tests/tui/__snapshots__/*"
     - "infra/*/tests/fixtures/*"
     - "fixture-vault/*"
-    - "plugins/hosted/*fixture*.json"
   # Directories that never ship keep a glob; scripts/ mixes product and proof, so its proof
   # files are named and a new script defaults to product.
   tests:
@@ -21,17 +20,16 @@ classes:
     - ".test_durations.json"
     - "scripts/e2e_http_server.py"
     - "scripts/e2e_product_loop.py"
+    - "scripts/e2e_s1_summary_journey.py"
+    - "scripts/_recipient_query_observer.py"
     - "scripts/smoke-media-pipeline.py"
     - "scripts/smoke-upload.py"
     - "scripts/time-to-value.py"
     - "scripts/verify_studio_install.py"
-    - "scripts/verify-hosted-image.py"
     - "scripts/live_write_acceptance.py"
     - "scripts/activation_real_turns.py"
-    - "infra/scripts/accept_hosted_service.py"
     - "infra/scripts/external_blackbox.py"
     - "infra/scripts/network_policy_probes.py"
-    - "infra/scripts/smoke_hosted_cell.py"
   eval:
     - "benchmarks/*"
     - "plugins/cloud/evals/*"
@@ -70,7 +68,6 @@ classes:
     - "deploy/*"
     - "contracts/*"
     - ".claude-plugin/*"
-    - "infra/provisioner/*"
     - "infra/cellctl/*"
     - "infra/cloud-rehearsal/*"
     - "infra/helm/*"
@@ -80,7 +77,6 @@ classes:
     - "infra/contracts/*"
     - "infra/operations/*"
     - "infra/policy/*"
-    - "infra/runbooks/*"
     - "infra/tool-versions.env"
     - "scripts/install*"
     - "scripts/upgrade.*"
@@ -111,12 +107,10 @@ classes:
     - "scripts/refresh_test_durations.py"
     - "scripts/tui_frames.py"
     - "scripts/validate-public-artifacts.py"
-    - "infra/scripts/audit_hosted_database_budget.py"
     - "infra/scripts/validate.sh"
     - "infra/scripts/validate_sops_ciphertext.py"
-    - "infra/scripts/verify_hosted_release.py"
-  # CI configuration by name: release-please, the provisioner publish and the hosted
-  # infrastructure workflows publish or run against production, so they stay product.
+  # CI configuration by name: the release-please and hosted infrastructure workflows
+  # publish or run against production, so they stay product.
   tooling:
     - ".github/quality.yml"
     - ".github/workflows/ci.yml"
@@ -141,7 +135,6 @@ python:
     - "src"
     - "plugins/claude-code/hooks"
     - "sidecar/diarizer"
-    - "infra/provisioner/src"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
   # Called by name from outside the code: Textual event and action handlers (watch_*
@@ -180,7 +173,6 @@ duplicates:
     - "src"
     - "plugins/claude-code/hooks"
     - "sidecar/diarizer"
-    - "infra/provisioner/src"
     - "infra/cellctl/src"
     - "infra/cloud-rehearsal/src"
   ignore: ["**/_sample_vault/**", "**/_scaffold/**"]

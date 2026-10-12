@@ -39,7 +39,7 @@ def test_every_docs_markdown_file_is_explicitly_non_authoritative() -> None:
     assert offenders == []
 
 
-def test_migrated_connector_and_init_recovery_contracts_are_explicit() -> None:
+def test_migrated_connector_contract_is_explicit() -> None:
     command_surface = (
         ROOT / "openspec" / "specs" / "command-surface" / "spec.md"
     ).read_text(encoding="utf-8")
@@ -50,20 +50,3 @@ def test_migrated_connector_and_init_recovery_contracts_are_explicit() -> None:
         "decoded text still passes the binary-blob guard",
     ):
         assert phrase in command_surface
-
-    hosted = (
-        ROOT
-        / "openspec"
-        / "changes"
-        / "add-hosted-private-alpha-infrastructure"
-        / "specs"
-        / "hosted-cell-orchestration"
-        / "spec.md"
-    ).read_text(encoding="utf-8")
-    for phrase in (
-        "init Job is absent",
-        "running or reports `Complete=True`",
-        "Failed-only init Job",
-        "terminating init Job",
-    ):
-        assert phrase in hosted

@@ -3,9 +3,8 @@
 # Distribution: getting Exomem into each client
 
 The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth for skill
-artifacts. Generated skill copies are checked by CI; hosted definitions,
-marketplace metadata, hooks, fixtures, and promotion records are maintained by
-their own channel contracts.
+artifacts. Generated skill copies are checked by CI; the Exomem Cloud plugin
+definition, hooks and fixtures are maintained by their own channel contracts.
 
 ## Distribution channels
 
@@ -17,11 +16,8 @@ their own channel contracts.
 | Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
 | Cursor and generic MCP clients | Client MCP configuration | A local stdio or remote HTTP MCP route; `bootstrap()` supplies the portable contract when skills are unavailable |
 
-The generated hosted candidates and directory packets are currently **pending**:
-`plugins/hosted/definition.json` has `distribution_scope: "pending"`, promotion
-records are pending, submission records are drafts, and no publication pointer
-is active. They remain candidates until the provider reviews and activates them;
-this repository does not claim a public listing.
+This repository does not claim a public directory listing until the provider
+reviews and activates one.
 
 ## Claude Code
 
@@ -52,12 +48,10 @@ exomem package-skills --plugin-root plugins/claude-code
 
 ## Hosted Claude and OpenAI channels
 
-The hosted release input is `plugins/hosted/definition.json`; public listing
-copy comes from `plugins/hosted/marketplace-definition.json`. The provider
-packets are drafts until an authorized operator submits them, receives a
-provider result, records the exact receipt, and completes post-install evidence
-and activation. See [hosted-client-plugins.md](hosted-client-plugins.md) for
-the review and activation contract.
+The Exomem Cloud release input is `plugins/cloud/definition.json`, built by
+`scripts/cloud-plugin.py`. See
+[cloud-plugin-distribution.md](cloud-plugin-distribution.md) for the packages
+and the directory preparation.
 
 The Claude Connector Directory entry is the remote MCP channel for claude.ai,
 Desktop, Mobile, Code, and Cowork. The separate Claude plugin channel carries

@@ -106,7 +106,7 @@
   - a NetworkPolicy admitting gateway ingress only from the Traefik pods;
   - cert-manager with a Cloudflare DNS-01 issuer and the gateway certificate and IngressRoute, whose middleware sets the gateway's trusted-ingress source header;
   - SOPS-sourced Secrets.
-  - preserve the legacy stop through Helm upgrades: either enabled Cloud control workload or `legacyHosted.paused: true` renders zero old gateway/provisioner/volume-worker replicas, suspends every legacy-only CronJob, and omits the old provisioner database migration/validation hook; the Cloud lifecycle scheduler stays active while Cloud is enabled, an explicit pause survives disabling Cloud, and hosted-only defaults remain unchanged;
+  - retire legacy Hosted workloads and hooks; the Cloud lifecycle scheduler stays active while either Cloud control workload is enabled and suspends when both are disabled;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
 - [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
@@ -230,8 +230,75 @@
   7. token refresh after 15 minutes.
 - [ ] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends. Moved from 3.6, where it was deferred; the P3 rehearsal's step 11 restores into a scratch namespace with cellctl's renderers as a stand-in.
 
+### Launch and resilience roadmap
+
+Current evidence separates healthy service from recovery and launch acceptance.
+On 2026-10-11, the operator API reports three ready cells on 0.114, with no active holds.
+Their requests remain `1Gi/250m`, with limits `3Gi/2CPU`.
+Shared selection remains off. Capacity currently charges scheduler requests rather than measured peaks.
+Today's backup rows do not prove a B2 restore. Endpoint probes pass; connector sign-in and refresh remain unverified.
+The 0.116 release is not yet published. Existing per-cell pins do not prove that the fleet default selects the reviewed release.
+The Neon cutover and project deletion are closed; do not repeat them.
+Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
+
+- [ ] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
+  Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
+  That proof did not compare `/data/host` runtime state. Complete vault and host comparisons, cleanup absence proofs and the recurring operator procedure.
+- [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
+  Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
+  Verify old-image route reads/writes, custody and durable debt before any live pin.
+  Schema 8 in 0.114 differs from current schema 10; readiness and manifest compatibility IDs do not prove route compatibility.
+  A synthetic schema-10 negative probe with the cached 0.114 image refused without changing the store on 2026-10-11.
+  It does not prove the restored vault-plus-host copy or successful historical rollback.
+  If the copy is incompatible, prove refusal and current-image recovery, avoid the live pin and leave successful historical rollback open.
+  Never restore pre-upgrade S0 over later committed writes or add a downmigration.
+- [ ] 6.7 Resilience 3: recheck damaged-volume or bad-import recovery through the existing in-place B2 restore helper.
+  The 2026-10-09 QA restore matched 45/45 vault files with 93 seconds of downtime.
+  Host-state comparison was absent. Reconcile that missing scope and verify authenticated service, custody, holds and cleanup.
+- [ ] 6.8 Resilience 4: prove recovery after actual CSI node loss on approved disposable infrastructure.
+  Verify surviving-volume reattachment or B2 recovery, canonical data, host custody and service readiness.
+  The older local-storage CI node-loss run does not prove the current CSI deployment's failure path.
+  Price any rental before obtaining its authority; no rental is authorized by this task record.
+- [ ] 6.9 Resilience 5: rehearse a server move with the existing backup, stop, volume-release, placement and resume procedures.
+  Compare canonical vault and host state, preserve post-backup writes and report downtime after the replacement node exists.
+- [ ] 6.10 Resilience 6: verify control database recovery from pgBackRest and WAL in an isolated environment.
+  The 2026-10-08 isolated restore replayed nine WAL segments, matched database lineage and passed `pg_amcheck`.
+  Network isolation, no TCP listener, unchanged source processes and scratch removal also passed.
+  Reconcile provider, stored-row and derived counts and ownership before closing this task; the restore receipt does not prove those comparisons.
+  Price any rental before obtaining its authority and keep production writes disabled during the drill.
+- [ ] 6.11 Resilience 7: qualify memory and CPU admission through the existing shared-worker envelope, default off.
+  Measure the worst supported warm peak per slot and select conservative occupancy and fixed reserves.
+  Charge `max(request, qualified peak)` and retain at least 20% node memory headroom; do not introduce a dynamic estimator or ledger.
+  Use selected-empty atomic zero publication, inventory, stop, completed holds, volume release, selection and resume before all-shared promotion.
+  Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
+  A production request change to `512Mi/125m` requires separate operator restart go.
+  If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
+- [ ] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
+  Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
+  The 2026-09-28 exercise does not close this current-release acceptance.
+- [ ] 6.13 Complete the friend end-to-end journey through invite, paid entitlement with a 100%-off QA code, provisioning and connector sign-in.
+  Verify save, cited recall, token refresh, a restorable backup, recipient export and ordered deletion without operator repair.
+  Select the friend discount through the product configuration; do not encode a historical price.
+  After capacity qualification, set and verify the fleet default `cellImage` through the existing release API.
+  Existing per-cell pins alone do not qualify a new friend's image. Keep invitations pending until the required journey and resilience evidence passes.
+
 ## 7. Retirement (R)
 
-- [ ] 7.1 Delete the hosted-only runtime modules and their tests, provisioner v1, the old platform chart pieces, deployment locks, plugin candidates and `cloudflared`
-- [ ] 7.2 Remove the superseded change directories, and remove the `hosted-*` canonical specs in the same delivery as the code they describe
+- [x] 7.1 Delete the hosted-only runtime modules and their tests, provisioner v1, the old platform chart pieces, deployment locks, plugin candidates and `cloudflared`
+  Evidence (branch `chore/retire-hosted-platform`): commits "refactor: cut the Cloud paths free of the Hosted platform" and "chore: delete the retired Hosted platform code"; the rebuilt `cloud` target passed two of three container-test runs, matching the baseline readiness first-poll flake, and the platform render loses only Hosted objects and the `exomem-export-gc` job.
+- [ ] 7.2 Remove superseded changes and Hosted-only canonical requirements with their code; retain generic contracts until their active deltas are reconciled.
+  Progress: the 12 superseded change directories and three original release capabilities are retired.
+  The original boundary had five blocked specs: `hosted-gateway-contract`, `hosted-agent-surface`,
+  `hosted-marketplace-release`, `hosted-vault-portability` and `hosted-tenant-cell`.
+  The reviewer-bootstrap change is now archived as superseded, with three historical gaps still unchecked.
+  `hosted-marketplace-release` has no active delta and is retired. Four capabilities remain blocked by active deltas.
+  Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
+  Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
+  Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
 - [ ] 7.3 After seven clean days, delete the Neon project, and retire merged worktrees and branches
+
+- [ ] 7.4 Complete the [Hosted retirement disposal inventory](../../../docs/runbooks/cloud-hosted-retirement.md).
+  Repository deletion leaves provider credentials, manually managed Secrets and retained data intact.
+  Revoke all 34 original destination records and eight collector destination records after confirming no kept consumer.
+  Each of the eight obsolete BWS entries requires a separate explicit operator go.
+  Keep Secret/ConfigMap cleanup, tenant data disposal and Terraform disposal pending until their exact absence proofs exist.

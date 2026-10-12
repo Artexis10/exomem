@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted image and vector-extension activation. Current service resource policy owns bounded Cloud scoring. Unchecked profiling, structural memory, and rollout work remain open.
+
 ## Why
 
 An Exomem Cloud cell's resident memory grows with the vault. On a vault of about 9,300 files (3.6 GB) a cell sits at 1.2–1.7 GiB RSS when idle, and its first index build was OOM-killed at 1536Mi, so cells now carry a 3Gi limit. RAM per node is the scaling bottleneck: at this rate one 8 GiB node holds only a handful of large vaults, and memory cannot be added indefinitely.

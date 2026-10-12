@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes frozen Hosted profile hashes, candidate rendering, and package checks. Bootstrap size, doctrine, plugin generation, and every surviving unchecked task remain in scope.
+
 ## 1. Phase 1: measure and propose
 
 - [x] 1.1 Measure the compact bootstrap by level, surface, section and field; record it in `measurements.md` with `scripts/bootstrap-byte-breakdown.py` as the reproducible source.

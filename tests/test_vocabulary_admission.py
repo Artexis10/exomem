@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -90,16 +89,16 @@ def test_restore_admission_uses_the_governed_restore_time(tmp_path: Path) -> Non
 def test_portability_refuses_before_offline_publication_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import hosted_portability
+    from exomem import vault_portability
 
     staging = tmp_path / "staging"
     staging.mkdir()
-    prepared = hosted_portability.PreparedRestore(
+    prepared = vault_portability.PreparedRestore(
         staging_root=staging,
         source_archive=tmp_path / "archive.zip",
         archive_sha256="0" * 64,
         manifest={},
-        context=hosted_portability.PortabilityContext(
+        context=vault_portability.PortabilityContext(
             cell_id="cell-a",
             vault_id="vault-a",
             operation_id="restore-a",
@@ -124,8 +123,8 @@ def test_portability_refuses_before_offline_publication_move(
         nonlocal moved
         moved = True
 
-    with pytest.raises(hosted_portability.PortabilityError) as error:
-        hosted_portability.publish_prepared_restore(prepared, tmp_path / "live", publish=publish)
+    with pytest.raises(vault_portability.PortabilityError) as error:
+        vault_portability.publish_prepared_restore(prepared, tmp_path / "live", publish=publish)
 
     assert error.value.code == "VOCABULARY_RESTORE_REQUIRES_AUTHORITY"
     assert moved is False
@@ -239,32 +238,3 @@ def test_writer_invocation_reserves_floor_two_pending_for_session_open(
         manager.invoke(content_write, (tmp_path,), {})
 
     assert calls == ["session-open"]
-
-
-def test_hosted_activation_guard_keeps_the_shared_writer_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from exomem import hosted_runtime
-
-    calls: list[tuple[Path, dict[str, object]]] = []
-
-    class _Manager:
-        def mutation_guard(self, vault_root: Path, **kwargs: object):
-            calls.append((vault_root, kwargs))
-            return nullcontext()
-
-    monkeypatch.setattr("exomem.writer_lease.get_manager", lambda: _Manager())
-
-    with hosted_runtime.hosted_vocabulary_activation_guard(tmp_path):
-        pass
-
-    assert calls == [
-        (
-            tmp_path,
-            {
-                "operation": "vocabulary-authority-activation",
-                "holder_kind": "vocabulary-authority-control",
-                "activation_admission": True,
-            },
-        )
-    ]
