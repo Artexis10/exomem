@@ -172,6 +172,7 @@ class FakeS3:
         self.uploads: dict[str, dict] = {}
         self.versions: dict[str, list[tuple[str, bytes]]] = {}
         self.calls: list[tuple[str, str]] = []  # (key id, object name)
+        self.abort_error: Exception | None = None
         self._ids = itertools.count(1)
 
     def client(self, cluster_config, key_id: str, key_secret: str) -> FakeS3Client:
@@ -241,6 +242,8 @@ class FakeS3Client:
 
     def abort_multipart_upload(self, Bucket, Key, UploadId):
         self._use(Key)
+        if self.store.abort_error is not None:
+            raise self.store.abort_error
         self.store.uploads.pop(UploadId, None)
 
     def delete_object(self, Bucket, Key, VersionId):
@@ -392,18 +395,23 @@ async def test_a_substituted_part_never_completes(cell_db, monkeypatch):
         assert ("delete_job", namespace_name(CELL), f"export-{uuid.UUID(export_id).hex}") in harness.cluster.events
 
 
-async def test_deleting_the_cell_aborts_its_export_upload(cell_db, monkeypatch):
-    """Defect: a deleted tenant's half-uploaded export parts stay in object storage."""
+async def test_deleting_the_cell_aborts_its_export_upload_until_the_abort_succeeds(cell_db, monkeypatch):
+    """Defect: one failed abort leaves a deleted tenant's half-uploaded export in object storage, unretried."""
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)
         export_id = await harness.request(CELL)
         await harness.pack(CELL, export_id, b"PK archive")
-        assert harness.s3.uploads
+        harness.s3.abort_error = ClientError({"Error": {"Code": "InternalError"}}, "AbortMultipartUpload")
         await harness.app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CELL)
+        await harness.run()
         await harness.run()
         interrupted = await harness.export(export_id)
         assert (interrupted["observed_state"], interrupted["error_code"]) == ("failed", "EXPORT_INTERRUPTED")
-        assert interrupted["upload_id"] is None and harness.s3.uploads == {}
+        assert interrupted["upload_id"] is not None and harness.s3.uploads
+
+        harness.s3.abort_error = None
+        await harness.run()
+        assert (await harness.export(export_id))["upload_id"] is None and harness.s3.uploads == {}
 
 
 async def test_each_export_is_signed_only_with_its_own_cells_key(cell_db, monkeypatch):

@@ -1939,11 +1939,12 @@ async def _export_storage(
 async def _remove_export(
     connection: asyncpg.Connection, row: CellRow, item: ExportRow, storage: ExportStorage | None,
     updates: dict[str, object],
-) -> bool:
+) -> None:
     """Deletes every version of the export's object and aborts its uploads,
-    then records `updates` with the upload released. A failure leaves the
-    upload_id, so a later pass retries; on a deleted cell the verified prefix
-    deletion is the authority instead, since its key may already be gone."""
+    then records `updates` with the upload released. A failure keeps
+    upload_id, so every later pass retries the abort while the cell has a
+    key. On a deleted cell the outcome is recorded anyway; the prefix
+    deletion that runs before its key goes is the final removal."""
 
     try:
         if storage is not None:
@@ -1951,10 +1952,10 @@ async def _remove_export(
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
         logger.error("cellctl: removing export %s of cell %s failed: %s", item.export_id, row.cell_id,
                      _describe_error(error))
-        if row.desired_state != "deleted":
-            return False
+        if row.desired_state == "deleted" and updates:
+            await db.write_export(connection, item.export_id, updates)
+        return
     await db.write_export(connection, item.export_id, {**updates, "upload_id": None})
-    return True
 
 
 async def _settle_exports(

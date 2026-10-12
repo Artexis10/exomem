@@ -48,11 +48,13 @@ After completion it checks the completed version's size again. A substituted par
 
 `expires_at` is `ready_at` plus `EXOMEM_EXPORT_TTL_HOURS` (default 24). On a link request cellctl presigns a GET for 300 seconds. The GET names the version it verified and asks for an attachment. cellctl answers each request once: `link_issued_at` is never earlier than the request it answers.
 
-At expiry, at supersede and when the cell is deleted, cellctl first clears the link, then deletes every version and delete marker of the object, and then records `expired`. If the deletion fails, the export stays `ready` without a link, and cellctl tries again on the next pass.
+At expiry, at supersede and when the cell is deleted, cellctl first clears the link, then deletes every version and delete marker of the object, and then records `expired`. If the deletion fails, the export stays `ready` without a link, and cellctl tries again on the next pass. On a deleted cell cellctl records `expired` anyway, and the prefix deletion in D5 removes the versions.
 
 ### D5. Failure records the outcome first, then removes the upload
 
-On a failure, at the deadline or on cell deletion, cellctl records the C6 outcome, deletes the Job, and then removes the upload. The row keeps `upload_id` until the removal succeeds, so a later pass retries it. A failed removal never holds the cell. On a deleted cell the verified prefix deletion is the authority, because the cell's key may already be gone.
+On a failure, at the deadline or on cell deletion, cellctl records the C6 outcome, deletes the Job, and then removes the upload with the cell's own key. The row keeps `upload_id` until the abort succeeds, and every pass retries it while the cell has a key. A failed removal never holds the cell.
+
+On a deleted cell the final mechanism is the deleted-cell prefix deletion. cellctl lists every file version under `cells/<id>/` with the controller key, deletes each one, and deletes the cell's key only when the listing is empty. The bucket has no lifecycle rule for unfinished large files. Task 4.2 checks on B2 that this prefix deletion lists and removes an unfinished multipart upload.
 
 ### D6. Disk use is an observed column group on C1
 
@@ -93,7 +95,7 @@ The Substrate migration 0066 is the schema of record. cellctl's tests apply `inf
 - **A running cell pauses for the export.** Hetzner volumes cannot snapshot, and D1 rejects the clone for now. Home says so before the owner starts an export.
 - **Part URLs appear in the Job's arguments.** An identity that can read Jobs in the cell namespace can upload a part. D3 rejects any part the Job did not report, so this can cause a failed export, not a substituted one.
 - **A plaintext archive sits at the object store for up to the TTL.** It has provider encryption at rest, under the cell's own prefix. Deletion is verified per version. The privacy page says this.
-- **An upload whose abort fails on a deleted cell** waits for the bucket's lifecycle rule that cancels unfinished large files.
+- **An upload whose abort fails until a deleted cell's key is gone** depends on the prefix deletion to remove it. Nothing else removes it: the bucket has no lifecycle rule. Task 4.2 checks this on B2 before the export API goes on.
 
 ## Migration Plan
 
