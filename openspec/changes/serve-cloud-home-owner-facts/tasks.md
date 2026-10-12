@@ -9,6 +9,7 @@
 
 - [x] 2.1 Record the dispatcher's access and the released-item count through the call token; prove a real recall's count equals the notes it returned.
 - [x] 2.2 Keep version 1 rows readable; prove an upgraded chain verifies.
+- [x] 2.3 Report the pages a commit names at the commit; prove `remember`, `capture_source` and `episode_memory` saves count one note each.
 
 ## 3. Activity and note count
 

@@ -16,9 +16,14 @@ Both fields SHALL survive content-private logging, because neither carries conte
 - **WHEN** a recall on a vault with an empty policy returns five distinct notes
 - **THEN** its row records `access: read` and `item_count: 5`
 
-#### Scenario: A write of unreported destination
+#### Scenario: A save whose destination the server chose
 
-- **WHEN** a write succeeds whose destination the server derived and did not report
+- **WHEN** a write commits a note at a path that the server derived, such as `remember`
+- **THEN** its row records `access: write` and `item_count: 1`
+
+#### Scenario: A write that names no page
+
+- **WHEN** a write succeeds whose arguments name no page and whose committed result names none
 - **THEN** its row records `access: write` and a null `item_count`
 
 ### Requirement: Version 1 Rows Stay Readable And Verifiable

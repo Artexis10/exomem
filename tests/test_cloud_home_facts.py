@@ -129,10 +129,37 @@ def test_home_sees_a_recall_with_the_notes_it_released_and_the_note_count_move(c
     assert released, "sanity: the recall returned notes"
     assert before["events"] == []
     assert [(e["client"], e["action"], e["items"]) for e in after["events"]] == [
-        ("chatgpt", "saved", None),  # the server derived the path and reported none
+        ("chatgpt", "saved", 1),  # the server derived the path; the commit reports it
         ("claude-ai", "recalled", len(released)),
     ]
     assert after["note_count"] == before["note_count"] + 1
+
+
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        ("remember", {"content": "The second build fixed the flaky upload.",
+                      "title": "Flaky upload fixed", "status": "draft"}),
+        ("capture_source", {"title": "Upload log", "content": "raw log text",
+                            "source_kind": "log"}),
+        ("episode_memory", {"action": "record", "subject": "upload fix",
+                            "summary": "Fixed the flaky upload.", "worked_on": ["upload"],
+                            "decided": ["retry twice"]}),
+    ],
+    ids=["remember", "capture_source", "episode_memory"],
+)
+def test_a_save_whose_path_the_server_chose_still_reports_its_note(cell, tool, arguments):
+    """These writers derive the destination themselves, so the call's arguments
+    name no page. Unless the commit reports what it saved, Home shows every such
+    save with an unknown count."""
+
+    async def scenario(client):
+        await _call(client, tool, arguments, oauth_client="ChatGPT", client_context="conversation")
+        return await _call(client, "bootstrap", {"section": "activity"})
+
+    activity = cell(scenario)
+
+    assert [(e["action"], e["items"]) for e in activity["events"]] == [("saved", 1)]
 
 
 def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:

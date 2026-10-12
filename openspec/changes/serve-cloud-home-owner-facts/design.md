@@ -34,7 +34,8 @@ The outermost read boundary of a call reports the size of that set.
 
 `access` is the classification the dispatcher already made for the call, carried to the ledger row through the call token, like committed targets.
 A write's `item_count` is the number of distinct targets the call addressed or reported committing.
-A write whose destination the server derived and did not report has no known target, so its count is null.
+At the commit, the dispatcher reports the pages that the committed terminal names (`path` or `paths`), so a write whose destination the server chose, such as `remember`, still has a count.
+A write whose arguments name no page and whose terminal names none has no known target, so its count is null.
 A call that did not succeed has a null count.
 
 ### Activity

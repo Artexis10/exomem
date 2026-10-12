@@ -116,11 +116,11 @@ def test_events_are_newest_first_and_at_most_twenty(vault, ledger):
 
 
 def test_a_save_of_unreported_size_makes_its_event_count_unknown(vault, ledger):
-    """`items` is shown as a number of notes. A write whose destination the server
-    derived reports no target, and folding it into a counted save would show
-    "saved 1" for two saves."""
+    """`items` is shown as a number of notes. A write whose arguments name no page
+    and whose commit reported none has an unknown size, and folding it into a
+    counted save would show "saved 1" for two saves."""
     ledger("edit_memory", _at(0), access="write", arguments={"path": "Notes/Insights/a.md"})
-    ledger("remember", _at(0.5), access="write", arguments={"title": "derived path"})
+    ledger("triage_memory", _at(0.5), access="write", arguments={"ref": "item"})
 
     assert _activity(vault)["events"] == [
         {"client": "claude-ai", "action": "saved", "items": None, "at": _iso(_at(0.5))},
