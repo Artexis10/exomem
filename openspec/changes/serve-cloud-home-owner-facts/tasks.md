@@ -19,6 +19,7 @@
 
 - [x] 4.1 Measure that a stateless handshake-protocol call through a cloud cell resolves to the coding context.
 - [x] 4.2 Read the gateway header on a cloud cell only; prove both sides of that condition with a real HTTP request.
+- [x] 4.3 Apply the registry context the gateway declares, before name detection, on a cloud cell only; prove it wins over detection, an unknown value is ignored and a local server ignores it.
 
 ## 5. Delivery
 

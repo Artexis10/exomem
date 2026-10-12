@@ -625,10 +625,20 @@ def levels() -> dict[str, dict[str, str]]:
 
 
 def _applied_context(surface: str | None) -> str:
-    """The context a request belongs to: from the surface — the detected one when
-    the caller passes none — never from a request argument. `surface` is an
-    internal "what would this surface get?" knob and is not reachable from the
-    public MCP/REST/CLI parameter set."""
+    """The context a request belongs to, never from a request argument.
+
+    An explicit `surface` is an internal "what would this surface get?" knob,
+    not reachable from the public MCP/REST/CLI parameter set. Without one: the
+    operator's surface override, then on a Cloud cell the context the gateway
+    declares from the control plane's client registry, then the detected client.
+    """
+    if surface is None and not os.environ.get(_SURFACE_ENV, "").strip():
+        if _REQUEST_PREFERENCE.get() is not None:
+            from .command_surface import gateway_client_context
+
+            declared = gateway_client_context()
+            if declared is not None:
+                return declared
     return context_for_surface(surface if surface is not None else detect_surface())
 
 
@@ -748,16 +758,17 @@ def resolved(surface: str | None = None) -> dict:
     # capture authority is handed THIS object -- the served contract here, and
     # the delegation envelope at the call site that attaches it.
     gate = capture_gate(surface=surface)
+    context = _applied_context(surface)
     result = {
         "level": level,
         "source": _active_source(surface),
         "surface": applied_surface,
-        "context": context_for_surface(applied_surface),
+        "context": context,
         "contract": CONTRACTS[level].as_dict(gate),
         "levels": list(CANON),
         "change_with": "exomem prominence <level>",
     }
-    cadence = hook_cadence(applied_surface)
+    cadence = _hook_cadence_for_context(context)
     if cadence is not None:
         result["hook_cadence"] = cadence
     if _REQUEST_PREFERENCE.get() is not None:
@@ -794,7 +805,11 @@ def hook_cadence(surface: str | None) -> dict | None:
     a local install driving the CLI directly. Silence on a hookless surface
     stays, because there is genuinely no cadence there to be out of step with.
     """
-    if context_for_surface(surface) != CODING_CONTEXT:
+    return _hook_cadence_for_context(context_for_surface(surface))
+
+
+def _hook_cadence_for_context(context: str) -> dict | None:
+    if context != CODING_CONTEXT:
         return None
     return {
         "reads": "operator environment, then this client machine's exomem configuration file",

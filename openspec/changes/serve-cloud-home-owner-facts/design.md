@@ -60,7 +60,16 @@ The same call with a client-naming `User-Agent`, or with a per-request `clientIn
 On a cloud cell, the caller's client name reads `x-exomem-oauth-client` after `clientInfo` and before `User-Agent`.
 Only a cloud cell trusts it: there the cell bearer proves the gateway sent the request, and the gateway forwards no caller copy of the header.
 
+### The registry decides a Cloud client's context
+
+Surface detection matches only some client names, so the web could know an app's context only by copying that name list.
+On Cloud, the control plane's client registry decides instead: it derives each client's context from data it already holds, and one function serves both the gateway and the web.
+The gateway sends that context in `x-exomem-client-context`, next to the client name.
+A cloud cell honours `coding` or `conversation` there, after the operator's surface override and before name detection.
+It ignores any other value, because the header tunes eagerness only and detection still has an answer.
+Home then saves a level to exactly the context the cell applies to that app, before the app's first call.
+
 ## Risks / Trade-offs
 
-Surface detection matches only some client names. The gateway must send a name that detection recognises, or a chat app still resolves to coding.
+A local install still depends on surface detection, which matches only some client names.
 Saves whose destination the server derives show unknown item counts until those writers report committed targets.

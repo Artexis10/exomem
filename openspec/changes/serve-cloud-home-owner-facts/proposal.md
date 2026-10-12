@@ -19,6 +19,7 @@ Four gaps stop Home from doing this honestly:
 - Call-ledger rows move to schema 2 with two content-free fields: `access` (`read` or `write`) and `item_count`. Version 1 rows stay as written and still verify.
 - `bootstrap(profile="compact", section="activity")` returns `{since, as_of, note_count, events}` to the owner. Unknown counts are null, never zero.
 - On a cloud cell, the caller's client name comes from a gateway-set header after `clientInfo` and before `User-Agent`.
+- On a cloud cell, the applied engagement context comes from the control plane's client registry, delivered in a second gateway header, before name detection.
 - The cell registers no new route. Only MCP output fields change.
 
 ## Capabilities
@@ -29,9 +30,9 @@ None.
 
 ### Modified Capabilities
 
-- `agent-prominence-control`: report every context's level and the rung that decided it.
+- `agent-prominence-control`: report every context's level and the rung that decided it; on Cloud, take the context from the control plane's client registry.
 - `call-ledger`: record access and item count without content, and keep reading version 1 rows.
-- `cloud-cell`: name the gateway's OAuth client, and serve the owner's activity and note count through MCP.
+- `cloud-cell`: take the client's name and context from the gateway, and serve the owner's activity and note count through MCP.
 
 ## Impact
 

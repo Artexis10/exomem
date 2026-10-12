@@ -25,6 +25,11 @@ CLOUD_CELL_ISSUER = "exomem-cloud-cell"
 #: bearer proves the request came through the gateway, which sets this header
 #: itself and never forwards a caller's copy. It tunes eagerness only.
 GATEWAY_CLIENT_HEADER = "x-exomem-oauth-client"
+#: The gateway names the engagement context (`coding` or `conversation`) of the
+#: authenticated OAuth client here, from the control plane's client registry.
+#: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`; neither name starts
+#: with `mcp-param-`, the one prefix the gateway forwards from a caller.
+GATEWAY_CONTEXT_HEADER = "x-exomem-client-context"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 

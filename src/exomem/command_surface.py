@@ -725,6 +725,26 @@ def mcp_caller_identity() -> dict[str, str | None]:
     return identity
 
 
+def gateway_client_context() -> str | None:
+    """The engagement context the Cloud gateway declared for this request.
+
+    Cloud mode only, for the reason `cloud_cell.GATEWAY_CONTEXT_HEADER` gives.
+    A value outside the closed context set is ignored, not refused: the header
+    tunes eagerness only, and name detection still answers without it.
+    """
+    from . import cloud_cell, prominence
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        value = get_http_headers().get(cloud_cell.GATEWAY_CONTEXT_HEADER)
+    except (ImportError, LookupError, RuntimeError):
+        return None
+    return value if value in prominence.CONTEXTS else None
+
+
 def peek_request_id() -> str | None:
     """Return the active MCP request id if one is bound, without minting.
 

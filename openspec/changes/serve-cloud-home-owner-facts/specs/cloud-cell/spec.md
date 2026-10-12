@@ -2,20 +2,23 @@
 
 ## ADDED Requirements
 
-### Requirement: A cloud cell names the gateway's OAuth client
+### Requirement: A cloud cell takes the client's name and context from the gateway
 
 On a cloud cell, the caller's client name SHALL come from the request's `clientInfo`, then from the `x-exomem-oauth-client` header, then from `User-Agent`.
-Only a cloud cell SHALL read that header. The client name MUST tune eagerness only, never authority.
+The applied engagement context SHALL come from the `x-exomem-client-context` header when it holds `coding` or `conversation`, before name detection.
+Only a cloud cell SHALL read either header: there the cell bearer proves the gateway sent the request.
+Neither header name SHALL start with `mcp-param-`, the one prefix the gateway forwards from a caller.
+Both headers MUST tune eagerness only, never authority.
 
 #### Scenario: A chat app behind the gateway
 
-- **WHEN** a stateless handshake-protocol tool call reaches a cloud cell with `x-exomem-oauth-client` naming a conversational client
+- **WHEN** a stateless handshake-protocol tool call reaches a cloud cell with `x-exomem-client-context: conversation`
 - **THEN** the call resolves in the conversation context and receives that context's level
 
-#### Scenario: A local server ignores the header
+#### Scenario: A local server ignores the headers
 
 - **WHEN** the same request reaches a server that is not a cloud cell
-- **THEN** the client name comes from `User-Agent`
+- **THEN** the client name comes from `User-Agent` and surface detection decides the context
 
 ### Requirement: A cloud cell serves its owner's activity and note count through MCP
 

@@ -9,12 +9,13 @@ way the gateway forwards them: no `initialize` first, the gateway's own
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
 from test_cloud_cell import LEGACY_VERSION, TOKEN, _build_cloud_server, _teardown_activation
 
-from exomem import cloud_cell, command_surface, server
+from exomem import cloud_cell, command_surface, prominence, server
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def cell(vault, monkeypatch, tmp_path):
     _teardown_activation(mcp)
 
 
-async def _call(client, name, arguments, *, oauth_client=None):
+async def _call(client, name, arguments, *, oauth_client=None, client_context=None):
     """One tools/call exactly as the gateway forwards it."""
     headers = {
         "accept": "application/json, text/event-stream",
@@ -52,6 +53,8 @@ async def _call(client, name, arguments, *, oauth_client=None):
     }
     if oauth_client is not None:
         headers[cloud_cell.GATEWAY_CLIENT_HEADER] = oauth_client
+    if client_context is not None:
+        headers[cloud_cell.GATEWAY_CONTEXT_HEADER] = client_context
     response = await client.post(
         "/mcp",
         headers=headers,
@@ -74,7 +77,11 @@ def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):
             "action": "set", "context": "conversation", "prominence": "light",
             "expected_revision": shown["revision"],
         })
-        chat_app = await _call(client, "configure_memory", {}, oauth_client="claude.ai")
+        # A name that client detection does not know: the registry's context decides.
+        chat_app = await _call(
+            client, "configure_memory", {},
+            oauth_client="Acme Chat", client_context="conversation",
+        )
         stale = await _call(client, "configure_memory", {
             "action": "set", "context": "conversation", "prominence": "off",
             "expected_revision": shown["revision"],
@@ -128,21 +135,22 @@ def test_home_sees_a_recall_with_the_notes_it_released_and_the_note_count_move(c
     assert after["note_count"] == before["note_count"] + 1
 
 
-@pytest.mark.parametrize("cloud,named", [(True, "claude.ai"), (False, "node")])
-def test_the_gateway_client_header_names_the_caller_only_on_a_cloud_cell(
-    monkeypatch, cloud, named
-):
-    """Only on a cloud cell does the bearer prove the gateway set the header.
-    Elsewhere any HTTP caller could send it, so the `User-Agent` still decides."""
+def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:
+    """What one real HTTP tool call sees as its caller and its applied context."""
     if cloud:
         monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     else:
         monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
+    monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
     mcp = server.ExomemFastMCP("caller-probe")
 
     @mcp.tool(name="caller_probe")
     def caller_probe() -> dict:
-        return command_surface.mcp_caller_identity()
+        with prominence.request_scope(Path("/nonexistent")):
+            return {
+                "client_name": command_surface.mcp_caller_identity()["client_name"],
+                "context": prominence.resolved()["context"],
+            }
 
     app = mcp.http_app(stateless_http=True, json_response=True)
 
@@ -158,13 +166,51 @@ def test_the_gateway_client_header_names_the_caller_only_on_a_cloud_cell(
                         "content-type": "application/json",
                         "mcp-protocol-version": LEGACY_VERSION,
                         "user-agent": "node",
-                        cloud_cell.GATEWAY_CLIENT_HEADER: "claude.ai",
+                        **headers,
                     },
                     json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                           "params": {"name": "caller_probe", "arguments": {}}},
                 )
 
     response = asyncio.run(scenario())
-
     assert response.status_code == 200, response.text
-    assert response.json()["result"]["structuredContent"]["client_name"] == named
+    return response.json()["result"]["structuredContent"]
+
+
+@pytest.mark.parametrize("cloud,named", [(True, "claude.ai"), (False, "node")])
+def test_the_gateway_client_header_names_the_caller_only_on_a_cloud_cell(
+    monkeypatch, cloud, named
+):
+    """Only on a cloud cell does the bearer prove the gateway set the header.
+    Elsewhere any HTTP caller could send it, so the `User-Agent` still decides."""
+    seen = _probe(monkeypatch, cloud=cloud, headers={cloud_cell.GATEWAY_CLIENT_HEADER: "claude.ai"})
+
+    assert seen["client_name"] == named
+
+
+@pytest.mark.parametrize(
+    "cloud,declared,name,context",
+    [
+        # The registry decides for a client name detection does not know ...
+        (True, "conversation", "Acme Chat", "conversation"),
+        # ... and against one it does: a loopback-only client is coding.
+        (True, "coding", "claude.ai", "coding"),
+        # A value outside the closed set is ignored; name detection answers.
+        (True, "Conversation", "claude.ai", "conversation"),
+        (True, "chat", "Acme Chat", "coding"),
+        # Nothing vouches for the header on a local server.
+        (False, "conversation", "Acme Chat", "coding"),
+    ],
+)
+def test_on_a_cloud_cell_the_registry_context_decides_which_level_applies(
+    monkeypatch, cloud, declared, name, context
+):
+    """Home saves a chat app's level to the context the control plane's client
+    registry assigns it. If the cell applied a different one, the saved choice
+    would silently never reach that app."""
+    seen = _probe(monkeypatch, cloud=cloud, headers={
+        cloud_cell.GATEWAY_CLIENT_HEADER: name,
+        cloud_cell.GATEWAY_CONTEXT_HEADER: declared,
+    })
+
+    assert seen["context"] == context
