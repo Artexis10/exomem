@@ -619,7 +619,7 @@ export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
 
 if [[ "$MODE" == "release" ]]; then
     echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
-    uv pip install --upgrade --python "$VENV_PYTHON" "$PACKAGE_REQUIREMENT"
+    uv pip install --upgrade --python "$VENV_PYTHON" "$PACKAGE_REQUIREMENT" --compile-bytecode
     if [[ "$SEAMLESS" == 1 ]]; then
         "$VENV_PYTHON" -c 'import exomem.service_manager' \
             || die "installed release does not provide the managed service launcher"

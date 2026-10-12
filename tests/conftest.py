@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -301,6 +302,42 @@ def _needs_posix_ownership_semantics(error: BaseException | None) -> bool:
     return False
 
 
+# The call-phase report, so a failed test keeps its scratch and a passing one does not.
+_CALL_REPORT = pytest.StashKey[pytest.TestReport]()
+
+
+def _state_root_for(tmp_path: Path) -> Path:
+    """The state root `_isolate_state_root` injects for a test's tmp_path."""
+    return tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):  # noqa: ANN001, ANN201
+    """Drop a passing test's vault copy and state root, ~200 files kept forever.
+
+    After the yield, so every fixture has finalized and no test's filesystem
+    patch is still active. tmp_path is emptied, not removed: pytest numbers the
+    next same-prefix tmp_path from the directories that exist, and caches keyed
+    by vault or state-root path must never see one reused.
+    """
+    tmp_path = getattr(item, "funcargs", {}).get("tmp_path")
+    yield
+    report = item.stash.get(_CALL_REPORT, None)
+    if tmp_path is None or (report is not None and not report.passed):
+        return
+    shutil.rmtree(_state_root_for(tmp_path), ignore_errors=True)
+    try:
+        children = list(tmp_path.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                child.unlink()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     """Report a platform capability this host does not have as a skip.
@@ -351,6 +388,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
     refusal or a Git refusal there stays a failure and is meant to.
     """
     report = (yield).get_result()
+    if report.when == "call":
+        item.stash[_CALL_REPORT] = report
     # `setup` as well as `call`: a fixture that builds its subject through the
     # absent capability raises before the body runs, and an error there is the
     # same missing prerequisite reported one phase earlier.
@@ -768,7 +807,7 @@ def _isolate_state_root(tmp_path: Path):
     platform root for the rest of the test.
     """
     private = pytest.MonkeyPatch()
-    state_root = tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
+    state_root = _state_root_for(tmp_path)
     private.setenv("EXOMEM_STATE_ROOT", str(state_root))
     private.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR",

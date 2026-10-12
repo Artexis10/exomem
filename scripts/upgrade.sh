@@ -285,7 +285,7 @@ TARGET="$(exomem_resolve_target_version "$VENV_PYTHON" "$REQUIREMENT" "$BEFORE" 
 echo "  target:    ${TARGET:-unresolved}"
 
 echo "Installing $REQUIREMENT into the service venv..."
-uv pip install --upgrade --refresh-package exomem --python "$VENV_PYTHON" "$REQUIREMENT"
+uv pip install --upgrade --refresh-package exomem --python "$VENV_PYTHON" "$REQUIREMENT" --compile-bytecode
 
 # No CUDA repair here, unlike the Windows path: PyPI's Linux torch wheels are
 # already CUDA-enabled, and macOS uses Metal/MPS. The Windows-only repair exists

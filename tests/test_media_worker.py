@@ -4366,8 +4366,8 @@ def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
 # through the full SQLite owner path every 5 s, forever: 63 of 954 profile
 # samples on an idle cell. While nothing changes it now doubles from 5 s up to
 # 60 s. Any work, any store change and any in-process enqueue put it back at
-# 5 s. These tests run the supervisor on a clock 100 times faster than real
-# time, so two real seconds are 200 s of idle at the shipped intervals.
+# 5 s. The idle interval test advances its polling clock directly. Store-change
+# tests use an accelerated clock, so two real seconds represent 200 s of idle.
 
 
 def _hundredfold_clock():
@@ -4395,11 +4395,21 @@ def test_an_idle_supervisor_backs_off_its_forced_store_recheck(
     monkeypatch.setattr(
         worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
     )
-    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
-    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
+    now = 0.0
+
+    def poll(_timeout):
+        nonlocal now
+        now += 0.5
+        if now >= 200.0:
+            worker._stop_event.set()
+        return False
+
+    # This checks backoff intervals; store I/O and host scheduling do not advance its clock.
+    monkeypatch.setattr(media_worker, "_clock", lambda: now)
+    monkeypatch.setattr(worker._wake, "wait", poll)
     checks = _record_store_checks(monkeypatch, worker)
 
-    _run_supervisor_for(worker, 2.0)
+    worker._supervise()
 
     gaps = [later - earlier for earlier, later in zip(checks, checks[1:], strict=False)]
     # A fixed 5 s re-check opens the store about 40 times in 200 s of idle;

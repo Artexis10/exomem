@@ -309,6 +309,7 @@ def build_row(
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
+    activation_result: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
     committed_targets: Sequence[str] | None = None,
 ) -> dict[str, Any]:
@@ -376,6 +377,11 @@ def build_row(
         "budget": _clip_budget(budget),
         "truncated": bool(args_truncated or targets_truncated),
     }
+    from .activation_result import project_block
+
+    observation = project_block(activation_result)
+    if tool == "activate_context" and outcome != "error" and observation is not None:
+        row["activation_result"] = observation
     row["row_hash"] = row_hash(row)
     return row
 
@@ -590,6 +596,7 @@ def record_call(
     session_id: str | None = None,
     spans: list[dict[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
+    activation_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -629,6 +636,7 @@ def record_call(
                 session_id=session_id,
                 spans=spans,
                 budget=budget,
+                activation_result=activation_result,
                 committed_targets=committed_targets,
             )
             append_row(row, path=path)
