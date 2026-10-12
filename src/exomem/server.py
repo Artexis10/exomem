@@ -175,6 +175,7 @@ class CallTraceMiddleware(Middleware):
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         from .command_surface import (
+            current_activation_result,
             mcp_request_context,
             mcp_request_id,
             pop_call_spans,
@@ -314,10 +315,17 @@ class CallTraceMiddleware(Middleware):
                 # raising, so inferring the outcome from control flow alone is
                 # what recorded refusals as successes; the breadcrumb above is
                 # the only thing that can tell them apart.
+                observation = current_activation_result()
+                outcome = (
+                    "refused" if failure is not None
+                    else "abstained" if observation is not None and observation.abstained is True
+                    else "ok"
+                )
                 _record_ledger_row(
                     request_id=request_id,
                     tool=tool_name,
-                    outcome="refused" if failure is not None else "ok",
+                    outcome=outcome,
+                    activation_result=observation.result if observation is not None else None,
                     duration_ms=dur,
                     total_ms=round((time.perf_counter() - call_started) * 1000, 2),
                     error_code=failure.get("code") if failure is not None else None,
@@ -370,6 +378,7 @@ def _record_ledger_row(
     error_code: str | None,
     arguments: dict,
     spans: list[dict] | None = None,
+    activation_result: dict[str, object] | None = None,
 ) -> None:
     """Append one call-ledger row. Never raises into the call path."""
     try:
@@ -401,6 +410,7 @@ def _record_ledger_row(
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
             spans=spans,
+            activation_result=activation_result,
             budget=(
                 active_budget.as_ledger_block() if active_budget is not None else None
             ),
@@ -419,9 +429,14 @@ def _record_ledger_row(
             deep=latency_watch.deep_flag(arguments),
             total_ms=total_ms,
             spans=spans,
+            surface="mcp",
+            outcome=outcome,
+            correlated=bool(request_id and request_id != "unknown"),
         )
     except Exception:  # noqa: BLE001 - the watch must never break a call either
-        pass
+        from . import latency_watch
+
+        latency_watch.current().record_failure()
 
 
 def _translated_edit_context(context: MiddlewareContext) -> MiddlewareContext:

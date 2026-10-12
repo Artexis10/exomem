@@ -25,11 +25,11 @@ It MUST NOT migrate the governance schema. A cell runs standalone governance def
 - **THEN** custody and writer-lease files keep owner-only modes
 - **AND** the new pod serves recall that includes the write, and accepts a further governed write
 
-### Requirement: A cloud cell authenticates only its per-cell bearer as a fixed non-owner principal
+### Requirement: A cloud cell authenticates only its per-cell bearer as its configured owner
 
 A cloud cell SHALL authenticate every MCP request by comparing the presented bearer, in constant time, against `EXOMEM_CLOUD_CELL_TOKEN` or, during a rotation, `EXOMEM_CLOUD_CELL_TOKEN_PREVIOUS`, and SHALL reject any other credential.
 
-A request that authenticates SHALL carry the fixed claims `{sub: <cell_id>, iss: "exomem-cloud-cell"}`. Those claims resolve to a non-owner principal, and MUST NOT be derived from the bearer or its key version.
+A request that authenticates SHALL carry the fixed claims `{sub: <cell_id>, iss: "exomem-cloud-cell"}`. Only the concrete Cloud verifier token type SHALL resolve to the configured cell owner. Copied claims MUST remain non-owner. Identity MUST NOT depend on bearer rotation.
 
 The cell SHALL register only the MCP endpoint, `GET /health` and `GET /health/ready`. It MUST NOT register REST, upload or download routes. Health routes MUST NOT disclose vault content.
 
@@ -42,7 +42,7 @@ The cell SHALL register only the MCP endpoint, `GET /health` and `GET /health/re
 
 - **WHEN** an authenticated client performs a governed product write, and then an owner-only governance authoring operation
 - **THEN** the write commits and is recalled
-- **AND** the owner-only operation is refused with `GOVERNANCE_OWNER_REQUIRED`
+- **AND** the owner-only operation uses the configured cell owner authority
 
 #### Scenario: REST route requested
 
@@ -56,7 +56,8 @@ A cloud cell SHALL publish the standard product tool surface, minus the members 
 #### Scenario: Excluded command
 
 - **WHEN** a client lists tools on a cloud cell
-- **THEN** `transfer_artifact`, `adopt_vault`, `process_media` and `read_media` are absent
+- **THEN** `transfer_artifact`, `process_media` and `read_media` are absent
+- **AND** `adopt_vault` is present for staged import adoption
 - **AND** every other product tool, including `configure_memory` and `activate_context`, is present
 
 ### Requirement: A cloud cell can serve read-only

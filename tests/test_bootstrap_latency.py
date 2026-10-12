@@ -41,17 +41,34 @@ def test_a_healthy_service_leaves_every_profile_unchanged(
     assert "latency" not in commands.op_bootstrap(vault, profile=profile)
 
 
-def test_a_breaching_client_is_told_what_is_slow(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, watch
+@pytest.mark.parametrize("profile,section", [
+    ("compact", "all"), ("compact", "diagnostics_reading"),
+    ("full", None), ("diagnostics", None),
+])
+def test_a_breaching_client_receives_the_profiles_latency_detail(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, watch, profile: str, section: str | None
 ) -> None:
     _identity(monkeypatch, "openai-mcp/1.0.0")
     _breach(watch, "openai-mcp/1.0.0")
-    out = commands.op_bootstrap(vault, section="all")
+    out = commands.op_bootstrap(vault, profile=profile, section=section)
     [row] = out["latency"]
     assert row["tool"] == "ask_memory" and row["deep"] is False
     assert row["samples"] == 25 and row["p90_ms"] == 3000 and row["ceiling_ms"] == 1000
-    assert row["dominant_spans"][0]["name"] == "embeddings.matrix_load"
-    assert set(row) == {"tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms", "dominant_spans"}
+    assert row["p50_ms"] == 3000
+    assert row["bar_id"] == "watch-ordinary" and row["source"] == "live-ring"
+    assert row["contract_revision"] == "request-latency-v1"
+    assert "client" not in row
+    if profile == "compact":
+        assert set(row) == {
+            "tool", "deep", "samples", "p50_ms", "p90_ms", "ceiling_ms",
+            "bar_id", "contract_revision", "source",
+        }
+    else:
+        assert row["dominant_spans"] == [
+            {"name": "embeddings.matrix_load", "ms": 62_500, "calls": 25}
+        ]
+        assert row["profile"] == "rolling-recall-ordinary"
+        assert row["coverage"]["population"] == "retained"
 
 
 def test_another_clients_breach_is_not_this_clients(
@@ -71,7 +88,7 @@ def test_the_block_survives_the_session_projection(
         vault, profile="session", skill_contract=workflow_skills.skill_contract()
     )
     assert out["profile"] == "session"
-    assert out["latency"][0]["tool"] == "ask_memory"
+    assert out["latency"] == commands.op_bootstrap(vault, section="diagnostics_reading")["latency"]
 
 
 def test_the_core_carries_only_a_pointer_while_breaching_and_its_section_the_block(

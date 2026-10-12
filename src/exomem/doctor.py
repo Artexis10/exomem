@@ -3390,66 +3390,55 @@ def _check_edge_ingress_read_routing(base_url: str, config: LeaseConfig) -> Doct
 
 
 def _check_latency() -> DoctorCheck:
-    """Recall latency per tool and calling client over the trailing window, read
-    from the call ledger on disk so it sees across restarts. Warns above the
-    provisional ceilings and names the stage spans that dominate the slow calls,
-    so the finding is a diagnosis rather than a number. Reads no note content,
-    query text or path. Never touches the network."""
-    from . import call_ledger, latency_watch
+    """Independent ledger, activation-log and retained-ring latency evidence."""
+    from . import call_ledger, latency_watch, query_log
 
-    details: dict[str, object] = {
-        "window_seconds": int(latency_watch.WINDOW_SECONDS),
-        "ceilings_ms": {
-            "recall": int(latency_watch.RECALL_P90_CEILING_MS),
-            "deep_recall": int(latency_watch.DEEP_RECALL_P90_CEILING_MS),
-        },
-        "min_samples": latency_watch.MIN_SAMPLES,
-    }
-    try:
-        path = call_ledger.ledger_path()
-        archive = call_ledger.archive_dir()
-    except Exception:  # noqa: BLE001 - doctor must stay structured
-        return _check("latency", "pass", "Call ledger location unavailable; nothing to measure.", details=details)
-    details["ledger"] = str(path)
-    if not path.exists():
-        return _check("latency", "pass", "No call ledger yet; nothing to measure.", details=details)
+    details: dict[str, object] = {"contract_revision": latency_watch.contract_revision()}
     now = time.time()
+    rows = []
+    sources = {"contract": {"available": details["contract_revision"] is not None}}
+    for name, reader in (
+        ("call-ledger", lambda: latency_watch.samples_from_ledger(
+            call_ledger.ledger_path(), archive_dir=call_ledger.archive_dir(), now=now)),
+        ("activation-log", lambda: latency_watch.samples_from_activations(
+            query_log.current_log_dir() / "activations.jsonl", now=now)),
+    ):
+        try:
+            samples = reader()
+            sources[name] = samples.coverage
+            rows.extend(latency_watch.summarize(samples, now=now))
+        except Exception:  # noqa: BLE001 - doctor reports unavailable sources independently
+            sources[name] = {"failed_reads": 1, "population": "unavailable"}
+    # The process ring is a separate source, never joined to a persisted census.
     try:
-        samples = latency_watch.samples_from_ledger(path, archive_dir=archive, now=now)
-        rows = latency_watch.summarize(samples, now=now)
-    except Exception as exc:  # noqa: BLE001 - doctor must stay structured
-        details["error"] = type(exc).__name__
-        return _check("latency", "pass", "Call ledger could not be summarised.", details=details)
-    details["rows"] = rows
-    if not rows:
-        return _check("latency", "pass", "No recall calls in the window; nothing to measure yet.", details=details)
-    warnings: list[str] = []
-    for row in rows:
-        if not row["breach"]:
-            continue
-        label = f"{row['tool']}{' deep' if row['deep'] else ''} from {row['client']}"
-        dominant = ", ".join(
-            f"{span['name']} {span['ms']} ms over {span['calls']} call(s)"
-            for span in row["dominant_spans"][:3]
-        )
-        warnings.append(
-            f"{label}: p90 {row['p90_ms']} ms over the {row['ceiling_ms']} ms ceiling "
-            f"({row['samples']} calls); dominant spans: {dominant or 'none recorded'}"
-        )
-    thin = sum(1 for row in rows if row["samples"] < latency_watch.MIN_SAMPLES)
+        live = latency_watch.current()
+        rows.extend(live.verdicts(now=now))
+        sources["live-ring"] = {"population": "retained", "observation_failures": live.failures}
+    except Exception:  # noqa: BLE001 - one failed source cannot hide another
+        sources["live-ring"] = {"population": "unavailable", "observation_failures": 1}
+    details["sources"] = sources
+    # Caller identities stay internal to the watch for bootstrap isolation.
+    details["rows"] = [{key: value for key, value in row.items() if key != "client"} for row in rows]
+    warnings = [f"{row['tool']} ({row['boundary']}): p{row['percentile']:g} "
+                f"{row['percentile_ms']:g} ms breaches {row['comparison']} {row['ceiling_ms']:g} ms "
+                f"({row['samples']} known timings); dominant spans: "
+                + ", ".join(f"{span['name']} {span['ms']} ms over {span['calls']} call(s)"
+                            for span in row["dominant_spans"][:3]) for row in rows if row["breach"]]
+    incomplete = details["contract_revision"] is None or any(source.get("failed_reads") or source.get("malformed_rows")
+                     or source.get("unknown_window_rows") or source.get("observation_failures")
+                     for source in sources.values())
     if warnings:
-        return _check(
-            "latency",
-            "warn",
-            "; ".join(warnings),
-            "Read the dominant spans first: they name the stage that regressed. "
-            "`exomem logs --file ledger` has the rows; docs/observability.md explains each span.",
-            details=details,
-        )
-    message = "Recall latency is under its ceilings."
-    if thin:
-        message += f" {thin} tool/client pair(s) have fewer than {latency_watch.MIN_SAMPLES} calls in the window."
-    return _check("latency", "pass", message, details=details)
+        return _check("latency", "warn", "; ".join(warnings),
+                      "Read the independent source coverage and dominant spans in docs/observability.md.",
+                      details=details)
+    message = "No observed latency breach; acceptance is not measured."
+    if not rows:
+        message = "No known latency samples; nothing to measure."
+    elif any(row["verdict"] == "insufficient" for row in rows):
+        message += " Some populations have insufficient samples."
+    if incomplete:
+        message += " Source coverage is incomplete or unavailable."
+    return _check("latency", "warn" if incomplete else "pass", message, details=details)
 
 
 def _check_observability() -> DoctorCheck:

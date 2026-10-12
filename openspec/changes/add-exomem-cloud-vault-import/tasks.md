@@ -11,7 +11,7 @@
 ## 2. Cell-side import commands and adoption (D2, D6, D7, D8)
 
 - [ ] 2.1 Add a cell command that mints the import identity under `/data/.import-keys/<id>/` (mode `0600`) and writes only the public recipient to the termination message. Verify: unit tests for file mode, for the recipient format, for the path being outside the backup paths, and for no identity bytes in stdout, stderr or the message.
-- [ ] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<date>-<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
+- [ ] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
 - [ ] 2.3 Remove `adopt_vault` from `CLOUD_SURFACE_EXCLUSIONS`, reword `transfer_artifact`'s lifting condition so the batch import path does not meet it, and amend the tool-surface scenario in the active change `adopt-exomem-cloud-plain-cells`, coordinating with whichever change archives first. Verify: the tool-surface tests show `adopt_vault` present on cells, and OpenSpec strict validation passes.
 - [ ] 2.4 Add a cell command that discards an import: its identity, its staging directory, or a staged `_Imports/` folder, permanently. Verify: tests that each is gone, not in trash, and that nothing outside the named import is touched.
 - [ ] 2.5 Confirm the import commands' logs are content-free. Verify: the content-free logging tests cover every command, with a canary member name that must not appear.
@@ -27,7 +27,7 @@
   - `cancelled`, `discard_requested` and expiry → hold → discard Job.
 
   Verify: reconcile tests against a disposable Postgres with the fake object store, including a restart mid-import that resumes the hold, a hold past its deadline, and a routine convergence pass that must not clear an import hold.
-- [ ] 3.4 Implement cleanup on every terminal state: delete the ciphertext versions, abort the multipart upload, clear the part URLs. Add a B2 lifecycle rule on the `cells/` prefix that sets only `daysFromStartingToCancelingUnfinishedLargeFiles`. B2 rules match a literal prefix, so the rule cannot name `imports/` alone, and it also clears restic's abandoned uploads. Verify: tests that no object, upload or identity remains after `done`, `failed`, `cancelled` and `expired`.
+- [ ] 3.4 Record cleanup_running before local cleanup and cleanup_stopping for keep-adoption cleanup or cleanup_discard_stopping for full discard before removing completion Jobs. Rearm full discard under the C1 and C5 locks when newer intent follows ordinary cleanup. Delete ciphertext versions, abort multipart uploads, and clear upload URLs. Wait for all phase Jobs and Pods, then publish current intent and release C1 atomically. Add a B2 lifecycle rule on the `cells/` prefix that sets only `daysFromStartingToCancelingUnfinishedLargeFiles`. B2 rules match a literal prefix, so the rule cannot name `imports/` alone, and it also clears restic's abandoned uploads. Verify: tests that no object, upload or identity remains after `done`, `failed`, `cancelled` and `expired`.
 - [ ] 3.5 Extend the live-K3s suite with an import: prepare, upload with presigned URLs, complete with the reported ETags, then import into a running cell. Also cover a refused archive, a wrong-key archive and a substituted part. Verify: the scenario passes in the live job, and the vault is unchanged after each refusal.
 - [ ] 3.6 Add a CORS rule on the Cloud bucket for the web app's origin: `PUT`, with `ETag` exposed. Verify: against B2 itself, with a disposable prefix, a preflight and a part upload from the origin succeed and one from another origin is refused.
 
@@ -36,3 +36,37 @@
 - [ ] 4.1 Open the Substrate change for C5 and the C1 `hold_kind` value: migrations and grants, a "Bring your notes" flow that tars and age-encrypts a chosen folder in the browser, uploads it in parts and reports the ETags and digest, import status on the Cloud home page, and a discard action. Verify: the Substrate change is merged and deployed, and its tests cover encryption round-trips, resumable parts and the reported ETags.
 - [ ] 4.2 Add `exomem cloud import <folder>` for technical tenants, on the same C5 flow. Verify: an end-to-end run against a rehearsal cell imports a folder into `_Imports/`.
 - [ ] 4.3 Import a friend-sized vault end to end in production with the owner's account, then adopt it through Adoption Studio and discard the staged folder. Verify: files are staged, adoption proposals appear, a filed note carries provenance to its original path, and nothing is left behind.
+
+## Implementation evidence (2026-10-11, pending integrated review)
+
+The source implements concrete Cloud owner binding, its persisted-job recheck,
+the protected encrypted envelope, private receipts, age commands, C5 controller
+Jobs and multipart transport, and a resumable OAuth CLI. Scoped tests exercise
+real age, protected member recovery, ciphertext substitution, exact multipart
+reports, cancellation precedence and disposable PostgreSQL split grants.
+
+The built Cloud image passed a real age roundtrip with networking disabled.
+Disposable PostgreSQL tests cover cleanup failure, controller restart, service
+recovery, bounded retry and eventual cleanup. The real-K3s rehearsal passed an
+accepted encrypted import into a running cell. A retained cleanup Pod kept
+admission occupied and the runtime paused until every phase Job and Pod was
+gone. Source hashes matched, and the identity, ciphertext and staging files
+were absent after cleanup.
+
+The CLI passed a trusted-TLS rehearsal with a synthetic OAuth server and PKCE.
+Independent K3s rehearsals also refused an unsafe member after a valid member,
+a wrong recipient, and a substituted ciphertext part. Each refusal preserved
+the complete canonical vault manifest and removed temporary import resources.
+The readiness correction passed a fresh accepted import. C1 reported running
+and ready after key preparation and after the presigned ciphertext upload.
+The controller kept admission occupied until all phase Jobs and Pods disappeared.
+
+The maintained live suite now runs the accepted import and all three refusals
+through one workflow. All four cases passed against the reviewed controller
+and built Cloud image. Each refusal kept all 77 canonical vault entries
+unchanged through cleanup and restart. Task 3.5 awaits the integrated merge.
+Production OAuth registration, bucket lifecycle/CORS and production rollout
+also remain open. The one-node local storage rehearsal does not prove multi-node
+storage behavior, large multipart uploads or production bucket restrictions.
+The owner restore was previously performed; unchecked historical tasks do not
+authorize repeating it.

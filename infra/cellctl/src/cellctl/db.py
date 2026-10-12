@@ -308,3 +308,77 @@ async def write_capacity_snapshot(
             await write_capacity(connection, node=node, cell_slots=capacity.cell_slots,
                                  attachments_used=capacity.attachments_used, observed_at=observed_at)
         await zero_absent_capacity(connection, present_nodes=list(capacities), observed_at=observed_at)
+
+
+async def read_import(connection: asyncpg.Connection, cell_id: str):
+    from .imports import ImportRow
+
+    # Migration 0061 fixes the open predicate; terminal history only repairs an orphan C1 hold.
+    record = await connection.fetchrow(
+        "SELECT * FROM (SELECT i.*, (observed_state IS NULL OR "
+        "observed_state IN ('key_ready','importing','cleanup_running','cleanup_stopping','cleanup_discard_stopping','cleanup_pending') OR "
+        "(requested_state='discard_requested' AND observed_state IS DISTINCT FROM 'discarded')) AS is_open "
+        "FROM exomem_cloud_imports i WHERE cell_id=$1) requests WHERE is_open OR "
+        "EXISTS (SELECT 1 FROM exomem_cloud_cells c WHERE c.cell_id=$1 AND c.hold_kind='import') "
+        "ORDER BY is_open DESC, created_at DESC, import_id DESC LIMIT 1", cell_id,
+    )
+    if record is None:
+        return None
+    fields = {name: record[name] for name in ImportRow.__dataclass_fields__}
+    fields["import_id"] = str(fields["import_id"])
+    for name in ("part_etags", "part_urls"):
+        if isinstance(fields[name], str):
+            fields[name] = json.loads(fields[name])
+    return ImportRow(**fields)
+
+
+async def write_import(connection: asyncpg.Connection, import_id: str, updates: dict) -> None:
+    import uuid
+
+    # C5 column grants fix this controller-owned subset.
+    allowed = {"recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state", "error_code"}
+    if not updates:
+        return
+    if set(updates) - allowed:
+        raise ValueError("not an import observation column")
+    values = {name: json.dumps(value) if name == "part_urls" and value is not None else value
+              for name, value in updates.items()}
+    assignments, parameters = _assignments(values, start=2)
+    await connection.execute(f"UPDATE exomem_cloud_imports SET {assignments} WHERE import_id=$1",
+                             uuid.UUID(import_id), *parameters)
+
+
+async def finalize_import(connection: asyncpg.Connection, cell_id: str, import_id: str) -> CellRow | None:
+    """Publish cleanup completion and release admission under the API's C1-first row lock."""
+    import uuid
+
+    async with connection.transaction():
+        record = await connection.fetchrow(
+            f"SELECT {', '.join(CELL_COLUMNS)} FROM exomem_cloud_cells WHERE cell_id=$1 FOR UPDATE", cell_id,
+        )
+        if record is None or record["desired_state"] == "deleted" or record["hold_kind"] not in (None, "import"):
+            return None
+        item = await connection.fetchrow(
+            "SELECT requested_state, observed_state, error_code FROM exomem_cloud_imports "
+            "WHERE cell_id=$1 AND import_id=$2 FOR UPDATE", cell_id, uuid.UUID(import_id),
+        )
+        # C5 fixes these stopping observations as proof of a completed cleanup phase.
+        if item is None or item["observed_state"] not in ("cleanup_stopping", "cleanup_discard_stopping"):
+            return None
+        # Keep-adoption completion cannot acknowledge newer full-discard intent.
+        if item["observed_state"] == "cleanup_stopping" and item["requested_state"] in ("cancelled", "discard_requested"):
+            await write_import(connection, import_id, {"observed_state": "cleanup_running"})
+            started_at = await connection.fetchval("SELECT clock_timestamp()")
+            await write_observed(connection, cell_id, {"hold_kind": "import", "hold_started_at": started_at})
+            return None
+        # C5 fixes intent, expiry codes and terminal observations.
+        if item["requested_state"] in ("cancelled", "discard_requested"):
+            terminal = "discarded"
+        elif item["error_code"] in ("IMPORT_EXPIRED", "IMPORT_HOLD_EXPIRED"):
+            terminal = "expired"
+        else:
+            terminal = "failed" if item["error_code"] else "done"
+        await write_import(connection, import_id, {"observed_state": terminal})
+        await write_observed(connection, cell_id, {"hold_kind": None, "hold_started_at": None,
+                                                  "last_error_code": None})
+        return _row_from_record(record)

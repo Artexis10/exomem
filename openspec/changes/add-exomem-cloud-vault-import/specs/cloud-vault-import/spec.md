@@ -131,7 +131,7 @@ While a restore's prior directory exists, a cell SHALL NOT start on an empty vau
 
 ### Requirement: Imports fail safe and leave nothing behind
 
-A failed import SHALL leave the vault as it was before the import. When an import ends, the archive object, any unfinished upload and the import's identity SHALL be deleted. The tenant SHALL see the import's state and, on failure, its typed error, with no content in either.
+A failed import SHALL leave existing canonical content intact. Interrupted member preservation MAY leave unreferenced RAW-protected blobs. When an import ends, the archive object, any unfinished upload and the import's identity SHALL be deleted. The tenant SHALL see the import's state and, on failure, its typed error, with no content in either.
 
 Import logs SHALL be content-free: counts, sizes, durations and error codes only, never member names or paths.
 
@@ -139,3 +139,56 @@ Import logs SHALL be content-free: counts, sizes, durations and error codes only
 
 - **WHEN** unpacking fails after some members were written to staging
 - **THEN** the staging folder is removed, existing notes are untouched, and the archive object and identity are deleted
+
+### Requirement: Protected ZIP imports preserve members without readable staging
+
+An `archive_members` import SHALL use the versioned encrypted envelope defined
+in the design. It SHALL carry filing intent only inside ciphertext. The cell
+SHALL validate the complete ciphertext, tar and decryptor before preserving ZIP
+members with RAW protection. It SHALL prove the committed manifest and blobs
+before recording private completion and permitting ciphertext cleanup.
+
+#### Scenario: A protected import restarts after its manifest commits
+
+- **WHEN** a Job stops after committing the protected manifest but before its receipt
+- **THEN** replay reuses member deduplication and reconstructs the private receipt
+- **AND** the public result contains only counts and state
+
+#### Scenario: A copied store carries an old Cloud owner job
+
+- **WHEN** a collection import resumes under another cell ID or disabled Cloud mode
+- **THEN** the current binding check pauses it before another row commits
+
+#### Scenario: A user discards a completed protected upload
+
+- **WHEN** discard removes transport material for a committed protected import
+- **THEN** the protected manifest and member blobs remain governed sources
+
+### Requirement: Cleanup completion preserves exclusive admission and current intent
+
+The controller SHALL record `cleanup_running`, the original work outcome and cleared upload URLs before removing private keys. It SHALL retry only idempotent local and transport cleanup from that state. It SHALL record `cleanup_stopping` after keep-adoption cleanup or `cleanup_discard_stopping` after full discard and transport cleanup. The completed Job phase SHALL determine that observation before Job removal. `cleanup_running`, `cleanup_stopping`, `cleanup_discard_stopping`, and `cleanup_pending` SHALL occupy the cell's open import slot.
+
+The controller SHALL publish the terminal outcome only after every import phase Job controller and Pod is absent. It SHALL lock C1 and C5 in API admission order, read current requested intent and lifecycle state, and publish the outcome with C1 hold release atomically. A new import SHALL use its current recorded C1 hold or a fresh deadline, never a predecessor's StatefulSet deadline.
+
+#### Scenario: Completed cleanup restarts while Kubernetes removes Pods
+
+- **WHEN** the controller restarts after recording a stopping observation and a terminating or orphan import Pod remains
+- **THEN** it keeps the hold and open slot, removes remaining Jobs, and never replays prepare or import
+
+#### Scenario: Cancellation arrives after the controller reads completion
+
+- **WHEN** cancellation commits after the controller reads `cleanup_stopping` but before terminal publication
+- **THEN** the transaction reads current state and intent and rearms `cleanup_running` with a fresh bounded C1 hold
+- **AND** full discard removes adoption material before `cleanup_discard_stopping` can publish `discarded`
+- **AND** final publication releases C1 in the same transaction and preserves current lifecycle state
+
+#### Scenario: Publication stops before hold release
+
+- **WHEN** the terminal transaction fails before clearing C1
+- **THEN** both terminal publication and hold release roll back and the open slot remains occupied
+
+#### Scenario: Full discard restarts after identity removal
+
+- **WHEN** a full discard restarts after removing the import identity and before recording completion
+- **THEN** it idempotently removes remaining adoption material without preparing or importing again
+- **AND** `cleanup_discard_stopping` waits for all phase Jobs and Pods before releasing admission

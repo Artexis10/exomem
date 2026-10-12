@@ -44,6 +44,7 @@ from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSc
 from typing_extensions import TypedDict
 
 from . import activation_conventions as activation_conventions_module
+from . import activation_result as activation_result_module
 from . import add as add_module
 from . import adopt as adopt_module
 from . import adoption_proposals as adoption_proposals_module
@@ -2333,11 +2334,10 @@ def op_bootstrap(
         core_payload = None
     else:
         core_payload = bootstrap_core_module.project_core(compact_payload)
-    # The calling client's own recall-latency breaches. The core carries only a pointer
-    # (the figures are bounded only by how many tools breach, and no turn needs them);
-    # they ride in the reference payload, so `diagnostics_reading` serves them and a session
-    # client, which has no other way to hear that its recalls went slow, gets them too.
-    latency_block = _bootstrap_latency_block()
+    # Compact sections and session carry the calling client's retained-ring advisory;
+    # the core carries only a pointer. The bootstrap contract fixes the full-detail
+    # profiles below; session already normalizes to compact.
+    latency_block = _bootstrap_latency_block(full=profile in ("full", "diagnostics"))
     if latency_block is not None and core_payload is not None:
         compact_payload = {**compact_payload, "latency": latency_block}
         # The core carries the fact, not the figures: a client that has gone slow
@@ -2358,8 +2358,8 @@ def op_bootstrap(
     else:
         result = core_payload if core_payload is not None else compact_payload
     # A surface that serves no core (a released hosted profile, `full`, `diagnostics`)
-    # keeps today's shape: absent when healthy, appended after the projection so the
-    # session whitelist cannot drop it.
+    # appends the selected latency detail after projection so the session whitelist
+    # cannot drop it. Healthy profiles omit the block.
     if latency_block is not None and core_payload is None:
         result["latency"] = latency_block
     # A delivery is recording what was handed over. Without it the first recall of the
@@ -2375,13 +2375,13 @@ def op_bootstrap(
     return result
 
 
-def _bootstrap_latency_block() -> list[dict] | None:
+def _bootstrap_latency_block(*, full: bool = False) -> list[dict] | None:
     """The calling client's recall-latency breaches, from the in-process watch only."""
     try:
         from . import latency_watch
         from .command_surface import mcp_caller_identity
 
-        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"))
+        return latency_watch.bootstrap_block(mcp_caller_identity().get("client_name"), full=full)
     except Exception:  # noqa: BLE001 — a watch failure never breaks a bootstrap
         return None
 
@@ -6582,20 +6582,27 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     started = time.perf_counter()
-    bounded = working_set_conversation_module.bound(conversation)
-    # A foreground request: in-process bulk passes (a whole-vault graph
-    # rebuild) pause at their next unit while this runs, instead of taking the
-    # GIL back after every SQLite call the request makes (5-15x per stage,
-    # measured). Activation is read-only and never waits on bulk work.
-    with state_paths_module.resolution_scope(), foreground_priority.foreground():
-        bound_token = None
-        if readiness_module.runtime_managed() and request_budget_module.current() is None:
-            bound_token = request_budget_module.set_current(
-                request_budget_module.RequestBudget(
-                    seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+    bounded = None
+    # The maintained collector also feeds host-local observations. Payloads remain opt-in.
+    observation_timings = find_types.FindTimings()
+    packet = None
+    outcome = None
+    error_code = None
+    # Finalization and logging share the leaf's budget, including error paths.
+    bound_token = None
+    try:
+        bounded = working_set_conversation_module.bound(conversation)
+        # A foreground request: in-process bulk passes (a whole-vault graph
+        # rebuild) pause at their next unit while this runs, instead of taking the
+        # GIL back after every SQLite call the request makes (5-15x per stage,
+        # measured). Activation is read-only and never waits on bulk work.
+        with state_paths_module.resolution_scope(), foreground_priority.foreground():
+            if readiness_module.runtime_managed() and request_budget_module.current() is None:
+                bound_token = request_budget_module.set_current(
+                    request_budget_module.RequestBudget(
+                        seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                    )
                 )
-            )
-        try:
             packet = _op_activate_context_body(
                 vault_root,
                 turn,
@@ -6608,6 +6615,7 @@ def op_activate_context(
                 session=session,
                 workspace=workspace,
                 conversation=bounded,
+                observation_timings=observation_timings,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6618,36 +6626,30 @@ def op_activate_context(
             upkeep_module.for_packet(vault_root, packet, session=session)
             # Also outside the cache: each resolved anchor page's sensed status.
             sensed_model.for_packet(vault_root, packet)
-        except Exception as error:
+        _carry_thread_through_abstention(packet, continuity)
+        _withhold_vault_generation(vault_root, packet)
+        # Every packet reports how its conversation was bounded; the compiler has
+        # already said `absent` when it skipped the stage for the request's budget.
+        if isinstance(packet.get("generation"), dict):
+            packet["generation"].setdefault("conversation", bounded.state)
+        return packet
+    except Exception as error:
+        outcome = "refused" if isinstance(error, ValueError) else "error"
+        error_code = type(error).__name__
+        raise
+    finally:
+        try:
             query_log.log_activation_call(
-                vault_root,
-                packet=None,
-                client=client,
-                session=session,
-                outcome="refused" if isinstance(error, ValueError) else "error",
-                error_code=type(error).__name__,
+                vault_root, packet=packet, client=client, session=session,
+                outcome=outcome, error_code=error_code,
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
-                conversation=bounded.counts,
+                conversation=bounded.counts if bounded is not None else None,
+                spans=[{"name": name, "ms": stage["ms"]}
+                       for name, stage in observation_timings.stages.items() if "ms" in stage],
             )
-            raise
         finally:
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
-    _carry_thread_through_abstention(packet, continuity)
-    _withhold_vault_generation(vault_root, packet)
-    # Every packet reports how its conversation was bounded; the compiler has
-    # already said `absent` when it skipped the stage for the request's budget.
-    if isinstance(packet.get("generation"), dict):
-        packet["generation"].setdefault("conversation", bounded.state)
-    query_log.log_activation_call(
-        vault_root,
-        packet=packet,
-        client=client,
-        session=session,
-        duration_ms=round((time.perf_counter() - started) * 1000, 3),
-        conversation=bounded.counts,
-    )
-    return packet
 
 
 #: Abstentions that say something about this server rather than the turn:
@@ -6711,12 +6713,13 @@ def _op_activate_context_body(
     session: str | None = None,
     workspace: str | None = None,
     conversation: working_set_conversation_module.Conversation | None = None,
+    observation_timings: find_types.FindTimings | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
     has to wrap this function's many early returns."""
-    timings = find_types.FindTimings() if include_timings else None
+    timings = observation_timings or (find_types.FindTimings() if include_timings else None)
     budget = working_set_module.clamp_budget(max_chars)
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
@@ -6764,7 +6767,7 @@ def _op_activate_context_body(
             max_chars=budget,
             generation=generation_stub if generation is None else generation,
         )
-        if timings is not None:
+        if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
         if budget_caused:
             active_budget = request_budget_module.current()
@@ -6791,11 +6794,11 @@ def _op_activate_context_body(
         return packet
 
     if not turn.strip():
-        return _abstain("unresolved")
+        return _abstain(activation_result_module.UNRESOLVED)
     if working_set_index_module.disabled():
         # The tool stays on the surface under the kill switch so the published
         # tool-surface digest is independent of the environment; it just abstains.
-        return _abstain("disabled")
+        return _abstain(activation_result_module.DISABLED)
 
     # The request budget is checked before EVERY stage below, not only here:
     # `working_set_module.budget_exhausted(stage)` is the one shared helper,
@@ -6998,7 +7001,7 @@ def _op_activate_context_body(
             )
     except Exception:  # noqa: BLE001 - the release plane failing means abstain, not serve
         log.warning("activation release plane unavailable; abstaining", exc_info=True)
-        return _abstain("unavailable")
+        return _abstain(activation_result_module.UNAVAILABLE)
     # An `anchor` naming no row of THIS index but an eligible agent-picked
     # page (design close-memory-loop, U7) is decided on the release plane
     # HERE, before the compile that page would otherwise buy nothing for: a
@@ -7091,7 +7094,7 @@ def _op_activate_context_body(
     # and deliberately NOT for the server's own abstentions (`index_warming`,
     # `disabled`, `unavailable`), which say something about this server rather
     # than about the ref the caller passed.
-    if anchor and _abstention_reason(packet) == "unresolved":
+    if anchor and _abstention_reason(packet) == activation_result_module.UNRESOLVED:
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     # Only gated when `packet` actually carries content: an already-abstained
     # packet (e.g. `compile_packet` gave up at an earlier budget boundary)
@@ -7113,7 +7116,7 @@ def _op_activate_context_body(
             guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
     except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
         log.warning("activation egress guard failed; abstaining", exc_info=True)
-        return _abstain("unavailable", generation=packet.get("generation") or generation_stub)
+        return _abstain(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or generation_stub)
     # The release plane's own decision, reused rather than re-derived: the
     # override anchor was the packet's ONLY anchor, so the guard emptying the
     # packet IS the answer to "may this audience see that ref".
@@ -7133,12 +7136,12 @@ def _op_activate_context_body(
     # The guard answers an L0 anchor as `unresolved` and a notice-level one as
     # `withheld`; either way the override's one anchor is gone.
     if anchor and (
-        guarded is None or _abstention_reason(guarded) in {"withheld", "unresolved"}
+        guarded is None or _abstention_reason(guarded) in {activation_result_module.WITHHELD, activation_result_module.UNRESOLVED}
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
         return _abstain(
-            "withheld",
+            activation_result_module.WITHHELD,
             generation=packet.get("generation") or generation_stub,
             carry_thread=False,
         )
@@ -7233,7 +7236,7 @@ def _op_activate_context_body(
     episode_due = episode_nudge_module.on_activation(vault_root)
     if episode_due is not None:
         packet["episode_due"] = episode_due
-    if timings is not None:
+    if include_timings and timings is not None:
         packet["timings"] = timings.as_dict()
     # Deliberately NOT `_with_due_state`. That helper consults the emission
     # ledger and marks it emitted, so an activation carrying the block would eat
@@ -13469,18 +13472,8 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
                     "(design Non-Goals)."
                 ),
                 lifted_when=(
-                    "a browser transfer or artifact-upload path is added to "
-                    "Exomem Cloud"
+                    "a live artifact-upload bridge is added for running Cloud cells"
                 ),
-            ),
-            HostedSurfaceExclusion(
-                command="adopt_vault",
-                reason=(
-                    "There is no upload-then-adopt staging flow for Exomem "
-                    "Cloud cells; a self-serve export/import UI is out of scope "
-                    "for Exomem Cloud (design Non-Goals)."
-                ),
-                lifted_when="an upload/import path is added to Exomem Cloud",
             ),
             HostedSurfaceExclusion(
                 command="process_media",

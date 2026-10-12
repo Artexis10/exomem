@@ -419,6 +419,21 @@ class _UnboundedJoinVisitor(ast.NodeVisitor):
 # These declarations stay test-local and name the owning bound or lifetime.
 _DECLARED_UNBOUNDED_JOINS = {
     (
+        "cloud_import_client.py",
+        "_ciphertext",
+        "process.wait",
+    ): "CLI-owned archive encryption and killed-child reaping, outside request serving",
+    (
+        "cloud_import_job.py",
+        "run_import",
+        "worker.join",
+    ): "stopped-cell import feed; the controller supplies the Job's activeDeadlineSeconds",
+    (
+        "cloud_import_job.py",
+        "run_import",
+        "process.wait",
+    ): "stopped-cell decryptor and killed-child reaping under the Job's activeDeadlineSeconds",
+    (
         "media_worker.py",
         "MediaWorker.join",
         "self._q.join",
