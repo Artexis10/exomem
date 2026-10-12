@@ -14,6 +14,36 @@ from cloud_rehearsal import build, platform, report, substrate, tls
 from cloud_rehearsal.mcp_client import _HiddenInputs
 
 
+@pytest.mark.parametrize("enveloped", [False, True])
+def test_cited_recall_records_valid_hit_list_and_envelope(enveloped) -> None:
+    """A valid recall reply must not crash before the rehearsal records its citation."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from cloud_rehearsal import scenarios
+    from cloud_rehearsal.mcp_client import ToolResult
+
+    path = "Knowledge Base/Sources/Survey observation.md"
+    hits = [{"path": path, "type": "source", "scope": "private", "title": "Recorded survey",
+             "updated": "2026-01-01", "excerpt": "preserved observation"}]
+    payload = {"hits": hits, "warming": {"components": []}} if enveloped else hits
+
+    async def recall(*_args):
+        return ToolResult(structured={"result": payload}, is_error=False, seconds=0.1)
+
+    @asynccontextmanager
+    async def mcp():
+        yield SimpleNamespace(call=recall)
+
+    run = report.Report(run_id="recall-shape")
+    ctx = SimpleNamespace(a=SimpleNamespace(client=SimpleNamespace(mcp=mcp), phrase="preserved observation"), report=run)
+    record = report.StepRecord(number=5, name="paraphrased_cited_recall")
+    asyncio.run(scenarios.step_5_cited_recall(ctx, record))
+    assert record.evidence["cites_the_capture"] is True
+    assert record.evidence["cited_paths"] == [path]
+
+
 def test_upgrade_gate_excludes_pre_release_diagnostics(monkeypatch) -> None:
     """Slow log collection must not falsely fail a timely cell upgrade."""
     import asyncio
