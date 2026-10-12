@@ -723,7 +723,7 @@ exomem_sync_uv_cli() {
         fi
     done
     local status=0
-    uv tool install --force "exomem==$service_version" || status=$?
+    uv tool install --force "exomem==$service_version" --compile-bytecode || status=$?
     for name in exomem kb; do
         if [[ -f "$saved/$name" ]]; then
             rm -f "$bin_dir/$name"

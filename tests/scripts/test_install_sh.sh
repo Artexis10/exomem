@@ -110,7 +110,7 @@ grep -q '^CURL ' "$MOCK_LOG" \
     || fail "expected install.sh to invoke curl to fetch the uv installer when uv is missing. Log:
 $(cat "$MOCK_LOG")"
 
-grep -q '^UV tool install exomem$' "$MOCK_LOG" \
+grep -q '^UV tool install exomem\( \|$\)' "$MOCK_LOG" \
     || fail "expected install.sh to run 'uv tool install exomem'. Log:
 $(cat "$MOCK_LOG")"
 
@@ -157,7 +157,7 @@ if grep -q '^CURL ' "$MOCK_LOG"; then
 $(cat "$MOCK_LOG")"
 fi
 
-grep -q '^UV tool install exomem$' "$MOCK_LOG" \
+grep -q '^UV tool install exomem\( \|$\)' "$MOCK_LOG" \
     || fail "expected install.sh to still run 'uv tool install exomem' on a re-run. Log:
 $(cat "$MOCK_LOG")"
 
