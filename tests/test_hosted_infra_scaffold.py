@@ -17,15 +17,12 @@ def test_hosted_infrastructure_surfaces_and_ownership_are_explicit() -> None:
         "terraform/bootstrap",
         "ansible",
         "helm/platform",
-        "helm/cell",
-        "provisioner",
         "scripts",
     )
     for relative in required:
         path = INFRA / relative
         assert path.is_dir(), relative
         assert (path / "OWNERSHIP.md").is_file(), relative
-    assert (ROOT / "docs/runbooks/hosted/README.md").is_file()
 
 
 def test_tool_versions_are_exact_and_required_provider_versions_are_exact() -> None:

@@ -17,18 +17,11 @@ import os
 import pathlib
 import tempfile
 
-from exomem import capabilities, commands, prominence
+from exomem import commands, prominence
 
 LEVELS = tuple(prominence.CANON)
-#: name -> (EXOMEM_SURFACE value or None, hosted profile or None)
-SURFACES = {
-    "default": (None, None),
-    "claude-code": ("claude-code", None),
-    "hosted-v1": (None, "hosted-alpha-agent-v1"),
-    "hosted-v3": (None, "hosted-alpha-agent-v3"),
-    "hosted-v4": (None, "hosted-alpha-agent-v4"),
-    "hosted-v5": (None, "hosted-alpha-agent-v5"),
-}
+#: The current public bootstrap surfaces.
+SURFACES = {"default": None, "claude-code": "claude-code"}
 
 
 def size(value: object) -> int:
@@ -36,24 +29,15 @@ def size(value: object) -> int:
 
 
 def payload(level: str, surface: str, profile: str = "compact") -> dict:
-    env, hosted = SURFACES[surface]
+    env = SURFACES[surface]
     os.environ["EXOMEM_PROMINENCE"] = level
     if env:
         os.environ["EXOMEM_SURFACE"] = env
     else:
         os.environ.pop("EXOMEM_SURFACE", None)
-    root = pathlib.Path(tempfile.mkdtemp())
-    (root / "Knowledge Base").mkdir()
-    if hosted is None:
-        return commands.op_bootstrap(root, profile=profile)
-    registry = commands.product_commands_for_profile(hosted, "rest")
-    descriptor = capabilities.ActiveSurfaceDescriptor(
-        surface="hosted-agent",
-        profile=hosted,
-        tier2_enabled=commands.PRODUCT_SURFACE_PROFILES[hosted].expose_tier2,
-        product_commands=tuple(command.name for command in registry),
-    )
-    with capabilities.active_surface(descriptor):
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        (root / "Knowledge Base").mkdir()
         return commands.op_bootstrap(root, profile=profile)
 
 

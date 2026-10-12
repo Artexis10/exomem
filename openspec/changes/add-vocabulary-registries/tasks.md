@@ -22,11 +22,11 @@ Delivered in [PR #1623](https://github.com/Artexis10/exomem/pull/1623), merge `e
 - [x] 1.5 Make `entity_types`, `relation_registry`, `source_taxonomy` and `semantic_language_registry` read through the loader, keeping their public APIs.
 - [x] 1.6 Commit every registry save and restore through `registry_history.commit`, with the principal hash in the snapshot header; seal the snapshot and log entry as derived auxiliaries for the v2 writer gate.
 - [x] 1.7 Add `inspect`, `propose`, `save`, `history` and `restore` to `schema_memory` for the five subjects; keep the old operation names; change the tool description once; classify `propose` in the egress selector table.
-- [x] 1.8 Separate existing owner/write authority from aggregate disclosure: v1 owner saves apply, resolved nonowner saves use the existing queue, and activated v2 retains its writer gate. Prove hosted RAW exemption and absent context grant no owner write authority; counts, reasons and private-dependent operations follow content admission.
+- [x] 1.8 Separate existing owner/write authority from aggregate disclosure: v1 owner saves apply, resolved nonowner saves use the existing queue, and activated v2 retains its writer gate. Prove a remote nonowner and absent context grant no owner write authority; counts, reasons and private-dependent operations follow content admission.
 - [x] 1.9 Serve usage counts from the graph snapshot and the lexical catalogue, `unavailable` when cold; replace the bootstrap `entities` section with `vocabulary` and the core entity-type list with a pointer.
 - [x] 1.10 Invalidate the registry cache from the `_Schema/` watcher event.
 - [x] 1.11 Add the repository rule to `CLAUDE.md`.
-- [x] 1.12 Regenerate the skill contract, plugins, tool schemas, hosted candidate, cloud plugin and capability docs; run the registry, schema_memory, bootstrap, egress, contract and carrier gates, ruff, mypy, OpenSpec strict and the privacy gate.
+- [x] 1.12 Regenerate the skill contract, plugins, tool schemas, Cloud plugin and capability docs; run the registry, schema_memory, bootstrap, egress, contract and carrier gates, ruff, mypy, OpenSpec strict and the privacy gate.
 
 ## S2. Skills
 
@@ -51,7 +51,7 @@ Tasks 1.1 to 1.13 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 
 Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4b, including the type-key debt that S4a defers.
 
-- [ ] 4.2 Move `folder`, `partition`, `stem`, `required_fields`, `statuses`, typed fields, `sections`, `claim_sections`, `sources` and `time_bounded` into the registry for `note.py`, `create_file`, `indexes`, `adoption_proposals`, `hosted_plugins` and `commands`.
+- [ ] 4.2 Move `folder`, `partition`, `stem`, `required_fields`, `statuses`, typed fields, `sections`, `claim_sections`, `sources` and `time_bounded` into the registry for `note.py`, `create_file`, `indexes`, `adoption_proposals`, `cloud_plugins` and `commands`.
 - [ ] 4.3 Proof: promote `meeting-note` under `insight`; `note()` lands it in `Notes/Meetings` with compiled behaviour; `restore` removes it. Run the full suite at the completion boundary.
 
 ## S5. Entity, relation and source attributes (after the retire-Other slice)

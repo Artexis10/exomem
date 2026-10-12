@@ -981,26 +981,6 @@ def _staged(tmp_path: Path, file_id: str, filename: str, payload: bytes):  # noq
     )
 
 
-@pytest.mark.parametrize("adoption", [None, {"key": "raw-retry", "trigger": "selected", "selected_file_id": "raw-file"}], ids=["batch", "adoption"])
-@pytest.mark.parametrize("marker", [False, True], ids=["raw-option", "raw-filename"])
-def test_hosted_raw_attachment_retry_cannot_return_a_stored_receipt(vault, tmp_path, monkeypatch, adoption, marker):
-    from exomem import client_artifacts
-    from exomem.governance import principal, raw_protection
-
-    filename = (raw_protection.PREFIX if marker else "") + "original.bin"
-    monkeypatch.setattr(client_artifacts, "stage_artifact", lambda file, _budget, **_kwargs: _staged(
-        tmp_path, file["file_id"], filename, b"exact protected bytes",
-    ))
-    arguments = dict(scope="Test", category="raw", adoption=adoption, raw_protection=not marker,
-                     files=[{"file_id": "raw-file", "download_url": "https://files.example/raw"}])
-    saved = commands.op_preserve_artifacts(vault, **arguments)
-    assert saved["files"][0]["outcome"] == "stored", saved
-    before = {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()}
-    with principal.request_scope(principal.resolve_hosted_principal("A" * 43)):
-        retry = commands.op_preserve_artifacts(vault, **arguments)
-    assert retry["files"][0]["outcome"] == "failed", retry
-    assert retry["files"][0]["code"] == "RAW_PROTECTION_UNAVAILABLE", retry
-    assert {p: p.read_bytes() for p in vault.rglob("*") if p.is_file()} == before
 
 
 @pytest.mark.parametrize("producer", ["text", "batch"])
@@ -2230,12 +2210,10 @@ def test_a_trickling_desktop_pull_still_stops_and_leaves_no_bytes(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("flag", ["EXOMEM_CLOUD_CELL", "EXOMEM_HOSTED_CELL"])
-def test_a_cell_keeps_the_broker_cap_and_fixed_deadlines(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
-    """A Cloud cell's broker grant carries the 100 MiB cap and a hosted cell serves no
-    upload session, so neither takes a desktop's larger, rate-bounded pulls."""
+def test_a_cell_keeps_the_broker_cap_and_fixed_deadlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Cloud broker grant retains its cap and fixed deadlines."""
     from exomem import client_artifacts
 
-    monkeypatch.setenv(flag, "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert client_artifacts.fetch_budget() == client_artifacts.FetchBudget()

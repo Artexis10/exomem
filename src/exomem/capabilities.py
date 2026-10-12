@@ -20,6 +20,7 @@ class ActiveSurfaceDescriptor:
     product_commands: tuple[str, ...]
     exported_aliases: tuple[str, ...] = ()
     hand_registered_tools: tuple[str, ...] = ()
+    unavailable_reasons: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -69,11 +70,6 @@ class ActiveSurfaceDescriptor:
             "hand_registered_tools": sorted(self.hand_registered_tools),
             "active_capability_sha256": self.fingerprint,
         }
-
-
-#: The hosted cell's private command router: the profile the hosted web app
-#: calls on a person's behalf, as distinct from a hosted agent profile.
-HOSTED_PRIVATE_ROUTER_PROFILE = "private-command-router"
 
 
 _ACTIVE_SURFACE: ContextVar[ActiveSurfaceDescriptor | None] = ContextVar(

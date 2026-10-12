@@ -136,17 +136,6 @@ session listing SHALL mark each session whose identity matches the binding.
 - **WHEN** the binding names an id other than the allowed sign-in account
 - **THEN** doctor fails the check and says owner equivalence can never apply
 
-### Requirement: Hosted cells never use a personal binding
-
-A hosted cell SHALL clear the binding from its environment. No hosted gateway principal or
-cell service credential SHALL match it. A cloud cell MAY bind only its own cell identity,
-under a requirement of its own change.
-
-#### Scenario: A hosted cell ignores a planted binding
-
-- **WHEN** a hosted cell starts with the binding in its environment
-- **THEN** the binding is cleared, and every principal resolves as before
-
 ### Requirement: Sessions of an account not currently allowed to sign in are suspended
 
 Session validation SHALL reject a durable session or refresh family whose GitHub user id

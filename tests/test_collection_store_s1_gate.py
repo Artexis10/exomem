@@ -713,7 +713,7 @@ def test_steady_writes_reach_the_replica_off_ack_at_most_once_per_window(abc, mo
 
 def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_path, monkeypatch):
     """Defect: a write inside the window republishes, or export ships a replica behind acknowledged rows."""
-    from exomem import hosted_portability as portability
+    from exomem import vault_portability as portability
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
@@ -782,7 +782,7 @@ def test_a_lease_lost_during_the_copy_abandons_the_swap_and_keeps_the_previous_r
 
 def test_export_refuses_a_lagging_replica_once_this_host_lost_the_lease(abc, tmp_path):
     """Defect: a host that can no longer flush exports a replica behind an acknowledged row."""
-    from exomem import hosted_portability as portability
+    from exomem import vault_portability as portability
 
     (abc.root / ".exomem/schema").mkdir(parents=True)
     (abc.root / ".exomem/schema/SKILL.md").write_text("# schema\n")
@@ -881,12 +881,12 @@ def _lease_environment(found, monkeypatch):
     monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator")
 
 
-def test_hosted_tenant_cannot_preview_owner_adoption(abc):
-    """RAW's hosted tenant exemption cannot grant owner maintenance authority."""
+def test_remote_tenant_cannot_preview_owner_adoption(abc):
+    """A remote tenant cannot grant owner maintenance authority."""
     from exomem import commands
-    from exomem.governance.principal import request_scope, resolve_hosted_principal
+    from exomem.governance.principal import request_scope, resolve_rest_principal
 
-    with request_scope(resolve_hosted_principal("tenant:unrelated")):
+    with request_scope(resolve_rest_principal("tenant:unrelated")):
         refused(lambda: commands.op_maintain_memory(abc.root, mode="collections-store-adopt-local"),
                 "COLLECTION_STORE_OWNER_REQUIRED")
 
@@ -1202,23 +1202,28 @@ def test_supported_runtime_admits_a_fresh_root_copy_of_the_c_vault(abc, tmp_path
 
 def test_staged_restore_carries_the_replica_and_admits_the_c_vault(abc, tmp_path):
     """Defect: a restore drops C's replica, carries live WAL bytes, or refuses the supported runtime."""
-    from conftest import _drain_background_threads
-    from test_hosted_restore_candidate import _bootstrap, _request
+    from dataclasses import replace
 
-    from exomem import hosted_portability, hosted_restore
+    from conftest import _drain_background_threads
+
+    from exomem import vault_portability
     from exomem.init import init_vault
 
     abc.release()
     init_vault(abc.root, force=True)
     _drain_background_threads()  # Source workers must finish before restore changes the process state root.
-    context = hosted_portability.PortabilityContext(
+    context = vault_portability.PortabilityContext(
         cell_id="source-cell", vault_id="logical-vault", operation_id="export-gate",
         created_at="2026-10-06T00:00:00+00:00", operator_authorized=True, lifecycle_state="quiesced",
         routing_stopped=True, active_mutations=0, background_writers_stopped=True, reads_allowed=True)
-    exported = hosted_portability.export_quiesced_vault(abc.root, tmp_path / "exports", context=context)
-    restored = hosted_restore.restore_candidate(_request(tmp_path, exported), bootstrap_security=_bootstrap)
-    assert restored.status == "ready"
+    exported = vault_portability.export_quiesced_vault(abc.root, tmp_path / "exports", context=context)
+    prepared = vault_portability.prepare_restore(
+        exported.archive_path, tmp_path / "staging",
+        context=replace(context, lifecycle_state="restore-staging", operation_id="restore-gate"),
+    )
     target = tmp_path / "target-vault"
+    restored = vault_portability.publish_prepared_restore(prepared, target)
+    assert restored.state == "published" and restored.lexical_ready
     assert authority.read_marker(target) == authority.read_marker(abc.root)
     assert ab_bytes(target) == ab_bytes(abc.root)
     assert not [path for path in target.rglob("*") if path.name.endswith(("-wal", "-shm"))]

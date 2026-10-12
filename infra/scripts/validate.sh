@@ -102,16 +102,6 @@ agent_module="${infra_dir}/terraform/foundation/modules/k3s-agents"
 "${conftest_bin}" verify --policy "${infra_dir}/policy"
 "${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/platform.yaml"
 
-for values in values.validation.yaml values.initialize.yaml; do
-  "${helm_bin}" lint "${infra_dir}/helm/cell" --strict \
-    --values "${infra_dir}/helm/cell/${values}"
-  "${helm_bin}" template exomem-cell "${infra_dir}/helm/cell" \
-    --namespace cell-alpha-test \
-    --values "${infra_dir}/helm/cell/${values}" > "${render_dir}/cell-${values}"
-  "${kubeconform_bin}" -strict -summary -ignore-missing-schemas "${render_dir}/cell-${values}"
-  "${conftest_bin}" test --show-builtin-errors --policy "${infra_dir}/policy" "${render_dir}/cell-${values}"
-done
-
 "${script_dir}/validate_sops_ciphertext.py"
 "${script_dir}/validate_sops_ciphertext.py" \
   --matrix "${repo_root}/tests/fixtures/hosted-sops/secret-destinations-v1.json" \
@@ -122,23 +112,13 @@ ANSIBLE_PLAYBOOK_BIN="${ansible_playbook_bin}" \
 HELM_BIN="${helm_bin}" \
 HELM_REPOSITORY_CONFIG="${helm_repository_config}" \
 HELM_REPOSITORY_CACHE="${helm_repository_cache}" \
-uv run --frozen --with "${infra_dir}/provisioner" pytest -q "${repo_root}"/tests/test_hosted_*.py
+uv run --frozen pytest -q "${repo_root}"/tests/test_hosted_*.py
 uvx --from "ruff==${RUFF_VERSION}" ruff check \
   "${repo_root}"/tests/test_hosted_*.py "${infra_dir}"/scripts/*.py \
   "${infra_dir}"/helm/platform/files/*.py
 uvx --from "mypy==${MYPY_VERSION}" mypy \
   --follow-imports skip --ignore-missing-imports --check-untyped-defs \
   "${infra_dir}"/scripts/*.py
-uv run --project "${infra_dir}/provisioner" --frozen \
-  --with-editable "${repo_root}" pytest -q \
-  --confcutdir="${infra_dir}/provisioner" "${infra_dir}/provisioner/tests"
-uv run --project "${infra_dir}/provisioner" --frozen ruff check \
-  "${infra_dir}/provisioner/src" "${infra_dir}/provisioner/tests"
-if [[ -n "${PROVISIONER_IMAGE:-}" ]]; then
-  "${script_dir}/verify_provisioner_image.py" \
-    --image "${PROVISIONER_IMAGE}" \
-    --container-binary "${CONTAINER_BIN:-docker}"
-fi
 shellcheck "${script_dir}"/*.sh
 "${trivy_bin}" fs --scanners secret --exit-code 1 --no-progress \
   --skip-dirs .git --skip-dirs .venv --skip-dirs .venv-hosted-ci \

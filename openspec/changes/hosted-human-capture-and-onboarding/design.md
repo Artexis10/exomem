@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted refusal tables and the old Hosted onboarding surface. Human capture and governed-conclusion separation remain in scope. Unchecked suite, delivery, and current client acceptance tasks stay open.
+
 # Design
 
 ## Context

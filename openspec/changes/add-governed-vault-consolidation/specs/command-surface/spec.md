@@ -70,11 +70,11 @@ Only explicit administrative CLI, stdio, or library ingress SHALL receive unrest
 - **THEN** it applies the restrictive default
 - **AND** the owner label does not grant unrestricted administrative access
 
-#### Scenario: A hosted cell has only a shared bearer
+#### Scenario: A cell has only a shared bearer
 
 - **WHEN** an armed cell receives a valid shared bearer without verified end-client provenance
 - **THEN** it applies the restrictive default
-- **AND** a tenant-owner binding or passed HTTP header cannot substitute for end-client provenance
+- **AND** a configured owner binding or passed HTTP header cannot substitute for end-client provenance
 
 #### Scenario: An explicit local administrator accesses admitted data
 
@@ -84,7 +84,7 @@ Only explicit administrative CLI, stdio, or library ingress SHALL receive unrest
 
 ### Requirement: Connector admission preserves the existing command contract
 
-Delivery A SHALL enforce connector ceilings through existing product surfaces without adding a consolidation command, hosted profile, or routine confirmation workflow. Allowed-target owner operations SHALL retain their existing contracts. Documentation SHALL distinguish unavailable private-dependent operations from completed private vocabulary support.
+Delivery A SHALL enforce connector ceilings through existing product surfaces without adding a consolidation command or routine confirmation workflow. Allowed-target owner operations SHALL retain their existing contracts. Documentation SHALL distinguish unavailable private-dependent operations from completed private vocabulary support.
 
 #### Scenario: A limited owner captures allowed content
 

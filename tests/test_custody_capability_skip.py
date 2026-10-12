@@ -47,7 +47,7 @@ def test_a_refusal_wrapped_by_implicit_chaining_is_recognised() -> None:
         try:
             raise CustodyUnsupported("no proc-fd")
         except CustodyUnsupported:
-            raise RuntimeError("cleanup failed")
+            raise RuntimeError("cleanup failed")  # noqa: B904 - implicit chaining is the behavior under test.
     except RuntimeError as outer:
         assert _declares_custody_unsupported(outer)
 
@@ -181,7 +181,7 @@ def test_hosted_posix_ownership_refusals_are_recognised() -> None:
 
 
 def test_a_wrapped_hosted_ownership_refusal_is_recognised() -> None:
-    """`server_hosted` re-raises the temp refusal as a gateway error."""
+    """The storage boundary refuses unsafe temporary custody."""
     from conftest import _needs_posix_ownership_semantics
 
     try:

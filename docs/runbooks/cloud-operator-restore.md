@@ -7,7 +7,10 @@
 - a cell with 45 vault files, restored in 45 s and compared with its live vault;
 - a cell with 9,324 vault files, restored in 97 s and compared with the vault that snapshot captured.
 
-The restore Job's deadline is 900 s. That drill ran as a reviewed private script, which `infra/scripts/cloud_restore.sh` packages; the packaged script has not yet run against a cell. The in-place restore has not run against a cell either. Its stop, move-aside and start steps follow the owner vault restore that ran on 2026-10-09 ([cloud owner vault restore](cloud-operator-import.md)).
+The restore Job's deadline is 900 s. The packaged in-place helper from PR #1641 ran successfully on 2026-10-09.
+The retained release files matched that merged implementation. Its restore Job took 44 seconds; service downtime was 93 seconds.
+The separate scratch drill took 49 seconds. Each proof compared 45 vault files, with zero differences and verified scratch cleanup.
+These runs did not compare `/data/host` runtime state. They do not close a full vault-and-host recovery proof.
 
 This runbook covers two operator tools for cells on Hetzner network volumes (storage class `exomem-cloud-encrypted`). One script, `infra/scripts/cloud_restore.sh`, runs both:
 
@@ -15,6 +18,20 @@ This runbook covers two operator tools for cells on Hetzner network volumes (sto
 - **In-place restore.** It replaces a live cell's contents with a chosen snapshot, after a corrupted volume or a bad change. The cell is down from the stop to the start.
 
 cellctl itself restores a cell only after an upgrade readiness timeout or a local-storage relocation. A cell on local storage (`exomem-cloud-local`) is out of scope here; see [cloud node loss](cloud-node-loss.md). To bring the owner's own vault from another machine, use [cloud owner vault restore](cloud-operator-import.md).
+
+## Repeat the restore drill
+
+Use `infra/scripts/cloud_restore.sh drill` with the exact cell, selected B2 snapshot and reference documented below.
+The helper already uses `cloud_restore_manifests.py`, `cloud_restore_digest.py` and `cloud_restore_volume.sh`.
+Do not create another renderer or private drill script.
+A reference must represent the selected snapshot's canonical version; a live vault with newer writes is a different comparison.
+Record the selected snapshot time, restored/reference file counts, exact matches, downtime and verified scratch-resource absence.
+Keep the result scoped to the paths actually compared. Current hashes compare the vault; host-state comparison remains pending.
+Repeat after each relevant release and backup-policy change and at the agreed recovery-check cadence.
+Today's successful backup row alone does not satisfy this drill.
+
+Use a disk scratch root for run receipts and manifests. Existing helper hash scratch in `/dev/shm` is retained implementation debt.
+Only credentials that must stay off disk belong in memory scratch; do not copy that hash-storage pattern into new tooling.
 
 ## What a restore covers
 
@@ -82,7 +99,7 @@ A drill against `live` passes only when no vault file changed after the snapshot
 
 ## Restore a cell in place
 
-**Warning:** do not deploy the platform chart (the `helm upgrade` in [deploy](hosted/deploy.md)) while a restore runs. The chart sets cellctl back to one replica, and cellctl then starts the cell on a half-restored volume. The script cannot prevent this.
+**Warning:** do not deploy the platform chart (the `helm upgrade` in [platform deploy](cloud-platform-deploy.md)) while a restore runs. The chart sets cellctl back to one replica, and cellctl then starts the cell on a half-restored volume. The script cannot prevent this.
 
 1. To see how far the snapshot is from the live vault, run a drill against `live` first and read its counts.
 2. Start the restore: `infra/scripts/cloud_restore.sh restore "$CELL_ID" "$SNAPSHOT"`.

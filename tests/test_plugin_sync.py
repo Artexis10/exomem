@@ -157,9 +157,8 @@ def test_manifest_carries_listing_metadata() -> None:
     """A curated listing shows author, homepage, and licence.
 
     Without these the plugin lists as anonymous and unlicensed, which reads as
-    abandoned next to entries that carry them. The Hosted manifest has always
-    had them; this keeps the self-hosted one from silently regressing to the
-    bare name/description/version it shipped with.
+    abandoned next to entries that carry them. This keeps the self-hosted
+    listing from silently regressing to bare name, description and version.
     """
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
 
@@ -174,17 +173,17 @@ def test_manifest_carries_listing_metadata() -> None:
 def test_listing_identity_agrees_across_both_plugin_surfaces() -> None:
     """The two listings describe one product, so they must not contradict.
 
-    A reviewer comparing the self-hosted marketplace entry against the Hosted
+    A reviewer comparing the self-hosted marketplace entry against the Cloud
     directory entry sees both. Divergent authorship or licence there reads as
     two unrelated projects sharing a name.
     """
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
-    hosted = json.loads(
-        (REPO_ROOT / "plugins" / "hosted" / "definition.json").read_text(encoding="utf-8")
+    cloud = json.loads(
+        (REPO_ROOT / "plugins" / "cloud" / "definition.json").read_text(encoding="utf-8")
     )
 
-    assert manifest["author"]["name"] == hosted["author_name"]
-    assert manifest["author"]["url"] == hosted["author_url"]
-    assert manifest["homepage"] == hosted["website_url"]
-    assert manifest["repository"] == hosted["repository_url"]
-    assert manifest["license"] == hosted["license"]
+    assert manifest["author"]["name"] == cloud["author"]["name"]
+    assert manifest["author"]["url"] == cloud["author"]["url"]
+    assert manifest["homepage"] == cloud["homepage"]
+    assert manifest["repository"] == cloud["repository"]
+    assert manifest["license"] == cloud["license"]

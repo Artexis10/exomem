@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes the Hosted image and provisioner capacity contract. Backend equivalence remains in scope; Cloud image, resource qualification, and the unchecked envelope and quality tasks remain open.
+
 ## Why
 
 Tenant density on the alpha node is capped by the embedding runtime, not by the

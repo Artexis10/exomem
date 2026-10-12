@@ -118,11 +118,11 @@ and rolls back by stopping routing, draining the cell, and starting the previous
 protocol-compatible image against the same canonical vault. Rollback never
 rewrites canonical content; derived stores may be discarded and rebuilt.
 
-See [hosted-operations.md](hosted-operations.md) for the cell runbook and
+See the Exomem Cloud runbooks in [runbooks/](runbooks/) for cell operations and
 [substrate-control-plane-contract.md](substrate-control-plane-contract.md) for
 the companion ownership contract.
 
-See [hosted-hardware-options.md](hosted-hardware-options.md) for dated EU hardware
+See [cloud-hardware-options.md](cloud-hardware-options.md) for dated EU hardware
 prices, candidate capabilities, and the distinction between cell embeddings and
 per-cell sensing on shared read-only model weights.
 

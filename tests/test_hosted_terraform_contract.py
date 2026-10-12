@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -15,7 +14,6 @@ FOUNDATION = ROOT / "infra/terraform/foundation"
 DURABILITY = ROOT / "infra/terraform/durability"
 BOOTSTRAP = ROOT / "infra/terraform/bootstrap"
 HCP_BOOTSTRAP = ROOT / "infra/terraform/hcp-bootstrap"
-HOSTED_CHANGE = ROOT / "openspec/changes/add-hosted-private-alpha-infrastructure"
 TERRAFORM = Path(os.environ["TERRAFORM_BIN"]) if "TERRAFORM_BIN" in os.environ else None
 
 
@@ -226,37 +224,6 @@ def test_etcd_snapshots_use_an_unlocked_bucket_and_a_write_only_key() -> None:
     assert "database_backup_delete_application_key" not in outputs
 
 
-def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() -> None:
-    contract = json.loads(
-        (ROOT / "infra/contracts/durability-storage-v1.json").read_text(encoding="utf-8")
-    )
-    outputs = (DURABILITY / "outputs.tf").read_text(encoding="utf-8")
-
-    assert contract["schemaVersion"] == 1
-    assert contract["terraformRoot"] == "durability"
-    assert contract["kubernetes"] == {
-        "namespace": "exomem-platform",
-        "configMap": "exomem-durability-storage",
-    }
-    assert contract["bindings"] == {
-        "recovery_bucket_name": {
-            "configMapKey": "recovery-bucket",
-                "workerEnvironmentVariable": "EXOMEM_DURABILITY_RECOVERY_BUCKET",
-        },
-        "user_export_bucket_name": {
-            "configMapKey": "user-export-bucket",
-                "workerEnvironmentVariable": "EXOMEM_DURABILITY_USER_EXPORT_BUCKET",
-        },
-        "database_backup_bucket_name": {
-            "configMapKey": "database-backup-bucket",
-                "workerEnvironmentVariable": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
-        },
-    }
-    for output_name in contract["bindings"]:
-        block = outputs.split(f'output "{output_name}"', 1)[1].split("}", 1)[0]
-        assert "sensitive" not in block
-
-
 def test_existing_b2_bootstrap_stays_quarantined_until_separate_cleanup() -> None:
     bootstrap = _all_tf(BOOTSTRAP)
 
@@ -395,22 +362,6 @@ def test_hcp_backend_proof_exercises_real_lock_and_state_version_rollback() -> N
         "_unlock_with_retry(client, workspace.workspace_id)"
     )
     assert "terraform state pull" not in script
-
-
-def test_openspec_records_hcp_state_only_and_quarantines_legacy_b2_state() -> None:
-    design = (HOSTED_CHANGE / "design.md").read_text(encoding="utf-8")
-    foundation_spec = (
-        HOSTED_CHANGE / "specs/hosted-infrastructure-foundation/spec.md"
-    ).read_text(encoding="utf-8")
-
-    for document in (design, foundation_spec):
-        assert "HCP Terraform" in document
-        assert "state-only" in document
-        assert "exomem-hosted-foundation" in document
-        assert "exomem-hosted-durability" in document
-    assert "already-applied B2 bootstrap" in design
-    assert "B2 S3 lockfile compatibility is not yet proven" not in design
-    assert "one process holds the disposable proof workspace state lock" in foundation_spec
 
 
 def test_hcp_provider_lock_covers_amd64_and_arm64() -> None:

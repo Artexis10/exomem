@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import threading
 import time
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,7 +21,6 @@ import anyio
 
 from . import (
     env_compat,
-    hosted_runtime,
     media_processing,
     metrics,
     privacy_log,
@@ -32,14 +29,7 @@ from . import (
     vocabulary_recovery,
 )
 from .dotenv_guard import working_directory_dotenv
-from .governance import authorization_session_lifecycle, projection_runtime
-from .governance.authorization_serving_membership import unavailable_readiness
-from .hosted_runtime import (
-    HostedBindingV2,
-    HostedCellConfig,
-    HostedCellLifecycle,
-    hosted_mode_enabled,
-)
+from .governance import projection_runtime
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
@@ -59,10 +49,6 @@ class ServerRuntime:
     media_worker: Any | None = None
     file_watcher: Any | None = None
     derived_drain: Any | None = None
-    hosted_config: HostedCellConfig | None = None
-    hosted_lifecycle: HostedCellLifecycle | None = None
-    hosted_security_authority: Any | None = None
-    hosted_lifetime_lock: AbstractContextManager[None] | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -75,8 +61,6 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     from . import cloud_cell
 
     cloud_cell.resource_policy()
-    if hosted_mode_enabled():
-        return _initialize_hosted_runtime()
 
     if cloud_cell.cloud_mode_enabled():
         # A cloud cell reads no `.env` file: configuration comes only from the
@@ -86,8 +70,6 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
         # query_log itself fails closed on content-private logging (D1.2), but
         # usage boost and the relevance check both read those journals -- with
         # them off, both features would otherwise loop forever finding nothing.
-        # Hosted parity: hosted_runtime.HostedProcessSettings.apply_process_environment
-        # sets the same two variables for the same reason.
         os.environ["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
         os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
     else:
@@ -519,260 +501,6 @@ class LocalRuntimeActivation:
                     raise shutdown_error
 
         return _lifespan
-
-
-def _initialize_hosted_runtime() -> ServerRuntime:
-    """Initialize one explicit hosted cell without reading any dotenv file."""
-    privacy_log.install_hosted_log_redaction()
-    config = HostedCellConfig.from_env(require_provisioned=True)
-    binding = None
-    if config.requires_dynamic_security:
-        assert config.vault_id is not None
-        binding = HostedBindingV2(
-            cell_id=config.cell_id,
-            vault_id=config.vault_id,
-            vault_root=config.vault_root,
-            state_root=config.state_root,
-            log_root=config.log_root,
-            runtime_uid=config.runtime_uid,
-            runtime_gid=config.runtime_gid,
-        )
-    from .hosted_restore import acquire_hosted_lifetime_lock
-
-    lifetime_lock = acquire_hosted_lifetime_lock(config.state_root, binding=binding)
-    lifetime_lock.__enter__()
-    try:
-        _cleanup_hosted_transfer_temp(config)
-        return _initialize_locked_hosted_runtime(config, lifetime_lock)
-    except BaseException:
-        lifetime_lock.__exit__(*sys.exc_info())
-        raise
-
-
-def _hosted_authorization_session_readiness_provider(
-    config: HostedCellConfig,
-) -> Callable[[], Any]:
-    """Bind Hosted membership checks to deployment-owned identity, never liveness."""
-
-    if config.vault_id is None or config.authorization_session_replica_id is None:
-        return unavailable_readiness
-
-    def readiness() -> Any:
-        return authorization_session_lifecycle.hosted_serving_membership_readiness(
-            config.vault_root,
-            expected_cell_id=config.cell_id,
-            expected_logical_vault_id=config.vault_id,
-            expected_replica_id=config.authorization_session_replica_id,
-        )
-
-    return readiness
-
-
-def _initialize_locked_hosted_runtime(
-    config: HostedCellConfig,
-    lifetime_lock: AbstractContextManager[None],
-) -> ServerRuntime:
-    """Finish hosted startup while retaining exclusive target-root ownership."""
-
-    config.apply_process_environment()
-    from . import state_migration
-
-    state_migration.require_vault_state_ready(config.vault_root)
-    _start_metrics_persistence()
-    lifecycle = HostedCellLifecycle(
-        config,
-        authorization_session_readiness_provider=(
-            _hosted_authorization_session_readiness_provider(config)
-        ),
-    )
-    security_authority = _initialize_hosted_security(config)
-    vault_root = config.vault_root
-
-    source_schema = schema.load_source_schema(vault_root)
-    project_keys_hint = project_keys.keys_hint(vault_root)
-    try:
-        projection_runtime.preactivate_projection_runtime(vault_root)
-    except projection_runtime.ProjectionRuntimeUnavailable:
-        log.warning("governed projected retrieval is unavailable")
-    log.info(
-        "hosted_cell=%s source_types=%s",
-        config.cell_id,
-        source_schema.source_types,
-    )
-
-    mutation_ready, mutation_reason = probe_hosted_mutation_authority(vault_root)
-
-    startup = lifecycle.complete_startup(
-        vault_ready=True,
-        mutation_authority_ready=mutation_ready,
-        service_auth_ready=(
-            security_authority is not None or config.service_credential is not None
-        ),
-    )
-    if config.has_feature("diarization"):
-        lifecycle.set_worker_status(
-            "diarization",
-            ready=False,
-            reason_code="HOSTED_RUNTIME_TEMP_AUTHORITY_REQUIRED",
-        )
-    if not mutation_ready:
-        lifecycle.set_mutation_authority(False, reason_code=mutation_reason)
-
-    media_worker = None
-    file_watcher = None
-    derived_drain = None
-    if mutation_ready and startup.phase == "active":
-        derived_drain = _start_derived_drain(vault_root)
-        if derived_drain is not None:
-            _register_derived_drain_worker(lifecycle, derived_drain)
-    elif mutation_ready and startup.phase == "quiesced":
-        derived_drain = _create_derived_drain(vault_root)
-        if derived_drain is not None:
-            _register_derived_drain_worker(lifecycle, derived_drain)
-    if mutation_ready and startup.phase == "active":
-        # Retrieval catalog warm-up is core service work, not an optional
-        # hosted worker.  A zero optional-worker budget must still converge
-        # truthful retrieval admission for lean cells.
-        if config.has_feature("embeddings") and config.resource_limits.worker_count > 0:
-            _start_compute_runtime(vault_root)
-        else:
-            _start_retrieval_runtime(vault_root)
-        try:
-            refresh_obsolete_projector(vault_root)
-        except Exception:  # noqa: BLE001 - serving continues; the next owner start retries
-            log.warning("projector refresh failed; transport continuing", exc_info=True)
-    if not mutation_ready:
-        for feature in ("embeddings", "file-watcher", "media"):
-            if config.has_feature(feature):
-                lifecycle.set_worker_status(
-                    feature,
-                    ready=False,
-                    reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE",
-                )
-    elif config.resource_limits.worker_count == 0:
-        for feature in ("embeddings", "file-watcher", "media"):
-            if config.has_feature(feature):
-                lifecycle.set_worker_status(
-                    feature,
-                    ready=False,
-                    reason_code="HOSTED_WORKER_LIMIT_ZERO",
-                )
-    elif startup.phase == "quiesced":
-        for feature in ("embeddings", "file-watcher", "media"):
-            if config.has_feature(feature):
-                lifecycle.set_worker_status(
-                    feature,
-                    ready=False,
-                    reason_code="HOSTED_CELL_NOT_ACTIVE",
-                )
-        if config.has_feature("media"):
-            media_worker = _create_media_worker(vault_root)
-            if media_worker is not None:
-                lifecycle.register_background_worker(
-                    stopper=media_worker.stop,
-                    starter=_worker_starter(lifecycle, "media", media_worker),
-                )
-        if config.has_feature("file-watcher"):
-            file_watcher = _create_file_watcher(vault_root)
-            if file_watcher is not None:
-                lifecycle.register_background_worker(
-                    stopper=file_watcher.stop,
-                    starter=_worker_starter(lifecycle, "file-watcher", file_watcher),
-                )
-    elif startup.phase != "active":
-        for feature in ("embeddings", "file-watcher", "media"):
-            if config.has_feature(feature):
-                lifecycle.set_worker_status(
-                    feature,
-                    ready=False,
-                    reason_code="HOSTED_CELL_NOT_ACTIVE",
-                )
-    else:
-        if config.has_feature("media"):
-            media_worker = _start_media_worker(vault_root)
-            lifecycle.set_worker_status(
-                "media",
-                ready=media_worker is not None,
-                reason_code="HOSTED_WORKER_UNAVAILABLE",
-            )
-            if media_worker is not None:
-                lifecycle.register_background_worker(
-                    stopper=media_worker.stop, starter=media_worker.start
-                )
-        if config.has_feature("file-watcher"):
-            file_watcher = _start_file_watcher(vault_root)
-            lifecycle.set_worker_status(
-                "file-watcher",
-                ready=file_watcher is not None,
-                reason_code="HOSTED_WORKER_UNAVAILABLE",
-            )
-            if file_watcher is not None:
-                lifecycle.register_background_worker(
-                    stopper=file_watcher.stop, starter=file_watcher.start
-                )
-
-    return ServerRuntime(
-        vault_root=vault_root,
-        source_schema=source_schema,
-        project_keys_hint=project_keys_hint,
-        base_url="",
-        media_worker=media_worker,
-        file_watcher=file_watcher,
-        derived_drain=derived_drain,
-        hosted_config=config,
-        hosted_lifecycle=lifecycle,
-        hosted_security_authority=security_authority,
-        hosted_lifetime_lock=lifetime_lock,
-    )
-
-
-def _cleanup_hosted_transfer_temp(config: HostedCellConfig) -> None:
-    from .hosted_runtime_temp import prepare_hosted_runtime_temp
-    from .hosted_transfer_routes import cleanup_hosted_transfer_temp
-
-    prepare_hosted_runtime_temp(
-        config.state_root,
-        expected_uid=config.runtime_uid,
-        expected_gid=config.runtime_gid,
-    )
-    cleanup_hosted_transfer_temp(config.state_root)
-
-
-def _initialize_hosted_security(config: HostedCellConfig) -> Any | None:
-    """Open and validate the v2 authority before the server becomes reachable."""
-
-    if not config.requires_dynamic_security:
-        return None
-    assert config.vault_id is not None
-    from .hosted_security import HostedSecurityAuthority
-
-    authority = HostedSecurityAuthority(
-        config.state_root,
-        cell_id=config.cell_id,
-        vault_id=config.vault_id,
-        expected_uid=config.runtime_uid,
-        expected_gid=config.runtime_gid,
-    )
-    authority.validate_ready()
-    return authority
-
-
-def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
-    """Prove the shared mutation guard can be acquired and safely released."""
-
-    try:
-        from .vocabulary_admission import require_mutation_admission
-
-        require_mutation_admission(vault_root)
-        with hosted_runtime.hosted_mutation_guard(vault_root):
-            pass
-    except Exception as exc:  # noqa: BLE001 - any uncertainty keeps hosted writes closed
-        log.warning(
-            "hosted mutation authority unavailable error=%s",
-            type(exc).__name__,
-        )
-        return False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
-    return True, "HOSTED_READY"
 
 
 #: How long the activation sequence waits for the graph projection to become
@@ -1238,29 +966,6 @@ def _start_derived_drain(vault_root: Path) -> Any | None:
         return None
 
 
-def _create_derived_drain(vault_root: Path) -> Any | None:
-    """Construct dormant exact-custody convergence for a quiesced hosted cell."""
-    from . import derived_drain
-
-    try:
-        return derived_drain.DerivedDrain(vault_root)
-    except Exception as exc:  # noqa: BLE001 - custody survives startup failure
-        log.warning("derived component drain unavailable: %s", exc)
-        return None
-
-
-def _register_derived_drain_worker(lifecycle: HostedCellLifecycle, worker: Any) -> None:
-    """Register hosted stop/start for the exact component drain.
-
-    The lifecycle calls a stopper with no arguments and keeps its quiesce
-    deadline private, so the registered stopper is the drain's bounded
-    fail-closed stop.  A pass that is still dispatching leaves the cell
-    quiescing instead of reporting a drained cell the deadline never proved.
-    """
-
-    lifecycle.register_background_worker(stopper=worker.stop, starter=worker.start)
-
-
 def _start_file_watcher(vault_root: Path) -> Any | None:
     """Start the optional live file watcher."""
     watcher = _create_file_watcher(vault_root)
@@ -1287,17 +992,3 @@ def _create_file_watcher(vault_root: Path) -> Any | None:
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher unavailable; core service continuing: %s", exc)
         return None
-
-
-def _worker_starter(
-    lifecycle: HostedCellLifecycle,
-    feature: str,
-    worker: Any,
-) -> Callable[[], None]:
-    """Start a dormant worker and make its resumed health explicit."""
-
-    def start() -> None:
-        worker.start()
-        lifecycle.set_worker_status(feature, ready=True)
-
-    return start

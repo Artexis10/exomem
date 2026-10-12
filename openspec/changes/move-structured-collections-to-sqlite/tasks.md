@@ -89,7 +89,7 @@ October 4 private runtime/create foundation: independent review approves current
   - Bulk 500 < 1 s. Guard refresh through full public `inspect` p95 < 15 ms, including its unchanged counts/frequencies/presentation/coverage response; a private guard-only lookup is not this gate.
   - Parity test green. Numbers recorded in `design.md` §12 and the PR.
 
-## P1b. Migration, snapshots and hosted (dark)
+## P1b. Migration, snapshots and Cloud (dark)
 
 - [x] P1b.1 Red: round-trip proof checks (a)–(f) on generated legacy vaults. The vaults include one whose activity logs exceed 8 MB across more than 128 archives and one collection chain deeper than 2048 (A6). They also cover items and log layouts, both built-ins, legacy chains with `ok`, `gap` and `acknowledged_gap`, held files, filename recipes and managed presentation. A failed check leaves the vault file-canonical and names the collection and the check. Import rewrites no vault file.
   Evidence: per collection, `tests/test_collection_store_legacy_import.py` covers items and log layouts, both built-ins, `gap` and `acknowledged_gap` chains, held files and managed presentation.
@@ -134,11 +134,11 @@ October 4 private runtime/create foundation: independent review approves current
   - divergence refuses collection writes with `COLLECTION_STORE_DIVERGED` while reads and knowledge writes continue;
   - `maintain_memory(mode="collections-store-reconcile")` is preview-first and turns every item changed after the fork point into a held correction;
   - `describe` and the doctor probe state that writers without the lease are unsupported.
-- [ ] P1b.7 Hosted: the live store in the cell state root; portability export and staged restore include the snapshot and exclude `-wal` / `-shm` (`hosted_portability`, `hosted_restore`); `cloud_import` of a file vault runs the importer and proof in staging.
+- [ ] P1b.7 Cloud: preserve a consistent snapshot of the cell-state-root store in operator export and staged restore, excluding `-wal` / `-shm`; Cloud import runs the importer and proof in staging through the existing helpers.
 - [ ] P1b.8 **Phase gate.**
   - The round-trip proof is green on the generated legacy vaults.
   - Backup under concurrent writes is integrity-checked at 10,000 items.
-  - The hosted portability tests pass for export, restore and import.
+  - The current Cloud portability checks pass for export, restore and import.
   - Replica sync churn is reported in bytes per hour at 1, 10 and 60 writes per minute on a 10,000-row store, within the stated budget (A9).
   - Handoff scenarios pass: routine idle-release re-acquisition on one host never waits, a cross-host handoff on a lagging replica waits boundedly, and adopt-local loses nothing.
   - The reverse-export round trip is green.
@@ -188,7 +188,7 @@ October 4 private runtime/create foundation: independent review approves current
 - [ ] P3.6 **GA gate.** This turns store mode on for migrated vaults. It requires:
   - P1a, P1b, P2 and P3 merged;
   - `records-release-acceptance`: installed-wheel proof and disposable live MCP evidence for both built-ins in store mode;
-  - frozen hosted candidates and `hosted_legacy_profile_schemas.json` byte-identical, and `minimum_records_reader_version` still 2;
+  - current local and Cloud tool schemas keep their supported compatibility, and `minimum_records_reader_version` remains 2;
   - a dry-run migration of a disposable copy of a real-sized vault with every proof check green.
 
   Then `collections-store-v1` is declared in the release's upgrade manifest, and the preview flag is retired.
@@ -210,7 +210,7 @@ Not in this change (A11; follow-up change): version-pinned links, and the generi
 - [ ] P4.6 Governance: subject-level default-deny from `default_audience: owner`, the explain source, and the type-registry hash in the compile fingerprint. Red first, per the `governance-kernel` scenarios.
 - [ ] P4.7 The registry replaces the hard-coded layers:
   - `recall_policy`;
-  - `hosted_gateway`, plus `test_target_constrained_mutations_are_actually_constrained`;
+  - the current Cloud gateway boundary, plus `test_target_constrained_mutations_are_actually_constrained`;
   - `structured_collections._require_profile_layer`;
   - bootstrap `semantic_profiles`.
 - [ ] P4.8 **Combined P4/P5 gate, after P2 edit-back.** An end-to-end journey with invented data:
@@ -230,7 +230,7 @@ Not in this change (A11; follow-up change): version-pinned links, and the generi
 - [ ] P5.2 Minimal surface (R8): exactly one new `action` enum value and one optional `collection_type` parameter with a one-line description, and at most one added sentence in the tool description. No other parameter.
 - [ ] P5.3 **Phase gate.**
   - A schema-bytes test: the generated local `record_memory` schema grows by ≤ 400 bytes, and `plan_memory` and `schema_memory` by only the `collection-types` subject text.
-  - Regenerate the tool schemas, plugin tree, hosted render, v5 candidate and `docs/capabilities.md` per `CONTRIBUTING.md`. Frozen hosted candidates are byte-identical.
+  - Regenerate the tool schemas, plugin tree, Cloud render and `docs/capabilities.md` per `CONTRIBUTING.md`.
 
 ## P6. Legacy window close (two minor releases after GA, R7)
 

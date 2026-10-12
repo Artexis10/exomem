@@ -184,17 +184,6 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
         "substrate.production"
     }
 
-    access = {
-        destination["kind"]
-        for name in ("cloudflare_access_client_id", "cloudflare_access_client_secret")
-        for destination in secrets[name]["destinations"].values()
-    }
-    assert access == {"vercel_env"}
-
-    tunnel = secrets["cloudflare_tunnel_token"]["destinations"]
-    assert set(tunnel) == {"k3s.cloudflared.active"}
-    assert {destination["kind"] for destination in tunnel.values()} == {"sops_k8s_secret"}
-
     scheduler = secrets["hosted_scheduler_secret"]["destinations"]
     assert set(scheduler) == {
         "k3s.scheduler.active",
@@ -242,30 +231,8 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
         "name": "EXOMEM_HOSTED_ALERT_TOKEN_SHA256_PREVIOUS",
     }
 
-    wrapping = secrets["provisioner_wrapping_key"]["destinations"]
-    assert set(wrapping) == {
-        "escrow.provisioner-wrapping-key.active",
-        "k3s.provisioner.wrapping-key.active",
-    }
-    assert {destination["kind"] for destination in wrapping.values()} == {
-        "sops_escrow",
-        "sops_k8s_secret",
-    }
-
     etcd_snapshot_upload = secrets["etcd_snapshot_upload_key"]["destinations"]
     assert set(etcd_snapshot_upload) == {"ansible.hosted-node.etcd-s3-secret-key.active"}
-    database_backup_upload = secrets["database_backup_upload_key"]["destinations"]
-    assert set(database_backup_upload) == {"k3s.provisioner.database-backup-upload-key.active"}
-
-    capacity_verifier = secrets["capacity_receipt_public_key"]["destinations"]
-    assert capacity_verifier["k3s.capacity-workers.capacity-receipt-verifier.active"] == {
-        "kind": "sops_k8s_secret",
-        "slot": "active",
-        "target": "infra/secrets/provisioner/capacity-receipt-verifier.{version}.sops.json",
-        "namespace": "exomem-platform",
-        "kubernetes_secret": "exomem-capacity-receipt-verifier",
-        "key": "public-key",
-    }
 
     assert "cell_credential" not in secrets
 
@@ -343,7 +310,7 @@ def test_rejects_existing_sops_version_before_reading_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_module()
-    target = tmp_path / "infra/secrets/platform/cloudflared-token.v3.sops.json"
+    target = tmp_path / "infra/secrets/platform/hcloud-csi-token.v3.sops.json"
     target.parent.mkdir(parents=True)
     target.write_text('{"sops":{}}', encoding="utf-8")
 
@@ -355,9 +322,9 @@ def test_rejects_existing_sops_version_before_reading_secret(
         module.execute_handoff(
             matrix_path=MATRIX,
             repository_root=tmp_path,
-            secret_name="cloudflare_tunnel_token",
+            secret_name="hcloud_csi_token",
             version="v3",
-            destination_ids=("k3s.cloudflared.active",),
+            destination_ids=("k3s.hcloud-csi.active",),
             source_kind="stdin",
             terraform_bin="terraform",
             sops_bin="sops",
@@ -374,7 +341,7 @@ def test_k3s_handoff_seals_atomically_without_plaintext_or_output_leak(
     sentinel = b"handoff-sentinel-never-persist"
     history = tmp_path / "operator.history"
     history.write_text(
-        "secret_handoff.py --secret cloudflare_tunnel_token --source stdin\n",
+        "secret_handoff.py --secret hcloud_csi_token --source stdin\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
@@ -393,9 +360,9 @@ def test_k3s_handoff_seals_atomically_without_plaintext_or_output_leak(
     module.execute_handoff(
         matrix_path=MATRIX,
         repository_root=tmp_path,
-        secret_name="cloudflare_tunnel_token",
+        secret_name="hcloud_csi_token",
         version="v7",
-        destination_ids=("k3s.cloudflared.active",),
+        destination_ids=("k3s.hcloud-csi.active",),
         source_kind="stdin",
         terraform_bin="terraform",
         sops_bin="sops",
@@ -404,7 +371,7 @@ def test_k3s_handoff_seals_atomically_without_plaintext_or_output_leak(
         dry_run=False,
     )
 
-    target = tmp_path / "infra/secrets/platform/cloudflared-token.v7.sops.json"
+    target = tmp_path / "infra/secrets/platform/hcloud-csi-token.v7.sops.json"
     assert target.is_file()
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert sentinel not in target.read_bytes()
@@ -726,57 +693,6 @@ def test_concurrent_vercel_versions_cannot_regress_one_destination(
     assert provider_calls != [b"version-three", b"version-two"]
 
 
-def test_wrapping_key_is_read_once_for_workload_and_offline_escrow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    module = _load_module()
-    sentinel = b"wrapping-key-sentinel"
-    reads = 0
-    plaintext_inputs: list[dict[str, object]] = []
-    plaintext_by_path: dict[Path, dict[str, object]] = {}
-
-    def _reader(**_kwargs):
-        nonlocal reads
-        reads += 1
-        return sentinel
-
-    def _runner(command, **kwargs):
-        if command[1] == "encrypt":
-            plaintext_inputs.append(json.loads(kwargs["input"]))
-        result = _run_fake_sops(list(command), kwargs, plaintext_by_path)
-        assert result is not None
-        return result
-
-    monkeypatch.setattr(module, "_read_secret", _reader)
-    monkeypatch.setattr(module.subprocess, "run", _runner)
-    monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
-    module.execute_handoff(
-        matrix_path=MATRIX,
-        repository_root=tmp_path,
-        secret_name="provisioner_wrapping_key",
-        version="v5",
-        destination_ids=(
-            "k3s.provisioner.wrapping-key.active",
-            "escrow.provisioner-wrapping-key.active",
-        ),
-        source_kind="stdin",
-        terraform_bin="terraform",
-        sops_bin="sops",
-        vercel_bin="vercel",
-        vercel_project=None,
-        dry_run=False,
-    )
-    assert reads == 1
-    assert len(plaintext_inputs) == 2
-    assert any(document.get("kind") == "Secret" for document in plaintext_inputs)
-    assert any(
-        document.get("secret_name") == "provisioner_wrapping_key" for document in plaintext_inputs
-    )
-    assert (tmp_path / "infra/secrets/provisioner/wrapping-key.v5.sops.json").is_file()
-    assert (tmp_path / "infra/secrets/escrow/provisioner-wrapping-key.v5.sops.json").is_file()
-    assert not any(sentinel in path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
-
-
 def test_terraform_source_is_exactly_bound_to_contract_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -790,7 +706,7 @@ def test_terraform_source_is_exactly_bound_to_contract_output(
     monkeypatch.setattr(module.subprocess, "run", _runner)
     value = module._read_secret(
         source_kind="terraform",
-        secret_spec=module.load_matrix(MATRIX).secrets["cloudflare_tunnel_token"],
+        secret_spec=module.load_matrix(MATRIX).secrets["etcd_snapshot_upload_key"],
         repository_root=ROOT,
         terraform_bin="terraform-test",
     )
@@ -798,10 +714,10 @@ def test_terraform_source_is_exactly_bound_to_contract_output(
     assert calls == [
         [
             "terraform-test",
-            f"-chdir={ROOT / 'infra/terraform/foundation'}",
+            f"-chdir={ROOT / 'infra/terraform/durability'}",
             "output",
             "-raw",
-            "cloudflare_tunnel_token",
+            "etcd_snapshot_upload_application_key",
         ]
     ]
 
@@ -855,9 +771,9 @@ def test_pinned_sops_age_round_trip_preserves_json_escaped_secret(
     module.execute_handoff(
         matrix_path=MATRIX,
         repository_root=tmp_path,
-        secret_name="cloudflare_tunnel_token",
+        secret_name="hcloud_csi_token",
         version="v1",
-        destination_ids=("k3s.cloudflared.active",),
+        destination_ids=("k3s.hcloud-csi.active",),
         source_kind="stdin",
         terraform_bin="terraform",
         sops_bin=sops_bin,
@@ -866,7 +782,7 @@ def test_pinned_sops_age_round_trip_preserves_json_escaped_secret(
         dry_run=False,
     )
 
-    target = tmp_path / "infra/secrets/platform/cloudflared-token.v1.sops.json"
+    target = tmp_path / "infra/secrets/platform/hcloud-csi-token.v1.sops.json"
     ciphertext = target.read_bytes()
     escaped = json.dumps(sentinel.decode("utf-8"))[1:-1].encode("utf-8")
     assert sentinel not in ciphertext
@@ -988,19 +904,21 @@ def test_cli_has_no_argument_that_can_carry_a_secret_value() -> None:
 def test_file_shaped_secret_keeps_its_newlines_through_the_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A libpq service file is multi-line by format; the handoff must carry it whole.
+    """A PEM key is multi-line by format; the handoff must carry it whole.
 
-    The destination matrix declared `database_backup_pg_service_file` and
-    `database_backup_pgpass_file` long before anything could create them: every
-    source path funnelled through a normalizer that rejected embedded newlines,
-    so the only supported handoff could not produce the two ciphertexts the
-    install gate requires. No test caught it because none exercised creation.
+    Every source path funnels through a normalizer that rejects embedded
+    newlines for line-shaped secrets, so a file-shaped secret must keep its
+    line breaks all the way into the sealed Kubernetes Secret.
     """
 
     module = _load_module()
-    service_file = b"[substrate-production]\nhost=db.example\nport=5432\ndbname=neondb\n"
+    public_key = (
+        b"-----BEGIN PUBLIC KEY-----\n"
+        b"MCowBQYDK2VwAyEAexampleexampleexampleexampleexampleexam=\n"
+        b"-----END PUBLIC KEY-----\n"
+    )
     monkeypatch.setenv("SOPS_AGE_RECIPIENTS", "age1testrecipient")
-    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: service_file.rstrip(b"\n"))
+    monkeypatch.setattr(module, "_read_secret", lambda **_kwargs: public_key.rstrip(b"\n"))
 
     plaintext_by_path: dict[Path, dict[str, object]] = {}
     monkeypatch.setattr(
@@ -1011,10 +929,10 @@ def test_file_shaped_secret_keeps_its_newlines_through_the_handoff(
     module.execute_handoff(
         matrix_path=MATRIX,
         repository_root=tmp_path,
-        secret_name="database_backup_pg_service_file",
+        secret_name="cloud_artifact_public_key",
         version="v1",
-        destination_ids=("k3s.database-backup.pg-service.active",),
-        source_kind="stdin",
+        destination_ids=("k3s.exomem-artifact-broker-public-key.active",),
+        source_kind="bws",
         terraform_bin="terraform",
         sops_bin="sops",
         vercel_bin="vercel",
@@ -1022,14 +940,14 @@ def test_file_shaped_secret_keeps_its_newlines_through_the_handoff(
         dry_run=False,
     )
 
-    target = tmp_path / "infra/secrets/database-backup/pg-service.v1.sops.json"
+    target = tmp_path / "infra/secrets/cloud/exomem-artifact-broker-public-key.v1.sops.json"
     assert target.is_file()
     # Sealing writes atomically, so the recorded key is the temporary path.
     assert len(plaintext_by_path) == 1
     sealed = next(iter(plaintext_by_path.values()))
-    stored = sealed["stringData"]["pg_service.conf"]  # type: ignore[index]
-    assert stored == service_file.rstrip(b"\n").decode("utf-8")
-    assert stored.count("\n") == 3
+    stored = sealed["stringData"]["public-key"]  # type: ignore[index]
+    assert stored == public_key.rstrip(b"\n").decode("utf-8")
+    assert stored.count("\n") == 2
 
 
 def test_normalizer_holds_the_line_shape_and_rejects_carriage_returns() -> None:
@@ -1068,14 +986,17 @@ def test_normalizer_rejects_whole_value_redaction_markers(value: bytes, value_sh
         module._normalize_secret(value, value_shape)
 
 
-@pytest.mark.parametrize("source_kind", ["stdin", "prompt", "terraform"])
 @pytest.mark.parametrize(
-    ("secret_name", "destination_id"),
+    ("secret_name", "destination_id", "source_kind"),
     [
-        ("cloudflare_tunnel_token", "k3s.cloudflared.active"),
+        ("hcloud_csi_token", "k3s.hcloud-csi.active", "stdin"),
+        ("hcloud_csi_token", "k3s.hcloud-csi.active", "prompt"),
+        ("global_cron_secret", "vercel.substrate.production.global-cron.active", "stdin"),
+        ("global_cron_secret", "vercel.substrate.production.global-cron.active", "prompt"),
         (
-            "cloudflare_access_client_secret",
-            "vercel.substrate.production.access.active.client-secret",
+            "etcd_snapshot_upload_key",
+            "ansible.hosted-node.etcd-s3-secret-key.active",
+            "terraform",
         ),
     ],
 )
@@ -1179,7 +1100,7 @@ def test_matrix_never_routes_a_file_shaped_secret_to_vercel(tmp_path: Path) -> N
         for destination in matrix["secrets"][name]["destinations"].values():
             assert destination["kind"] == "sops_k8s_secret"
 
-    matrix["secrets"]["cloudflare_access_client_id"]["value_shape"] = "file"
+    matrix["secrets"]["global_cron_secret"]["value_shape"] = "file"
     poisoned = tmp_path / "poisoned-matrix.json"
     poisoned.write_text(json.dumps(matrix), encoding="utf-8")
     with pytest.raises(module.HandoffError, match="outside a Kubernetes Secret"):
@@ -1419,7 +1340,7 @@ def test_json_object_matrix_uses_its_own_declared_key_set(tmp_path: Path) -> Non
 def test_scalar_matrix_rejects_null_key_sets_field(tmp_path: Path) -> None:
     module = _load_module()
     matrix = _matrix()
-    matrix["secrets"]["cloudflare_tunnel_token"]["destinations"]["k3s.cloudflared.active"][  # type: ignore[index]
+    matrix["secrets"]["hcloud_csi_token"]["destinations"]["k3s.hcloud-csi.active"][  # type: ignore[index]
         "key_sets"
     ] = None
     path = tmp_path / "matrix.json"

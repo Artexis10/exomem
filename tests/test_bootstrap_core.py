@@ -42,25 +42,21 @@ SECTION_BYTE_CEILINGS = {
     "diagnostics_reading": 2_200,
 }
 
-SURFACES = (None, "claude-code", "hosted-alpha-agent-v5")
+#: `cloud` is the reduced surface an Exomem Cloud cell serves: the product surface
+#: minus `CLOUD_SURFACE_EXCLUSIONS`, so a rule naming an excluded command vanishes there.
+SURFACES = (None, "claude-code", "cloud")
 CARRYING = ("balanced", "maximal")
 
 
-@pytest.mark.parametrize("surface", (None, "hosted-alpha-agent-v4"))
-def test_full_bootstrap_exposes_public_references_without_growing_compact(
-    monkeypatch, surface
-) -> None:
-    """Current clients find moved manuals; released bootstrap payloads stay unchanged."""
-    full = _bootstrap(monkeypatch, "balanced", surface, profile="full")
-    if surface is not None:
-        assert "references" not in full
-        return
+def test_full_bootstrap_exposes_public_references_without_growing_compact(monkeypatch) -> None:
+    """Current clients find moved manuals; the compact payload stays unchanged."""
+    full = _bootstrap(monkeypatch, "balanced", None, profile="full")
     sources = dict(workflow_skills.contract_sources())
     assert full["references"]
     for name, url in full["references"].items():
         assert name.startswith("references/") and name in sources
         assert url.endswith("/src/exomem/_scaffold/_Schema/" + name)
-    assert "references" not in _bootstrap(monkeypatch, "balanced", surface)
+    assert "references" not in _bootstrap(monkeypatch, "balanced", None)
 
 
 def _root() -> pathlib.Path:
@@ -73,20 +69,23 @@ def _bootstrap(monkeypatch, level: str, surface: str | None, *, populated: bool 
     """`populated` serves a vault at the design's maximum bound (`bootstrap_populated`)."""
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     monkeypatch.delenv("EXOMEM_SURFACE", raising=False)
-    hosted = surface if surface and surface.startswith("hosted-") else None
-    if surface and hosted is None:
+    if surface and surface != "cloud":
         monkeypatch.setenv("EXOMEM_SURFACE", surface)
     kwargs.setdefault("profile", "compact")
     root = populated_root() if populated else _root()
     with populated_blocks() if populated else contextlib.nullcontext():
-        if hosted is None:
+        if surface != "cloud":
             return commands.op_bootstrap(root, **kwargs)
-        registry = commands.product_commands_for_profile(hosted, "rest")
+        # The descriptor `server.build_server` publishes for a cloud cell.
         descriptor = capabilities.ActiveSurfaceDescriptor(
-            surface="hosted-agent",
-            profile=hosted,
-            tier2_enabled=commands.PRODUCT_SURFACE_PROFILES[hosted].expose_tier2,
-            product_commands=tuple(command.name for command in registry),
+            surface="mcp",
+            profile="product-cloud",
+            tier2_enabled=True,
+            product_commands=tuple(
+                command.name
+                for command in commands.product_commands_for("mcp")
+                if command.name not in commands.CLOUD_SURFACE_EXCLUSIONS
+            ),
         )
         with capabilities.active_surface(descriptor):
             return commands.op_bootstrap(root, **kwargs)
@@ -204,10 +203,9 @@ def test_the_core_carries_every_manifest_rule(monkeypatch, level, surface):
 @pytest.mark.parametrize("surface", SURFACES)
 @pytest.mark.parametrize("level", prominence.CANON)
 def test_every_surface_the_split_applies_to_carries_a_recall_rule(monkeypatch, level, surface):
-    """Hosted does not export `activate_context`, and the surface filter drops any string
-    that names an unavailable command: the whole recall contract used to vanish from a
-    hosted compact payload, on the one surface with no hook to carry it. The line is now
-    surface-aware, so the rule survives and names only commands the surface exports."""
+    """The surface filter drops any string that names an unavailable command, so the
+    recall line is surface-aware: the rule survives and names only commands the surface
+    exports."""
     core = _bootstrap(monkeypatch, level, surface)
     recall = core["engagement"]["contract"]["recall"]
     assert recall
@@ -219,14 +217,6 @@ def test_every_surface_the_split_applies_to_carries_a_recall_rule(monkeypatch, l
         else:
             assert "activate_context" not in recall
             assert "ask_memory" in recall and "ask_memory" in exported
-
-
-@pytest.mark.parametrize("profile", ("hosted-alpha-agent-v1", "hosted-alpha-agent-v3", "hosted-alpha-agent-v4"))
-def test_released_profiles_keep_their_published_payload_without_the_recall_fix(monkeypatch, profile):
-    """v1 to v4 are frozen (see `test_bootstrap_frozen_profiles`): the surface-aware
-    recall line applies to unpublished surfaces only."""
-    contract = _bootstrap(monkeypatch, "maximal", profile)["engagement"]["contract"]
-    assert "recall" not in contract
 
 
 @pytest.mark.parametrize("level", ("off", "light"))

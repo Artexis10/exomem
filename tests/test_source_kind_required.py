@@ -439,10 +439,10 @@ def test_programmatic_capture_cannot_reuse_the_tui_exception(vault: Path) -> Non
 
 
 def test_hosted_nonowner_gets_no_debt_advisory(vault: Path, source_schema) -> None:
-    from exomem.governance.principal import request_scope, resolve_hosted_principal
+    from exomem.governance.principal import request_scope, resolve_rest_principal
 
     _legacy_other_page(vault)
-    with request_scope(resolve_hosted_principal("tenant-capture")):
+    with request_scope(resolve_rest_principal("tenant-capture")):
         leaf = commands.op_capture_source(
             vault, source_schema, title="Field report", content="Three nests.",
             source_kind="field-notebook",

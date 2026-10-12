@@ -286,23 +286,19 @@ For each node, cellctl SHALL publish `cell_slots`, equal to the provider's per-s
 
 ### Requirement: The Cloud lifecycle sweep remains scheduled
 
-The platform chart SHALL classify every hosted scheduler job by whether it serves Cloud. While either cellctl or the Cloud gateway is enabled, it SHALL keep Cloud-serving scheduler jobs active and suspend legacy-only scheduler jobs. With Cloud disabled, `legacyHosted.paused` SHALL retain its existing all-jobs pause, and with every pause input disabled no scheduler job SHALL be suspended.
+The platform chart SHALL retain the `exomem-reconcile` and `exomem-access-delivery` scheduler jobs. While `cellctl.enabled` or `cloudGateway.enabled` is true, it SHALL keep both jobs active. With both controls false, it SHALL suspend both jobs. The signed scheduler contract SHALL continue to define their exact schedules and external authentication.
 
 #### Scenario: The lifecycle sweep runs while Cloud is on
 
-- **WHEN** cellctl or the Cloud gateway is enabled
-- **THEN** the `exomem-reconcile` CronJob is not suspended
-- **AND** every legacy-only scheduler CronJob is suspended
+- **WHEN** `cellctl.enabled` or `cloudGateway.enabled` is true
+- **THEN** the `exomem-reconcile` and `exomem-access-delivery` CronJobs are not suspended
+- **AND** both jobs retain their schedules and external authentication from the signed scheduler contract
 
-#### Scenario: Only the explicit legacy pause is on
+#### Scenario: Both Cloud controls are off
 
-- **WHEN** Cloud is disabled and `legacyHosted.paused` is true
-- **THEN** every scheduler CronJob is suspended
-
-#### Scenario: No platform pause is on
-
-- **WHEN** Cloud is disabled and `legacyHosted.paused` is false
-- **THEN** no scheduler CronJob is suspended
+- **WHEN** `cellctl.enabled` and `cloudGateway.enabled` are false
+- **THEN** the `exomem-reconcile` and `exomem-access-delivery` CronJobs are suspended
+- **AND** both jobs retain their schedules and external authentication from the signed scheduler contract
 
 ### Requirement: Vault traffic is TLS-terminated only on our own servers
 

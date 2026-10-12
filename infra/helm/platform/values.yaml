@@ -1,65 +1,14 @@
-gateway:
-  enabled: false
-  # Supplied by the reviewed Substrate image release; never a mutable tag.
+# The released Exomem image the platform's own jobs run on: the scheduler
+# requests, the scheduler collector and alert evaluator. Each job runs a
+# script the chart mounts, so set the current
+# Cloud cell image, ghcr.io/artexis10/exomem@sha256:<digest>. Always a digest,
+# never a tag.
+platformJobs:
   image: ""
-  originHostname: ""
-  replicas: 1
-  maxInflight: 16
-  databaseSecretName: exomem-gateway-database
-  databaseSecretKey: url
-  controlPlaneKeySecretName: exomem-gateway-control-plane-key
-  controlPlaneKeySecretKey: key
-  # Explicit database endpoint addresses, resolved during deployment preflight.
-  # Refresh these deliberately when the database provider changes its addresses.
-  databaseEgressCidrs: []
-
-legacyHosted:
-  paused: false
-
-cloudflared:
-  image: docker.io/cloudflare/cloudflared:2026.7.0@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df
-  replicas: 1
-  tokenSecretName: exomem-cloudflared-token
-  tokenSecretKey: token
-
-provisioner:
-  deploymentLockJson: ""
-  deploymentLockSha256: ""
-  runtimeSelection: ""
-  replicas: 1
-  databaseSchema: exomem_provisioner
-  databaseRole: exomem_provisioner_runtime
-  trustedProxyIps: 10.0.0.0/8
-  cellChartPath: /opt/exomem/charts/cell
-  cellChartVersion: 0.1.0
-  helmBinary: /opt/exomem/bin/helm
-  helmVersion: 3.19.4
-  controlHostname: ""
-  transferHostname: ""
-  browserOrigin: https://substratesystems.io
-  location: fsn1
-  internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
-  pollSeconds: "1"
-  # Ceiling for the routine worker's idle backoff. It must stay above the database's
-  # autosuspend timeout, or an idle fleet keeps a serverless endpoint awake for nothing.
-  idlePollSeconds: "300"
-  providerRecoveryPublicKeySecret:
-    name: exomem-provider-recovery-verifier
-    key: public-key
-  providerRecoverySigningKeySecret:
-    name: exomem-provider-recovery-signer
-    key: private-key
-  capacityReceiptPublicKeySecret:
-    name: exomem-capacity-receipt-verifier
-    key: public-key
-
-admission:
-  namespaceContractOperatorUsernames:
-    - system:admin
 
 scheduler:
   contractVersion: 1
-  contractSha256: 03ec8f7ae6f1a221ef8ac73e390be029b180df08e0b55806812496ea9fca7733
+  contractSha256: 5c28d3a7ad14a88d30be1264dc223e4fd82dbfc055812dbd442c8acbeb5684ad
   secretName: exomem-hosted-scheduler
   secretKey: secret
   jobs:
@@ -67,46 +16,11 @@ scheduler:
       servesCloud: true
     exomem-reconcile:
       servesCloud: true
-    exomem-export-gc:
-      servesCloud: false
 
 observability:
-  contractSha256: 30671acff9bfc15fa825fbc72292f6435cf3ce994c0de04f4649ee46ee343f63
+  contractSha256: 3f3afe827755d253695bb9a71058cbc303bb5dff60fb6eb6eaab880e976d4973
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
-
-capacityCollector:
-  schedule: "*/5 * * * *"
-  contractSha256: 9339f62fd322c1d82361ec90506d45e840a38d7abd3f7948507d03adcc572e76
-  hcloudServerId: 0
-  stateConfigMap: exomem-capacity-receipt
-  privateKeySecret:
-    name: exomem-capacity-receipt-signer
-    key: private-key
-  hcloudTokenSecret:
-    name: exomem-hcloud-capacity-reader
-    key: token
-
-durability:
-  contractSha256: 8381b6b85f9afa45eb25323a4b4aedba3ecc1234aa632b38a852f86c14fb48c6
-  storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
-  b2Endpoint: ""
-  b2Region: ""
-  recoveryBucket: ""
-  userExportBucket: ""
-  databaseBackupBucket: ""
-  databaseBackup:
-    proofTenantId: ""
-    proofCellId: ""
-    sourceService: substrate-production
-    maintenanceService: postgres-maintenance
-    scratchService: exomem-restore-verification
-    scratchDatabase: exomem_restore_verification
-    expectedRestoreOwner: substrate
-    verificationSql: >-
-      SELECT current_user,
-      current_setting('app.restore_tenant_id', true),
-      current_setting('app.restore_cell_id', true)
 
 storage:
   className: exomem-hcloud-encrypted-retain
@@ -191,23 +105,13 @@ traefik:
     # `service.type` is not a key in this chart and was silently ignored, so the
     # subchart default of LoadBalancer applied. The node runs k3s with servicelb
     # disabled, so a LoadBalancer Service never gets an address and
-    # `helm --wait` can never return. Ingress arrives through the Cloudflare
-    # Tunnel, which dials traefik from inside the cluster.
+    # `helm --wait` needs no external load balancer; Cloud uses hostPort.
     spec:
       type: ClusterIP
   ports:
     web:
       port: 8000
       exposedPort: 80
-      # The tunnel terminates TLS at Cloudflare and dials this entrypoint over
-      # plain HTTP, so traefik must be told the hop in front of it is trusted or
-      # it rewrites X-Forwarded-Proto to http. The provisioner refuses any
-      # /cells/* request whose scheme is not https, so without this every
-      # control-plane call fails closed. Narrower than the 10.0.0.0/8 the
-      # provisioner already trusts for the same header.
-      forwardedHeaders:
-        trustedIPs:
-          - 10.42.0.0/16
     websecure:
       # D11: the Exomem Cloud MCP hostname is served here, exposed only
       # through this entrypoint on the node's real port 443 via hostPort.
@@ -215,8 +119,7 @@ traefik:
       # overwrites X-Real-Ip with the peer address hostPort preserves; the
       # cloud gateway's own NetworkPolicy (cloud-gateway.yaml) is what makes
       # that header trustworthy, by admitting ingress only from these pods.
-      # Not added to the ClusterIP Service: hostPort is the only way in, and
-      # the tunnel keeps its single `web` port.
+      # Not added to the ClusterIP Service: hostPort is the Cloud ingress.
       expose:
         default: false
       exposedPort: 443
@@ -238,10 +141,8 @@ traefik:
 
 # --- Exomem Cloud (adopt-exomem-cloud-plain-cells) ---
 #
-# Separate from the `gateway`/`provisioner`/`storage` blocks above, which
-# stay wired to the old hosted platform until phase R retires it. Cloud
-# cellctl and its gateway run in their own namespace (exomem-cloud) with
-# their own StorageClass, so neither block collides with the hosted one.
+# Cloud cellctl and its gateway run in their own namespace (exomem-cloud)
+# with their own StorageClass, separate from the `storage` block above.
 
 cellctl:
   enabled: false

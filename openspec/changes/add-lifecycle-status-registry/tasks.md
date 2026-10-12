@@ -1,5 +1,9 @@
 # Tasks
 
+Hosted retirement supersedes only this change's frozen-profile artifact and bootstrap obligations.
+The checked receipts below describe historical work.
+Shared vocabulary and classification requirements remain active, and release and archive tasks 3.3 and 3.4 remain pending.
+
 Delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/1630).
 [CI run 37888048092](https://github.com/Artexis10/exomem/actions/runs/37888048092) passed every test cited below on head `7c37c37cd5c459ba83a5fef79b898f3dfd3dc82d`, with one exception.
 The lean core matrix skips `tests/test_vocabulary_registries.py::test_a_reverted_promotion_leaves_its_page_as_debt` because the `tui` extra is not installed there; that test passed in a local run with the extra installed.

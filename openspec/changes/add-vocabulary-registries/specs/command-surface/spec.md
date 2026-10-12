@@ -22,7 +22,7 @@ The existing operation names (`save-entity-types`, `resolve-entity-type`, `propo
 ### Requirement: Registry saves follow the owner governance rule
 Registry mutation authorization SHALL use existing bound-principal ownership and canonical vocabulary writer authority. Whole-vault disclosure admission SHALL NOT confer or remove write authority. In v1, a valid owner's save SHALL take effect without an approval item. A content restriction alone SHALL NOT route that owner for review. A resolved nonowner's save SHALL preserve the existing pending-item route and leave the registry unchanged. The item SHALL carry the reason and delta and remain visible only to its authorized owner. A registry without a review family SHALL refuse with `audience_restricted`.
 
-Restore SHALL require owner write authority independently of disclosure permission. Missing principal context and the hosted RAW exemption SHALL NOT confer owner write authority. Trusted internal calls SHALL establish their existing explicit library scope without elevating a bound remote principal.
+Restore SHALL require owner write authority independently of disclosure permission. Missing principal context and whole-vault disclosure SHALL NOT confer owner write authority. Trusted internal calls SHALL establish their existing explicit library scope without elevating a bound remote principal.
 
 Explicitly activated v2 vaults SHALL retain canonical effect classification and writer authority. Registry code SHALL NOT replace that gate with disclosure admission or a new S1 queue. S1 SHALL NOT activate v2 or require its opt-in owner-control process for v1 owners.
 
@@ -38,8 +38,8 @@ Counts, history reasons, collision details and other private-dependent results S
 - **THEN** the valid save takes effect without an approval item
 - **AND** unavailable private-dependent counts remain unavailable independently of the write
 
-#### Scenario: A hosted exemption supplies no owner authority
-- **WHEN** a resolved hosted nonowner is exempt from RAW admission and saves vocabulary in v1
+#### Scenario: A remote principal supplies no owner authority
+- **WHEN** a resolved remote nonowner has whole-vault disclosure and saves vocabulary in v1
 - **THEN** the operation uses the existing nonowner route
 - **AND** unrestricted aggregate disclosure cannot turn the caller into the owner
 

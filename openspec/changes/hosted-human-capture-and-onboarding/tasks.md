@@ -1,3 +1,5 @@
+Retirement scope (2026-10-11): Retirement supersedes Hosted refusal tables and the old Hosted onboarding surface. Human capture and governed-conclusion separation remain in scope. Unchecked suite, delivery, and current client acceptance tasks stay open.
+
 ## 1. Hosted refusal guidance
 
 - [x] 1.1 Add `_HOSTED_REFUSAL_GUIDANCE` in `src/exomem/server_hosted.py`: a static code → (message, remediation) table, with the `missing_semantic_unit` and `empty_rich_unit` entries derived from `semantic_authoring.AUTHORING_CONTRACT.findings` at import time so they cannot drift
