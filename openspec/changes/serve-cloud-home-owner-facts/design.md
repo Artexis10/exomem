@@ -63,12 +63,14 @@ Measured on a laptop, a verified scan of an 8 MB live file with no qualifying ca
 The reader skips the text after the file's last newline, which is a row still being appended.
 A failed append writes no row and leaves no gap in the sequence, so the file cannot show the missing call.
 The failing process therefore records the time of each failed append in memory, and best effort in a marker file beside the ledger (`ledger.gap`).
+Memory keeps the latest time, whatever order concurrent failures arrive in.
+The marker is an empty file that each failure touches, so its modification time is the latest touch, after every failure it marks.
+The reader needs no parser for it, and a marker that cannot be stat'ed makes the section `ACTIVITY_UNAVAILABLE`.
 The reader treats the later of the two times as a boundary: the interval starts strictly after the failed call.
 With no row after that time, the section is `ACTIVITY_UNAVAILABLE` until the next call that the ledger records.
 The memory call itself still succeeds.
 On a Cloud cell one MCP server process serves the recalls, the saves and the activity section, so its memory covers every call.
 The marker covers a reader in another process, such as a second server beside a local service.
-An unreadable marker makes the section `ACTIVITY_UNAVAILABLE`, because the reader cannot know whether a call is missing.
 The section is owner-only: it shows when and how much the owner's other assistants used memory.
 A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an empty list.
 

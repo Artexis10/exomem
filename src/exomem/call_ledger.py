@@ -142,24 +142,25 @@ def archive_dir() -> Path:
 
 
 def gap_marker_path() -> Path:
-    """The time of the latest failed append, beside the ledger, for a reader in
-    another process."""
+    """An empty file whose modification time is no earlier than the latest failed
+    append, beside the ledger, for a reader in another process."""
     return ledger_dir() / _GAP_MARKER_FILENAME
 
 
 def _note_append_failure() -> None:
     """Record that a call has no row: in memory, and beside the ledger if possible.
 
-    The marker write is best effort. If it fails too, a reader in another
-    process cannot know about this call; design.md states that residual.
+    Both keep the latest time, whatever order concurrent failures arrive in:
+    memory keeps the maximum, and the marker's modification time is set at each
+    touch, after the failure it marks. The marker write is best effort; design.md
+    states what a reader in another process misses when it fails too.
     """
     at = dt.datetime.now(dt.UTC)
     with _lock:
-        _append_failure["at"] = at
+        seen = _append_failure["at"]
+        _append_failure["at"] = at if seen is None else max(seen, at)
     try:
-        from . import durable_write
-
-        durable_write.replace_text(gap_marker_path(), at.isoformat(timespec="milliseconds"))
+        gap_marker_path().touch()
     except Exception:  # noqa: BLE001 - this process still holds the time in memory
         pass
 
@@ -167,18 +168,15 @@ def _note_append_failure() -> None:
 def last_append_failure() -> dt.datetime | None:
     """The latest failed append that this process saw or that any process marked.
 
-    Raises `OSError` or `ValueError` when the marker exists but cannot be read:
-    a reader then cannot know whether a call is missing.
+    Raises `OSError` when the marker exists but cannot be stat'ed: a reader then
+    cannot know whether a call is missing.
     """
     with _lock:
         seen = _append_failure["at"]
     try:
-        text = gap_marker_path().read_text(encoding="utf-8").strip()
+        marked = dt.datetime.fromtimestamp(gap_marker_path().stat().st_mtime, dt.UTC)
     except FileNotFoundError:
         return seen
-    marked = dt.datetime.fromisoformat(text)
-    if marked.tzinfo is None:
-        raise ValueError("the ledger gap marker has no time zone")
     return marked if seen is None else max(seen, marked)
 
 

@@ -33,7 +33,7 @@ directory independently.
 | `mutations.jsonl`        | One record per mutation attempt (the mutation journal).          |
 | `ledger.jsonl`           | One record per **MCP tool call** — the call ledger (below).       |
 | `ledger-archive/`        | The call ledger's rotated segments, content-addressed.           |
-| `ledger.gap`             | The time of the latest call whose ledger row failed to append.   |
+| `ledger.gap`             | Empty; its mtime marks the latest call whose row failed to append. |
 | `archive/exomem-*.log`   | Prior sessions' `exomem.log`, archived (not deleted) on restart.  |
 
 Each JSONL file rotates at a size cap (`EXOMEM_JSONL_MAX_MB`, default 64MB),
