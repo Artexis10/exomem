@@ -73,11 +73,12 @@ def storage(tmp_path):
         server.server_close()
 
 
-def _cell_export(vault: Path, tmp_path: Path, storage: dict, *, part_bytes: int, urls: list[str]) -> tuple[int, dict]:
+def _cell_export(vault: Path, tmp_path: Path, storage: dict, *, part_bytes: int, urls: list[str],
+                 max_bytes: int = 1024**3) -> tuple[int, dict]:
     staging, log = tmp_path / "staging", tmp_path / "termination-log"
     args = [sys.executable, "-m", "exomem", "cell-export", "--export-id", str(uuid.uuid4()),
-            "--part-bytes", str(part_bytes), "--vault", str(vault), "--staging", str(staging),
-            "--termination-log", str(log)]
+            "--part-bytes", str(part_bytes), "--max-bytes", str(max_bytes), "--vault", str(vault),
+            "--staging", str(staging), "--termination-log", str(log)]
     for url in urls:
         args += ["--part-url", url]
     env = {**os.environ, "EXOMEM_CLOUD_CELL": "1", "EXOMEM_CLOUD_CELL_ID": CELL, "SSL_CERT_FILE": str(storage["ca"])}
@@ -107,8 +108,26 @@ def test_a_held_cells_export_uploads_a_verifiable_archive_and_reports_only_its_s
 
 
 def test_an_archive_larger_than_its_parts_is_refused_before_any_upload(vault, tmp_path, storage):
-    """Defect: a too-small upload is completed as a truncated archive."""
+    """Defect: a too-small upload is completed as a truncated archive, or blamed on the owner's vault."""
     status, report = _cell_export(vault, tmp_path, storage, part_bytes=1024,
+                                  urls=[f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber=1"])
+    assert status == 1 and report["error"] == "EXPORT_FAILED"
+    assert storage["parts"] == {}
+
+
+def test_the_cells_size_bounds_the_export_in_place_of_the_default_limit(vault, tmp_path, storage):
+    """Defect: the 10 GiB default refuses every export of a cell grown past it."""
+    status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, max_bytes=100,
+                                  urls=[f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber=1"])
+    assert status == 1 and report["error"] == "EXPORT_FAILED"
+    assert storage["parts"] == {}
+
+
+def test_only_a_file_above_the_per_file_limit_reads_as_too_large(vault, tmp_path, storage):
+    """Defect: the owner is told to shrink a vault that any other failure stopped."""
+    with (vault / "recording.bin").open("wb") as sparse:
+        sparse.truncate(vault_portability.PortabilityLimits().max_file_bytes + 1)
+    status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, max_bytes=4 * 1024**3,
                                   urls=[f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber=1"])
     assert status == 1 and report["error"] == "EXPORT_TOO_LARGE"
     assert storage["parts"] == {}

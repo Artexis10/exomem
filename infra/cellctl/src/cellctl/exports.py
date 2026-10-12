@@ -33,11 +33,12 @@ EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
 # The codes the cell's export Job itself reports; any other report is EXPORT_FAILED.
 JOB_FAILURE_CODES = frozenset({EXPORT_FAILED, EXPORT_TOO_LARGE, EXPORT_UPLOAD_FAILED, SOURCE_CHANGED_DURING_EXPORT})
-# C6: the part URLs cover the measured use plus 2% for the ZIP's own headers.
+# C6: the part URLs cover the cell's whole size plus 2% for the ZIP's own headers.
 SIZE_MARGIN_PERCENT = 102
 # One presigned URL is one Job argument; this keeps a Job object far inside the
-# API server's request size limit (64 GiB of archive at 64 MiB parts).
+# API server's request size limit. A larger cell gets larger parts instead.
 MAX_PARTS = 1000
+_MIB = 1024 * 1024
 _HEX64 = re.compile(r"[0-9a-f]{64}")  # SHA-256 wire format; always fullmatch
 
 
@@ -121,13 +122,23 @@ def report_usage(report: dict, observed_at: datetime) -> dict[str, object]:
     return usage_updates(used, total, observed_at)
 
 
-def part_count(row: CellRow) -> int:
-    """C6: enough 64 MiB parts for the measured use plus the ZIP margin, or for
-    the whole claim while the cell's use was never measured."""
+@dataclass(frozen=True)
+class ExportSize:
+    max_bytes: int
+    part_bytes: int
+    parts: int
 
-    basis = row.used_bytes if row.used_bytes is not None else row.size_gib * GIB
-    needed = -(-basis * SIZE_MARGIN_PERCENT // (100 * PART_BYTES))
-    return min(MAX_PARTS, max(1, needed))
+
+def export_size(row: CellRow) -> ExportSize:
+    """C6: an export may pack everything the cell can hold, its size or its
+    measured filesystem when that is larger, so only one file above the
+    per-file limit makes a vault too large. The parts are 64 MiB, or larger in
+    whole MiB, so that at most MAX_PARTS cover it with the ZIP margin."""
+
+    max_bytes = max(row.size_gib * GIB, row.filesystem_bytes or 0)
+    covered = -(-max_bytes * SIZE_MARGIN_PERCENT // 100)
+    part_bytes = max(PART_BYTES, -(-covered // (MAX_PARTS * _MIB)) * _MIB)
+    return ExportSize(max_bytes=max_bytes, part_bytes=part_bytes, parts=-(-covered // part_bytes))
 
 
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,

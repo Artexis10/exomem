@@ -14,7 +14,15 @@ import pytest
 from botocore.exceptions import ClientError
 
 from cellctl import db, reconcile
-from cellctl.exports import ExportJob, ExportRow, decide_export, etag_digest, part_count
+from cellctl.capacity import GIB
+from cellctl.exports import (
+    ExportJob,
+    ExportRow,
+    ExportSize,
+    decide_export,
+    etag_digest,
+    export_size,
+)
 from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
 from cellctl.storage.fake_b2 import FakeB2
@@ -134,10 +142,14 @@ def test_an_export_waits_while_another_hold_owns_the_volume():
     assert decide_export(backing_up, _export(), observed, ExportJob(), now=NOW) is None
 
 
-def test_part_urls_cover_the_measured_use_or_the_whole_claim():
-    """Defect: too few part URLs fail every export with EXPORT_TOO_LARGE."""
-    assert part_count(_row(used_bytes=64 * MIB, filesystem_bytes=1024 * MIB, usage_observed_at=NOW)) == 2
-    assert part_count(_row()) == 164  # a 10 GiB claim never measured, plus the ZIP margin
+def test_an_export_covers_everything_the_cell_can_hold_in_at_most_1000_parts():
+    """Defect: a cell grown past 10 GiB, or past its last measurement, can never be exported."""
+    assert export_size(_row()) == ExportSize(max_bytes=10 * GIB, part_bytes=64 * MIB, parts=164)
+    grown = export_size(_row(grown_storage_gib=110))
+    assert grown.max_bytes == 110 * GIB and grown.parts <= 1000 and grown.part_bytes % MIB == 0
+    assert grown.parts * grown.part_bytes >= grown.max_bytes * 1.02  # the ZIP's own headers
+    measured = export_size(_row(used_bytes=GIB, filesystem_bytes=12 * GIB, usage_observed_at=NOW))
+    assert measured.max_bytes == 12 * GIB
 
 
 def test_the_part_digest_matches_the_cell_commands_vector():
@@ -149,15 +161,17 @@ def test_the_export_job_carries_part_urls_but_no_storage_credential():
     """Defect: the Job could reach other objects, or it fills the node's disk unbounded."""
     spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=0, read_only=False, storage_gib=20,
                             hold_kind="export", hold_started_at=NOW.isoformat())
-    job = render_export_job(spec, _export(), part_urls=["https://storage.test/one", "https://storage.test/two"],
-                            part_bytes=64 * MIB, deadline_seconds=1800)
+    size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
+    job = render_export_job(spec, _export(), size, part_urls=["https://storage.test/one", "https://storage.test/two"],
+                            deadline_seconds=1800)
     pod = job["spec"]["template"]["spec"]
     container = pod["containers"][0]
     assert container["command"][-4:] == ["--part-url", "https://storage.test/one", "--part-url", "https://storage.test/two"]
+    assert container["command"][container["command"].index("--max-bytes") + 1] == str(20 * GIB)
     assert {env["name"]: set(env) for env in container["env"]} == {
         name: {"name", "value"} for name in ("EXOMEM_CLOUD_CELL", "EXOMEM_CLOUD_CELL_ID", "TMPDIR", "EXOMEM_LOG_DIR")}
     assert "envFrom" not in container
-    assert {"name": "staging", "emptyDir": {"sizeLimit": "20Gi"}} in pod["volumes"]
+    assert {"name": "staging", "emptyDir": {"sizeLimit": str(327 * 64 * MIB)}} in pod["volumes"]
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
 
 

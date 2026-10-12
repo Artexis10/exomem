@@ -1122,14 +1122,14 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
 JOB_KIND_EXPORT = "export"
 
 
-def render_export_job(spec: CellManifestSpec, item, *, part_urls: list[str], part_bytes: int,
-                      deadline_seconds: int) -> dict:
+def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str], deadline_seconds: int) -> dict:
     """C6: the cell's own `exomem cell-export` under the export hold. It packs
-    the stopped cell's volume into a staging emptyDir sized to the claim and
+    the stopped cell's volume into a staging emptyDir as large as its parts and
     uploads the ZIP to the presigned parts; it holds no object-storage key."""
     from .exports import job_name
 
-    command = ["exomem", "cell-export", "--export-id", item.export_id, "--part-bytes", str(part_bytes)]
+    command = ["exomem", "cell-export", "--export-id", item.export_id, "--part-bytes", str(size.part_bytes),
+               "--max-bytes", str(size.max_bytes)]
     for url in part_urls:
         command += ["--part-url", url]
     # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
@@ -1140,7 +1140,7 @@ def render_export_job(spec: CellManifestSpec, item, *, part_urls: list[str], par
     container["command"] = command
     container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}]
     container["volumeMounts"].append({"name": "staging", "mountPath": "/staging"})
-    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": f"{spec.storage_gib}Gi"}})
+    pod["volumes"].append({"name": "staging", "emptyDir": {"sizeLimit": str(size.parts * size.part_bytes)}})
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}
     return {
         "apiVersion": "batch/v1", "kind": "Job",

@@ -51,12 +51,11 @@ from .exports import (
     ExportStorage,
     accepted_report,
     decide_export,
-    part_count,
+    export_size,
     settle_step,
 )
 from .exports import HOLD as EXPORT_HOLD
 from .exports import job_name as export_job_name
-from .imports import PART_BYTES
 from .manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
@@ -1841,11 +1840,11 @@ async def _reconcile_row(
                                                                       else config.import_cleanup_deadline).total_seconds())), job_refused)
             if decision.run_export_job:
                 deadline = int(config.export_deadline.total_seconds())
-                part_urls = await asyncio.to_thread(export_storage.part_urls, export_item, part_count(row),
+                size = export_size(row)
+                part_urls = await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
                                                     expires_in=deadline)
                 _run_cell_job(cluster, row.cell_id, render_export_job(
-                    spec, export_item, part_urls=part_urls, part_bytes=PART_BYTES, deadline_seconds=deadline,
-                ), job_refused)
+                    spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
             if decision.create_snapshot and local is not None:
                 _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
                               job_refused)

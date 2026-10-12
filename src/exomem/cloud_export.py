@@ -82,16 +82,19 @@ def upload_parts(archive: Path, part_urls: list[str], part_bytes: int) -> list[s
 
     count = max(1, -(-archive.stat().st_size // part_bytes))
     if count > len(part_urls):
-        # Uploading what fits would complete a truncated archive. The report's
-        # fresh use sizes the parts of the owner's next request.
-        raise ExportRefused(EXPORT_TOO_LARGE)
+        # Uploading what fits would complete a truncated archive. cellctl's
+        # parts cover the cell's whole size plus the ZIP margin, so this is a
+        # fault, not an archive the owner can make smaller.
+        raise ExportRefused(EXPORT_FAILED)
     with archive.open("rb") as stream:
         return [_put(url, stream.read(part_bytes)) for url in part_urls[:count]]
 
 
 def run_export(vault: Path, staging: Path, *, export_id: str, cell_id: str,
-               part_urls: list[str], part_bytes: int) -> dict:
-    """Build and self-verify the canonical archive, upload it, and report it."""
+               part_urls: list[str], part_bytes: int, max_bytes: int) -> dict:
+    """Build and self-verify the canonical archive, upload it, and report it.
+    `max_bytes` is the cell's whole size, so only one file above the
+    per-file limit can make a cell's vault too large to export."""
 
     # The export hold is the quiescence: cellctl starts this Job only after the
     # runtime's pod has released the volume, and no other writer exists.
@@ -102,7 +105,8 @@ def run_export(vault: Path, staging: Path, *, export_id: str, cell_id: str,
     )
     with request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="cloud-export",
                                         issuer_family=f"cloud-cell:{cell_id}")):
-        exported = vault_portability.export_quiesced_vault(vault, staging, context=context)
+        exported = vault_portability.export_quiesced_vault(
+            vault, staging, context=context, limits=vault_portability.PortabilityLimits(max_total_bytes=max_bytes))
     try:
         etags = upload_parts(exported.archive_path, part_urls, part_bytes)
     finally:
@@ -111,11 +115,11 @@ def run_export(vault: Path, staging: Path, *, export_id: str, cell_id: str,
             "etag_digest": etag_digest(etags)}
 
 
-def _portability_code(code: str) -> str:
+def _portability_code(error: vault_portability.PortabilityError) -> str:
     # The portability module's own fixed codes, mapped onto C6's.
-    if code == "SOURCE_CHANGED_DURING_EXPORT":
+    if error.code == "SOURCE_CHANGED_DURING_EXPORT":
         return SOURCE_CHANGED_DURING_EXPORT
-    if code == "RESOURCE_LIMIT_EXCEEDED":
+    if error.code == "RESOURCE_LIMIT_EXCEEDED" and error.limit == "max_file_bytes":
         return EXPORT_TOO_LARGE
     return EXPORT_FAILED
 
@@ -125,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export-id", required=True)
     parser.add_argument("--part-url", dest="part_urls", action="append", default=[])
     parser.add_argument("--part-bytes", type=int, required=True)
+    parser.add_argument("--max-bytes", type=int, required=True)
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     parser.add_argument("--staging", type=Path, default=Path("/staging"))
     parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
@@ -139,15 +144,16 @@ def main(argv: list[str] | None = None) -> int:
         _check_cell(args.vault.parent, cell_id)
         # A plain-HTTP part URL would carry the owner's plaintext archive unencrypted;
         # refusing it costs an export only when the storage endpoint is misconfigured.
-        if (str(uuid.UUID(args.export_id)) != args.export_id or args.part_bytes <= 0 or not args.part_urls
-                or not all(url.startswith("https://") for url in args.part_urls)):
+        if (str(uuid.UUID(args.export_id)) != args.export_id or args.part_bytes <= 0 or args.max_bytes <= 0
+                or not args.part_urls or not all(url.startswith("https://") for url in args.part_urls)):
             raise ExportRefused(EXPORT_FAILED)
         result = {**run_export(args.vault, args.staging, export_id=args.export_id, cell_id=cell_id,
-                               part_urls=args.part_urls, part_bytes=args.part_bytes), **usage}
+                               part_urls=args.part_urls, part_bytes=args.part_bytes,
+                               max_bytes=args.max_bytes), **usage}
     except ExportRefused as error:
         result = {"error": error.code, **usage}
     except vault_portability.PortabilityError as error:
-        result = {"error": _portability_code(error.code), **usage}
+        result = {"error": _portability_code(error), **usage}
     except Exception:  # noqa: BLE001 -- messages may carry member names or signed URLs
         result = {"error": EXPORT_FAILED, **usage}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")

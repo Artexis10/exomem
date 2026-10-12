@@ -23,9 +23,14 @@ The hold SHALL have a deadline. Past it, the export SHALL fail with `EXPORT_HOLD
 
 ### Requirement: An export is uploaded only as the parts the cell reported
 
-The cell's export Job SHALL build the canonical archive with the quiesced vault export in owner scope and SHALL upload it only to part URLs that cellctl presigned over HTTPS for the export's own object, `cells/<cell_id>/exports/<export_id>.zip`. The Job MUST NOT hold an object-storage credential. Its report SHALL carry only sizes, digests, the filesystem's use and fixed error codes.
+The cell's export Job SHALL build the canonical archive with the quiesced vault export in owner scope and SHALL upload it only to part URLs that cellctl presigned over HTTPS for the export's own object, `cells/<cell_id>/exports/<export_id>.zip`. The Job MUST NOT hold an object-storage credential. Its report SHALL carry only sizes, digests, the filesystem's use and fixed error codes. The Job SHALL accept a vault as large as the cell can hold, and SHALL report `EXPORT_TOO_LARGE` only for a file above the per-file limit.
 
 cellctl SHALL create the upload with the cell's own prefix-restricted key and with encryption at rest. It SHALL complete the upload only when the listed parts match the Job's report in number, ETag digest and total size. It SHALL record the completed object version.
+
+#### Scenario: A cell grown past 10 GiB
+
+- **WHEN** an owner exports a cell whose size is 110 GiB
+- **THEN** the Job may pack up to 110 GiB, and at most 1000 presigned parts cover the archive
 
 #### Scenario: A part is replaced before completion
 

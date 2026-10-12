@@ -28,9 +28,9 @@ The hold has a deadline (default 30 minutes). Past it, the export fails with `EX
 
 ### D2. The cell's Job uploads to presigned parts and holds no key
 
-cellctl opens the multipart upload with the cell's own prefix-restricted key and `ServerSideEncryption=AES256`. It presigns one PUT URL per 64 MiB part. The number of parts covers the last measured use plus 2%, or the whole claim while the use was never measured. The URLs expire at the export deadline.
+cellctl opens the multipart upload with the cell's own prefix-restricted key and `ServerSideEncryption=AES256`. An export may pack everything the cell can hold: the cell's size, or its measured filesystem when that is larger. Storage add-ons grow a cell past 10 GiB, so the portability module's 10 GiB default does not apply. cellctl passes this cap to the Job as `--max-bytes`. It presigns parts that cover the cap plus 2% for the ZIP's own headers: 64 MiB each, or larger in whole MiB so that at most 1000 parts cover it. The URLs expire at the export deadline.
 
-The Job runs `exomem cell-export` on the cell image. It mounts the cell's volume, stages the archive on an emptyDir sized to the claim, and uploads the parts in order. Its environment carries no object-storage credential.
+The Job runs `exomem cell-export` on the cell image. It mounts the cell's volume, stages the archive on an emptyDir as large as its parts, and uploads the parts in order. Its environment carries no object-storage credential.
 
 The Job mounts the volume read-write, like the import Jobs. SQLite cannot read a WAL-mode database on a read-only mount once its `-shm` file is gone, and the export reads the collection store. The hold keeps the runtime stopped, so no other writer exists.
 
@@ -84,9 +84,9 @@ The Substrate migration 0066 is the schema of record. cellctl's tests apply `inf
 | `exomem_cellctl` | select; update the cellctl columns above | select; update |
 | `exomem_gateway` | none | none |
 
-**Error codes:** `EXPORT_FAILED`, `EXPORT_TOO_LARGE`, `EXPORT_HOLD_EXPIRED`, `EXPORT_INTERRUPTED`, `EXPORT_UPLOAD_FAILED`, `SOURCE_CHANGED_DURING_EXPORT`. The Job may report `EXPORT_FAILED`, `EXPORT_TOO_LARGE`, `EXPORT_UPLOAD_FAILED` and `SOURCE_CHANGED_DURING_EXPORT`. cellctl records any other report as `EXPORT_FAILED`.
+**Error codes:** `EXPORT_FAILED`, `EXPORT_TOO_LARGE`, `EXPORT_HOLD_EXPIRED`, `EXPORT_INTERRUPTED`, `EXPORT_UPLOAD_FAILED`, `SOURCE_CHANGED_DURING_EXPORT`. The Job may report `EXPORT_FAILED`, `EXPORT_TOO_LARGE`, `EXPORT_UPLOAD_FAILED` and `SOURCE_CHANGED_DURING_EXPORT`. cellctl records any other report as `EXPORT_FAILED`. The Job reports `EXPORT_TOO_LARGE` only for a file above the portability module's per-file limit (2 GiB). Any other exceeded limit, and an archive that outgrows its parts, is `EXPORT_FAILED`.
 
-**Job report:** the termination message is `{"bytes", "sha256", "parts", "etag_digest", "used", "total"}` on success. On failure it is `{"error"}`, plus `used` and `total` when the Job measured them, so that a retry after `EXPORT_TOO_LARGE` sizes its parts from the new measurement.
+**Job report:** the termination message is `{"bytes", "sha256", "parts", "etag_digest", "used", "total"}` on success. On failure it is `{"error"}`, plus `used` and `total` when the Job measured them, so that C1 keeps the newest measurement.
 
 **ETag digest:** SHA-256 of one line `"<part number> <ETag>\n"` per part, in part order, with the ETag's surrounding double quotes removed. Shared test vector: the ETags `"0cc175b9c0f1b6a831c399e269772661"` and `"92eb5ffee6ae2fec3ad71c777531578f"` give `91124627b9b8d6bffcbbfb35d09b5fb3cea67f87e4e84d341fac87ba0d0586da`. Both the cell command's tests and cellctl's tests assert it.
 

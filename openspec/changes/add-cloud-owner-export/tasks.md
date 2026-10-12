@@ -5,7 +5,7 @@
 
 ## 2. The cell's export command
 
-- [x] 2.1 Add `exomem cell-export`: quiesced export in owner scope, upload to HTTPS part URLs, a content-free termination report. Verify: the reassembled parts pass `verify_export_archive`; an archive larger than its parts and a plain-HTTP URL are refused before any upload; the shared ETag digest vector.
+- [x] 2.1 Add `exomem cell-export`: quiesced export in owner scope, upload to HTTPS part URLs, a content-free termination report. Verify: the reassembled parts pass `verify_export_archive`; an archive larger than its parts and a plain-HTTP URL are refused before any upload; the cell's size replaces the 10 GiB default; only a file above the per-file limit reports `EXPORT_TOO_LARGE`; the shared ETag digest vector.
 
 ## 3. cellctl
 
