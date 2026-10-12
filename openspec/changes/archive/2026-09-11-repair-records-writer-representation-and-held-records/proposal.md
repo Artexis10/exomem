@@ -2,7 +2,7 @@
 
 ## Why
 
-A canonical Records collection whose contract is "preserve the exact published text" cannot be written through the Records writer today: representability is checked strategy-blind, so any value containing a newline is refused as `UNREPRESENTABLE_RECORD_VALUE` even for Markdown-item frontmatter, which the writer's own quoting already round-trips losslessly. The refusal names no field, `item_key` reads as the natural key it is not, and a refused append discards the candidate, so the ledger ends the episode silently incomplete while the agent loops on Evidence. Live dogfood on 2026-09-09 hit all four (KB: `Notes/Failures/public-posts-v2-record-append-natural-key-and-unrepresentable-value-diagnostics-failure`); the one committed multi-line item carries a pre-escaped value that no longer hashes to its declared digest.
+A canonical Records collection whose contract is "preserve the exact published text" cannot be written through the Records writer today: representability is checked strategy-blind, so any value containing a newline is refused as `UNREPRESENTABLE_RECORD_VALUE` even for Markdown-item frontmatter, which the writer's own quoting already round-trips losslessly. The refusal names no field, `item_key` reads as the natural key it is not, and a refused append discards the candidate, so the ledger ends the episode silently incomplete while the agent loops on Evidence. A 2026-09-09 incident exposed all four defects; one committed multi-line item carried a pre-escaped value that no longer matched its declared digest.
 
 ## What Changes
 

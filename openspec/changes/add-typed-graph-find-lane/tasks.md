@@ -84,5 +84,11 @@
 - [ ] 6.4 `scripts/graph_value_benchmark.py`: add a recall-visibility
       dimension (typed neighbour reachable through plain `find`) to the
       Exomem-only fixture gate.
-- [ ] 6.5 Before/after recall snapshot on the reference vault (desk-side),
-      recorded in the change dir for the archive.
+- [ ] 6.5 Compare typed and fallback recall on an invented fixture and record
+      aggregate results for the archive. Do not publish private recall payloads.
+
+Historical snapshot inventory: the saved fallback and typed snapshots each held
+five queries. Their returned-hit counts, in stored query order, were
+`[0, 3, 2, 7, 8]` and `[0, 3, 2, 8, 8]`. These counts describe the old snapshots;
+they establish no relevance or quality claim. The raw private payloads were
+removed from the public change. Current fixture output is not that historical run.

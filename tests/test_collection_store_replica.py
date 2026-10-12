@@ -747,15 +747,23 @@ def test_matching_replacement_requires_actual_file_flush_before_success(
 
 
 def _crash_staging(root, boundary):
+    diagnostic_prefix = "staging-boundary "
     script = """
 import os, sys, time
+started = time.monotonic()
+def note(phase):
+    print(sys.argv[3] + phase + ' ' + str(time.monotonic() - started), file=sys.stderr, flush=True)
+note('entry')
 from pathlib import Path
 from contextlib import contextmanager
 from exomem import held_fs
 from exomem.collection_store import connection, replica, snapshot
+note('imports-returned')
 root, boundary = Path(sys.argv[1]), sys.argv[2]
+note('filesystem-enter')
 with held_fs.acquire(root).require() as fs:
     filesystem_type = type(fs)
+note('filesystem-returned')
 original_parent = filesystem_type.parent
 def parent(fs, relative, **kwargs):
     allocating = kwargs.get('exclusive') and kwargs.get('create')
@@ -769,19 +777,33 @@ filesystem_type.parent = parent
 original_snapshot = snapshot.staged_snapshot
 @contextmanager
 def staged(*args, **kwargs):
+    note('snapshot-enter')
     # Old publication has no operation directory; still die before backup.
     if boundary != 'ready':
         os._exit(73)
     with original_snapshot(*args, **kwargs) as artifact:
+        note('snapshot-ready')
         os._exit(73)
         yield artifact
 snapshot.staged_snapshot = staged
+note('writer-enter')
 with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as writer:
+    note('writer-returned')
+    note('replica-enter')
     replica.publish_replica(root, writer, authority_check=lambda: True, deadline=time.monotonic()+10)
 """
-    child = subprocess.run(
-        [sys.executable, "-c", script, str(root), boundary], capture_output=True, timeout=15
-    )
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", script, str(root), boundary, diagnostic_prefix],
+            capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = error.stderr or b""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        # The prefix fixes this test's boundary protocol; unrelated stderr stays out of this report.
+        notes = [line for line in output.splitlines() if line.startswith(diagnostic_prefix)]
+        raise AssertionError(f"staging child exceeded its 15-second bound; boundaries={notes}") from error
     assert child.returncode == 73, child.stderr.decode()
 
 

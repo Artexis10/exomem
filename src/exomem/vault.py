@@ -6892,8 +6892,8 @@ class WikilinkResolver:
     - `stems`: filename stem (no path) → list of full paths (multi-match if
       the basename collides across folders).
     - `titles`: frontmatter `title:` lower-cased → list of full paths. This
-      lets `[[North-Led Content Manual]]` resolve to a source file whose
-      stem is date-prefixed (`2026-05-15-tu-north-led-content-manual`) but
+      lets `[[Test Content Manual]]` resolve to a source file whose
+      stem is date-prefixed (`2026-05-15-tu-test-manual`) but
       whose title matches.
     """
 

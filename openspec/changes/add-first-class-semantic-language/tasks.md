@@ -131,6 +131,5 @@ native Torch/SentenceTransformers BGE load before a valid report can be emitted;
 the unexecuted full media lane and superseded pre-correction performance failure
 remain recorded in the comparison docs.
 Independent adversarial re-review cleared the explanation, lifecycle/reconcile,
-performance-boundary, and content-bearing media-fixture proofs. The durable
-claim boundary is captured in Exomem at
-`Notes/Insights/semantic-local-core-benchmark-closes-lean-proof-full-profile-remains-host-gated.md`.
+performance-boundary, and content-bearing media-fixture proofs. The verification
+record above preserves the lean claim and the unverified full-profile boundary.

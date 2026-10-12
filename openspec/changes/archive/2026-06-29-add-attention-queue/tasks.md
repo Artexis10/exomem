@@ -49,12 +49,12 @@
 - [x] 4.3 `ruff check` clean on the changed files.
 - [x] 4.4 CLI smoke (fixture vault): `kb attention --limit 5 --json` and
       `kb attention --categories stale_review --json` return one ranked envelope; the live-vault
-      smoke is Hugo's at deploy.
+      smoke is the operator's at deploy.
 - [x] 4.5 Pure-substrate check: `attention.py` imports only `audit` + `fusion` (no
       embedding/model module); `_rank` reads only pre-computed `AuditFinding` fields; `find`
       output unchanged.
 - [x] 4.6 `openspec validate add-attention-queue --strict` passes.
 
-## 5. Deploy (Hugo)
+## 5. Deploy (operator)
 - [ ] 5.1 `reset --hard origin/main` on the deploy checkout + restart; reconnect the claude.ai
       connector so the new `attention` MCP tool appears. (Additive, read-only — safe.)

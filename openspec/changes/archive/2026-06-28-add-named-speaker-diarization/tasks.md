@@ -54,7 +54,7 @@
 - [x] 7.2 `ruff check` clean (no new errors; pre-existing advisory baseline untouched).
 - [ ] 7.3 Desk-side smoke (GPU box): enroll own voice from a sample, diarize a 2-speaker
       recording, confirm `[<name>]:` for the enrolled voice + anonymous for the other, and
-      that the transcript is findable by the enrolled name. **(Hugo runs — needs GPU + models.)**
+      that the transcript is findable by the enrolled name. **(the operator runs — needs GPU + models.)**
 - [x] 7.4 `openspec validate add-named-speaker-diarization --strict` passes.
 
 ## 8. Follow-ups (post-merge, non-blocking)

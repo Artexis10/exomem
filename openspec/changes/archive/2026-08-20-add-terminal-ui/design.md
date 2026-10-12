@@ -192,12 +192,8 @@ Emotional target: calm, trustworthy, fast, precise. Concretely:
 ### Design pass 2 (2026-08-01): the ledger and the receipt language
 
 The v1 screens were correct but read as configuration. A dedicated design
-session produced a locked direction — first run as an **accreting ledger**,
-and the daily loop restyled in the same **receipt language** — recorded in
-Exomem as "Exomem TUI redesign locked — ledger first-run and receipt language"
-(project `exomem`). The palette comes from "Substrate Design System v2 —
-tokens locked, per-brand accents, terminal amber confirmed" (project
-`substrate`), which pins Exomem's terminal accent to phosphor amber `#ffb000`
+session locked the first run as an **accreting ledger** and restyled the daily
+loop in the same **receipt language**. Exomem's terminal accent is phosphor amber `#ffb000`
 (256-colour 214, 16-colour yellow 3) on warm near-black with warm off-white
 text, under the same live-state-only rule. What that changed, and why:
 

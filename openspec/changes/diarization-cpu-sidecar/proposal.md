@@ -1,7 +1,7 @@
 ## Why
 
 `EXOMEM_DIARIZE` diarization is **enrollment-ready but pipeline-blocked** on the live box. The
-named-attribution layer (ECAPA voice profiles → cosine → `[Hugo]: …`) works, but the pyannote
+named-attribution layer (ECAPA voice profiles → cosine → `[Fixture Speaker]: …`) works, but the pyannote
 *who-spoke-when* pipeline does not load: the service runs a custom **torch-2.12+cu132** (Blackwell)
 build for whisper/CLIP/bge, and pyannote + torchaudio are fundamentally incompatible with it —
 six distinct version walls (torchcodec native-lib load failure; `torchaudio.AudioMetaData` and

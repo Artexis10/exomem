@@ -135,8 +135,8 @@ def test_x3_public_record_path_keeps_manual_templates_and_derived_views_ephemera
     # This is deliberately ordinary template insertion: no command owns or rewrites it.
     inserted = "\n".join(
         (
-            (template_root / "X3 Push.md").read_text(encoding="utf-8").replace("{{date}}", "2026-08-03"),
-            (template_root / "X3 Pull.md").read_text(encoding="utf-8").replace("{{date}}", "2026-08-02"),
+            (template_root / "X3 Push.md").read_text(encoding="utf-8").replace("{{date}}", "2024-11-20"),
+            (template_root / "X3 Pull.md").read_text(encoding="utf-8").replace("{{date}}", "2024-11-19"),
         )
     )
     log.write_text(
@@ -153,7 +153,7 @@ def test_x3_public_record_path_keeps_manual_templates_and_derived_views_ephemera
         columns=["occurred_on", "title", "status", "movements"],
         limit=100,
     )
-    assert any(row["occurred_on"] == "2026-08-03" for row in before["rows"])
+    assert any(row["occurred_on"] == "2024-11-20" for row in before["rows"])
     assert (fixture / "Historical Reps (undated).md").read_bytes() == archive_before
     assert {name: (template_root / name).read_bytes() for name in templates_before} == templates_before
 
@@ -163,7 +163,7 @@ def test_x3_public_record_path_keeps_manual_templates_and_derived_views_ephemera
         action="append",
         collection=collection,
         item={
-            "occurred_on": "2026-08-04",
+            "occurred_on": "2024-11-21",
             "title": "Pull",
             "status": "completed",
             "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}],
@@ -203,8 +203,8 @@ def test_x3_public_record_path_keeps_manual_templates_and_derived_views_ephemera
             action="query",
             collection=collection,
             columns=["occurred_on", "title", "movements"],
-            date_from="2026-06-01",
-            date_to="2026-08-31",
+            date_from="2024-09-01",
+            date_to="2024-11-30",
             date_column="occurred_on",
             limit=100,
             output_format=output,
