@@ -17,7 +17,7 @@ from cellctl.imports import ImportRow
 from cellctl.manifests import JOB_KIND_LABEL, namespace_name
 
 from .infra import BACKUP_BUCKET, ObjectStore
-from .report import StepFailure
+from .report import StepFailure, guarded
 from .shell import run, wait_for
 from .substrate import MCP_URL, PUBLIC_BASE_URL
 
@@ -102,6 +102,32 @@ def enable_versioning(store: ObjectStore) -> None:
 
 
 async def import_folder(ctx: Context, image: str) -> dict:
+    """Retain native CLI evidence before teardown, including early failures."""
+    try:
+        return await _import_folder(ctx, image)
+    finally:
+        guarded(ctx.report, "native_cli_diagnostics", lambda: _retain_cli_diagnostics(ctx))
+
+
+def _retain_cli_diagnostics(ctx: Context) -> None:
+    name = f"exo-rehearsal-cli-{ctx.stack.run_id}"
+    if name not in ctx.stack.containers:
+        return
+    fixture = ctx.stack.workdir / "native-import"
+    evidence = {}
+    for filename, command in (
+        ("cli.log", ["docker", "logs", name]),
+        ("cli-state.json", ["docker", "inspect", "--format", "{{json .State}}", name]),
+    ):
+        result = run(command, check=False, timeout=10)
+        path = fixture / filename
+        path.write_text(result.stdout + result.stderr)
+        path.chmod(0o600)
+        evidence[filename] = {"returncode": result.returncode, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    ctx.report.stages["cloud_import"]["cli_diagnostics"] = evidence
+
+
+async def _import_folder(ctx: Context, image: str) -> dict:
     """Keep CLI auth, encryption, multipart reports and polling entirely native."""
     if not ctx.a.cell_id or not ctx.a.session:
         raise StepFailure("native import requires the provisioned owner cell and browser session")
