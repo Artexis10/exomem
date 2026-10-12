@@ -707,6 +707,9 @@ def _measure_working_set(vault: Path) -> tuple[float, dict]:
         # The packet cache is keyed on the turn, so vary it to measure the
         # compiler rather than a cache hit.
         working_set_runtime.reset_caches_for_tests()
+        # Settle fixture-created garbage before warm samples; collection
+        # triggered by activation's own allocations remains timed.
+        gc.collect()
         return commands.op_activate_context(
             vault, turn=WORKING_SET_TURN, include_timings=True
         )
