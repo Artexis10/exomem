@@ -894,3 +894,9 @@ def test_basic_memory_adapter_rejects_a_missing_created_path(tmp_path):
 
     with pytest.raises(common.AdapterFault, match="created file path"):
         asyncio.run(common._run_basic_memory(Client(), "marker", fixture, 0))
+
+
+@pytest.mark.parametrize("flag,expected", [(True, "abstained"), (False, "ok"), (1, "ok"), ("true", "ok")])
+def test_activation_classification_keeps_strict_abstention_separate_from_refusal(flag, expected):
+    assert common.result_classification({"abstained": flag}) == expected
+    assert common.result_classification({"abstained": flag, "success": False}) == "refused"

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from mcp.types import ToolAnnotations
 from pydantic import Field, WithJsonSchema
 
-from . import call_spans, capabilities, request_budget, reserved_paths
+from . import activation_result, call_spans, capabilities, request_budget, reserved_paths
 from .call_spans import (  # noqa: F401 - re-exported for existing importers
     pop_call_spans,
     record_span,
@@ -220,6 +220,15 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "plan_memory": ("manifest_text", "body"),
     "episode_memory": ("subject", "summary"),
 }
+
+
+_MCP_ACTIVATION_RESULT: ContextVar[activation_result.Observation | None] = ContextVar(
+    "exomem_mcp_activation_result", default=None
+)
+
+
+def current_activation_result() -> activation_result.Observation | None:
+    return _MCP_ACTIVATION_RESULT.get()
 
 
 _MCP_REQUEST_ID: ContextVar[str | None] = ContextVar(
@@ -543,6 +552,13 @@ def bind_vault(
                         ],
                         structured_content=dict(result),
                     )
+                if tool_name == "activate_context":
+                    try:
+                        observation = current_activation_result()
+                        if observation is not None:
+                            observation.capture(result)
+                    except Exception:  # noqa: BLE001 - telemetry must not change the response
+                        pass
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
@@ -745,9 +761,13 @@ def mcp_request_context(
         else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
     )
     budget_reset = request_budget.set_current(budget)
+    activation_reset = _MCP_ACTIVATION_RESULT.set(
+        activation_result.Observation() if tool == "activate_context" else None
+    )
     try:
         yield call_token
     finally:
+        _MCP_ACTIVATION_RESULT.reset(activation_reset)
         request_budget.reset_current(budget_reset)
         _MCP_CALL_TOKEN.reset(call_reset)
         _MCP_REQUEST_ID.reset(token)

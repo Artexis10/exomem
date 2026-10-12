@@ -1032,3 +1032,283 @@ def test_a_local_ingress_call_is_labelled_owner_local(ledger_dir: Path, monkeypa
     row = _rows(ledger_dir)[0]
     assert row["principal_kind"] == "owner-local"
     assert "synthetic-local-token" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def activation_owner():
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal(surface="mcp")):
+        yield
+
+
+@pytest.mark.parametrize("packet,outcome,observation", [
+    ({"abstained": True, "abstention": {"reason": "unresolved"}}, "abstained",
+     {"abstained": True, "reason": "unresolved", "budget_limited": False}),
+    ({"abstained": True, "abstention": {"reason": "private text"}}, "abstained",
+     {"abstained": True, "reason": None, "budget_limited": False}),
+    ({"abstained": True, "request_budget": {"applied": "true"}}, "abstained", None),
+    ({"abstained": "true"}, "ok", None),
+    ({"abstained": False, "request_budget": {"applied": True}}, "ok",
+     {"abstained": False, "reason": None, "budget_limited": True}),
+])
+def test_activation_wrapper_thread_stores_strict_final_flags(
+    vault, ledger_dir, activation_owner, packet, outcome, observation
+):
+    from dataclasses import replace
+
+    from exomem import commands
+
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+    command = replace(command, leaf=lambda _vault, **_kwargs: packet)
+    wrapper = command_surface.bind_vault(command.leaf, vault, command=command)
+
+    async def dispatch(_context):
+        return await asyncio.to_thread(wrapper, turn="fixture")
+
+    served = _drive("activate_context", {"turn": "fixture"}, dispatch)
+    assert served == packet
+    row = _rows(ledger_dir)[0]
+    assert row["outcome"] == outcome
+    assert row["error_code"] is None
+    assert row.get("activation_result") == observation
+    assert ("activation_result" in row) == (observation is not None)
+
+
+def test_activation_observation_uses_the_final_postfilter(
+    vault, ledger_dir, activation_owner, monkeypatch
+):
+    from dataclasses import replace
+
+    from exomem import commands, writer_lease
+    from exomem.governance import egress
+
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+    command = replace(command, leaf=lambda _vault, **_kwargs: {"abstained": False})
+    monkeypatch.setattr(writer_lease, "invoke_command", lambda *_a, **_k: {"abstained": False})
+    final = {"abstained": True, "abstention": {"reason": "withheld"}}
+    monkeypatch.setattr(egress, "postfilter", lambda *_a, **_k: final)
+    wrapper = command_surface.bind_vault(command.leaf, vault, command=command)
+
+    async def dispatch(_context):
+        return await asyncio.to_thread(wrapper, turn="fixture")
+
+    assert _drive("activate_context", {}, dispatch) == final
+    row = _rows(ledger_dir)[0]
+    assert row["outcome"] == "abstained"
+    assert row["activation_result"]["reason"] == "withheld"
+
+
+def test_real_activation_exhaustion_and_useful_partial_have_distinct_rows(
+    vault, ledger_dir, activation_owner, monkeypatch
+):
+    from copy import deepcopy
+    from dataclasses import replace
+
+    from exomem import (
+        commands,
+        lexstore,
+        request_budget,
+        working_set,
+        working_set_index,
+        working_set_runtime,
+    )
+
+    page = vault / "Knowledge Base" / "Products" / "Harbour Cart.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: note\nstatus: active\nupdated: 2026-10-10\n---\n\n# Harbour Cart\n\n"
+        "## Summary\n\nA cart that carries supplies.\n\n## Constraints\n\n"
+        "The cart carries at most 100 kg.\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_WORKING_SET_BAND", "1")
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+    wrapper = command_surface.bind_vault(command.leaf, vault, command=command)
+    turn = "What are the Harbour Cart constraints?"
+
+    async def dispatch(_context):
+        return await asyncio.to_thread(wrapper, turn=turn)
+
+    useful = _drive("activate_context", {"turn": turn}, dispatch)
+    assert useful["abstained"] is False and useful["budget"]["used_chars"] > 0
+
+    async def expired_dispatch(context):
+        request_budget.current().deadline = time.monotonic() - 1
+        return await dispatch(context)
+
+    entry = _drive("activate_context", {"turn": turn}, expired_dispatch)
+    assert entry["abstained"] is True
+    assert entry["request_budget"]["skipped"] == ["working_set.freshness"]
+    real_compile = working_set.compile_packet
+
+    def expired_compile(*args, **kwargs):
+        request_budget.current().deadline = time.monotonic() - 1
+        return real_compile(*args, **kwargs)
+
+    working_set_runtime.reset_caches_for_tests()
+    with monkeypatch.context() as patch:
+        patch.setattr(working_set, "compile_packet", expired_compile)
+        compiler = _drive("activate_context", {"turn": turn}, dispatch)
+    assert compiler["abstained"] is True
+    assert compiler["request_budget"]["skipped"] == ["working_set.semantic"]
+
+    def partial_leaf(_vault, **_kwargs):
+        request_budget.current().note_skipped("working_set.conversation")
+        packet = deepcopy(useful)
+        packet["request_budget"] = request_budget.current().as_response_block()
+        return packet
+
+    partial_command = replace(command, leaf=partial_leaf)
+    wrapper = command_surface.bind_vault(partial_leaf, vault, command=partial_command)
+    partial = _drive("activate_context", {"turn": turn}, dispatch)
+    assert partial["abstained"] is False and partial["budget"]["used_chars"] > 0
+    rows = _rows(ledger_dir)
+    assert [row["outcome"] for row in rows] == ["ok", "abstained", "abstained", "ok"]
+    assert [row["activation_result"]["budget_limited"] for row in rows] == [False, True, True, True]
+    assert all(row["error_code"] is None for row in rows)
+    assert call_ledger.verify(ledger_dir / "ledger.jsonl") == []
+
+
+@pytest.mark.parametrize("failure", ["refusal", "dispatch", "serialization"])
+def test_activation_failure_takes_precedence_over_the_observation(
+    vault, ledger_dir, activation_owner, failure
+):
+    from dataclasses import replace
+
+    from exomem import commands
+    from exomem.cli_ops import OpError
+
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+
+    def leaf(_vault, **_kwargs):
+        command_surface.current_activation_result().capture({"abstained": True})
+        if failure == "refusal":
+            raise OpError("INVALID_ANCHOR", "fixture refusal")
+        if failure == "dispatch":
+            raise RuntimeError("fixture dispatch error")
+        return {"abstained": True, "material": object()}
+
+    command = replace(command, leaf=leaf)
+    wrapper = command_surface.bind_vault(leaf, vault, command=command)
+
+    async def dispatch(_context):
+        packet = await asyncio.to_thread(wrapper, turn="fixture")
+        if failure == "serialization":
+            json.dumps(packet)
+        return packet
+
+    if failure == "refusal":
+        assert _drive("activate_context", {}, dispatch)["success"] is False
+    else:
+        with pytest.raises((RuntimeError, TypeError)):
+            _drive("activate_context", {}, dispatch)
+    row = _rows(ledger_dir)[0]
+    assert row["outcome"] == ("refused" if failure == "refusal" else "error")
+    if failure != "refusal":
+        assert "activation_result" not in row
+
+
+def test_observation_capture_and_ledger_failure_do_not_change_the_response(
+    vault, ledger_dir, activation_owner, monkeypatch
+):
+    from dataclasses import replace
+
+    from exomem import activation_result, commands
+
+    def broken(*_a, **_k):
+        raise RuntimeError("fixture telemetry failure")
+
+    packet = {"abstained": True}
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+    command = replace(command, leaf=lambda _vault, **_k: packet)
+    wrapper = command_surface.bind_vault(command.leaf, vault, command=command)
+    monkeypatch.setattr(activation_result.Observation, "capture", broken)
+    monkeypatch.setattr(call_ledger, "canonical_json", broken)
+
+    async def dispatch(_context):
+        return await asyncio.to_thread(wrapper, turn="fixture")
+
+    assert _drive("activate_context", {}, dispatch) == packet
+    assert _rows(ledger_dir) == []
+
+
+def test_mixed_legacy_and_observed_activation_chain_keeps_historical_hashes(ledger_dir):
+    legacy = call_ledger.record_call(
+        request_id="fixture", tool="activate_context", outcome="ok", duration_ms=1
+    )
+    legacy_bytes = (ledger_dir / "ledger.jsonl").read_bytes()
+    observed = call_ledger.record_call(
+        request_id="fixture", tool="activate_context", outcome="abstained", duration_ms=1,
+        activation_result={"abstained": True, "reason": "unresolved", "budget_limited": False}
+    )
+    assert "activation_result" not in legacy
+    assert observed["prev_hash"] == legacy["row_hash"]
+    assert (ledger_dir / "ledger.jsonl").read_bytes().startswith(legacy_bytes)
+    assert call_ledger.verify(ledger_dir / "ledger.jsonl") == []
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_equal_request_ids_and_late_workers_cannot_exchange_activation_results(
+    vault, ledger_dir, activation_owner, monkeypatch, cancel_first
+):
+    import threading
+    from dataclasses import replace
+
+    from exomem import commands
+
+    monkeypatch.setattr(command_surface, "mcp_request_id", lambda: "same-client-id")
+    release = threading.Event()
+    command = next(item for item in commands.COMMANDS if item.name == "activate_context")
+
+    async def run():
+        entered, finished = asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def leaf(_vault, turn="", **_kwargs):
+            if turn == "first":
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(timeout=10), "the test must release its worker"
+                # Observe the abandoned cell before a cancelled worker finishes.
+                command_surface.current_activation_result().capture({"abstained": True})
+                loop.call_soon_threadsafe(finished.set)
+            return {"abstained": turn == "first"}
+
+        wrapper = command_surface.bind_vault(leaf, vault, command=replace(command, leaf=leaf))
+
+        async def dispatch(context):
+            return await asyncio.to_thread(wrapper, **context.message["params"]["arguments"])
+
+        def context(turn):
+            return SimpleNamespace(message={"params": {
+                "name": "activate_context", "arguments": {"turn": turn}
+            }})
+
+        middleware = server_module.CallTraceMiddleware()
+        first = asyncio.create_task(middleware.on_call_tool(context("first"), dispatch))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            if cancel_first:
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+            second = await middleware.on_call_tool(context("second"), dispatch)
+            assert second["abstained"] is False
+            release.set()
+            if not cancel_first:
+                assert (await first)["abstained"] is True
+            await asyncio.wait_for(finished.wait(), timeout=10)
+            assert command_surface.current_activation_result() is None
+        finally:
+            release.set()
+
+    asyncio.run(run())
+    rows = _rows(ledger_dir)
+    assert [row["request_id"] for row in rows] == ["same-client-id"] * len(rows)
+    assert [row["outcome"] for row in rows] == (["ok"] if cancel_first else ["ok", "abstained"])
+    assert [row["activation_result"]["abstained"] for row in rows] == (
+        [False] if cancel_first else [False, True]
+    )
