@@ -5916,8 +5916,8 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """Return `rel` re-spelled with the real on-disk casing under `vault_root`.
 
     On a case-insensitive filesystem (Windows NTFS, macOS APFS by default) a
-    caller may address `Notes/Polly/x.md` while the directory on disk is
-    `POLLY`. Both open the same file, but identity comparisons keyed on the
+    caller may address `Notes/Acme/x.md` while the directory on disk is
+    `ACME`. Both open the same file, but identity comparisons keyed on the
     path string then see two owners for one physical page. Non-strict
     `Path.resolve()` returns the real casing for the components that exist and
     preserves a not-yet-existing tail verbatim, so this handles both an edit

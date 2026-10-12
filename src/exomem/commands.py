@@ -3774,8 +3774,8 @@ def op_audit(
       original or remove the unsupported citation; audit never reconstructs it.
     - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
     - `tag_inconsistency`: case/separator variants of the same tag
-      (`warning_letter_incident` vs `warning-letter-incident` vs
-      `Warning-Letter-Incident`). Mechanical drift only; semantic
+      (`move_in_checklist` vs `move-in-checklist` vs
+      `Move-In-Checklist`). Mechanical drift only; semantic
       near-duplicates like `workflow` vs `workflows` aren't flagged.
     - `frontmatter_compliance`: per-page-type required-field gaps,
       a `tenant:` set without the expected project, patterns using singular

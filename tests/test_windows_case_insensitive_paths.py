@@ -1,8 +1,8 @@
 """On-box proof that a case-insensitive filesystem can no longer split one
 governed page into two identity owners.
 
-The incident: a client addressed `Knowledge Base/Notes/Research/Polly/…` while
-the directory on disk is `POLLY`. NTFS opens the same single file either way,
+The incident: a client addressed `Knowledge Base/Notes/Research/Acme/…` while
+the directory on disk is `ACME`. NTFS opens the same single file either way,
 but the stable-identity census recorded the real on-disk casing while the write
 pipeline carried the caller's casing, and the ownership guard compared them
 byte-for-byte — so one physical file read as having "another corpus owner" and
@@ -50,8 +50,8 @@ _ID = "35494c6a-da47-4694-ab0c-47552571d73f"
 _LEAF = "provisional-commercial-terms.md"
 # The on-disk directory (what the identity census walks) vs. the spelling the
 # blocked client sent. Both open the same directory on NTFS.
-_REAL_DIR = "Knowledge Base/Notes/Research/POLLY"
-_PHANTOM_DIR = "Knowledge Base/Notes/Research/Polly"
+_REAL_DIR = "Knowledge Base/Notes/Research/ACME"
+_PHANTOM_DIR = "Knowledge Base/Notes/Research/Acme"
 _REAL_REL = f"{_REAL_DIR}/{_LEAF}"
 _PHANTOM_REL = f"{_PHANTOM_DIR}/{_LEAF}"
 
@@ -68,7 +68,7 @@ def _note_source(*, rate: str, title: str = "Provisional commercial terms") -> s
         f"exomem_id: {_ID}\n"
         "---\n\n"
         "## Observations\n\n"
-        f"- [commercial term] The provisional rate is {rate} per hour #polly\n\n"
+        f"- [commercial term] The provisional rate is {rate} per hour #acme\n\n"
         "## Relations\n\n"
         "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]\n"
     )
@@ -103,8 +103,8 @@ def folding_vault(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path
     vault_module.reset_casefold_probe_cache()
 
 
-def _seed_governed_note(root: Path, *, rate: str = "37.50 EUR") -> Path:
-    """Write the governed note under the REAL on-disk casing (`POLLY`).
+def _seed_governed_note(root: Path, *, rate: str = "1.00 EUR") -> Path:
+    """Write the governed note under the REAL on-disk casing (`ACME`).
 
     The activation manifest is installed deliberately. Without it the page is
     grandfathered, and grandfathering downgrades any error the *before* state
@@ -127,9 +127,9 @@ def _seed_governed_note(root: Path, *, rate: str = "37.50 EUR") -> Path:
 def test_edit_addressed_with_phantom_casing_commits_to_the_one_on_disk_page(
     folding_vault: Path,
 ) -> None:
-    """The exact production failure: ONE file on disk under `POLLY/`, addressed
-    by the caller as `Polly/`. Before the fix the census recorded `POLLY` while
-    the write pipeline carried `Polly`, the ownership guard compared them
+    """The failure this module exists for: ONE file on disk under `ACME/`, addressed
+    by the caller as `Acme/`. Before the fix the census recorded `ACME` while
+    the write pipeline carried `Acme`, the ownership guard compared them
     case-sensitively, and the edit was refused as a duplicate identity. It must
     now commit, and every path it records must be the real on-disk spelling.
     """
@@ -144,8 +144,8 @@ def test_edit_addressed_with_phantom_casing_commits_to_the_one_on_disk_page(
             folding_vault,
             path=_PHANTOM_REL,
             why="land the blocked commercial-terms update",
-            old_string="37.50 EUR",
-            new_string="100.00 EUR",
+            old_string="1.00 EUR",
+            new_string="2.00 EUR",
             today=TODAY,
         )
     except edit_module.EditError as error:  # pragma: no cover - regression path
@@ -160,7 +160,7 @@ def test_edit_addressed_with_phantom_casing_commits_to_the_one_on_disk_page(
     assert result.semantic["mutated"] is True
     assert _PHANTOM_REL not in result.semantic["written_paths"]
     assert _REAL_REL in result.semantic["written_paths"]
-    assert "100.00 EUR" in page.read_text(encoding="utf-8")
+    assert "2.00 EUR" in page.read_text(encoding="utf-8")
     # Still exactly one physical file — the fix must not have created a sibling.
     assert sorted(p.name for p in (folding_vault / _REAL_DIR).iterdir()) == [_LEAF]
 
@@ -171,7 +171,7 @@ def test_edit_addressed_with_phantom_casing_commits_to_the_one_on_disk_page(
 def test_create_into_differently_cased_directory_canonicalizes_only_the_parent(
     folding_vault: Path,
 ) -> None:
-    """`POLLY/` exists on disk; the caller creates into `Polly/`. The parent
+    """`ACME/` exists on disk; the caller creates into `Acme/`. The parent
     prefix must be re-spelled to the on-disk casing, while the brand-new leaf —
     which has no on-disk spelling yet — keeps the casing the author chose."""
     (folding_vault / _REAL_DIR).mkdir(parents=True, exist_ok=True)
@@ -181,7 +181,7 @@ def test_create_into_differently_cased_directory_canonicalizes_only_the_parent(
         "content": (
             "# Addendum\n\n"
             "## Observations\n\n"
-            "- [commercial term] The weekly cap is 25 hours #polly\n"
+            "- [commercial term] The weekly cap is 100 hours #acme\n"
         ),
         # Notes/Research/ is a canonical compiled destination, so the contract
         # pins the type; unrelated to the casing behavior under test.
@@ -256,7 +256,7 @@ def test_edit_resolve_canonicalizes_a_kb_prefixless_address(folding_vault: Path)
     must still come back in the on-disk casing."""
     _seed_governed_note(folding_vault)
 
-    _, rel = edit_module._resolve(folding_vault, f"Notes/Research/Polly/{_LEAF}")
+    _, rel = edit_module._resolve(folding_vault, f"Notes/Research/Acme/{_LEAF}")
 
     assert rel == _REAL_REL
 
@@ -281,7 +281,7 @@ def test_warm_corpus_delta_keys_a_phantom_cased_event_under_the_on_disk_path(
     assert _REAL_REL in warm.pages, "test setup: the census must see the on-disk page"
 
     page.write_text(
-        _note_source(rate="100.00 EUR", title="Event patched terms"),
+        _note_source(rate="2.00 EUR", title="Event patched terms"),
         encoding="utf-8",
         newline="\n",
     )
@@ -310,7 +310,7 @@ def _multi_edit(root: Path) -> str:
         root,
         path=_PHANTOM_REL,
         why="batch the phantom-cased address",
-        edits=[{"old_string": "37.50 EUR", "new_string": "100.00 EUR"}],
+        edits=[{"old_string": "1.00 EUR", "new_string": "2.00 EUR"}],
         today=TODAY,
     ).path
 
@@ -321,7 +321,7 @@ def _append(root: Path) -> str:
         path=_PHANTOM_REL,
         # Opens a new section: the seeded page ends with `## Relations`, and a
         # bare bullet appended there would parse as a malformed relation.
-        content="\n## Addendum\n\n- [commercial term] Weekly cap is 25 hours #polly\n",
+        content="\n## Addendum\n\n- [commercial term] Weekly cap is 100 hours #acme\n",
         today=TODAY,
     ).path
 

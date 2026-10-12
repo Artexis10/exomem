@@ -111,17 +111,17 @@ def _clear_casefold_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def test_guard_ignores_case_variant_owner_when_folds_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The POLLY-vs-Polly incident: same physical file, caller-cased path."""
+    """The ACME-vs-Acme incident: same physical file, caller-cased path."""
     monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
     page = _state(
         tmp_path,
-        "Knowledge Base/Notes/Research/Polly/terms.md",
+        "Knowledge Base/Notes/Research/Acme/terms.md",
         _source(exomem_id=_ID_A),
     )
     census = semantic_contract.StableIdentityCensus(
         (
             semantic_contract.StableIdentityEntry(
-                "Knowledge Base/Notes/Research/POLLY/terms.md", _ID_A
+                "Knowledge Base/Notes/Research/ACME/terms.md", _ID_A
             ),
         )
     )
@@ -141,13 +141,13 @@ def test_guard_blocks_case_variant_owner_when_folds_disabled(
     monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "0")
     page = _state(
         tmp_path,
-        "Knowledge Base/Notes/Research/Polly/terms.md",
+        "Knowledge Base/Notes/Research/Acme/terms.md",
         _source(exomem_id=_ID_A),
     )
     census = semantic_contract.StableIdentityCensus(
         (
             semantic_contract.StableIdentityEntry(
-                "Knowledge Base/Notes/Research/POLLY/terms.md", _ID_A
+                "Knowledge Base/Notes/Research/ACME/terms.md", _ID_A
             ),
         )
     )
@@ -204,12 +204,12 @@ def test_identity_duplicate_detail_names_owner_paths(tmp_path: Path) -> None:
 
 def test_with_page_drops_case_variant_entries_only_when_folding(tmp_path: Path) -> None:
     old = semantic_contract.StableIdentityEntry(
-        "Knowledge Base/Notes/Research/POLLY/terms.md", _ID_A
+        "Knowledge Base/Notes/Research/ACME/terms.md", _ID_A
     )
     census = semantic_contract.StableIdentityCensus((old,))
     page = _state(
         tmp_path,
-        "Knowledge Base/Notes/Research/Polly/terms.md",
+        "Knowledge Base/Notes/Research/Acme/terms.md",
         _source(exomem_id=_ID_A),
     )
 
@@ -282,9 +282,9 @@ def test_canonical_vault_rel_fails_open_on_oserror(
 
     monkeypatch.setattr(Path, "resolve", raising_resolve)
 
-    rel = vault.canonical_vault_rel(tmp_path, "Knowledge Base/Notes/Polly/x.md")
+    rel = vault.canonical_vault_rel(tmp_path, "Knowledge Base/Notes/Acme/x.md")
 
-    assert rel == "Knowledge Base/Notes/Polly/x.md"
+    assert rel == "Knowledge Base/Notes/Acme/x.md"
 
 
 def test_canonical_vault_rel_fails_open_on_value_error(tmp_path: Path) -> None:
@@ -381,8 +381,8 @@ def _seed_symlinked_note(root: Path, *, link: str, target: str) -> None:
 
 def test_is_casing_only_rewrite_accepts_a_pure_recasing() -> None:
     assert vault.is_casing_only_rewrite(
-        "Knowledge Base/Notes/Research/POLLY/terms.md",
-        "Knowledge Base/Notes/Research/Polly/terms.md",
+        "Knowledge Base/Notes/Research/ACME/terms.md",
+        "Knowledge Base/Notes/Research/Acme/terms.md",
     )
     assert vault.is_casing_only_rewrite("Knowledge Base/Notes/x.md", "Knowledge Base/Notes/x.md")
 

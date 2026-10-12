@@ -507,7 +507,7 @@ def test_managed_refresh_defers_owner_gated_capture(tmp_path):
     import sys
 
     home = tmp_path / "home"
-    profile = home / ".claude-polly"
+    profile = home / ".claude-client"
     settings = profile / "settings.json"
     installer.install_hook(
         hook_dir=profile / "hooks", settings_path=settings, activation_mode="mcp"
@@ -518,7 +518,7 @@ def test_managed_refresh_defers_owner_gated_capture(tmp_path):
             "hooks": [
                 {
                     "type": "command",
-                    "command": f'python "{profile / "hooks" / "polly_capture_gate.py"}" --client claude --hook-home "{profile}"',
+                    "command": f'python "{profile / "hooks" / "client_capture_gate.py"}" --client claude --hook-home "{profile}"',
                 }
             ]
         }
