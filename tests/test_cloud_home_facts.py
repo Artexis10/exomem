@@ -9,7 +9,6 @@ way the gateway forwards them: no `initialize` first, the gateway's own
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import httpx
@@ -190,43 +189,6 @@ def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, va
     assert [(e["client"], e["items"]) for e in activity["events"]] == [
         ("claude-ai", 1), ("chatgpt", 1),
     ]
-
-
-@pytest.mark.skipif(
-    not hasattr(os, "geteuid") or os.geteuid() == 0,
-    reason="needs POSIX permissions that bind the caller",
-)
-def test_a_save_moves_the_note_count_even_when_the_commit_counter_cannot(cell, vault):
-    """The commit counter on disk is best effort: a full or read-only state disk
-    leaves it unchanged after a save that landed. Home must still see the save."""
-    from exomem import writer_lease
-
-    async def scenario(client):
-        before = await _call(client, "bootstrap", {"section": "activity"})
-        counter = writer_lease._commit_generation_path(
-            writer_lease.active_manager().config.state_dir, vault
-        )
-        generation = writer_lease.read_commit_generation(vault)
-        counter.parent.mkdir(parents=True, exist_ok=True)
-        locked = [path for path in (counter, counter.parent) if path.exists()]
-        modes = [path.stat().st_mode for path in locked]
-        for path in locked:  # the counter can be read but neither replaced nor rewritten
-            path.chmod(0o500 if path.is_dir() else 0o400)
-        try:
-            await _call(client, "remember", {
-                "content": "The second build fixed the flaky upload.",
-                "title": "Flaky upload fixed", "status": "draft",
-            })
-            assert writer_lease.read_commit_generation(vault) == generation, "sanity: no bump"
-            after = await _call(client, "bootstrap", {"section": "activity"})
-        finally:
-            for path, path_mode in zip(locked, modes, strict=True):
-                path.chmod(path_mode)
-        return before, after
-
-    before, after = cell(scenario)
-
-    assert after["note_count"] == before["note_count"] + 1
 
 
 def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:

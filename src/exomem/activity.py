@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -207,38 +206,14 @@ def _iso(value: dt.datetime) -> str:
     return value.astimezone(dt.UTC).isoformat(timespec="milliseconds")
 
 
-_note_count_lock = threading.Lock()
-_note_count_cache: dict[str, tuple[tuple[int, int], int]] = {}
-
-
 def note_count(vault_root: Path) -> int | None:
     """Pages saved in the Knowledge Base, or `None` when the count is unknown.
 
-    A Cloud cell caches the count against two counters that every governed
-    writer advances as it leaves the mutation boundary: this process's own
-    count, which cannot fail to advance, and the vault's commit generation on
-    disk, which also sees a writer in another process such as the media worker.
-    A local install can be edited outside the writers, so it counts every time
-    rather than serve a stale number.
+    Counted on every call, never cached: no token that every writer process
+    advances can prove a cached count current, and a count older than a
+    committed write is a false fact.
     """
-    from . import cloud_cell, writer_lease
-
-    key = str(vault_root)
-    generation: tuple[int, int] | None = None
-    if cloud_cell.cloud_mode_enabled():
-        on_disk = writer_lease.read_commit_generation(vault_root)
-        if on_disk is not None:  # unreadable: count every time
-            generation = (writer_lease.process_mutation_count(), on_disk)
-    if generation is not None:
-        with _note_count_lock:
-            cached = _note_count_cache.get(key)
-        if cached is not None and cached[0] == generation:
-            return cached[1]
-    count = _count_saved_pages(vault_root)
-    if generation is not None and count is not None:
-        with _note_count_lock:
-            _note_count_cache[key] = (generation, count)
-    return count
+    return _count_saved_pages(vault_root)
 
 
 def _count_saved_pages(vault_root: Path) -> int | None:

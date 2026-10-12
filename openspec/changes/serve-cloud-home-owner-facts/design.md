@@ -65,11 +65,11 @@ It counts every page that the Knowledge Base corpus walk yields: sources, record
 Navigation pages (`index.md`, `log.md`) and Records collection manifests (`_collection.md`) are structure, not saved items.
 Rows of a record dataset kept as one CSV are not pages, and are not counted.
 The count is null when the walk cannot read any directory or entry.
-Measured on a laptop, one uncached count of 10,000 pages took 373 ms, so a cloud cell caches it.
-The cache key holds two counters that every governed writer advances as it leaves the mutation boundary.
-The first is this process's own count, which cannot fail to advance.
-The second is the vault's commit generation on disk, which also sees a writer in another process, such as the media worker.
-A local install counts every time, because an editor can change the vault outside the writers.
+The cell walks the corpus on every activity call and keeps no cached count.
+A cache needs a token that every writer advances, and none exists:
+- the commit generation on disk stays unchanged when its write fails after a committed save;
+- a counter in one process cannot see a commit by another writer process, such as the media worker.
+Measured on a laptop with a warm file cache, one walk takes 44 ms for 1,000 pages, 410 ms for 10,000 and 1,221 ms for 30,000 (median of five).
 
 ### The gateway's client header
 
