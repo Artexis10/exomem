@@ -464,7 +464,7 @@ function Install-ExomemPackage {
     Write-Host "  target:    $(if ($target) { $target } else { 'unresolved' })"
 
     Write-Host "Installing $pkg into $Python..."
-    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--refresh-package", "exomem", "--python", $Python, $pkg)
+    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--refresh-package", "exomem", "--python", $Python, $pkg, "--compile-bytecode")
     if ($code -ne 0) { throw "uv pip install failed for $pkg (uv exit $code)" }
 
     $after = Get-ExomemInstalledVersion -PythonPath $Python
@@ -581,7 +581,7 @@ function Sync-ExomemUvCli {
         throw "Cannot sync the CLI without a verified live service version."
     }
     Write-Host "Aligning lean uv-tool CLI to exomem==$ServiceVersion..."
-    $code = Invoke-LoggedNative @("uv", "tool", "install", "--force", "exomem==$ServiceVersion")
+    $code = Invoke-LoggedNative @("uv", "tool", "install", "--force", "exomem==$ServiceVersion", "--compile-bytecode")
     if ($code -ne 0) { throw "uv tool CLI sync failed for exomem==$ServiceVersion" }
     return $true
 }

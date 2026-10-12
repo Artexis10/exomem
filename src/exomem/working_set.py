@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     activation_conventions,
+    activation_result,
     context_intents,
     context_roles,
     lifecycle_statuses,
@@ -1021,12 +1022,13 @@ def run_lanes(
     # The unit lanes select overlapping units off the same pages: each page is
     # read, checked and parsed once for all of them.
     parent_reads = find.UnitParentReads()
-    for role in roles:
+    for role_index, role in enumerate(roles):
         role_id = str(role.get("id"))
         definition = registry.roles.get(role_id)
         if definition is None:
             continue
-        lane_stage = f"working_set.lanes.{role_id}"
+        # Role identifiers are configured content; diagnostics expose positions only.
+        lane_stage = f"working_set.lanes.{role_index}"
         if budget_exhausted(lane_stage):
             # Discards any items/missing entries already gathered from prior
             # lanes in this same loop: there is no partial packet, only a
@@ -1226,6 +1228,8 @@ def _neighbourhood_paths(
         mine = {path} if path else set()
         mine.update(str(item) for item in getattr(anchor, "neighbourhood", ()) or ())
         if depth >= 2:
+            if budget_exhausted("working_set.graph"):
+                raise BudgetExhausted("working_set.graph")
             mine.update(_graph_neighbours(vault_root, path, depth=depth))
         paths.update(mine)
         if material_scopes is not None:
@@ -1248,6 +1252,8 @@ def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[s
             max_nodes=GRAPH_MAX_NODES,
             max_edges=GRAPH_MAX_EDGES,
             traversal_profile=GRAPH_TRAVERSAL_PROFILE,
+            # Activation consumes nodes, never unavailable-graph diagnostics.
+            include_lag=False,
         )
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph expansion failed for %s", path, exc_info=True)
@@ -3395,7 +3401,7 @@ def _follow_up_packet(
     if packet is not None:
         return packet
     return abstained_packet(
-        reason="unresolved",
+        reason=activation_result.UNRESOLVED,
         max_chars=limit,
         generation=generation,
         anchors=(listed,),
@@ -3893,7 +3899,7 @@ def _compile_packet(
                 return packet
         else:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -3956,7 +3962,7 @@ def _compile_packet(
             )
         if pages:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -4076,7 +4082,7 @@ def _compile_packet(
             )
         if verdict.status == "ambiguous" and licensed:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),
@@ -4232,7 +4238,7 @@ def _compile_packet(
             )
         if overlapping:
             return abstained_packet(
-                reason="ambiguous",
+                reason=activation_result.AMBIGUOUS,
                 max_chars=limit,
                 generation=generation,
                 anchors=(),

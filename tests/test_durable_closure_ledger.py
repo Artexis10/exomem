@@ -120,3 +120,23 @@ def test_bad_span_is_named_and_does_not_hide_valid_sibling():
     assert not report["complete"]
     assert report["canonical_commit_ms"] == 1
     assert "private path" not in json.dumps(report)
+
+
+def test_activation_summary_keeps_historical_unknown_and_observed_outcomes_separate():
+    legacy = _row(1, 1, 100, tool="activate_context")
+    current = _row(2, 2, 100, tool="activate_context", outcome="abstained")
+    current["activation_result"] = {"abstained": True, "reason": "unavailable", "budget_limited": True}
+    report = _module().summarize_rows([legacy, current])
+    assert report["complete"] is True
+    assert report["outcomes"] == {"ok": 1, "abstained": 1}
+    assert report["activation_observations"] == {"calls": 2, "observed": 1, "unknown": 1, "invalid": 0}
+    assert "activation_result" not in legacy
+
+
+def test_current_activation_disagreement_invalidates_the_summary():
+    row = _row(1, 1, 100, tool="activate_context")
+    row["activation_result"] = {"abstained": True, "reason": None, "budget_limited": False}
+    report = _module().summarize_rows([row])
+    assert report["complete"] is False
+    assert report["invalid_rows"] == [{"row": 1, "reason": "invalid_activation_result"}]
+    assert report["activation_observations"] == {"calls": 1, "observed": 0, "unknown": 0, "invalid": 1}

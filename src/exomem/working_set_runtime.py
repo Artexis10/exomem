@@ -66,6 +66,8 @@ from . import (
     working_set_index,
     working_set_resolve,
 )
+from .activation_result import DISABLED, UNAVAILABLE
+from .activation_result import INDEX_WARMING as WARMING
 
 log = logging.getLogger(__name__)
 
@@ -109,12 +111,6 @@ CONTINUITY_THREAD_IDLE_NS = working_set_heat.SESSION_GAP_NS
 CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
-#: The abstention reason a managed runtime returns while the derived index is
-#: still cold. Spelled `index_warming` in the packet because a reader needs to
-#: know WHICH thing is warming; "warming" alone reads as the whole server.
-WARMING = "index_warming"
-UNAVAILABLE = "unavailable"
-DISABLED = "disabled"
 
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
@@ -2237,7 +2233,7 @@ def serve(
 
     def _abstain_unavailable() -> dict[str, Any]:
         return working_set.abstained_packet(
-            reason="unavailable",
+            reason=UNAVAILABLE,
             max_chars=limit,
             generation={
                 "freshness_key": _key_text(freshness_key),

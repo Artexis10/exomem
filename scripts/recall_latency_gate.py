@@ -1,67 +1,17 @@
-"""Recall latency gate for `recall-latency-contract`.
+"""Read-path observations using the current governed recall bars.
 
-Runs the contract's three series against a cell — plus a fourth the contract
-states no ceiling for — reads the per-stage timing diagnostics, and compares
-the result with the fixed ceilings.
-
-The fourth is `browse`, the `query=""` shape the tool schema recommends. It is
-measured and reported and every structural rule applies to it, but no latency
-comparison is made, because the spec states no number for it. See
-`UNCEILINGED_SHAPES`.
-
-Four properties make the reading worth having, and each one is pinned by a
-node in `tests/test_recall_latency_gate.py`:
-
-* **The ceilings are the contract.** They are literals here because the spec
-  says they are "the capability's contract, not calibrated from any runner",
-  and a gate MUST NOT loosen them. If this cell cannot meet them, the honest
-  output is a failure with the measured number beside the ceiling — not a
-  wider ceiling. A ceiling edited until the gate passes measures nothing.
-* **A contended box is refused, not reported.** Above a one-minute load
-  average of 2.0 the gate waits a bounded time and then exits *without a
-  verdict*, naming the load. It re-checks between samples, because a box that
-  was quiet at the start is not necessarily quiet at sample twenty. Every
-  percentile carries the load it was produced under.
-* **The result cache cannot serve the series.** Every query in a run carries a
-  nonce that is unique to the run and to the sample, so no request can be
-  answered from a previous one — within the run or across runs. Two shapes
-  cannot spell that nonce in words — the browse is DEFINED by an empty query,
-  and a keyword series has to match the corpus — so they carry it in
-  whitespace, which the result cache distinguishes and the read path strips.
-* **Nothing measured is nothing certified.** Every series must return hits at
-  its median sample, the premise about the corpus must come from the cell the
-  series ran against, and a stage the check depends on that did not report at
-  all fails closed rather than defaulting into a pass.
-
-Output is content-free by construction: closed codes, counts, percentiles and
-load. No query text, no paths, no excerpts. A latency artifact gets stored
-under an OpenSpec change and read by people who are not entitled to the vault's
-contents.
-
-Two transports:
-
-    --served-url http://127.0.0.1:8765
-        The live cell, over the REST facade at `/api/ask_memory`, authenticated
-        with `Authorization: Bearer $EXOMEM_REST_API_KEY`. This is the surface
-        that answers a key; the streamable-HTTP MCP endpoint is behind the
-        GitHub OAuth proxy and correctly rejects that key with a 401.
-        The key is read from the environment and never echoed.
-
-    --vault /path/to/vault
-        The same series in-process, for a CI-shaped run on a small corpus.
-        It will not meet the ceilings on a fixture vault and is not meant to;
-        `--check` against a corpus below the contract's 8,000 pages fails on
-        the premise rather than pretending the numbers mean anything.
-
-The measured quantity is the server-side `timings.total_ms`, the same quantity
-the 0.69.0 baseline recorded, so the before/after comparison is like for like
-and does not fold this box's loopback and JSON costs into the read path.
+The packaged contract supplies ceilings, diagnostic targets and the reference
+premise. This runner still lacks the complete reference mix, principal proof,
+stage unions and live run-queue attribution required by acceptance task 6.1.
+Its reports therefore say not measured for full acceptance. Response inner
+timings remain identified as read-path diagnostics, never public dispatch.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import sys
@@ -77,22 +27,17 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-# --- The contract ----------------------------------------------------------
-#
-# From `openspec/changes/accelerate-governed-recall/specs/recall-latency-contract
-# /spec.md`, requirement "Governed Recall Meets Fixed Latency Ceilings On A
-# Quiescent Cell". Restated as literals so that loosening one is a visible diff
-# against a test that restates the same sentence.
+from exomem.request_latency_contract import load_contract  # noqa: E402
 
-#: Hybrid recall without structured filters.
-HYBRID_P50_MS = 300.0
-HYBRID_P95_MS = 600.0
-#: Keyword recall.
-KEYWORD_P50_MS = 120.0
-#: Hybrid recall carrying one supported structured filter.
-FILTERED_HYBRID_P50_MS = 400.0
-#: "the eligibility stage reports an index outcome with a duration under 20 ms"
-FILTERED_ELIGIBILITY_MS = 20.0
+CONTRACT = load_contract()
+HYBRID_BAR = CONTRACT.bar("governed-hybrid")
+KEYWORD_BAR = CONTRACT.bar("governed-keyword")
+HYBRID_P95_MS = HYBRID_BAR.threshold_ms
+KEYWORD_P95_MS = KEYWORD_BAR.threshold_ms
+HYBRID_P50_MS = CONTRACT.bar("governed-p50-target").threshold_ms
+KEYWORD_P50_MS = HYBRID_P50_MS
+FILTERED_HYBRID_P50_MS = HYBRID_P50_MS
+FILTERED_ELIGIBILITY_MS = CONTRACT.bar("governed-stage-filter_eligibility").threshold_ms
 
 #: "with the load average at or below 2.0"
 MAX_LOAD_AVERAGE = 2.0
@@ -102,11 +47,11 @@ QUIESCENCE_POLL_SECONDS = 1.0
 DEFAULT_QUIESCENCE_BOUND_SECONDS = 120.0
 
 #: "thirty novel hybrid recalls run back to back"
-SAMPLES_PER_SERIES = 30
+SAMPLES_PER_SERIES = HYBRID_BAR.min_samples
 #: "more than one warming outcome in a measured series SHALL fail the gate"
-MAX_WARMING_SAMPLES = 1
-#: "a quiescent cell of at least 8,000 governed pages"
-MIN_CORPUS_PAGES = 8_000
+MAX_WARMING_SAMPLES = int(CONTRACT.references[HYBRID_BAR.reference]["max_warming"])
+#: "a quiescent cell of at least 6,500 governed pages"
+MIN_CORPUS_PAGES = int(CONTRACT.references[HYBRID_BAR.reference]["pages_min"])
 
 #: The request limit the verdict is defined at. `rerank` scales with the
 #: candidate count — about 103-120 ms at 15 candidates and 217 ms at 30 — so
@@ -211,7 +156,7 @@ class Sample:
     that matched nothing on this cell.
     """
 
-    elapsed_ms: float
+    elapsed_ms: float | None
     warming: bool
     stage_sources: dict[str, str] = field(default_factory=dict)
     stage_ms: dict[str, float] = field(default_factory=dict)
@@ -247,9 +192,7 @@ def one_minute_load() -> float:
         return float("inf")
 
 
-def await_quiescence(
-    load_source, *, bound_seconds: float, sleep
-) -> tuple[float, float, float]:
+def await_quiescence(load_source, *, bound_seconds: float, sleep) -> tuple[float, float, float]:
     """Wait a bounded time for the load to fall to the ceiling.
 
     Returns `(first_load, final_load, waited_seconds)`. The caller decides what
@@ -329,10 +272,10 @@ def novel_query(shape: str, index: int, nonce: str) -> str:
     return f"governed recall latency probe {shape} {nonce} {index:02d}"
 
 
-def _percentile(values: list[float], fraction: float) -> float:
+def _percentile(values: list[float], fraction: float) -> float | None:
     """Nearest-rank percentile; no interpolation, so 30 samples stay legible."""
     if not values:
-        return 0.0
+        return None
     ordered = sorted(values)
     rank = max(1, min(len(ordered), int(round(fraction * len(ordered) + 0.5))))
     return ordered[rank - 1]
@@ -359,6 +302,34 @@ def _is_walker(stage: str) -> bool:
     return stage.rsplit(".", 1)[-1] in WALKER_STAGES
 
 
+def _report_targets(series: dict[str, Any], shape: str) -> None:
+    if shape == "filtered_hybrid":
+        eligibility = series.get("eligibility_ms")
+        # Stage budgets diagnose their row; they never fail the ceiling verdict.
+        series["eligibility_budget_ms"] = FILTERED_ELIGIBILITY_MS
+        series["eligibility_over_budget"] = (
+            float(eligibility) > FILTERED_ELIGIBILITY_MS if eligibility is not None else None
+        )
+    p50 = series.get("p50_ms")
+    p95 = series.get("p95_ms")
+    target = _P50_TARGETS.get(shape)
+    series["p50_target_ms"] = target
+    series["p50_target_met"] = (
+        float(p50) <= target if p50 is not None and target is not None else None
+    )
+    p95_target = (
+        CONTRACT.bar(
+            "governed-keyword-p95-target" if shape == "keyword" else "governed-hybrid-p95-target"
+        )
+        if shape != "browse"
+        else None
+    )
+    series["p95_target_ms"] = p95_target.threshold_ms if p95_target else None
+    series["p95_target_met"] = (
+        float(p95) <= p95_target.threshold_ms if p95 is not None and p95_target else None
+    )
+
+
 def run_series(
     transport,
     shape: str,
@@ -376,6 +347,7 @@ def run_series(
     measured: list[float] = []
     loads: list[float] = []
     warming = 0
+    unknown = 0
     sources: dict[str, str] = {}
     eligibility: list[float] = []
     hit_counts: list[int] = []
@@ -392,6 +364,12 @@ def run_series(
             # A truthful refusal is not a fast recall. Excluded from the
             # percentiles, counted, and bounded by `check`.
             warming += 1
+        elif (
+            sample.elapsed_ms is None
+            or not math.isfinite(sample.elapsed_ms)
+            or sample.elapsed_ms < 0
+        ):
+            unknown += 1
         else:
             measured.append(float(sample.elapsed_ms))
             hit_counts.append(int(sample.hits))
@@ -401,24 +379,17 @@ def run_series(
             if _is_walker(stage) and stage.rsplit(".", 1)[-1] == "filter_eligibility":
                 eligibility.append(float(milliseconds))
 
-        # Between samples, not only at the start: a box that was quiet at
-        # sample one is not necessarily quiet at sample twenty, and a series
-        # that straddles a spike is not a measurement of this cell.
+        # The owner checks quiescence once; later process load is diagnostic.
         load = float(load_source())
-        if load > MAX_LOAD_AVERAGE:
-            first, final, waited = await_quiescence(
-                load_source, bound_seconds=quiescence_bound_seconds, sleep=sleep
-            )
-            if final > MAX_LOAD_AVERAGE:
-                raise _refuse(load, final, waited)
-            loads.append(first)
         loads.append(load)
 
     series: dict[str, Any] = {
         "samples": len(measured),
         "warming": warming,
-        "p50_ms": round(_percentile(measured, 0.50), 1),
-        "p95_ms": round(_percentile(measured, 0.95), 1),
+        "unknown_timings": unknown,
+        "contention": "unknown",
+        "p50_ms": round(_percentile(measured, 0.50), 1) if measured else None,
+        "p95_ms": round(_percentile(measured, 0.95), 1) if measured else None,
         "load_mean": round(statistics.fmean(loads), 2) if loads else 0.0,
         "load_max": round(max(loads), 2) if loads else 0.0,
         "stage_sources": sources,
@@ -428,13 +399,16 @@ def run_series(
         # gate certifies. A sum lets one hit in thirty clear a check that is
         # supposed to prove the p50 measured a real retrieval.
         "hits": sum(hit_counts),
-        "hits_p50": int(_percentile([float(count) for count in hit_counts], 0.50)),
+        "hits_p50": int(_percentile([float(count) for count in hit_counts], 0.50))
+        if hit_counts
+        else None,
     }
     if shape == "filtered_hybrid":
         # None, not 0.0, when the stage never reported: a stage that did not run
         # is not a stage that ran in no time, and 0.0 sails under every ceiling.
         # `check` fails closed on the None.
         series["eligibility_ms"] = round(max(eligibility), 1) if eligibility else None
+    _report_targets(series, shape)
     return series
 
 
@@ -457,6 +431,18 @@ def run(
     pages = transport.pages
     return {
         "refused": False,
+        "contract_revision": CONTRACT.revision,
+        "acceptance": "not measured",
+        "boundary": "response-inner-timings-v1",
+        "profile": "legacy-read-path-observation",
+        "unmeasured_dimensions": [
+            "reference-query-mix",
+            "owner-authority",
+            "admitted-principal",
+            "stage-interval-unions",
+            "run-queue-contention",
+            "served-encoder",
+        ],
         "transport": transport.name,
         # None when the transport could not derive the size of the cell it
         # measured. Carried through as None rather than coerced to a number,
@@ -480,7 +466,7 @@ def run(
 
 # --- The verdict ------------------------------------------------------------
 
-_P50_CEILINGS = {
+_P50_TARGETS = {
     "hybrid": HYBRID_P50_MS,
     "keyword": KEYWORD_P50_MS,
     "filtered_hybrid": FILTERED_HYBRID_P50_MS,
@@ -524,17 +510,19 @@ def check(report: dict[str, Any]) -> None:
 
     for shape in SERIES_SHAPES:
         series = report["series"][shape]
-        p50 = float(series["p50_ms"])
-        ceiling = _P50_CEILINGS.get(shape)
-        if ceiling is not None and p50 > ceiling:
-            failures.append(f"{shape} p50={p50:.1f}ms > {ceiling:.1f}ms")
-        if shape == "hybrid":
-            p95 = float(series["p95_ms"])
-            if p95 > HYBRID_P95_MS:
-                failures.append(f"{shape} p95={p95:.1f}ms > {HYBRID_P95_MS:.1f}ms")
+        p50 = series.get("p50_ms")
+        p95 = series.get("p95_ms")
+        if p50 is None or p95 is None or int(series.get("unknown_timings", 0)):
+            failures.append(f"{shape} has unknown timing observations")
+        ceiling = (
+            KEYWORD_P95_MS if shape == "keyword" else HYBRID_P95_MS if shape != "browse" else None
+        )
+        if ceiling is not None and p95 is not None and float(p95) > ceiling:
+            failures.append(f"{shape} p95={float(p95):.1f}ms > {ceiling:.1f}ms")
+        _report_targets(series, shape)
 
-        if int(series["samples"]) < 1:
-            failures.append(f"{shape} produced no measured sample")
+        if int(series["samples"]) < SAMPLES_PER_SERIES - MAX_WARMING_SAMPLES:
+            failures.append(f"{shape} produced insufficient measured samples")
 
         warming = int(series["warming"])
         if warming > MAX_WARMING_SAMPLES:
@@ -553,7 +541,7 @@ def check(report: dict[str, Any]) -> None:
         # The median, not the sum: the gate certifies a p50, so one hit across
         # thirty samples clearing the guard would leave the very percentile
         # being certified an empty recall.
-        if int(series.get("hits_p50", 0)) < 1:
+        if int(series.get("hits_p50") or 0) < 1:
             failures.append(
                 f"the {shape} series' median sample returned no hits ("
                 f"{int(series.get('hits', 0))} across the whole run): its percentiles "
@@ -581,13 +569,8 @@ def check(report: dict[str, Any]) -> None:
             if eligibility is None:
                 failures.append(
                     f"{shape} reported no filter_eligibility duration at all: the "
-                    "20 ms index-outcome premise cannot be read on this cell, and an "
+                    "stage-budget premise cannot be read on this cell, and an "
                     "absent stage is not a stage that ran in no time"
-                )
-            elif float(eligibility) > FILTERED_ELIGIBILITY_MS:
-                failures.append(
-                    f"{shape} stage filter_eligibility took {float(eligibility):.1f}ms > "
-                    f"{FILTERED_ELIGIBILITY_MS:.1f}ms"
                 )
             # Matched the way `_is_walker` and the `eligibility_ms` collector
             # already match, because Lane 1 moves stages under qualified names
@@ -614,9 +597,7 @@ def check(report: dict[str, Any]) -> None:
                 )
             for stage, source in sorted(eligibility_sources.items()):
                 if source not in ("index", "cache"):
-                    failures.append(
-                        f"{shape} stage {stage} answered from {source}, not an index"
-                    )
+                    failures.append(f"{shape} stage {stage} answered from {source}, not an index")
 
     if failures:
         raise SystemExit("recall latency gate failed: " + "; ".join(failures))
@@ -702,9 +683,7 @@ class ServedTransport:
             scope_path = str(knowledge_base.get("path") or "").strip()
             if not scope_path:
                 return None
-            scoped = self._post(
-                {"path": scope_path, "mode": "overview"}, command="browse_memory"
-            )
+            scoped = self._post({"path": scope_path, "mode": "overview"}, command="browse_memory")
             markdown = (scoped.get("totals") or {}).get("markdown")
         except SystemExit:
             # A cell that will not answer the premise is not a cell that failed
@@ -804,14 +783,13 @@ class VaultTransport:
 def _sample_from_envelope(data: Any) -> Sample:
     """Read one closed outcome out of the `include_timings` envelope."""
     if not isinstance(data, dict):
-        return Sample(elapsed_ms=0.0, warming=True)
+        return Sample(elapsed_ms=None, warming=False)
     if "warming" in data:
-        return Sample(elapsed_ms=0.0, warming=True)
+        return Sample(elapsed_ms=None, warming=True)
     timings = data.get("timings")
     if not isinstance(timings, dict):
-        # No diagnostics means no verdict is possible for this sample; treat it
-        # the way a warming outcome is treated rather than inventing a number.
-        return Sample(elapsed_ms=0.0, warming=True)
+        # Missing diagnostics are unknown, distinct from a typed warming outcome.
+        return Sample(elapsed_ms=None, warming=False)
     stages = timings.get("stages") or {}
     sources: dict[str, str] = {}
     milliseconds: dict[str, float] = {}
@@ -825,11 +803,14 @@ def _sample_from_envelope(data: Any) -> Sample:
         if isinstance(value, (int, float)):
             milliseconds[name] = float(value)
     total = timings.get("total_ms")
-    if not isinstance(total, (int, float)) or float(total) <= 0.0:
-        # Thirty of these would be thirty 0.0 ms samples and a green verdict.
-        # An absent `timings` dict is already treated as warming three lines
-        # up; a timings dict with no usable total says exactly as little.
-        return Sample(elapsed_ms=0.0, warming=True)
+    if (
+        isinstance(total, bool)
+        or not isinstance(total, (int, float))
+        or not math.isfinite(total)
+        or total < 0
+    ):
+        # Invalid totals remain unknown; they never enter the percentile as zero.
+        return Sample(elapsed_ms=None, warming=False)
     hit_list = data.get("hits")
     return Sample(
         elapsed_ms=float(total),
@@ -848,7 +829,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Measure governed recall against the fixed latency ceilings."
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--served-url", help="base URL of a served cell, e.g. http://127.0.0.1:8765")
+    source.add_argument(
+        "--served-url", help="base URL of a served cell, e.g. http://127.0.0.1:8765"
+    )
     source.add_argument("--vault", type=Path, help="vault root, for an in-process run")
     parser.add_argument(
         "--check",

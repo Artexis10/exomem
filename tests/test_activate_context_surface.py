@@ -66,6 +66,99 @@ def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, 
     return code, captured.out
 
 
+def test_configured_role_content_stays_out_of_private_activation_diagnostics(
+    activation_vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+    import uuid
+
+    import yaml
+
+    from exomem import call_spans, context_roles, latency_watch, query_log
+
+    role_id = "Notes/Example Route.md"
+    proposal = {
+        "schema_version": 1,
+        "roles": {
+            name: {"anchor_defaults": [], "cues": [], "evidence_cues": []}
+            for name in context_roles.shipped_registry().roles
+        },
+    }
+    # These anchor kinds are fixed by the context-role schema.
+    proposal["roles"][role_id] = {
+        "lane": "units",
+        "anchor_defaults": ["entity", "resource", "project", "hub", "collection", "page", "plan"],
+    }
+    checked = context_roles.load_roles(activation_vault, proposal=proposal)
+    assert not checked.findings
+    context_roles.override_path(activation_vault).write_text(yaml.safe_dump(proposal))
+    context_roles.clear_cache()
+    working_set_runtime.reset_caches_for_tests()
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
+    log_dir = tmp_path / "logs"
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(log_dir))
+    monkeypatch.setattr(query_log, "_disabled", lambda: False)
+    watch = latency_watch.Watch(started_at=time.time() - 601)
+    monkeypatch.setattr(latency_watch, "_WATCH", watch)
+    call_token = uuid.uuid4().hex
+    token = call_spans.MCP_CALL_TOKEN.set(call_token)
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
+        spans = call_spans.pop_call_spans(call_token)
+
+    assert packet["abstained"] is False
+    assert any(role["id"] == role_id for role in packet["roles"])
+    assert "timings" not in packet
+    logged = json.loads((log_dir / "activations.jsonl").read_text())
+    assert "anchors" not in logged
+    assert any(span["name"] == "working_set.lanes.0" for span in logged["spans"])
+    assert any(span["name"] == "recall.working_set.lanes.0" for span in spans)
+    assert role_id not in json.dumps([logged, spans])
+    assert role_id not in repr(list(watch._ring))
+
+
+def test_unavailable_graph_diagnostics_cannot_delay_activation_past_its_deadline(
+    activation_vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked queue must not delay a packet that discards graph diagnostics."""
+    import threading
+    import time
+
+    from exomem import deferred_index, epistemic_graph, request_budget
+
+    warm_managed_cell(activation_vault)
+    caller = threading.get_ident()
+    real_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def unavailable_for_caller(index):
+        return None if threading.get_ident() == caller else real_open(index)
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", unavailable_for_caller
+    )
+    reference = commands.op_activate_context(activation_vault, turn=TURN)
+    working_set_runtime.reset_caches_for_tests()
+    locker = deferred_index._connect(activation_vault, create=True)
+    locker.execute("PRAGMA locking_mode=EXCLUSIVE")
+    locker.execute("BEGIN EXCLUSIVE")
+    budget = request_budget.RequestBudget(seconds=50, entry=time.monotonic() - 48.4)
+    token = request_budget.set_current(budget)
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+        returned = time.monotonic()
+    finally:
+        request_budget.reset_current(token)
+        locker.rollback()
+        locker.close()
+
+    assert returned < budget.deadline
+    assert packet["abstained"] is False
+    for block in PARITY_BLOCKS:
+        assert packet.get(block) == reference.get(block), block
+
+
 def _surface_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in (

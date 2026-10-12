@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any, NamedTuple
 
-from . import working_set_anaphora
+from . import activation_result, working_set_anaphora
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
@@ -153,11 +153,11 @@ RETRIEVAL_NAMED_STATUS = "retrieval_named"
 ANCHOR_STATUSES: tuple[str, ...] = (
     "resolved",
     "partial",
-    "unresolved",
+    activation_result.UNRESOLVED,
     RETRIEVAL_CARRIED_STATUS,
     RETRIEVAL_NAMED_STATUS,
 )
-TURN_STATUSES: tuple[str, ...] = ("resolved", "ambiguous", "unresolved")
+TURN_STATUSES: tuple[str, ...] = ("resolved", activation_result.AMBIGUOUS, activation_result.UNRESOLVED)
 
 MAX_ANCHORS = 6
 MAX_EXPLICIT_ANCHORS = 24
@@ -2432,11 +2432,11 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
     # claim is that somebody edited it. Before `recency` existed no such
     # candidate could be built, so this reads only sets that contain it.
     if evidence & PRIOR_CONTACT_KINDS and not evidence & CONTACT_KINDS:
-        return "unresolved"
+        return activation_result.UNRESOLVED
     if deciding:
         return "partial"
     # Nothing but tie-breaks: not a candidate this turn reached at all.
-    return "unresolved"
+    return activation_result.UNRESOLVED
 
 
 def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) -> str:
@@ -2681,7 +2681,7 @@ def resolve(
     retrieved_partial_ids: set[str] = set()
     for candidate in ordered:
         status = _status_for(candidate, recency_resolves=recency_resolves)
-        if status == "unresolved":
+        if status == activation_result.UNRESOLVED:
             continue
         if status == "partial" and candidate.retrieval_reached:
             retrieved_partial_ids.add(candidate.anchor_id)
@@ -2793,7 +2793,7 @@ def resolve(
     if not resolved and not ambiguity:
         ambiguity = [entry for kind, group in _bare_name_groups(anchors)
             for entry in _ambiguity_dicts(kind, group)]
-    status = "ambiguous" if ambiguity else "resolved" if resolved else "unresolved"
+    status = activation_result.AMBIGUOUS if ambiguity else "resolved" if resolved else activation_result.UNRESOLVED
     # Partial leads cannot displace the contexts that established the verdict.
     anchors = sorted(anchors, key=lambda item: item.status != "resolved")
     # Explicit current-turn names consume the ordinary allowance first. Other

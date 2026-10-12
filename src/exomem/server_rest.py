@@ -334,6 +334,22 @@ def register_rest_facade(
             return None
         return data if isinstance(data, dict) else None
 
+    def _observe_rest(tool: str, *, outcome: str, started: float | None,
+                      request_id: str | None = None) -> None:
+        try:
+            from . import latency_watch
+
+            latency_watch.observe(
+                tool=tool, client=None, deep=False, surface="rest", outcome=outcome,
+                total_ms=(time.perf_counter() - started) * 1000 if started is not None else None,
+                correlated=bool(request_id and request_id != "unknown"),
+                excluded=started is None,
+            )
+        except Exception:  # noqa: BLE001 - observation must not change a REST response
+            from . import latency_watch
+
+            latency_watch.current().record_failure()
+
     def _register_rest(cmd: commands_module.Command) -> None:
         @mcp_app.custom_route(f"/api/{cmd.name}", methods=["POST"])
         async def _handler(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
@@ -343,6 +359,7 @@ def register_rest_facade(
             if local_grant is None:
                 gate, principal_scope = _rest_gate(request)
                 if gate is not None:
+                    _observe_rest(_cmd.name, outcome="refused", started=None)
                     return gate
             else:
                 principal_scope = None
@@ -361,6 +378,7 @@ def register_rest_facade(
                 or "cell_id" in request.query_params
                 or "authorization_session_id" in request.query_params
             ):
+                _observe_rest(_cmd.name, outcome="refused", started=None)
                 return _rest_err(
                     "AUTHORIZATION_SESSION_UNAVAILABLE",
                     "authorization session is unavailable",
@@ -368,6 +386,7 @@ def register_rest_facade(
                 )
             request_carrier = authorization_transport.current_request_authorization_carrier()
             if request_carrier is None or request_carrier.is_invalid:
+                _observe_rest(_cmd.name, outcome="refused", started=None)
                 return _rest_err(
                     "AUTHORIZATION_SESSION_UNAVAILABLE",
                     "authorization session is unavailable",
@@ -377,117 +396,126 @@ def register_rest_facade(
                 canonical_request_id(request.headers.get("x-exomem-request-id")) or "unknown"
             )
             t0 = time.perf_counter()
+            outcome = "error"
             try:
-                from .governance import principal as principal_module
+                try:
+                    from .governance import principal as principal_module
 
-                principal = (
-                    principal_module.local_owner_principal(surface="rest")
-                    if local_grant is not None
-                    else principal_module.resolve_rest_principal(principal_scope)
-                )
-                admission = await run_in_threadpool(
-                    authorization_request.verify_authorization_context,
-                    vault_root,
-                    principal=principal,
-                    credential=request_carrier.consume(),
-                    now=int(time.time()),
-                )
-                body = await _rest_body(request)
-                if body is None:
-                    raise cli_ops.OpError("INVALID_BODY", "request body must be a JSON object")
-                forbidden_identity_fields = {
-                    "authorization_session_credential",
-                    "principal",
-                    "principal_scope",
-                    "issuer",
-                    "cell_id",
-                    "logical_vault_id",
-                    "authorization_session_id",
-                }
-                if forbidden_identity_fields.intersection(body):
-                    raise authorization_request.AuthorizationContextUnavailable
-                rule = authorization_request.credential_rule(_cmd.name, body)
-                bound_principal = authorization_request.enforce_credential_rule(
-                    admission,
-                    rule,
-                )
-                from . import auth_sessions
-                from .governance import connector_boundary
+                    principal = (
+                        principal_module.local_owner_principal(surface="rest")
+                        if local_grant is not None
+                        else principal_module.resolve_rest_principal(principal_scope)
+                    )
+                    admission = await run_in_threadpool(
+                        authorization_request.verify_authorization_context,
+                        vault_root,
+                        principal=principal,
+                        credential=request_carrier.consume(),
+                        now=int(time.time()),
+                    )
+                    body = await _rest_body(request)
+                    if body is None:
+                        raise cli_ops.OpError("INVALID_BODY", "request body must be a JSON object")
+                    forbidden_identity_fields = {
+                        "authorization_session_credential",
+                        "principal",
+                        "principal_scope",
+                        "issuer",
+                        "cell_id",
+                        "logical_vault_id",
+                        "authorization_session_id",
+                    }
+                    if forbidden_identity_fields.intersection(body):
+                        raise authorization_request.AuthorizationContextUnavailable
+                    rule = authorization_request.credential_rule(_cmd.name, body)
+                    bound_principal = authorization_request.enforce_credential_rule(
+                        admission,
+                        rule,
+                    )
+                    from . import auth_sessions
+                    from .governance import connector_boundary
 
-                if not await auth_sessions.origin_session_active(bound_principal):
-                    raise authorization_request.AuthorizationContextUnavailable
-                boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
-                unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
-                if _cmd.name == "edit_memory":
-                    body = edit_operations.normalize_edit_surface_arguments(body)
-                kwargs = cli_ops.coerce(
-                    _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
-                )
-                injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
-                from .writer_lease import invoke_command
+                    if not await auth_sessions.origin_session_active(bound_principal):
+                        raise authorization_request.AuthorizationContextUnavailable
+                    boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
+                    unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
+                    if _cmd.name == "edit_memory":
+                        body = edit_operations.normalize_edit_surface_arguments(body)
+                    kwargs = cli_ops.coerce(
+                        _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
+                    )
+                    injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
+                    from .writer_lease import invoke_command
 
-                def invoke_bound() -> Any:
-                    # Canonical audience at the REST boundary (design D5): a
-                    # `None` scope is the vault's own shared key (owner); a
-                    # CF-Access scope folds into the shared OAuth id space.
-                    with (
-                        capabilities.active_surface(surface_descriptor),
-                        principal_module.request_scope(bound_principal),
-                    ):
-                        return invoke_command(
-                            _cmd,
-                            *injected,
-                            idempotency_key=request.headers.get("idempotency-key"),
-                            idempotency_principal_scope=principal_scope,
-                            mutation_request_id=canonical_request_id(
-                                request.headers.get("x-exomem-request-id")
-                            ),
-                            **kwargs,
-                        )
+                    def invoke_bound() -> Any:
+                        # Canonical audience at the REST boundary (design D5): a
+                        # `None` scope is the vault's own shared key (owner); a
+                        # CF-Access scope folds into the shared OAuth id space.
+                        with (
+                            capabilities.active_surface(surface_descriptor),
+                            principal_module.request_scope(bound_principal),
+                        ):
+                            return invoke_command(
+                                _cmd,
+                                *injected,
+                                idempotency_key=request.headers.get("idempotency-key"),
+                                idempotency_principal_scope=principal_scope,
+                                mutation_request_id=canonical_request_id(
+                                    request.headers.get("x-exomem-request-id")
+                                ),
+                                **kwargs,
+                            )
 
-                result = await run_in_threadpool(invoke_bound)
-                changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
-                limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
-                if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
-                    raise authorization_request.AuthorizationContextUnavailable
-            except runtime_resources.ModelBusyError as exc:
-                err = cli_ops.error_dict(exc)
-                _log_rest_failure(
-                    tool=_cmd.name,
-                    request_id=request_id,
-                    code=str(err.get("code") or "MODEL_BUSY"),
-                    duration_ms=round((time.perf_counter() - t0) * 1000, 2),
-                    message=str(err.get("message") or ""),
-                    scope=log_scope,
+                    result = await run_in_threadpool(invoke_bound)
+                    changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
+                    limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
+                    if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
+                        raise authorization_request.AuthorizationContextUnavailable
+                except runtime_resources.ModelBusyError as exc:
+                    outcome = "refused"
+                    err = cli_ops.error_dict(exc)
+                    _log_rest_failure(
+                        tool=_cmd.name,
+                        request_id=request_id,
+                        code=str(err.get("code") or "MODEL_BUSY"),
+                        duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                        message=str(err.get("message") or ""),
+                        scope=log_scope,
+                    )
+                    return RestJSONResponse(
+                        cli_ops.envelope(False, error=err),
+                        status_code=cli_ops.http_status_for(err["code"]),
+                    )
+                except (
+                    authorization_request.AuthorizationContextUnavailable,
+                    authorization_request.AuthorizationRouteUnclassified,
+                    cli_ops.OpError,
+                    ValueError,
+                    TypeError,
+                ) as exc:
+                    outcome = "refused"
+                    err = cli_ops.error_dict(exc)
+                    _log_rest_failure(
+                        tool=_cmd.name,
+                        request_id=request_id,
+                        code=str(err.get("code") or "OP_ERROR"),
+                        duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                        message=str(err.get("message") or ""),
+                        scope=log_scope,
+                    )
+                    return RestJSONResponse(
+                        cli_ops.envelope(False, error=err),
+                        status_code=cli_ops.http_status_for(err["code"]),
+                    )
+                _log_rest_success(
+                    tool=_cmd.name, duration_ms=round((time.perf_counter() - t0) * 1000, 2)
                 )
-                return RestJSONResponse(
-                    cli_ops.envelope(False, error=err),
-                    status_code=cli_ops.http_status_for(err["code"]),
-                )
-            except (
-                authorization_request.AuthorizationContextUnavailable,
-                authorization_request.AuthorizationRouteUnclassified,
-                cli_ops.OpError,
-                ValueError,
-                TypeError,
-            ) as exc:
-                err = cli_ops.error_dict(exc)
-                _log_rest_failure(
-                    tool=_cmd.name,
-                    request_id=request_id,
-                    code=str(err.get("code") or "OP_ERROR"),
-                    duration_ms=round((time.perf_counter() - t0) * 1000, 2),
-                    message=str(err.get("message") or ""),
-                    scope=log_scope,
-                )
-                return RestJSONResponse(
-                    cli_ops.envelope(False, error=err),
-                    status_code=cli_ops.http_status_for(err["code"]),
-                )
-            _log_rest_success(
-                tool=_cmd.name, duration_ms=round((time.perf_counter() - t0) * 1000, 2)
-            )
-            return RestJSONResponse(cli_ops.envelope(True, data=result))
+                response = RestJSONResponse(cli_ops.envelope(True, data=result))
+                outcome = "abstained" if isinstance(result, dict) and result.get("abstained") else "ok"
+                return response
+
+            finally:
+                _observe_rest(_cmd.name, outcome=outcome, started=t0, request_id=request_id)
 
         _handler.__name__ = f"_api_{cmd.name}"
 
