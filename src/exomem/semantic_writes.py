@@ -2029,9 +2029,24 @@ def _preflight_existing(
     before_review: semantic_contract.RelationReviewState | None = None
     after_review: semantic_contract.RelationReviewState | None = None
     if applicability == "full":
+        from . import vocabulary_auxiliaries
+
+        admission = None
+        if after.identity_kind == "exomem_id":
+            admission = vocabulary_auxiliaries.lifecycle_admission(
+                root,
+                primary_path=path,
+                current_source=before_source,
+                proposed_source=after_source,
+                primary_guard=primary_guard,
+            )
         with mutation_timing_span(timings, "preflight.relation_review"):
-            before_review = relation_review.load_relation_review(root, before, corpus=before_corpus)
-            after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+            before_review = relation_review.load_relation_review(
+                root, before, corpus=before_corpus, admission=admission,
+            )
+            after_review = relation_review.load_relation_review(
+                root, after, corpus=after_corpus, admission=admission,
+            )
 
     token = transition_token or _existing_transition_token(
         operation=operation,

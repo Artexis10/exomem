@@ -38,6 +38,112 @@ def _deny_paths(root: Path, *paths: str) -> None:
     )
 
 
+def test_full_restricted_mcp_edit_ignores_denied_lifecycle_overflow(
+    configured_boundary, vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Denied lifecycle state must not stop a supported compiled-page edit."""
+    import asyncio
+    import datetime as dt
+    import json
+    import shutil
+
+    from fastmcp import Client
+
+    from exomem import memory_refs, server, state_migration, temporal
+
+    _, authenticate = configured_boundary
+    _write_primary(vault)
+    directory = relation_review.lifecycle_prepared_path(vault, IDENTITY).parent
+    relative = directory.relative_to(vault).as_posix()
+    _deny_paths(vault, f"{relative}/withheld-*.json")
+    monkeypatch.setattr(temporal, "now", lambda: dt.datetime(2025, 1, 1, tzinfo=dt.UTC))
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    observations = []
+    for world in ("absent", "withheld"):
+        root = tmp_path / world
+        shutil.copytree(vault, root)
+        if world == "withheld":
+            hidden_directory = root / relative
+            hidden_directory.mkdir(parents=True)
+            for index in range(270):
+                (hidden_directory / f"withheld-{index}.json").write_bytes(b"not a decision")
+        authority = state_migration.assert_offline_migration_authority(
+            source="isolated full lifecycle edit proof",
+        )
+        state_migration.arm_connector_boundary_offline(root, authority=authority)
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+        authenticate("limited")
+        mcp = server.build_server(require_auth=False)
+
+        async def invoke(mcp=mcp):
+            async with Client(mcp) as client:
+                response = await client.call_tool("edit_memory", {
+                    "path": PAGE,
+                    "why": "Record the completed round",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": "An earlier round.",
+                        "new_string": "The completed round.",
+                    },
+                })
+                return response.data
+
+        response = asyncio.run(invoke())
+        written = response.get("result", response)
+        assert written["status"] == "committed", json.dumps(written)
+        final = (root / PAGE).read_text(encoding="utf-8")
+        assert memory_refs.ref_from_markdown(final) == memory_refs.memory_ref(IDENTITY)
+        prepared = relation_review.lifecycle_prepared_path(root, IDENTITY)
+        record = json.loads(prepared.read_bytes())
+        assert record["page_identity"] == IDENTITY
+        assert record["before_source_hash"] == vault_module.content_hash(SOURCE)
+        assert record["after_source_hash"] == vault_module.content_hash(final)
+        observations.append((final, record["after_fingerprint"], {
+            key: written.get(key) for key in ("status", "path", "relation_advisory")
+        }))
+        if world == "withheld":
+            assert all(
+                (root / relative / f"withheld-{index}.json").read_bytes() == b"not a decision"
+                for index in range(270)
+            )
+    assert observations[0] == observations[1]
+
+
+@pytest.mark.parametrize("target", ["prepared", "current_decision", "proposed_decision"])
+def test_full_preflight_denied_target_refuses_before_observing_its_bytes(
+    configured_boundary, vault: Path, target: str,
+) -> None:
+    """An unavailable required artifact has the same outcome before and after arrival."""
+    _, authenticate = configured_boundary
+    before, _ = _write_primary(vault)
+    after = before.replace("An earlier round.", "The completed round.")
+    refusals = []
+    with principal.request_scope(authenticate("limited")):
+        preview = semantic_writes.preflight_existing(
+            vault, path=PAGE, after_source=after, operation="edit",
+        )
+        assert preview.applicability == "full"
+        if target == "prepared":
+            artifact = relation_review.lifecycle_prepared_path(vault, IDENTITY)
+        else:
+            state = preview.before if target == "current_decision" else preview.after
+            artifact = relation_review.lifecycle_decision_path(
+                vault, IDENTITY, state.review_fingerprint,
+            )
+        _deny_paths(vault, artifact.relative_to(vault).as_posix())
+        for present in (False, True):
+            if present:
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_bytes(b"{" * 20_000)
+            with pytest.raises((ValueError, relation_review.RelationReviewError)) as refused:
+                semantic_writes.preflight_existing(
+                    vault, path=PAGE, after_source=after, operation="edit",
+                )
+            refusals.append((type(refused.value), str(refused.value)))
+            assert (vault / PAGE).read_text(encoding="utf-8") == before
+    assert refusals[0] == refusals[1]
+
+
 def test_denied_lifecycle_siblings_do_not_spend_history_or_residue_limits(
     configured_boundary, vault: Path,
 ) -> None:
