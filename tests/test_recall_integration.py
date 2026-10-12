@@ -285,15 +285,14 @@ def _attribution_allowance(total_ms: float) -> float:
     breached. That is a flake waiting, and widening the RATIO to stop it would
     retire the only guard the spec gives against uninstrumented time.
 
-    So the ratio is not loosened. Below the smallest ceiling the contract
-    states anywhere — the 120 ms keyword p50 — it is replaced by an absolute
-    cap sized against what this actually costs. See
-    `_FLAT_ATTRIBUTION_ALLOWANCE_MS` for why that is 8 ms and not the 18 ms
-    the contract's own arithmetic produces at that scale.
+    Below the current 50 ms diagnostic p50 target, the measured 8 ms fixture
+    cap replaces the ratio. The target sets this fixture's scale; it does not
+    establish live acceptance. At the target, the unchanged ratio allows
+    7.5 ms. `_FLAT_ATTRIBUTION_ALLOWANCE_MS` explains the fixture cap.
 
     On the live cell the question does not arise: the 0.69.0 baseline puts
     unattributed at 12.8-16.0 ms against totals of 561-1037 ms, or 1.5-2.3%,
-    and every request clears 120 ms comfortably, so the ratio governs.
+    and every request clears the diagnostic target, so the ratio governs.
     """
     if total_ms >= gate.KEYWORD_P50_MS:
         return 0.15 * total_ms
@@ -1030,7 +1029,7 @@ def test_every_stage_of_every_shape_carries_a_source(
 def test_the_attribution_allowance_falls_back_only_below_the_contract_scale() -> None:
     """The fallback must not become the rule.
 
-    At or above the contract's smallest stated ceiling the ratio applies
+    At or above the contract's diagnostic p50 target the ratio applies
     unchanged; below it, and only below it, an absolute cap sized against what
     unattributed time actually costs here. A mutant that returns the flat
     allowance everywhere would let a 600 ms request hide 90 ms, and a mutant
@@ -1044,7 +1043,7 @@ def test_the_attribution_allowance_falls_back_only_below_the_contract_scale() ->
     threshold under test and let the mutant live.
     """
     assert _attribution_allowance(1000.0) == pytest.approx(150.0)
-    assert _attribution_allowance(gate.KEYWORD_P50_MS) == pytest.approx(18.0)
+    assert _attribution_allowance(gate.KEYWORD_P50_MS) == pytest.approx(7.5)
     assert _attribution_allowance(gate.KEYWORD_P50_MS - 0.01) == pytest.approx(8.0)
     assert _attribution_allowance(10.0) == pytest.approx(8.0)
 
