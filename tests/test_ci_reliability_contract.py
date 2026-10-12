@@ -681,6 +681,7 @@ def _installed_journey_scope(repository: Path, event: str) -> tuple[str, str]:
         ("openspec/spec.md", "openspec/spec.md", True, "true"),
     ],
 )
+@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
 def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, expected: str
 ) -> None:
@@ -722,6 +723,7 @@ def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     "event,has_parent",
     [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
 )
+@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
 def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_events(
     tmp_path: Path, event: str, has_parent: bool
 ) -> None:
