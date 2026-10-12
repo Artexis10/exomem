@@ -1,4 +1,4 @@
-"""The Cloud restore tools' own logic: the vault digest the drill and the
+"""The Cloud restore tools' own logic: the backup digest the drill and the
 in-place restore trust for their verdict, the move and rollback of a cell's
 contents, and the restore resources they render with cellctl
 (infra/scripts/cloud_vault_digest.py, cloud_restore_volume.sh and
@@ -105,10 +105,91 @@ def test_a_restore_that_differs_from_its_reference_fails(tmp_path: Path, change:
     result = _digest("compare", _hash(restored, tmp_path / "r.list"), _hash(reference, tmp_path / "f.list"), out)
 
     assert result.returncode == 3, result.stdout + result.stderr
-    # The run log carries counts; the names stay in the memory-backed directory.
+    # The run log carries counts; the names stay in the private hash directory.
     assert ".md" not in result.stdout
     if listed_in:
         assert (out / listed_in).read_text(encoding="utf-8").count(".md") == 1
+
+
+@posix_trees
+@pytest.mark.parametrize("empty_host", [False, True])
+def test_scratch_and_in_place_restores_match_both_backup_roots(tmp_path: Path, empty_host: bool) -> None:
+    reference = tmp_path / "reference"
+    _vault(reference / "vault")
+    (reference / "host").mkdir()
+    if not empty_host:
+        (reference / "host" / "custody.db").write_bytes(b"committed custody")
+    scratch = tmp_path / "scratch"
+    in_place = tmp_path / "in-place"
+    shutil.copytree(reference, scratch, symlinks=True)
+    shutil.copytree(scratch, in_place, symlinks=True)
+
+    for backup_path in _manifests().BACKUP_PATHS:
+        name = Path(backup_path).name
+        reference_list = _hash(reference / name, tmp_path / f"reference-{name}.list")
+        scratch_list = _hash(scratch / name, tmp_path / f"scratch-{name}.list")
+        in_place_list = _hash(in_place / name, tmp_path / f"in-place-{name}.list")
+        options = ["--allow-empty"] if name == "host" else []
+        for restored, expected in ((scratch_list, reference_list), (in_place_list, scratch_list)):
+            result = _digest("compare", restored, expected, tmp_path, *options)
+            assert result.returncode == 0, result.stdout + result.stderr
+        if name == "host" and empty_host:
+            assert "restored=0 reference=0 identical=0" in result.stdout
+
+
+@posix_trees
+@pytest.mark.parametrize("change", ["edit", "remove", "add", "retarget"])
+def test_unchanged_vault_does_not_hide_changed_host_state(tmp_path: Path, change: str) -> None:
+    reference = tmp_path / "reference"
+    _vault(reference / "vault")
+    (reference / "host").mkdir()
+    (reference / "host" / "custody.db").write_bytes(b"committed custody")
+    (reference / "host" / "current").symlink_to("custody.db")
+    restored = tmp_path / "restored"
+    shutil.copytree(reference, restored, symlinks=True)
+    if change == "edit":
+        (restored / "host" / "custody.db").write_bytes(b"lost custody")
+    elif change == "remove":
+        (restored / "host" / "custody.db").unlink()
+    elif change == "add":
+        (restored / "host" / "stray.db").write_bytes(b"extra state")
+    else:
+        (restored / "host" / "current").unlink()
+        (restored / "host" / "current").symlink_to("stray.db")
+
+    vault_result = _digest(
+        "compare", _hash(restored / "vault", tmp_path / "r-vault.list"),
+        _hash(reference / "vault", tmp_path / "f-vault.list"), tmp_path,
+    )
+    host_result = _digest(
+        "compare", _hash(restored / "host", tmp_path / "r-host.list"),
+        _hash(reference / "host", tmp_path / "f-host.list"), tmp_path, "--allow-empty",
+    )
+
+    assert vault_result.returncode == 0, vault_result.stderr
+    assert host_result.returncode == 3, host_result.stdout + host_result.stderr
+    assert "custody.db" not in host_result.stdout and "current" not in host_result.stdout
+
+
+@posix_trees
+@pytest.mark.parametrize("root_kind", ["missing", "symlink"])
+def test_missing_or_linked_host_root_cannot_pass_as_empty(tmp_path: Path, root_kind: str) -> None:
+    host = tmp_path / "host"
+    if root_kind == "symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "private.db").write_bytes(b"outside backup roots")
+        host.symlink_to(outside, target_is_directory=True)
+
+    spellings = [str(host)]
+    if root_kind == "symlink":
+        spellings.extend((str(host) + "/", str(host) + "/."))
+    for root in spellings:
+        result = _digest("hash", root)
+
+        assert result.returncode == 1
+        assert not result.stdout
+        assert "private.db" not in result.stderr
 
 
 @posix_trees

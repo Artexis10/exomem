@@ -4,9 +4,9 @@
 # use each one and what to record.
 #
 #   cloud_restore.sh drill CELL_ID SNAPSHOT REFERENCE
-#     Restore SNAPSHOT into a scratch namespace, hash every restored vault file
-#     and compare with REFERENCE: "live" (the running cell's vault) or
-#     "prior:<8 hex>" (the vault an earlier restore kept). The cell is never
+#     Restore SNAPSHOT into a scratch namespace, hash each backup root
+#     and compare with REFERENCE: "live" (the running cell's roots) or
+#     "prior:<8 hex>" (the roots an earlier restore kept). The cell is never
 #     stopped, mounted by a new pod or written. The cell must run on this node.
 #   cloud_restore.sh restore CELL_ID SNAPSHOT
 #     Replace the cell's backed-up paths (/data/vault and /data/host) with
@@ -19,8 +19,8 @@
 # /var/lib/exomem-restore/<run ID>, start them there as a transient systemd
 # unit, so a dropped SSH session cannot interrupt a run, and print the run ID.
 # The run's last log line gives its verdict; rc=0 means it passed and its
-# cleanup was verified. The log holds counts only. The hash lists name vault
-# files, so they stay in /dev/shm/exomem-restore-<run ID>, removed after a pass.
+# cleanup was verified. The log holds counts only. The hash lists name private
+# files, so they stay in the private run directory, removed after a pass.
 set -euo pipefail
 umask 077
 
@@ -234,6 +234,40 @@ runtime_root() {
 
 # --- scratch restore, shared by drill and restore -------------------------
 
+read_backup_paths() {
+  local paths path
+  paths=$(py "$MANIFESTS" backup-paths)
+  read -r -a BACKUP_PATHS <<< "$paths"
+  [ "${#BACKUP_PATHS[@]}" -gt 0 ] || die 'cellctl names no backup paths'
+  for path in "${BACKUP_PATHS[@]}"; do [[ "$path" =~ ^/data/[a-z]+$ ]] || die "unexpected backup path $path"; done
+  echo "cell=$CELL_ID snapshot=$SNAPSHOT backup_paths=${BACKUP_PATHS[*]}"
+}
+
+hash_pod_roots() {
+  local namespace=$1 pod=$2 label=$3 path name
+  for path in "${BACKUP_PATHS[@]}"; do
+    name=${path##*/}
+    k -n "$namespace" exec "$pod" -- python3 -I -c "$DIGEST_SOURCE" hash "$path" \
+      < /dev/null > "$HASH_DIR/$label-$name.hashes" || die "hashing $label $path failed"
+    echo "$label $name entries=$(wc -l < "$HASH_DIR/$label-$name.hashes")"
+  done
+}
+
+compare_roots() {
+  local restored=$1 reference=$2 path name
+  local allow_empty=()
+  for path in "${BACKUP_PATHS[@]}"; do
+    name=${path##*/}
+    allow_empty=()
+    # D8's host directory may be empty; the vault must still contain recoverable files.
+    [ "$path" != /data/host ] || allow_empty=(--allow-empty)
+    mkdir -m 700 "$HASH_DIR/compare-$restored-$name"
+    echo "== compare $restored $path"
+    py "$DIGEST" compare "$HASH_DIR/$restored-$name.hashes" "$HASH_DIR/$reference-$name.hashes" \
+      "$HASH_DIR/compare-$restored-$name" "${allow_empty[@]}"
+  done
+}
+
 scratch_restore() {
   local started job
   echo "== restore the snapshot into $SCRATCH"
@@ -247,11 +281,9 @@ scratch_restore() {
   wait_job "$SCRATCH" "$job"
   echo "restore completed in $(($(date -u +%s) - started)) s (job deadline 900 s)"
 
-  echo "== hash the restored vault"
+  echo "== hash the restored backup roots"
   start_helper restore-verify --scratch "$SCRATCH"
-  k -n "$SCRATCH" exec restore-verify -- python3 -I -c "$DIGEST_SOURCE" hash /data/vault \
-    < /dev/null > "$MEM/snapshot.hashes" || die 'hashing the restored vault failed'
-  echo "snapshot vault files=$(wc -l < "$MEM/snapshot.hashes")"
+  hash_pod_roots "$SCRATCH" restore-verify snapshot
   RESTORED_BYTES=$(k -n "$SCRATCH" exec restore-verify -- df -B1 --output=used /data < /dev/null | tail -n 1 | tr -d ' ')
   [[ "$RESTORED_BYTES" =~ ^[0-9]+$ ]] || die 'could not measure the restored size'
   echo "restored bytes=$RESTORED_BYTES"
@@ -298,23 +330,27 @@ cleanup_scratch() {
 # --- drill -----------------------------------------------------------------
 
 run_drill() {
-  local reference=$1 ref_path root
+  local reference=$1 ref_path root path name
   case "$reference" in
-    live) ref_path=vault ;;
-    *) ref_path=".restore-prior-${reference#prior:}/vault" ;;
+    live) ref_path="" ;;
+    *) ref_path="/.restore-prior-${reference#prior:}" ;;
   esac
   check_memory
   mint_break_glass
   check_window
   # The reference is read through the live runtime's root, never through a
   # new pod on the cell's volume. File reads avoid atime updates.
-  root=$(runtime_root) && [ -d "$root/$ref_path" ] || die 'reference vault not found through the live runtime'
+  root=$(runtime_root) || die 'reference not found through the live runtime'
+  echo "reference=$reference capture started at $(date -u +%FT%TZ)"
+  for path in "${BACKUP_PATHS[@]}"; do
+    name=${path##*/}
+    py "$DIGEST" hash "$root$ref_path/$name" > "$HASH_DIR/reference-$name.hashes" \
+      || die "hashing the reference $path failed"
+    echo "reference $name entries=$(wc -l < "$HASH_DIR/reference-$name.hashes")"
+  done
+  echo "reference capture finished at $(date -u +%FT%TZ)"
   scratch_restore
-  # Resolved again: the restore can take many minutes.
-  root=$(runtime_root) && [ -d "$root/$ref_path" ] || die 'reference vault vanished before hashing'
-  py "$DIGEST" hash "$root/$ref_path" > "$MEM/reference.hashes" || die 'hashing the reference vault failed'
-  echo "== compare"
-  py "$DIGEST" compare "$MEM/snapshot.hashes" "$MEM/reference.hashes" "$MEM"
+  compare_roots snapshot reference
   VERDICT=pass
   echo "drill PASS"
 }
@@ -366,20 +402,16 @@ resume_cellctl() {
 }
 
 run_restore() {
-  local available paths path
+  local available
   check_memory
   mint_break_glass
   check_window
-  paths=$(py "$MANIFESTS" backup-paths)
-  read -r -a BACKUP_PATHS <<< "$paths"
-  [ "${#BACKUP_PATHS[@]}" -gt 0 ] || die 'cellctl names no backup paths'
-  for path in "${BACKUP_PATHS[@]}"; do [[ "$path" =~ ^/data/[a-z]+$ ]] || die "unexpected backup path $path"; done
   RESTORE_JOBS=$(py "$MANIFESTS" restore-job-selector)
 
   # 1. Restore and hash the snapshot beside the cell, so a snapshot that cannot
   # be restored is refused before any downtime.
   scratch_restore
-  [ -s "$MEM/snapshot.hashes" ] || die 'the snapshot holds an empty vault; stop'
+  [ -s "$HASH_DIR/snapshot-vault.hashes" ] || die 'the snapshot holds an empty vault; stop'
   cleanup_scratch || die 'the scratch namespace could not be removed; stop before any downtime'
   # The free space, measured through the running cell on whatever node it
   # runs; the helper measures it again after the stop.
@@ -426,13 +458,12 @@ run_restore() {
   echo "restore job=$IN_PLACE_JOB"
   wait_job "$NS" "$IN_PLACE_JOB"
 
-  # 5. The restored vault must equal what the scratch restore produced.
+  # 5. Each restored backup root must equal what the scratch restore produced.
   echo "== verify"
   start_helper "$HELPER"
-  helper python3 -I -c "$DIGEST_SOURCE" hash /data/vault > "$MEM/in-place.hashes" \
-    || die 'hashing the restored vault failed'
+  hash_pod_roots "$NS" "$HELPER" in-place
   delete_helper
-  py "$DIGEST" compare "$MEM/in-place.hashes" "$MEM/snapshot.hashes" "$MEM"
+  compare_roots in-place snapshot
 
   # 6. Start the cell, then resume cellctl. Once the cell serves, recovery
   # never rolls back.
@@ -497,7 +528,7 @@ on_exit() {
   cleanup_scratch || rc=1
   rm -rf -- "$BG_DIR" "$BG_DIR.new"
   if [ "$rc" -eq 0 ] && [ "$VERDICT" != pass ]; then rc=1; fi
-  if [ "$rc" -eq 0 ]; then rm -rf -- "$MEM"; fi
+  if [ "$rc" -eq 0 ]; then rm -rf -- "$HASH_DIR"; fi
   echo "run=$RUN_ID mode=$MODE phase=$PHASE verdict=$VERDICT scratch_cleanup=$SCRATCH_CLEAN rc=$rc"
   exit "$rc"
 }
@@ -512,16 +543,17 @@ run() {
   SCRATCH="exo-scratch-$CELL_ID-$RUN_ID"
   SCRATCH_PV="" SCRATCH_CLEAN=no PHASE=checks VERDICT=fail BG_EXPIRES=0 RESTORED_BYTES=0
   CELLCTL_REPLICAS="" BACKUP_PATHS=() IN_PLACE_JOB="" RESTORE_JOBS=""
-  MEM="/dev/shm/exomem-restore-$RUN_ID"
+  HASH_DIR="$STATE/$RUN_ID/hashes"
   BG_DIR="/dev/shm/exomem-break-glass-$RUN_ID"
   DIGEST_SOURCE=$(cat -- "$DIGEST")
   echo "run=$RUN_ID mode=$MODE started at $(date -u +%FT%TZ)"
   sha256sum "$HERE/cloud_restore.sh" "$MANIFESTS" "$DIGEST" "$VOLUME" "$HERE/../cellctl/src/cellctl/manifests.py"
-  mkdir -m 700 "$MEM"
+  mkdir -m 700 "$HASH_DIR"
   export KUBECONFIG="$BG_DIR/kubeconfig" PATH="$BG_DIR/bin:$PATH"
   trap on_exit EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  read_backup_paths
   if [ "$MODE" = drill ]; then
     FIELD_MANAGER=cloud-restore-drill PHASE=-
     run_drill "$3"
