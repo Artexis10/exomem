@@ -79,7 +79,7 @@ The ordinary CLI used real OAuth with S256 PKCE and its loopback callback.
 The real Substrate app recorded one completed C5 import through cellctl and K3s.
 Both invented files matched their source hashes in `_Imports/`.
 The private receipt recorded the declared two files and 90 bytes.
-The identity, staging, checkpoint, phase Jobs, Pods, ciphertext versions and
+The identity, staging, checkpoint material, phase Jobs, Pods, ciphertext versions and
 multipart uploads were absent after completion. The cell resumed running and ready.
 
 The disposable CA layer preserved the source image's product and model bytes.
