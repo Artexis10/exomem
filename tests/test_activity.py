@@ -251,7 +251,8 @@ def test_a_fresh_vault_counts_zero_notes(tmp_path, ledger, monkeypatch):
 
 def test_the_note_count_includes_every_saved_page(tmp_path, ledger, monkeypatch):
     """The owner counts everything saved, not compiled notes only: an owner who has
-    captured only sources or records must not read "Waiting for the first note"."""
+    captured only sources or records must not read "Waiting for the first note".
+    A collection's manifest is structure: creating a collection saves nothing."""
     from exomem.init import init_vault
     from exomem.vault import kb_root
 
@@ -262,6 +263,7 @@ def test_the_note_count_includes_every_saved_page(tmp_path, ledger, monkeypatch)
         "Sources/Articles/2026-03-01-upload-log.md",
         "Records/vehicle/Events/2026-03-01-oil.md",
         "Notes/Insights/flaky-upload-fixed.md",
+        "Records/vehicle/Events/_collection.md",
     ):
         page = kb_root(fresh) / rel
         page.parent.mkdir(parents=True, exist_ok=True)

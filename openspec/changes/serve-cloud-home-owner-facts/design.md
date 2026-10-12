@@ -62,7 +62,8 @@ A disabled or unreadable ledger is the error `ACTIVITY_UNAVAILABLE`, never an em
 
 The owner chose the meaning: the count holds everything saved, not compiled notes only.
 It counts every page that the Knowledge Base corpus walk yields: sources, records kept as pages, entities, evidence and compiled notes.
-Navigation pages (`index.md`, `log.md`) are not saved items. Rows of a record dataset kept as one CSV are not pages, and are not counted.
+Navigation pages (`index.md`, `log.md`) and Records collection manifests (`_collection.md`) are structure, not saved items.
+Rows of a record dataset kept as one CSV are not pages, and are not counted.
 The count is null when the walk cannot read any directory or entry.
 Measured on a laptop, one uncached count of 10,000 pages took 373 ms, so a cloud cell caches it.
 The cache key holds two counters that every governed writer advances as it leaves the mutation boundary.
