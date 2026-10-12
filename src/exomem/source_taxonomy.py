@@ -756,6 +756,13 @@ class TaxonomyPlan:
     source_text: str | None = None
     #: The kept version of the replaced registry, when there are writes.
     version: str | None = None
+    selected_spec: vocabulary_registry.RegistrySpec | None = None
+
+    def recheck_bindings(self, root: Path) -> None:
+        if self.selected_spec is not None:
+            from .vocabulary import instances
+
+            instances.recheck(root, self.selected_spec)
 
     @property
     def introduced_keys(self) -> tuple[str, ...]:
@@ -808,16 +815,21 @@ def plan_registrations(
     does, so a capture and its vocabulary land together or not at all.
     """
     root = Path(vault_root)
-    path = registry_path(root)
     pending = [
         resolution
         for resolution in (kind, domain)
         if resolution is not None and resolution.status == "unregistered"
     ]
+    from .vocabulary import instances
+
+    selected = instances.select(root, KIND_SPEC)
     taxonomy = load_taxonomy(root)
     if not pending:
-        return TaxonomyPlan(taxonomy)
+        return TaxonomyPlan(taxonomy, selected_spec=selected)
 
+    spec = instances.select(root, KIND_SPEC, authoring=True)
+    instances.recheck(root, spec)
+    path = spec.overlay(root)
     try:
         text, guard = read_guarded_text(root, path)
         path_exists = True
@@ -851,7 +863,7 @@ def plan_registrations(
         )
 
     if not introductions:
-        return TaxonomyPlan(taxonomy)
+        return TaxonomyPlan(taxonomy, selected_spec=spec)
 
     updated = _append_introductions(text, introductions)
     write = PlannedWrite(
@@ -868,7 +880,7 @@ def plan_registrations(
     version, kept = registry_history.plan_snapshot(
         root,
         path=path,
-        stem=KIND_SPEC.stem,
+        stem=spec.stem,
         previous=text if path_exists else None,
         operation="auto-register",
         before_hash=(
@@ -891,6 +903,7 @@ def plan_registrations(
         writes=(write, kept),
         source_text=text if path_exists else None,
         version=version,
+        selected_spec=spec,
     )
 
 
@@ -957,7 +970,8 @@ def register(
         vault_root, kind=kind_resolution, domain=domain_resolution
     )
     if plan.writes:
-        batch_atomic_write(list(plan.writes), vault_root=Path(vault_root))
+        batch_atomic_write(list(plan.writes), vault_root=Path(vault_root),
+                           _validate_prepared_bindings=lambda: plan.recheck_bindings(Path(vault_root)))
     return plan.introductions
 
 

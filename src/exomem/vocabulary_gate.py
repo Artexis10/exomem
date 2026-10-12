@@ -114,7 +114,7 @@ class _BatchAuthority:
         self.committed = False
 
     def commit(self) -> None:
-        self.evidence.recheck()
+        self.evidence.recheck(phase="after")
         manifest = list(self.authority.authority_use_manifest(self.reservation))
         receipt = vocabulary_authority._canonical_receipt_for_writer(
             operation=self.operation, receipt_id=self.context.receipt_id
@@ -132,6 +132,9 @@ class _BatchAuthority:
         self.committed = True
         self.closed = True
         self._close_evidence()
+
+    def before_publication(self) -> None:
+        self.evidence.recheck(phase="before")
 
     def _close_evidence(self) -> None:
         try:

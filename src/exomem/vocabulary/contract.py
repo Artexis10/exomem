@@ -483,6 +483,8 @@ def queue_for_owner(
             f"{PENDING_MAX_CHARS} characters; save one entry at a time"
         )
     root = Path(vault_root)
+    if spec.binding_revision is None:
+        spec = instances.select(root, spec, authoring=True)
     target = spec.overlay(root).relative_to(root).as_posix()
     item = make_item(
         family=spec.family,
@@ -496,7 +498,7 @@ def queue_for_owner(
         projection_status="current",
         paths={target: target},
         question=question,
-        logical_identity=f"registry-proposal:{spec.name}:{registry.content_hash(question)[:32]}",
+        logical_identity=f"registry-proposal:{spec.name}:{registry.content_hash(target + ':' + question)[:32]}",
     )
     VocabularyState(root).observe(item)
     return {

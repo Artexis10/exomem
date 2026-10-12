@@ -10689,6 +10689,9 @@ def op_schema_memory(
         if refusal is not None:
             return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
+        _validate_vocabulary_binding(
+            vocabulary_ref, vocabulary_fingerprint, supported=operation == "save",
+        )
         return _registry_schema_operation(
             vault_root,
             subject=subject,
@@ -10880,9 +10883,11 @@ def op_schema_memory(
                     )
                 current = semantic_language_registry_module.load_registry(vault_root)
                 candidate = semantic_language_registry_module.load_registry(proposal=proposal)
-                registry_file_exists = semantic_language_registry_module.registry_path(
-                    vault_root
-                ).exists()
+                from .vocabulary import instances
+
+                registry_file_exists = instances.select(
+                    vault_root, semantic_language_registry_module.CATEGORY_SPEC
+                ).overlay(vault_root).exists()
                 if (
                     registry_file_exists
                     and not candidate.findings
@@ -11414,7 +11419,9 @@ def _registry_schema_operation(
     """One registry contract for every vocabulary subject."""
     from .vocabulary import contract, registry_spec
 
-    supplied = sorted(name for name, value in unexpected.items() if value is not None)
+    # The writer binds this correlation pair before the save leaf; inspect and propose never accept it.
+    supplied = sorted(name for name, value in unexpected.items() if value is not None
+                      and not (operation == "save" and name in ("vocabulary_ref", "vocabulary_fingerprint")))
     allowed = {
         "inspect": {"limit", "continuation"},
         "propose": {"proposal"},

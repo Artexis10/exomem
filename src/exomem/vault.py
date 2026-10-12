@@ -5322,6 +5322,8 @@ def _batch_atomic_write_locked(
         for index, (final, workspace, artifact) in enumerate(staged):
             if index == 0 and _validate_prepared_bindings is not None:
                 _validate_prepared_bindings()
+            if index == 0 and additive_guard is not None:
+                additive_guard.before_publication()
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
             for _pending_final, _pending_workspace, pending_artifact in staged[index:]:
