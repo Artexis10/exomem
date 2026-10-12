@@ -89,6 +89,26 @@ them to local ports and trusts only that CA.
 
 A post-check scans the gateway, cellctl and cell logs for the run's distinctive phrases.
 
+## Native Cloud import
+
+The optional import journey runs the ordinary `exomem cloud import` command after provisioning.
+It uses real Substrate HTTP, OAuth consent, PKCE, C5 rows, cellctl and import Jobs.
+The CLI receives no prepared bearer token.
+Versity serves versioned storage with TLS, and every actor trusts the run CA.
+The CLI container shares Substrate's internal network and has no external route.
+
+From the repository root, run the bounded journey:
+
+```sh
+uv run --frozen --project infra/cloud-rehearsal exomem-cloud-rehearsal run --steps 1,2 --cloud-import --report cloud-import-report.json
+```
+
+The report records source hashes, staged hashes, private receipt checks and cleanup evidence under `stages.cloud_import`.
+The journey uses invented files and does not adopt them into governed notes.
+The report remains partial and cannot gate the node.
+The twelve P3 steps and their release criteria stay unchanged.
+Production storage, browser CORS, large uploads and multiple nodes need their own acceptance evidence.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:

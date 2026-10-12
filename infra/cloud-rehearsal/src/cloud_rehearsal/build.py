@@ -107,6 +107,19 @@ def _derive(context: Path, base: str, tag: str, body: str) -> None:
     run(["docker", "build", "--tag", tag, str(context)], timeout=900)
 
 
+def trust_rehearsal_ca(tag: str, ca_path: Path, workdir: Path) -> str:
+    """Add only the disposable trust root to a source-built Cloud image."""
+    trusted = tag + "-trusted"
+    context = workdir / trusted.rsplit(":", 1)[1]
+    context.mkdir()
+    shutil.copy(ca_path, context / "ca.crt")
+    _derive(context, tag, trusted,
+            "USER 0:0\nCOPY ca.crt /tmp/rehearsal-ca.crt\n"
+            "RUN cat /tmp/rehearsal-ca.crt >> /etc/ssl/certs/ca-certificates.crt && rm /tmp/rehearsal-ca.crt\n"
+            "USER 10001:10001\n")
+    return trusted
+
+
 def build_gateway_image(run_id: str, workdir: Path, substrate_source: Path, *, mode: str) -> str:
     tag = f"{GATEWAY_REPOSITORY}:{run_id}"
     if mode == "dockerfile":

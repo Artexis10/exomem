@@ -34,7 +34,9 @@ def main(path: str) -> None:
         print(f"| {name} | {value['observed']} | {value['comparison']} {value['target']} | {met} |")
     failed_stages = {name: stage for name, stage in report["stages"].items() if stage.get("status") == "failed"}
     for name, stage in failed_stages.items():
-        print(f"\n**Stage {name} failed:** {stage['failure'].get('message', '')[:600]}")
+        # The harness stage records failed steps rather than a stage exception.
+        message = (stage.get("failure") or {}).get("message", "See step failures above.")
+        print(f"\n**Stage {name} failed:** {message[:600]}")
     if report["cross_lane_defects"]:
         print("\n### Cross-lane defects\n")
         for defect in report["cross_lane_defects"]:

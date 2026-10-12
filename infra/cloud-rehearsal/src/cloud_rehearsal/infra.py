@@ -19,6 +19,7 @@ assumed, and each recorded in the report:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
@@ -26,7 +27,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import images
+from . import images, tls
 from .shell import run, wait_for
 
 K3S_POD_CIDR = "10.42.0.0/16"
@@ -57,11 +58,15 @@ class Postgres:
 class ObjectStore:
     container: str
     ip: str
-    host_port: int
+    host_port: int | None
     access_key: str
     secret_key: str
+    ca_path: Path | None = None
 
     def endpoint(self, *, from_host: bool) -> str:
+        if self.ca_path is not None:
+            # The internal bridge has no published port; host and pods use its private IP.
+            return f"https://{self.ip}"
         return f"http://127.0.0.1:{self.host_port}" if from_host else f"http://{self.ip}:{S3_PORT}"
 
 
@@ -94,6 +99,8 @@ class Stack:
     adaptations: list[str] = field(default_factory=list)
     containers: list[str] = field(default_factory=list)
     networks: list[str] = field(default_factory=list)
+    pki: tls.RehearsalPki | None = None
+    sealed_network: str | None = None
 
 
 def _container_ip(name: str, network: str) -> str:
@@ -106,7 +113,7 @@ def _host_port(name: str, port: str) -> int:
     return int(published.rsplit(":", 1)[1])
 
 
-def create_stack(run_id: str, workdir: Path) -> Stack:
+def create_stack(run_id: str, workdir: Path, *, tls_storage: bool = False) -> Stack:
     network = f"exo-rehearsal-{run_id}"
     run(["docker", "network", "create", network])
     subnet = json.loads(run(["docker", "network", "inspect", network]).stdout)[0]["IPAM"]["Config"][0]["Subnet"]
@@ -120,8 +127,14 @@ def create_stack(run_id: str, workdir: Path) -> Stack:
         object_store=None,  # type: ignore[arg-type]
     )
     stack.postgres = _start_postgres(stack)
+    if tls_storage:
+        stack.sealed_network = f"{network}-sealed"
+        run(["docker", "network", "create", "--internal", stack.sealed_network])
+        stack.networks.append(stack.sealed_network)
     stack.object_store = _start_object_store(stack)
     stack.k3s = _start_k3s(stack)
+    if stack.sealed_network:
+        run(["docker", "network", "connect", stack.sealed_network, stack.k3s.container])
     return stack
 
 
@@ -167,23 +180,49 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     (data / BACKUP_BUCKET).mkdir(exist_ok=True)
     data.chmod(0o777)
     (data / BACKUP_BUCKET).chmod(0o777)
+    network = stack.sealed_network or stack.network
+    options: list[str] = ["--publish", f"127.0.0.1::{S3_PORT}"]
+    arguments = ["--port", f":{S3_PORT}", "posix", "/data"]
+    if stack.sealed_network:
+        observed = json.loads(run(["docker", "network", "inspect", network]).stdout)[0]
+        subnet = ipaddress.ip_network(observed["IPAM"]["Config"][0]["Subnet"])
+        occupied = {observed["IPAM"]["Config"][0]["Gateway"]}
+        occupied.update(ipaddress.ip_interface(c["IPv4Address"]).ip.compressed for c in observed["Containers"].values())
+        address = next(ip.compressed for ip in subnet.hosts() if ip.compressed not in occupied)
+        stack.pki = tls.make_pki(stack.workdir, (tls.SUBSTRATE_HOST, tls.MCP_HOST, address, "127.0.0.1"))
+        leaf = stack.pki.leaves[address]
+        certificates = stack.workdir / "storage-tls"
+        certificates.mkdir(mode=0o700)
+        (certificates / "cert.pem").write_text(leaf.cert_pem)
+        key = certificates / "key.pem"
+        key.write_text(leaf.key_pem)
+        key.chmod(0o600)
+        versions = data / "versions"
+        buckets = data / "buckets"
+        versions.mkdir()
+        buckets.mkdir()
+        (buckets / BACKUP_BUCKET).mkdir()
+        options = ["--ip", address, "--user", f"{os.getuid()}:{os.getgid()}",
+                   "--mount", f"type=bind,source={certificates},target=/certificates,readonly"]
+        arguments = ["--port", f":{S3_PORT}", "--cert", "/certificates/cert.pem", "--key", "/certificates/key.pem",
+                     "posix", "--versioning-dir", "/data/versions", "/data/buckets"]
     run(
         [
-            "docker", "run", "--detach", "--name", name, "--network", stack.network,
-            "--publish", f"127.0.0.1::{S3_PORT}",
+            "docker", "run", "--detach", "--name", name, "--network", network, *options,
             "--env", f"ROOT_ACCESS_KEY={access_key}",
             "--env", f"ROOT_SECRET_KEY={secret_key}",
             "--mount", f"type=bind,source={data},target=/data",
-            images.S3_DOUBLE, "--port", f":{S3_PORT}", "posix", "/data",
+            images.S3_DOUBLE, *arguments,
         ]
     )
     stack.containers.append(name)
     store = ObjectStore(
         container=name,
-        ip=_container_ip(name, stack.network),
-        host_port=_host_port(name, f"{S3_PORT}/tcp"),
+        ip=_container_ip(name, network),
+        host_port=None if stack.sealed_network else _host_port(name, f"{S3_PORT}/tcp"),
         access_key=access_key,
         secret_key=secret_key,
+        ca_path=stack.pki.ca_path if stack.pki else None,
     )
     wait_for(
         lambda: run(["docker", "exec", name, "true"], check=False).returncode == 0,
