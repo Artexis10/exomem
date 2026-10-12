@@ -205,7 +205,7 @@ def lifecycle_admission(
     This prevents denied siblings from influencing edits. A false refusal costs
     the caller that edit; unrelated namespaces keep independent admission.
     """
-    from . import access, find_corpus, vault
+    from . import access, find_corpus, state_paths, vault
     from .governance import connector_boundary, membership, policy
     from .governance.principal import effective_principal
     from .memory_refs import ID_FIELD, memory_ref, normalize_id
@@ -232,7 +232,7 @@ def lifecycle_admission(
     directory = relation_review.lifecycle_prepared_path(root, identity).parent.relative_to(root).as_posix()
     proposed_hash = _hash(proposed_source)
 
-    def admit(path: str) -> bool:
+    def check_admission(path: str) -> bool:
         if effective_principal() != who:
             raise ValueError("WRITE_REFUSED: target is unavailable")
         current, _ = vault.read_guarded_text(root, root / primary_path)
@@ -256,6 +256,11 @@ def lifecycle_admission(
             and all(not denied.intersection(membership.evaluate_metadata(replace(subject, path=path), compiled))
                     for subject in subjects)
         )
+
+    def admit(path: str) -> bool:
+        # One invocation reuses host resolution; source and admission checks stay live.
+        with state_paths.resolution_scope():
+            return check_admission(path)
 
     # Missing or empty directories cannot invoke the census predicate.
     if not admit(f"{directory}/prepared.json"):
