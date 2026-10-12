@@ -458,6 +458,7 @@ version = "0.1.0"
 source = { directory = "../cellctl" }
 dependencies = [
     { name = "asyncpg" },
+    { name = "boto3" },
     { name = "cryptography" },
     { name = "httpx" },
     { name = "kubernetes" },
@@ -466,6 +467,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30,<1" },
+    { name = "boto3", specifier = ">=1.43,<2" },
     { name = "cryptography", specifier = ">=48.0.1,<51" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "kubernetes", specifier = ">=35.0,<36" },
