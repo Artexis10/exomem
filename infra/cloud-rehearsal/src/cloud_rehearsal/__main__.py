@@ -140,6 +140,7 @@ async def _run(args: argparse.Namespace) -> int:
                 source_v1 = v1
                 v1, v2, broken = (build.trust_rehearsal_ca(tag, pki.ca_path, workdir) for tag in (v1, v2, broken))
                 report.overlays.append("Cloud images: the disposable CA is the sole added trust root")
+                report.overlays.append("Native CLI container: legacy resource profile")
                 from .native_import import enable_versioning, image_payload
 
                 baseline_payload = image_payload(source_v1)
