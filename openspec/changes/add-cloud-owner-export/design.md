@@ -22,7 +22,7 @@
 
 cellctl takes an `export` hold, exactly as for an import: it records the hold on the row, scales the runtime to zero, and waits until no runtime pod uses the volume. A stopped cell is already at zero replicas, and the hold keeps it there. The Job runs only then. The hold ends when the export Job and its pods are gone. The cell then returns to its desired replicas.
 
-The hold has a deadline (default 30 minutes). Past it, the export fails with `EXPORT_HOLD_EXPIRED` and the cell starts again. An export waits while another hold (upgrade, backup, restore, import) owns the volume. An import that claims the volume first goes first.
+The hold has a deadline (default 30 minutes). Past it, the export fails with `EXPORT_HOLD_EXPIRED` and the cell starts again. A hold that no export row owns ends after twice the deadline, when no export Job can still run; an orphaned import hold ends the same way after twice the import deadline. An export waits while another hold (upgrade, backup, restore, import) owns the volume. An import that claims the volume first goes first.
 
 *Rejected for now: a snapshot clone on local storage.* The shared contract asks for a clone that keeps the cell serving. A crash-consistent clone of a running cell can hold a collection store ahead of its published replica, and the quiesced export refuses that (`COLLECTION_STORE_FLUSH_PENDING`). So clone exports would fail intermittently for owners who write collection rows. Local storage has not shipped, and the product accepts a few-minute pause until it does. The stopping hold works on every storage class.
 

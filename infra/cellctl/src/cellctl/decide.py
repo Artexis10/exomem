@@ -199,10 +199,22 @@ def decide(
             "observed_generation": row.generation,
         })
     elif active_hold in ("import", "export"):
-        # C5 and C6 reconciliation own these holds. Routine convergence never restarts their volume.
-        decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
-                            hold_kind=active_hold, hold_started_at=row.hold_started_at,
-                            row_updates={"ready": False, "observed_state": "stopping"})
+        # C5 and C6 reconciliation own these holds, and this branch runs only
+        # when neither decides, as when no row owns the hold. Routine
+        # convergence never restarts their volume. An unowned hold still ends:
+        # every Job of its kind starts before the kind's deadline and runs at
+        # most that long, so after twice the deadline none can use the volume.
+        started = observation.statefulset_hold_started_at or row.hold_started_at or now
+        deadline = config.import_deadline if active_hold == "import" else config.export_deadline
+        if now - started < 2 * deadline:
+            decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
+                                hold_kind=active_hold, hold_started_at=row.hold_started_at,
+                                row_updates={"ready": False, "observed_state": "stopping"})
+        else:
+            decision = Decision(apply_manifests=True, replicas=0 if row.desired_state == "stopped" else 1,
+                                read_only=row.desired_state == "read_only", image=current_image(row, observation),
+                                row_updates={"hold_kind": None, "hold_started_at": None, "ready": False,
+                                             "observed_state": "stopping"})
     elif active_hold == SNAPSHOT_BACKUP:
         decision = _continue_snapshot_backup(
             row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from cellctl.decide import ReconcileConfig, decide, nightly_backup_due
 from cellctl.manifests import STORAGE_CLASS
 from cellctl.rollout import select_upgrade_candidate
@@ -568,6 +570,23 @@ def test_a_recorded_backup_records_the_disk_use_its_job_measured() -> None:
     assert finished.row_updates["used_bytes"] == 3 * 1024**3
     assert finished.row_updates["filesystem_bytes"] == 10 * 1024**3
     assert finished.row_updates["usage_observed_at"] == finished.row_updates["last_backup_at"]
+
+
+@pytest.mark.parametrize(("kind", "deadline"), [("import", CONFIG.import_deadline), ("export", CONFIG.export_deadline)])
+def test_an_import_or_export_hold_no_row_owns_ends_after_twice_its_deadline(kind, deadline) -> None:
+    """Defect: a hold whose C5 or C6 row is gone keeps the owner's cell stopped forever."""
+
+    def decide_held_since(started):
+        held_row = row(hold_kind=kind, hold_started_at=started, observed_image=IMAGE_A)
+        held = obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=0,
+                   statefulset_hold_kind=kind, statefulset_hold_started_at=started)
+        return decide(held_row, rollout(), held, now=NOW, cell_image=IMAGE_A, start_upgrade=False, config=CONFIG)
+
+    waiting = decide_held_since(NOW - 2 * deadline + timedelta(minutes=1))
+    assert (waiting.replicas, waiting.hold_kind) == (0, kind)
+    released = decide_held_since(NOW - 2 * deadline)
+    assert (released.replicas, released.hold_kind) == (1, None)
+    assert (released.row_updates["hold_kind"], released.row_updates["hold_started_at"]) == (None, None)
 
 
 def test_backup_hold_honours_a_flip_to_stopped() -> None:
