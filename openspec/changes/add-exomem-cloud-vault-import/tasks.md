@@ -10,18 +10,18 @@
 
 ## 2. Cell-side import commands and adoption (D2, D6, D7, D8)
 
-- [ ] 2.1 Add a cell command that mints the import identity under `/data/.import-keys/<id>/` (mode `0600`) and writes only the public recipient to the termination message. Verify: unit tests for file mode, for the recipient format, for the path being outside the backup paths, and for no identity bytes in stdout, stderr or the message.
-- [ ] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
-- [ ] 2.3 Remove `adopt_vault` from `CLOUD_SURFACE_EXCLUSIONS`, reword `transfer_artifact`'s lifting condition so the batch import path does not meet it, and amend the tool-surface scenario in the active change `adopt-exomem-cloud-plain-cells`, coordinating with whichever change archives first. Verify: the tool-surface tests show `adopt_vault` present on cells, and OpenSpec strict validation passes.
-- [ ] 2.4 Add a cell command that discards an import: its identity, its staging directory, or a staged `_Imports/` folder, permanently. Verify: tests that each is gone, not in trash, and that nothing outside the named import is touched.
-- [ ] 2.5 Confirm the import commands' logs are content-free. Verify: the content-free logging tests cover every command, with a canary member name that must not appear.
-- [ ] 2.6 Add an age implementation to the cloud image. Verify: an image test decrypts a fixture archive.
+- [x] 2.1 Add a cell command that mints the import identity under `/data/.import-keys/<id>/` (mode `0600`) and writes only the public recipient to the termination message. Verify: unit tests for file mode, for the recipient format, for the path being outside the backup paths, and for no identity bytes in stdout, stderr or the message.
+- [x] 2.2 Add a cell command that checks the ciphertext digest, decrypts with that identity, pipes it into the 1.3 unpacker, applies the commit gate, and moves the result into `_Imports/<id>/`, or swaps the vault in restore mode. Make `cell-init` refuse to create a vault while a `/data/.restore-prior-*` directory exists. Verify: tests for a clean import, a wrong key (`ARCHIVE_UNDECRYPTABLE`), a wrong digest (`ARCHIVE_DIGEST_MISMATCH`), a decryptor failing after a valid tar (nothing committed), a refused member leaving the vault byte-identical, restore keeping the custody directory, and `cell-init` refusing in the swap window.
+- [x] 2.3 Remove `adopt_vault` from `CLOUD_SURFACE_EXCLUSIONS`, reword `transfer_artifact`'s lifting condition so the batch import path does not meet it, and amend the tool-surface scenario in the active change `adopt-exomem-cloud-plain-cells`, coordinating with whichever change archives first. Verify: the tool-surface tests show `adopt_vault` present on cells, and OpenSpec strict validation passes.
+- [x] 2.4 Add a cell command that discards an import: its identity, its staging directory, or a staged `_Imports/` folder, permanently. Verify: tests that each is gone, not in trash, and that nothing outside the named import is touched.
+- [x] 2.5 Confirm the import commands' logs are content-free. Verify: the content-free logging tests cover every command, with a canary member name that must not appear.
+- [x] 2.6 Add an age implementation to the cloud image. Verify: an image test decrypts a fixture archive.
 
 ## 3. cellctl import support and contract C5 (D3, D4, D5, D8)
 
-- [ ] 3.1 Add `exomem_cloud_imports` to the fixture schema with the C5 columns, split state columns and grants, list it in the grants script beside C1, and add `import` to C1's `hold_kind` CHECK. Verify: fixture tests show cellctl cannot write Substrate's columns and Substrate cannot write cellctl's, and that default privileges grant Substrate nothing more.
-- [ ] 3.2 Render the prepare, import and discard Jobs: cell image, cell namespace, volume mount, no ServiceAccount token, and a presigned GET for the import Job only. Verify: red-first manifest tests for egress, security context, import-id validation and termination-message handling.
-- [ ] 3.3 Implement the import hold in the decision function, with a deadline, and the import flow in the reconcile loop:
+- [x] 3.1 Add `exomem_cloud_imports` to the fixture schema with the C5 columns, split state columns and grants, list it in the grants script beside C1, and add `import` to C1's `hold_kind` CHECK. Verify: fixture tests show cellctl cannot write Substrate's columns and Substrate cannot write cellctl's, and that default privileges grant Substrate nothing more.
+- [x] 3.2 Render the prepare, import and discard Jobs: cell image, cell namespace, volume mount, no ServiceAccount token, and a presigned GET for the import Job only. Verify: red-first manifest tests for egress, security context, import-id validation and termination-message handling.
+- [x] 3.3 Implement the import hold in the decision function, with a deadline, and the import flow in the reconcile loop:
   - `requested` → hold → prepare Job → recipient checked and recorded → multipart upload created and parts presigned → `key_ready`;
   - `uploaded` → completion with the reported ETags → hold → import Job → `done` or `failed`;
   - `cancelled`, `discard_requested` and expiry → hold → discard Job.
@@ -108,3 +108,24 @@ The live import rehearsal verified identity, staging and ciphertext cleanup.
 The applied cancellation-only bucket policy completes task 3.4.
 Production OAuth, the product browser flow, adoption, discard and large imports
 remain open. This check did not run the production C5 flow.
+
+
+## Command and controller proof (2026-10-12)
+
+The stopped-cell command checks cover private identity permissions and placement,
+content-free output, and permanent discard of only the named import.
+A real age decryptor emitted a complete tar before its final chunk failed.
+The command refused that archive and preserved the canonical vault bytes.
+The ciphertext digest refusal preserved those bytes too.
+
+The Job checks cover all import phases, their cell image and volume,
+ServiceAccount token exclusion, import identifiers, and the import-only GET URL.
+An empty preparation report keeps the import hold and publishes no recipient.
+Disposable PostgreSQL checks verified the split grants and controller recovery.
+The controller-only environment skipped two existing cross-package cases.
+The earlier reviewed live-K3s import and refusal checks remain the runtime proof.
+
+These checks complete tasks 2.1 through 2.6 and 3.1 through 3.3.
+They extend the command, Cloud surface, image and controller evidence from PR #1692.
+They change no product code, deadline, capability or production setting.
+Owner restore, the product browser flow and production adoption remain open.
