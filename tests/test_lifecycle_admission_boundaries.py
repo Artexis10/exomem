@@ -233,6 +233,25 @@ def test_primary_or_policy_change_cannot_keep_operational_admission(
             admission(relation_review.lifecycle_prepared_path(vault, IDENTITY).relative_to(vault).as_posix())
 
 
+def test_newly_withheld_primary_refuses_before_disclosing_staleness(
+    configured_boundary, vault: Path,
+) -> None:
+    """A preflight cannot reveal later source changes after the target becomes withheld."""
+    _, authenticate = configured_boundary
+    before, guard = _write_primary(vault)
+    with principal.request_scope(authenticate("limited")):
+        admission = vocabulary_auxiliaries.lifecycle_admission(
+            vault, primary_path=PAGE, current_source=before,
+            proposed_source=before, primary_guard=guard,
+        )
+        (vault / PAGE).write_text(
+            before.replace("public-project", "private-project"), encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="^WRITE_REFUSED: target is unavailable$"):
+            path = relation_review.lifecycle_prepared_path(vault, IDENTITY)
+            admission(path.relative_to(vault).as_posix())
+
+
 def test_pending_suffix_cannot_hide_primary_drift_from_sealed_full_plan(
     configured_boundary, vault: Path,
 ) -> None:

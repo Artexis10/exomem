@@ -235,12 +235,7 @@ def lifecycle_admission(
     def check_admission(path: str) -> bool:
         if effective_principal() != who:
             raise ValueError("WRITE_REFUSED: target is unavailable")
-        current, _ = vault.read_guarded_text(root, root / primary_path)
-        current_hash = _hash(current)
-        if current_hash == primary_guard.expected_content_hash:
-            primary_guard.recheck(root)
-        elif current_hash != proposed_hash:
-            raise ValueError("WRITE_REFUSED: target is unavailable")
+        # Current and proposed admission must precede a content-staleness result.
         if access.writable_reason(root, primary_path) is not None:
             raise ValueError("WRITE_REFUSED: target is unavailable")
         connector_boundary.require_write(root, primary_path, content=proposed_source.encode("utf-8"))
@@ -248,6 +243,13 @@ def lifecycle_admission(
         boundary = connector_boundary.snapshot(root, compiled)
         denied = boundary.denied_scopes(who) if boundary is not None else frozenset()
         if any(denied.intersection(membership.evaluate_metadata(subject, compiled)) for subject in subjects):
+            raise ValueError("WRITE_REFUSED: target is unavailable")
+        current, _ = vault.read_guarded_text(root, root / primary_path)
+        current_hash = _hash(current)
+        if current_hash == primary_guard.expected_content_hash:
+            primary_guard.recheck(root)
+        elif current_hash != proposed_hash:
+            primary_guard.recheck(root)
             raise ValueError("WRITE_REFUSED: target is unavailable")
         return (
             path.startswith(f"{directory}/")

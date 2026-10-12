@@ -19,6 +19,8 @@ def observe_query_timeouts(log_path: Path):
     Nested durations overlap and include observer overhead. They do not identify
     host I/O or garbage collection as a cause.
     ``read_session.finish`` includes the final temporary-state check and teardown.
+    CPU deltas cover observed session entry to the first observed timeout.
+    Process CPU includes other service threads; it does not prove contention.
     """
     originals = []
 
@@ -117,6 +119,16 @@ def observe_query_timeouts(log_path: Path):
                         frame["failure_phase_stack"] = [label for label, _ in frame["stack"]]
                         frame["timeout_ms"] = session.limits.timeout_ms
                         frame["query_deadline_elapsed_ms"] = deadline_elapsed(session)
+                        started = getattr(state, "query_clock", None)
+                        if started is not None:
+                            ended = (time.perf_counter(), time.thread_time(), time.process_time())
+                            for name, before, after in zip(
+                                ("observed_query_window_ms", "query_thread_cpu_ms",
+                                 "query_process_cpu_ms"),
+                                started, ended,
+                                strict=True,
+                            ):
+                                frame[name] = (after - before) * 1000
                 except Exception:  # noqa: BLE001 - preserve the original query exception
                     pass
                 raise
@@ -128,6 +140,12 @@ def observe_query_timeouts(log_path: Path):
         @wraps(original_session)
         def read_session(*args, **kwargs):
             measurement = begin("read_session.setup")
+            previous_clock = getattr(state, "query_clock", None)
+            try:
+                state.query_clock = None
+                state.query_clock = (time.perf_counter(), time.thread_time(), time.process_time())
+            except Exception:  # noqa: BLE001 - observation must not change execution
+                pass
             try:
                 with original_session(*args, **kwargs) as session:
                     finish(measurement)
@@ -148,6 +166,8 @@ def observe_query_timeouts(log_path: Path):
                         measurement = begin("read_session.finish")
             finally:
                 finish(measurement)
+                with contextlib.suppress(Exception):
+                    state.query_clock = previous_clock
 
         replace(runtime, "read_session", read_session)
         original_route = route.run
@@ -177,6 +197,8 @@ def observe_query_timeouts(log_path: Path):
             try:
                 frame = {"stack": [], "phases": {}, "timeout_ms": None,
                          "query_deadline_elapsed_ms": None, "failure_phase_stack": None,
+                         "observed_query_window_ms": None, "query_thread_cpu_ms": None,
+                         "query_process_cpu_ms": None,
                          "body_returned": None, "body_return_deadline_elapsed_ms": None}
                 started = time.perf_counter()
             except Exception:  # noqa: BLE001 - observation must not change execution

@@ -89,15 +89,36 @@ def _require_registry_observation(vault_root: Path, item: Mapping[str, Any] | No
     # must exist before a limited caller can observe their private definitions.
     from .vocabulary.contract import admission_refusal, selected_admission_refusal
 
-    proposal = registry_proposal(vault_root, item) if item is not None else None
-    if item is not None and proposal is not None:
-        if admission_refusal(vault_root, proposal[0]) is not None or not _visible(vault_root, item):
-            raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
-        return
+    if item is not None and item.get("signal") == REGISTRY_PROPOSAL_SIGNAL:
+        try:
+            if _visible(vault_root, item):
+                proposal = registry_proposal(vault_root, item)
+                if proposal is not None and admission_refusal(vault_root, proposal[0]) is None:
+                    return
+        except ValueError:
+            pass
+        _require_registry_observation(vault_root)
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
 
     for spec in (relation_registry.SPEC, entity_types.SPEC):
         if selected_admission_refusal(vault_root, spec) is not None:
             raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
+
+
+def _observed_item(vault_root: Path, store: VocabularyState, ref: str) -> dict[str, Any]:
+    """Admit lookup outcomes before they can distinguish withheld work from absence."""
+    try:
+        item = store.get(ref)
+    except ValueError as error:
+        # This fixed store error code denotes absence; state corruption must stay visible.
+        if not str(error).startswith("VOCABULARY_ITEM_NOT_FOUND:"):
+            raise
+        _require_registry_observation(vault_root)
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work") from None
+    _require_registry_observation(vault_root, item)
+    if item.get("signal") != REGISTRY_PROPOSAL_SIGNAL and not _visible(vault_root, item):
+        raise ValueError("VOCABULARY_ITEM_NOT_FOUND: refresh observed work")
+    return item
 
 
 def registry_hashes(vault_root: Path) -> dict[str, str]:
@@ -391,8 +412,7 @@ def context(
     if type(max_related_pages) is not int or not 1 <= max_related_pages <= 64:
         raise ValueError("VOCABULARY_LIMIT_INVALID: evidence page budget must be 1 to 64")
     store = VocabularyState(vault_root)
-    stored = store.get(ref)
-    _require_registry_observation(vault_root, stored)
+    stored = _observed_item(vault_root, store, ref)
     current, pages = _fresh(vault_root, stored)
     if expected_fingerprint is not None and current.fingerprint != expected_fingerprint:
         raise ValueError("VOCABULARY_DECISION_STALE: refresh the changed consideration")
@@ -533,8 +553,7 @@ def context(
 
 def decide(vault_root: Path, *, ref: str, decision: dict[str, Any]) -> dict[str, Any]:
     store = VocabularyState(vault_root)
-    stored = store.get(ref)
-    _require_registry_observation(vault_root, stored)
+    stored = _observed_item(vault_root, store, ref)
     current, _ = _fresh(vault_root, stored)
     validate_decision(current, decision)  # Stale requests must not even update currency.
     _validate_live_choice(vault_root, current, decision)

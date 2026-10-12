@@ -160,10 +160,10 @@ def test_raw_rollback_survivor_keeps_its_intrinsic_floor(vault: Path, monkeypatc
             assert companion.is_file()
             raise OSError("synthetic publication failure")
 
-    def fail_original_cleanup(workspace, final, identity):
+    def fail_original_cleanup(workspace, final, identity, **kwargs):
         if final == original:
             raise OSError("synthetic cleanup failure")
-        return unlink(workspace, final, identity)
+        return unlink(workspace, final, identity, **kwargs)
 
     monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_original)
     monkeypatch.setattr(vault_module._BatchWorkspace, "unlink_installed", fail_original_cleanup)
