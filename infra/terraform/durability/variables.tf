@@ -26,3 +26,9 @@ variable "cloud_backup_enabled" {
   type        = bool
   default     = false
 }
+
+variable "cloud_import_allowed_origins" {
+  description = "Browser origins allowed to PUT encrypted import parts. Empty disables browser CORS."
+  type        = list(string)
+  default     = []
+}
