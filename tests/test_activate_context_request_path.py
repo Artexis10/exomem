@@ -476,6 +476,79 @@ def test_a_normal_budget_leaves_activation_unchanged(
     assert budget.skipped == []
 
 
+@pytest.mark.parametrize("headroom", [0.05, 1.2])
+def test_relevant_due_advice_respects_the_fixed_request_deadline(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, headroom: float,
+) -> None:
+    """Optional advice needs headroom and must withdraw after a late source read."""
+    import datetime as dt
+
+    from exomem import due_state
+    from exomem.governance import egress
+
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    target = activation_vault / page
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n## Prediction\n\n- id: capacity-check\n- check_by: "
+        + (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        + "\n\nThe runners withstand the planned load.\n",
+        encoding="utf-8",
+    )
+    due_state.reconcile(activation_vault)
+    lexstore.ensure_fresh(activation_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(activation_vault).rebuild()
+    baseline = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
+    assert baseline["abstained"] is False and baseline["relevant_due_refs"]
+
+    budget = request_budget.RequestBudget(seconds=50, entry=time.monotonic() - 47)
+    deadline = budget.deadline
+    guard = egress.guard_working_set
+    read = vault_module.read_bytes_without_pinning
+    projection = due_state.state_path(activation_vault)
+    projection_reads: list[float] = []
+
+    def slow_guard(*args, **kwargs):
+        packet = guard(*args, **kwargs)
+        pause = budget.remaining() - headroom
+        assert pause > 0, "the completed guard must leave the intended headroom"
+        time.sleep(pause)
+        return packet
+
+    def slow_projection(path, *args, **kwargs):
+        if path == projection:
+            projection_reads.append(budget.remaining())
+            time.sleep(budget.remaining() + 0.03)
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "guard_working_set", slow_guard)
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", slow_projection)
+    token = request_budget.set_current(budget)
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
+        returned = time.monotonic()
+        assert request_budget.current() is budget
+    finally:
+        request_budget.reset_current(token)
+
+    assert budget.deadline == deadline
+    assert packet["abstained"] is False
+    assert packet["anchors"] == baseline["anchors"]
+    assert packet["units"] == baseline["units"]
+    assert packet.get("current_state") == baseline.get("current_state")
+    assert "relevant_due_refs" not in packet
+    if headroom < request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
+        assert projection_reads == []
+        assert budget.skipped == ["working_set.relevant_due"]
+        assert budget.truncated == []
+    else:
+        assert projection_reads
+        assert returned > deadline
+        assert budget.skipped == []
+        assert budget.truncated == ["working_set.relevant_due"]
+
+
 # --------------------------------------------------------------------------- #
 # T3b — every stage boundary honours the budget, not only entry
 #

@@ -2573,10 +2573,20 @@ def for_activation(
     material = relevant_material(packet)
     if not material:
         return
+    from . import request_budget, working_set
+
+    # Optional advice must not start source IO without the activation stage reserve.
+    if working_set.budget_exhausted("working_set.relevant_due"):
+        return
+    budget = request_budget.current()
     try:
         rows = served_entries(vault_root, paths=frozenset(material), recover=False, purpose=purpose)
     except Exception:  # noqa: BLE001 - missing advice never prevents current context
         log.debug("relevant due advice unavailable", exc_info=True)
+        return
+    # A started read cannot be interrupted; late advice is truncated, never skipped.
+    if budget is not None and budget.remaining() <= 0:
+        budget.note_truncated("working_set.relevant_due")
         return
     for row in rows:
         anchor = material.get(str(row.get("path") or ""))
