@@ -13,7 +13,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile authorized stored context for the user's current turn.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nUse when live policy calls for initial recall; bootstrap reports unknown/changed\nsettings. Pass the turn verbatim. For known gaps, ask_memory recalls and\nread_memory opens selected refs; neither writes the user's answer.\nRead-only: bounded recent_context, anchored units, provenance, pointers and\ngoverned current_state. Abstains rather than guesses.\nFor ambiguous or unresolved candidates, choose a ref and retry with anchor.\nepisode_due, upkeep and relevant_due_refs are advisory, never mutation authority.\nRaise at most one relevant due item per maintained client conversation.\nDetails: bootstrap(profile=\"full\") reference index, references/recall.md.\n\nUse optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.\nReturned `origin` labels cues, not the user's words. Activation reads no attachment.\nFor a missed subject, retry with `conversation.focus`; see the engagement reference.",
+    "description": "Compile authorized context for a human turn or an agent task refresh.\n\n    API reference: https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md\n\nUse when live policy calls for initial recall; bootstrap reports unknown/changed\nsettings. Pass the turn verbatim. For known gaps, ask_memory recalls and\nread_memory opens selected refs; neither writes the user's answer.\nRead-only: bounded recent_context, anchored units, provenance, pointers and\ngoverned current_state. Abstains rather than guesses.\nFor ambiguous or unresolved candidates, choose a ref and retry with anchor.\nepisode_due, upkeep and relevant_due_refs are advisory, never mutation authority.\nRaise at most one relevant due item per maintained client conversation.\nDetails: bootstrap(profile=\"full\") reference index, references/recall.md.\n\nUse optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.\nReturned `origin` labels cues, not the user's words. Activation reads no attachment.\nFor a missed subject, retry with `conversation.focus`; see the engagement reference.\n\nDefault trigger is `user_turn`. For an agent checkpoint, set `task_refresh`,\nkeep `turn` verbatim, and put the current task in `conversation.focus`.\n`intent_resolution` qualifies the human request separately from the task packet.\nRefresh grants no capture, edit or external-effect authority.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -59,6 +59,19 @@
         "conversation": {
           "type": "object",
           "description": "Pass only relevant context to resolve this turn: {focus?: str, recent?: [{role: \"user\"|\"assistant\", text: str}], refs?: [str]}. At most six excerpts and 2,400 characters total; focus 240 characters, refs twelve; never full history or unrelated personal data. Unknown fields ignored; omit when the turn suffices."
+        },
+        "trigger": {
+          "default": "user_turn",
+          "description": "Initial human-turn activation or agent task refresh. Refresh keeps turn unchanged and selects task context from conversation.focus.",
+          "enum": [
+            "user_turn",
+            "task_refresh"
+          ],
+          "type": "string"
+        },
+        "initiator": {
+          "type": "string",
+          "description": "Optional client label for the caller's declared attribution. Invalid labels are ignored; attribution grants no authority."
         },
         "authorization_session_credential": {
           "type": "string",
