@@ -88,6 +88,38 @@ def test_a_phase_that_raised_is_still_recorded(token) -> None:
     assert [s["name"] for s in call_spans.pop_call_spans(token)] == ["phase.explodes"]
 
 
+def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, token) -> None:
+    """A fast page timer must not hide preparation, filtering or receipt cost."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import library_scope
+
+    (vault / "timed-read.md").write_text("# Example\n\nVisible example text.\n")
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "read_memory")
+    with library_scope():
+        result = writer_lease.invoke_command(command, vault, path="timed-read.md")
+
+    assert "Visible example text." in result["body"]
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
+        assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
+        assert set(stages[name]) == {"name", "count", "ms"}
+
+
+def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -> None:
+    """A failed read must retain timings and the terminal error filter."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import library_scope
+
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "read_memory")
+    with library_scope(), pytest.raises(ValueError, match="^NOT_FOUND:"):
+        writer_lease.invoke_command(command, vault, path="absent-example.md")
+
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
+        assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
+        assert set(stages[name]) == {"name", "count", "ms"}
+
+
 def test_span_measures_real_elapsed_time(token) -> None:
     with call_spans.span("phase.sleeps"):
         time.sleep(0.02)

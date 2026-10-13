@@ -58,6 +58,45 @@ ENTRY_KINDS: frozenset[str] = frozenset({"exact_alias", "lexical_overlap"})
 FOCUS_KINDS: frozenset[str] = frozenset({"exact_alias", "lexical_overlap", "claims_match"})
 
 
+def public_input_schema() -> dict[str, Any]:
+    """Describe bounded cues without changing the runtime's clipping and ignoring."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "focus": {
+                "type": "string",
+                "maxLength": FOCUS_MAX_CHARS,
+                "description": "Assistant-authored subject cue; separate from user words.",
+            },
+            "recent": {
+                "type": "array",
+                "maxItems": RECENT_MAX_ENTRIES,
+                "description": f"Relevant excerpts, newest last; {RECENT_MAX_TOTAL_CHARS:,} characters total.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["role", "text"],
+                    "properties": {
+                        "role": {"type": "string", "enum": list(ROLES)},
+                        "text": {
+                            "type": "string",
+                            "maxLength": max(USER_ENTRY_MAX_CHARS, ASSISTANT_ENTRY_MAX_CHARS),
+                            "description": f"Max {USER_ENTRY_MAX_CHARS} user or {ASSISTANT_ENTRY_MAX_CHARS} assistant characters.",
+                        },
+                    },
+                },
+            },
+            "refs": {
+                "type": "array",
+                "maxItems": REFS_MAX,
+                "items": {"type": "string", "maxLength": REF_MAX_CHARS},
+                "description": "Canonical page references already read.",
+            },
+        },
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Entry:
     role: str

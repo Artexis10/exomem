@@ -6853,12 +6853,19 @@ def invoke_command(
     # that touched withheld items before failing.
     with disclosure_boundary(injected[0], command.name) as collector:
         try:
-            result = postfilter(command.name, _invoke(), injected[0])
+            # Fixed phase labels carry timing only, never caller or vault data.
+            with call_spans.span("command.body"):
+                result = _invoke()
+            with call_spans.span("command.terminal_filter"):
+                result = postfilter(command.name, result, injected[0])
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            emit_boundary_receipt(collector)
+            with call_spans.span("command.terminal_filter"):
+                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            with call_spans.span("command.disclosure_receipt"):
+                emit_boundary_receipt(collector)
             raise
-        emit_boundary_receipt(collector)
+        with call_spans.span("command.disclosure_receipt"):
+            emit_boundary_receipt(collector)
         from . import call_ledger
         from .governance.egress import released_item_count
 

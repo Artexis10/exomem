@@ -5,11 +5,12 @@ to.** Everything else is downstream.
 
 ## Memory boundary
 
-Built-in assistant memory and custom instructions are short-term or behavioural
-memory for small preferences, style rules, identity facts, working context, and
-reminders to use Exomem. Exomem is long-term governed memory for durable
-knowledge: sourced conclusions, project context, decisions, failures,
-experiments, proof-bearing records, review, and supersession.
+Keep temporary working context in the current conversation. Exomem holds durable
+preferences, feedback, personal baselines, project context, decisions, failures,
+experiments, and proof-bearing records, subject to the live capture policy.
+Custom instructions can guide one client; they do not replace this durable home.
+Use native memory only as an explicit fallback when Exomem cannot capture.
+Move durable results to Exomem when capture becomes available.
 
 Do not turn transient scratch, reminders, tasks, credentials, or every passing
 chat remark into KB material. Capture only raw material worth preserving or a
