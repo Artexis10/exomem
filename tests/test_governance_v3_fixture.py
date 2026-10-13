@@ -201,7 +201,11 @@ def test_rich_v3_fixture_rolls_back_every_precommit_migration_crash(
 
 def test_enrolled_rich_v3_fixture_migrates_authority_conservatively(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        authorization_custody, "_standalone_host_control_root", lambda: tmp_path / "host-control"
+    )
     vault = tmp_path / "vault"
     install_frozen_v3_fixture(vault)
     now = int(time.time())
