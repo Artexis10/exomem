@@ -799,6 +799,9 @@ def op_configure_memory(
         # surface. `contexts` (from `saved`) is the saved map; this is the one
         # that applied. They are deliberately different questions.
         "context": engagement["context"],
+        # What each context resolves to and why, whichever client is asking: a
+        # settings view must show both contexts, not only the one it runs in.
+        "levels": prominence_module.levels(),
         "before_hash": before["revision"],
         "after_hash": saved["revision"],
         "engagement": engagement,
@@ -837,6 +840,12 @@ def op_bootstrap(
             )
         if profile != "compact":
             raise ValueError("bootstrap: section requires profile='compact'")
+    if section == bootstrap_core_module.ACTIVITY_SECTION:
+        # Live state for a settings view, not agent guidance: answered without
+        # building the reference payload it has no part in.
+        from . import activity as activity_module
+
+        return activity_module.payload(vault_root)
 
     session_requested = profile == "session"
     session_unavailable: str | None = None

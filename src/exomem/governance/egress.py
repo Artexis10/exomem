@@ -133,9 +133,23 @@ class DisclosureCollector:
     command_name: str
     outcomes: list[DisclosureOutcome | _DisclosureBatch] = field(default_factory=list)
     path_outcomes: set[tuple[str, str, int | None]] = field(default_factory=set)
+    #: Every identity released to the caller, kept apart from `path_outcomes`:
+    #: that set is the receipt's dedupe key and stays empty under an empty
+    #: policy, which releases without a receipt.
+    released: set[str] = field(default_factory=set)
     credential_redactions: int = 0
     credential_principal: str | None = None
     credential_purpose: str | None = None
+
+
+#: Receipt decisions that put an item in front of the caller. The receipt
+#: schema fixes the closed decision set (`receipts` validates it).
+RELEASE_DECISIONS = frozenset({"released", "release_authorized"})
+
+
+def released_item_count(collector: DisclosureCollector) -> int:
+    """Distinct items this boundary released to the caller."""
+    return len(collector.released)
 
 
 _DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
@@ -331,10 +345,12 @@ def _outcome_for_decision(
     the claim comes before the page is hashed, so a path decided again (by the
     compiler, then by the guard) is neither hashed nor recorded twice.
     """
+    collector = _collector()
+    if collector is not None and outcome in RELEASE_DECISIONS:
+        collector.released.add(rel_path)
     if (decision is not None and _file_policy_empty(vault_root, policy)
             and not raw_protection.marked(rel_path)):
         return
-    collector = _collector()
     if collector is None or not _claim_path_outcome(
         collector, rel_path, outcome, decision.level if decision is not None else None,
     ):
@@ -1748,6 +1764,8 @@ def canonical_subject_notices(
     for identity, fingerprint, payload_hash, decision in entries:
         outcome = "release_authorized" if decision.level >= LEVEL_FULL else "withheld"
         if collector is not None:
+            if outcome in RELEASE_DECISIONS:
+                collector.released.add(identity)
             if _claim_path_outcome(collector, identity, outcome, decision.level):
                 reusable = (type(decision.level) is int and type(decision.scope_ids) is tuple
                             and all(type(value) is str for value in decision.scope_ids)

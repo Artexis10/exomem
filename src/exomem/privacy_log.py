@@ -59,9 +59,18 @@ def log_client_label(value: object, *, env: Mapping[str, str] | None = None) -> 
     text = str(value)
     if not content_private_logging_enabled(env):
         return text
-    if not text.strip():
+    return client_family(text)
+
+
+def client_family(value: object) -> str | None:
+    """A client name's family, or `"other"`; `None` when there is no name.
+
+    Idempotent: a family label maps to itself, so a content-private ledger row
+    (which already holds the family) and a verbatim one read the same.
+    """
+    if value is None or not str(value).strip():
         return None
-    folded = text.casefold()
+    folded = str(value).casefold()
     for needle, family in _CLIENT_FAMILIES:
         if needle in folded:
             return family

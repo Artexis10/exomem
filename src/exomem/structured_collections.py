@@ -25,6 +25,8 @@ from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
 
 COLLECTION_VERSION = 1
+#: The file that defines a Records collection: structure, not a saved record.
+MANIFEST_FILENAME = "_collection.md"
 STORAGE_FORMAT_VERSION = 1
 RECORDS_READER_VERSION = 2
 RECORD_REF_PREFIX = "exomem://record/"
@@ -262,7 +264,7 @@ def manifest_authoring_contract() -> dict[str, Any]:
     }
     return {
         "contract_version": COLLECTION_VERSION,
-        "manifest_filename": "_collection.md",
+        "manifest_filename": MANIFEST_FILENAME,
         "records_path": f"{vault.kb_dirname()}/Records/",
         "records_action_constraint": {"semantic_profile": "records"},
         "closed_values": {
@@ -1030,7 +1032,7 @@ def load_manifest(vault_root: Path, path: Path | str) -> CollectionManifest:
         with writer.read_collection(path) as manifest:
             return manifest
     manifest_path, rel = _safe_existing_path(root, path)
-    if manifest_path.name != "_collection.md":
+    if manifest_path.name != MANIFEST_FILENAME:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
@@ -1111,7 +1113,7 @@ def parse_manifest_bytes(
         raise CollectionError(
             "INVALID_COLLECTION_PATH", "collection path is outside the governed vault"
         )
-    if manifest_path.name != "_collection.md":
+    if manifest_path.name != MANIFEST_FILENAME:
         raise CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest must be named _collection.md"
         )
@@ -1260,7 +1262,7 @@ def discover_collections_with_errors(
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
-    for candidate in kb.rglob("_collection.md"):
+    for candidate in kb.rglob(MANIFEST_FILENAME):
         safe = _safe_candidate_rel(root, candidate)
         if safe is None:
             continue
