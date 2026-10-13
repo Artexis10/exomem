@@ -1,0 +1,17 @@
+# systemd --user template for the single-host writer coordinator.
+# Render the marked inputs before installation; do not install this template directly.
+
+[Unit]
+Description=exomem: local writer-lease coordinator
+
+[Service]
+Type=simple
+EnvironmentFile=__COORDINATOR_ENV_FILE__
+WorkingDirectory=__COORDINATOR_STATE_DIRECTORY__
+ExecStart="__VENV_PYTHON__" -m exomem.lease_coordinator --host 127.0.0.1 --port __PORT__ --database "__COORDINATOR_DATABASE__"
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

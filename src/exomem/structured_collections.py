@@ -1215,6 +1215,7 @@ def discover_collections_with_errors(
     from .collection_store import authority, connection
     from .collection_store.connection import CollectionStoreError
     from .collection_store.preview import bound_writer
+    from .list_trash import TRASH_SUBPATH
 
     writer = bound_writer(root)
     marker_error = None
@@ -1250,6 +1251,7 @@ def discover_collections_with_errors(
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
+    trash_root = kb / TRASH_SUBPATH
     authorize = authorize_path or (lambda _path: True)
     notice_owner = False
     if writer is None and (marker is not None or marker_error is not None):
@@ -1264,7 +1266,8 @@ def discover_collections_with_errors(
     candidates = []
     for candidate in kb.rglob(MANIFEST_FILENAME):
         safe = _safe_candidate_rel(root, candidate)
-        if safe is None:
+        # Recoverable trash retains bytes but declares no live collection ownership.
+        if safe is None or safe[0].is_relative_to(trash_root):
             continue
         entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
         if marker_error is not None or entry is not None:
