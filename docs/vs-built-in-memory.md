@@ -7,11 +7,13 @@ when the boundary is explicit.
 
 ## Short version
 
-Use built-in memory or custom instructions as short-term or behavioural memory:
-small preferences, routing rules, and working context that should shape every
-chat. Use Exomem as long-term governed memory: project context, sourced
-conclusions, decisions, failures, experiments, evidence, and anything you may
+Keep temporary working context in the current conversation. Custom instructions
+can guide one client. Use Exomem as long-term governed memory: durable preferences,
+personal baselines, project context, sourced conclusions, decisions, failures,
+experiments, evidence, and anything you may
 need to inspect, cite, edit, review, supersede, or use from more than one client.
+Capture follows the live engagement policy. Native memory is an explicit fallback
+when Exomem cannot capture; move durable results to Exomem when it can.
 
 Exomem is not a replacement for every native memory feature. It is the portable,
 user-owned knowledge layer behind Claude, Codex, ChatGPT, Cursor, hosted chat
@@ -21,9 +23,10 @@ clients, scripts, and future MCP clients.
 
 | Need | Best home | Why |
 | --- | --- | --- |
-| Response style, tone, formatting preferences | Built-in memory or custom instructions | These should shape nearly every chat with minimal retrieval cost |
+| Temporary response style or formatting for this conversation | Current chat or custom instructions | Apply it without creating durable knowledge |
+| Durable response preferences, feedback, and personal baselines | Exomem | Preserve reusable context across clients under the live capture policy |
 | "Use Exomem for project/domain questions" | Built-in memory or custom instructions | This is a routing rule for the assistant |
-| Stable personal identity facts the assistant should always respect | Built-in memory or custom instructions | Small, cross-chat personalization fits native memory |
+| Stable personal identity facts with reusable value | Exomem | Govern capture, attribution, correction, and cross-client recall |
 | Project decisions and architecture context | Exomem | They need provenance, history, edits, and cross-client access |
 | Research findings and reusable conclusions | Exomem | They should be searchable, citeable, and supersedable |
 | Raw articles, transcripts, screenshots, PDFs, images, audio, or video | Exomem source capture | Raw material needs provenance and should not be rewritten as memory |
@@ -36,7 +39,7 @@ clients, scripts, and future MCP clients.
 
 ## The boundary in one sentence
 
-Native assistant memory tells the assistant how to behave right now. Exomem tells
+Current chat context tells the assistant how to behave right now. Exomem tells
 the assistant what durable, governed knowledge the user has accumulated.
 
 A good native-memory entry is tiny:
@@ -105,7 +108,7 @@ lessons.
 | "Save this article." | Capture it as a raw source with provenance; offer to compile only if there is a conclusion. |
 | "Keep this receipt for the warranty case." | Preserve it as proof-bearing evidence, not as a general note. |
 | "This new approach replaces the old one." | Supersede the old compiled conclusion instead of creating a duplicate. |
-| "Always use terse answers." | Put that in native memory or custom instructions, not Exomem. |
+| "Always use terse answers." | Apply the preference now and preserve it in Exomem under the live capture policy. |
 
 For client-specific setup and a copyable instruction block, see
 [ai-assistant-guide.md](ai-assistant-guide.md).

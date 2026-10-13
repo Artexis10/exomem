@@ -491,12 +491,8 @@ def test_product_metadata_and_bound_signature_advertise_only_primary_form() -> N
         "validate_only",
         "identity_decision",
         "response_detail",
-        "authorization_session_credential",
     ]
     assert signature.parameters["operation"].default is inspect.Parameter.empty
-    assert (
-        signature.parameters["authorization_session_credential"].default is None
-    )
 
 
 def test_python_runtime_accepts_nested_and_deprecated_flat_forms(monkeypatch) -> None:
