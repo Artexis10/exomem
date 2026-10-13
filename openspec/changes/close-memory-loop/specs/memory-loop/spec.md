@@ -1438,3 +1438,36 @@ Presence and advisory ownership SHALL remain transient operational state. Suppor
 - **WHEN** two attributable activity records claim responsibility for overlapping work
 - **THEN** bounded context exposes the advisory conflict without choosing an exclusive owner or automatically suppressing either task
 - **AND** any actual side effect remains subject to its existing authorization, idempotency and execution boundaries
+
+### Requirement: Reuse the installed contract with bounded live orientation
+
+A client holding the current installed skill or hook contract SHALL reuse its
+instructions. It SHALL obtain missing live state through the existing bounded session
+handshake and capability fingerprint rather than repeatedly requesting the full instruction
+or diagnostic bundle. Live state includes applicable policy, availability and service version.
+
+A missing or stale contract SHALL request an affected section or one compact fallback
+under the agent-bootstrap contract. Full diagnostics SHALL require a diagnostic need.
+A tool-only client without installed instructions SHALL retain instruction-bearing bootstrap
+fallback. Current governed operations SHALL enforce live permission checks regardless of
+the client's cached instructions.
+Implementations SHALL update generated schemas, fingerprints, skill guidance and hook guidance
+together. Acceptance SHALL record the exercised client version and actual lifecycle coverage.
+
+#### Scenario: An installed client continues with the current contract
+
+- **WHEN** a skill-capable client holds the current instruction digest and needs live service state
+- **THEN** it receives bounded session state without another full instruction bundle
+- **AND** later task refresh remains available under the existing context budget
+
+#### Scenario: Instructions change or no skill is installed
+
+- **WHEN** the installed digest is stale or a tool-only client has no instruction contract
+- **THEN** the client can obtain the applicable section or compact fallback without a retry loop
+- **AND** the response states the mismatch and does not infer a permission grant
+
+#### Scenario: Cached instructions outlive a permission change
+
+- **WHEN** live policy removes a permission described by an older installed contract
+- **THEN** the governed operation applies the current policy
+- **AND** reusing instructions does not preserve the removed permission
