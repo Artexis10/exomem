@@ -2,16 +2,18 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 16d778cceb5cabee62c8ea7e3fffa44decad6478800dd1fed49a0f375cb4c9d8
+  skill_contract: a163b0ab922eed89db20091bba40c564c91968aeac4cca81c22a25308a834028
   version: "0.32.0"
 ---
 
 # Exomem
 
 Exomem is the connector/MCP; the Knowledge Base is the governed layer inside a
-markdown vault (Obsidian optional). Native assistant memory holds preferences,
-style, routing, and working context; Exomem holds durable project/domain knowledge,
-sourced conclusions, decisions, failures, experiments, and proof-bearing records.
+markdown vault (Obsidian optional). Keep temporary working context in the current
+conversation. Exomem holds durable preferences, feedback, personal baselines,
+project knowledge, sourced conclusions, decisions, failures, and proof-bearing records.
+Capture follows the live engagement policy. Use native assistant memory only as
+an explicit fallback when Exomem cannot capture; move durable results when it can.
 
 **Sources are immutable. Compiled material is governed. Evidence is preserved.**
 Raw inputs go to `Sources/`; proof-bearing artifacts to `Evidence/`; conclusions
@@ -187,7 +189,8 @@ or explicitly overridden by the user.
 | `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
 
-**The decider protocol**, for every action you are about to take:
+**The decider protocol**, for actions covered by the envelope.
+Read-only recall follows governance, without a capture or restructure disposition.
 
 1. **Name the action class.** An action that fits none of them has no envelope
    cell and therefore no authority — propose it instead.
@@ -198,8 +201,8 @@ or explicitly overridden by the user.
    `confirm` / `confirm-shortcut`: obtain the confirmation first; a
    confirm-shortcut is an inline one-action approval of that one named item, so
    the confirmation step is never skipped.
-4. **Record the outcome through triage**, so the decision is durable and the
-   signal family is countable.
+4. **For an addressed review decision, record it through triage.** Ordinary
+   writes retain their normal mutation receipts; triage is not a general action log.
 
 Confirm-required binds at three tiers: the served envelope marks the class, you
 obtain the confirmation in the conversation, and the server-side gates still

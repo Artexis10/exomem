@@ -80,9 +80,9 @@ def test_unload_noop_when_not_loaded() -> None:
 
 def test_unload_skips_when_inflight() -> None:
     embeddings._MODEL = object()
-    embeddings.BGE_GUARD._inflight = 1
-    assert embeddings.unload_model() is False
-    assert embeddings._MODEL is not None  # kept — a worker is mid-encode
+    with embeddings.BGE_GUARD.active():
+        assert embeddings.unload_model() is False
+        assert embeddings._MODEL is not None  # kept — a worker is mid-encode
 
 
 def test_unload_reranker_and_clip() -> None:

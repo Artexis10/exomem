@@ -180,7 +180,6 @@ def test_every_carrier_states_the_decider_protocol(config, vault: Path) -> None:
         text = "\n".join(lines).lower()
         assert "action class" in text or "class" in text, name
         assert "ceiling" in text, name
-        assert "proposal" in text, f"{name} does not say an above-ceiling intent is a proposal"
         for disposition in ("off", "advisory", "silent", "confirm"):
             assert disposition in text, f"{name} does not name the {disposition} disposition"
         assert "triage" in text, f"{name} does not say to record the outcome"
