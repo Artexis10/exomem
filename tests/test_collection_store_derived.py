@@ -326,6 +326,35 @@ def test_a_writer_that_lost_the_lease_stages_no_derived_rows(derived):
     assert not derived_rows.path(writer.handle.path).exists() or _rows_file(derived_rows.path(writer.handle.path)) == []
 
 
+def test_writer_contention_keeps_a_derived_import_running_and_preserves_committed_rows(derived, monkeypatch):
+    """A transient vault-writer refusal must not fail an acknowledged job or discard its checkpoint."""
+    writer, job = derived("busy")
+    run_jobs(writer, max_batches=1)
+    before = agent(writer, mode="status", continuation=job["continuation"])
+    rows = _rows_file(derived_rows.path(writer.handle.path))
+
+    def busy_stage(self, *args, **kwargs):
+        # The native mutation boundary refuses before the derived batch writes.
+        raise OpError("MUTATION_BUSY", "another writer holds the vault", "retry later",
+                      details={"status": "retryable", "committed": False})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derived_rows.Store, "stage", busy_stage)
+        run_jobs(writer, max_batches=1)
+    blocked = agent(writer, mode="status", continuation=job["continuation"])
+    assert (blocked["state"], blocked["reason"]) == ("partial", "store_unavailable")
+    assert blocked["error"]["code"] == "MUTATION_BUSY"
+    assert blocked["next_position"] == before["next_position"]
+    assert blocked["rows"] == before["rows"]
+    assert _rows_file(derived_rows.path(writer.handle.path)) == rows
+
+    done = finish(writer, job)
+    assert done["state"] == "complete"
+    assert (done["rows"]["imported"], done["rows"]["duplicates"], done["rows"]["rejected"]) == (12, 0, 0)
+    assert len(_rows_file(derived_rows.path(writer.handle.path))) == 12
+    assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(writer.handle.path))
+
+
 def _imported_state(writer):
     """What a finished import leaves: the derived rows, the import log and the store's rollup buckets."""
     log = writer.connection.execute(
