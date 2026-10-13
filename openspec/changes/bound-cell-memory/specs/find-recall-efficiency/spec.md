@@ -24,6 +24,25 @@ The parsed-page (frontmatter) cache SHALL be bounded both by entry count and by 
 
 ## ADDED Requirements
 
+### Requirement: Batch Publication Preserves Bounded Matrix Catch-Up
+
+When the backend keeps a resident chunk matrix, batch publication SHALL retain a compatible immutable snapshot for the existing bounded journal catch-up. A read SHALL reject a snapshot known to precede the index's observed publication. This check SHALL follow the token probe, including when publication completes during an unavailable probe.
+
+Catch-up SHALL preserve policy, epoch, instance, journal and row-count validation. An incompatible or unprovable update SHALL use a correct full reload. Consumers holding an earlier matrix SHALL retain its unchanged contents. The active service resource policy SHALL still determine matrix residency and scoring.
+
+#### Scenario: A bounded parent batch does not require a full matrix reload
+
+- **WHEN** a shared index publishes a bounded parent batch while its matrix is warm
+- **AND** the unchanged policy, epoch, instance and bounded journal prove catch-up
+- **THEN** the next read reflects the committed rows without loading the whole matrix from SQLite
+- **AND** earlier consumers retain their unchanged matrix
+
+#### Scenario: An unavailable token probe cannot serve known old vectors
+
+- **WHEN** publication completes before or during a sidecar token probe that returns unavailable
+- **THEN** the read rejects a snapshot that precedes the index's observed publication
+- **AND** it returns verified current rows through bounded catch-up or a correct full reload
+
 ### Requirement: A Busy Lexical Sidecar Never Triggers A Whole-Corpus Python Index
 
 When the FTS5 lexical sidecar exists but is transiently unavailable (locked, busy, or lagging behind vault writes), the lexical warm SHALL decline to build the whole-corpus Python BM25 index as a fallback, and SHALL retry through the sidecar on a later pass. The warm MAY build the Python BM25 index only when the sidecar is absent, when an explicit Python backend is requested, or after N consecutive unclassified sidecar errors, where N is a fixed bound. A request-time search on a small unmanaged vault, one within the inline-repair page cap, MAY use the in-process rung; managed cells search through the catalogue, which declines instead. A catalogue whose schema is not current MAY be served by the in-process rung until it is rebuilt.
