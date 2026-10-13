@@ -205,6 +205,25 @@ def test_stage_env_bounds_glibc_arenas_like_the_image(tmp_path: Path) -> None:
     assert "EXOMEM_MODE" not in bounded
 
 
+def test_stage_env_uses_the_image_policy_without_inheriting_its_credentials(tmp_path: Path) -> None:
+    from exomem.cloud_cell import RESOURCE_POLICY_ENV, resource_policy
+
+    inherited_token = "unrelated-service-token"
+    base = {
+        RESOURCE_POLICY_ENV: "service-v1",
+        "EXOMEM_CLOUD_CELL_TOKEN": inherited_token,
+        "EXOMEM_VAULT_PATH": str(tmp_path / "unrelated-vault"),
+        "EXOMEM_PRELOAD_MODELS": "1",
+    }
+
+    env = profile.cell_environment(tmp_path / "measurement", encoder="stub", base=base)
+
+    assert resource_policy(env) == "service-v1"
+    assert env["EXOMEM_CLOUD_CELL_TOKEN"] != inherited_token
+    assert env["EXOMEM_VAULT_PATH"] == str(tmp_path / "measurement" / "vault")
+    assert "EXOMEM_PRELOAD_MODELS" not in env
+
+
 def _stage_args(tmp_path: Path) -> argparse.Namespace:
     args = profile._parser().parse_args(["--encoder", "stub"])
     args.scratch = str(tmp_path)
@@ -326,10 +345,13 @@ def test_the_scan_covers_note_stems_titles_roots_and_probe_text(tmp_path: Path) 
 
 
 def _run_harness(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, dict]:
+    from exomem.cloud_cell import RESOURCE_POLICY_ENV
+
     out = tmp_path / "report.json"
     scratch_parent = tmp_path / "scratch"
     scratch_parent.mkdir()
-    env = {**os.environ, "TMPDIR": str(scratch_parent)}
+    # These attribution fixtures exercise legacy idle unloading, not service retention.
+    env = {**os.environ, "TMPDIR": str(scratch_parent), RESOURCE_POLICY_ENV: "legacy"}
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--out", str(out), "--settle-seconds", "30",
          "--timeout", "300"],
@@ -367,6 +389,7 @@ def test_smoke_run_profiles_a_real_cloud_cell_and_stays_content_free(tmp_path: P
     )
 
     assert report["ok"] is True
+    assert report["resource_policy"] == "legacy"
     assert report["vault"]["notes"] == 12
     assert [p["name"] for p in report["build"]["points"]] == list(profile.BUILD_POINTS)
     assert [p["name"] for p in report["cell"]["points"]] == list(profile.CELL_POINTS)
