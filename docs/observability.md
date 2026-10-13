@@ -279,6 +279,13 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `embeddings.model_load` | Lazy load of the embedding model weights. |
 | `embeddings.encode` | Encoding text to vectors. |
 | `embeddings.matrix_load` | A full vector-matrix load from the sidecar; the log line `embedding matrix full load: … rows=… cached_gen=…` names the reason. |
+| `embeddings.matrix_load.policy` | Read the recall policy identity. |
+| `embeddings.matrix_load.connect` | Open the sidecar, including identity coordination and connection setup. |
+| `embeddings.matrix_load.snapshot` | Begin the snapshot and read its generation, vector space and row count. |
+| `embeddings.matrix_load.allocate` | Allocate the final matrix and metadata list. Physical pages can be allocated later during row copying. |
+| `embeddings.matrix_load.rows` | Read, validate and copy vector rows. Fields report `expected_rows`, completed `rows`, `width_sum` and copied `vector_bytes`, including failed loads. |
+| `embeddings.matrix_load.release` | Sum transaction rollback and connection close. |
+| `embeddings.matrix_load.finalize` | Observe the snapshot identity, read the sidecar timestamp and construct the cache. |
 | `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
 | `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after each unit write; the log line `semantic-unit matrix full load: … rows=…` names the reason. |
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
@@ -306,6 +313,13 @@ items they covered (`paths` on the `index.*` components, `texts`/`chars` on
 `embeddings.encode` and `advisory.best_cosine`, `candidates` on
 `advisory.overlap_groups`). The key is absent on a span that measured only time,
 so nothing about an existing row changes.
+
+Matrix-load child spans break down the outer load. They do not include the caller's
+lock wait or vector scoring. Snapshot and release each aggregate two intervals.
+The ledger retains only the 32 slowest spans; an omitted phase has no retained duration.
+The row fields sum across loads, so `width_sum` equals the vector width only for one load.
+A slow row phase alone does not distinguish storage, row conversion, copying or
+memory pressure.
 
 ### Mutation-lock events dominate the log under writes
 
