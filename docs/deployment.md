@@ -644,8 +644,13 @@ The service keeps its existing durable sessions and FastMCP OAuth storage when
 storage and requires its existing credentials and namespace. Omitting the
 topology retains multi-host behavior and its shared OAuth requirement.
 `exomem doctor --profile ha --probe` checks the local coordinator and lease
-configuration without requiring an HA edge or two replica origins. The store
-still requires its capability fence, head checks, mutation lock, verified custody,
+configuration without requiring an HA edge or two replica origins. It checks
+authenticated lease status and requires HTTP 401 for a credential-free status
+request. Other results fail the diagnostic, including unavailable transport.
+This detects missing bearer enforcement; a false refusal delays setup for the
+deployment owner.
+
+The store still requires its capability fence, head checks, mutation lock, verified custody,
 and supported reader admission. This setup does not enable store creation or
 migrate an existing collection.
 
