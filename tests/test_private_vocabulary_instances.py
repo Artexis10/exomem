@@ -42,6 +42,48 @@ def private_instances(configured_boundary, vault):
     return authenticate
 
 
+@pytest.mark.parametrize(("client", "destination_allowed"), [
+    ("full", False), ("limited", True), ("limited", False),
+])
+def test_first_use_capture_registers_in_selected_storage_and_can_rearm(
+    private_instances, configured_boundary, vault, source_schema, client, destination_allowed,
+):
+    """A new source kind must remain usable without creating an unassigned overlay."""
+    from test_source_taxonomy import _capture
+
+    from exomem import add, source_taxonomy, state_migration
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    if destination_allowed:
+        config, _authenticate = configured_boundary
+        document = json.loads(config.read_text())
+        document["capture_paths"].append("Knowledge Base/Sources/Field Notebook")
+        config.write_text(json.dumps(document))
+        authority = state_migration.assert_offline_migration_authority(source="capture fixture setup")
+        state_migration.arm_connector_boundary_offline(vault, authority=authority)
+
+    legacy = source_taxonomy.registry_path(vault)
+    with principal.request_scope(private_instances(client)):
+        selected = instances.select(vault, source_taxonomy.KIND_SPEC).overlay(vault)
+        if client == "limited" and not destination_allowed:
+            with pytest.raises(add.AddError) as denied:
+                _capture(vault, source_schema, source_type="field-notebook", title="Bound source capture")
+            assert denied.value.code == "WRITE_REFUSED"
+            assert denied.value.reason
+            assert not selected.exists() and not legacy.exists()
+            assert source_taxonomy.load_taxonomy(vault).resolve_kind("field-notebook").status == "unregistered"
+            return
+
+        captured = _capture(vault, source_schema, source_type="field-notebook", title="Bound source capture")
+        assert (vault / captured.path).is_file()
+        assert selected.is_file() and not legacy.exists()
+        assert source_taxonomy.load_taxonomy(vault).resolve_kind("field-notebook").status == "registered"
+
+    authority = state_migration.assert_offline_migration_authority(source="capture rearm acceptance")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+
+
 @pytest.mark.parametrize("failure", [None, "duplicate", "definition", "untouched-race", "selected-race"])
 def test_complete_batch_uses_each_staged_instance_definition(private_instances, vault, warm_managed_cell, monkeypatch, failure):
     """A private entity must use its own staged folder and relation meaning."""
