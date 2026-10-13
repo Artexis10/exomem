@@ -1,6 +1,8 @@
 """Private registry operations keep their definitions and audit evidence private."""
 
+import datetime as dt
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -40,6 +42,508 @@ def private_instances(configured_boundary, vault):
     authority = state_migration.assert_offline_migration_authority(source="private vocabulary fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
     return authenticate
+
+
+@pytest.fixture
+def bound_private_session(private_instances, vault, tmp_path, monkeypatch, request):
+    import test_authorization_session_wire_reconnect as wire
+    from test_vocabulary_authority_lifecycle import _publish_floor_two
+
+    from exomem.governance import authorization_custody, authorization_session_lifecycle, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    transport = private_instances("full")
+    with request_scope(transport):
+        overlay = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+    policy_shape = getattr(request, "param", None)
+    if policy_shape in {"default-deny", "deny-history-file"}:
+        denied_scope = SCOPE
+        if policy_shape == "deny-history-file":
+            denied_scope = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+            (vault / "Knowledge Base/_Governance/scopes/retained.yaml").write_text(
+                f"governance_version: 1\nid: {denied_scope}\n"
+                'paths: ["_Schema/history/private/entity-types/*.yaml"]\n', encoding="utf-8",
+            )
+        rules = vault / "Knowledge Base/_Governance/rules"
+        rules.mkdir(exist_ok=True)
+        (rules / "private.yaml").write_text(
+            f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAY\nscope_ids: [{denied_scope}]\n"
+            f"audience: {transport.audience_id}\nceiling: 0\n", encoding="utf-8",
+        )
+    custody_root = tmp_path / "custody"
+    wire._configure_v4_authority(vault, custody_root, monkeypatch)
+    custody_root.chmod(0o700)
+    now = int(time.time())
+    _publish_floor_two(authorization_custody.load_authorization_custody(vault, now=now))
+    custody = authorization_custody.load_authorization_custody(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        issuance = authorization_session_lifecycle.open_session(
+            connection, custody=custody, principal_id=transport.audience_id,
+            issuer_family=transport.issuer_family, now=now, ttl_seconds=600,
+        )
+    finally:
+        connection.close()
+    who = replace(transport, authorization_session_id=issuance.context.session_id,
+                  verified_authorization_session=issuance.context)
+    return who, custody
+
+
+@pytest.fixture
+def private_writer(bound_private_session, vault, tmp_path):
+    from exomem import vocabulary_authority, vocabulary_control, writer_lease
+
+    who, custody = bound_private_session
+    now = int(time.time())
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
+    control = vocabulary_control.VocabularyControl(
+        vocabulary_authority.VocabularyAuthority(vault),
+        owner_decision_callback=lambda intent: vocabulary_authority._trusted_owner_decision_for_adapter(
+            owner_id="owner", ceremony_id=f"control-{intent.binding_digest[:20]}",
+            binding_digest=intent.binding_digest, expires_at=now + 300,
+        ),
+        deployment_floor_callback=lambda _intent: vocabulary_authority._deployment_floor_for_adapter(
+            runtime="vocabulary-authority/v2", generation=custody.control.activation_epoch,
+        ),
+        activation_guard_factory=lambda root: manager.mutation_guard(
+            root, operation="vocabulary-authority-activation",
+            holder_kind="vocabulary-authority-control", activation_admission=True,
+        ),
+    )
+    assert control.activate(principal=who, body={}).mode == "v2"
+    return manager, control
+
+
+@pytest.mark.parametrize("history_exists", [False, True])
+def test_bound_private_session_inspects_and_publishes_with_history_storage(
+    bound_private_session, private_instances, private_writer, vault, history_exists,
+):
+    """A signed floor-two session must admit directory metadata before registry publication."""
+    from exomem import commands
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    who, _custody = bound_private_session
+    manager, control = private_writer
+    control.grant(principal=who, body={
+        "actions": ["entity_type.add"], "scope": "vault", "expires_at": int(time.time()) + 300,
+    })
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory")
+    with principal.request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        directory = registry_history.history_dir(vault, spec.stem)
+        if history_exists:
+            directory.mkdir(parents=True)
+        inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+        assert inspected.get("available", True), inspected
+        saved = manager.invoke(command, (vault,), {
+            "operation": "save", "subject": "entity-types", "registry_scope": SCOPE,
+            "proposal": {"upsert": {"venue": {
+                "label": "Venue", "guidance": "A stable meeting place.", "parent": "concept",
+                "attributes": {"folder": "Venues"},
+            }}},
+            "expected_hash": inspected["content_hash"], "why": "Private recurring places",
+        }, idempotency_key="private-type", read_only=False)
+        assert saved["state"] == "committed", saved
+        after = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+        history = commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)
+        assert after.get("available", True), after
+        assert history["versions"][0]["why"] == "Private recurring places"
+        restored = manager.invoke(command, (vault,), {
+            "operation": "restore", "subject": "entity-types", "registry_scope": SCOPE,
+            "version": history["versions"][0]["version"], "expected_hash": after["content_hash"],
+            "why": "Restore the private core",
+        }, idempotency_key="private-restore", read_only=False)
+        assert restored["state"] == "committed", restored
+        assert entity_types.load_entity_types(vault, registry_scope=SCOPE).resolve("venue") is None
+    with principal.request_scope(private_instances("limited")):
+        assert commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE,
+        )["available"] is False
+        public = commands.op_schema_memory(vault, "inspect", subject="entity-types")
+        assert all(entry["key"] != "venue" for entry in public["entries"])
+
+
+@pytest.mark.parametrize("failure", ["closed-session", "custody-loss", "principal-mismatch"])
+def test_bound_history_metadata_refuses_lost_session_authority(
+    bound_private_session, vault, failure,
+):
+    """Owner and open-policy shortcuts cannot retain metadata authority after a session loses custody."""
+    from exomem import commands
+    from exomem.governance import authorization_custody, authorization_session_lifecycle, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import contract, instances
+
+    who, custody = bound_private_session
+    who = replace(who, purpose="registry-editing")
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        witness = contract.capture_admission(vault, spec, spec.overlay(vault).read_bytes())
+        assert contract.history_refusal(vault, spec) is None
+    if failure == "closed-session":
+        connection = store.open_authorization_session_connection(vault)
+        try:
+            authorization_session_lifecycle.close_verified_session(
+                connection, custody=custody, context=who.verified_authorization_session, now=int(time.time()),
+            )
+        finally:
+            connection.close()
+    elif failure == "custody-loss":
+        custody.keyring_path.unlink()
+    else:
+        who = replace(who, authorization_session_id="another-session")
+    with request_scope(who):
+        inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+        assert inspected == {"subject": "entity-types", "available": False, "reason": "audience_restricted"}
+        assert contract.history_refusal(vault, spec)["available"] is False
+        with pytest.raises((registry.RegistryError, authorization_session_lifecycle.AuthorizationSessionUnavailable,
+                            authorization_custody.AuthorizationCustodyUnavailable)):
+            witness.recheck()
+
+
+@pytest.mark.parametrize("substitution", ["file", "symlink", "ancestor-symlink", "reserved-identity", "unreadable"])
+def test_bound_history_metadata_refuses_physical_substitution(
+    bound_private_session, vault, tmp_path, monkeypatch, substitution,
+):
+    """Directory metadata admission must not accept aliases, reserved identities or a file replacement."""
+    from exomem import commands, reserved_paths
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import contract, instances
+
+    who, _custody = bound_private_session
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        directory = registry_history.history_dir(vault, spec.stem)
+        directory.mkdir(parents=True)
+        witness = contract.capture_admission(vault, spec, spec.overlay(vault).read_bytes())
+        assert contract.history_refusal(vault, spec) is None
+    if substitution == "file":
+        directory.rmdir()
+        directory.write_text("Not a history directory", encoding="utf-8")
+    elif substitution == "symlink":
+        directory.rmdir()
+        directory.symlink_to(tmp_path, target_is_directory=True)
+    elif substitution == "ancestor-symlink":
+        moved = tmp_path / "moved-history"
+        directory.parent.rename(moved)
+        directory.parent.symlink_to(moved, target_is_directory=True)
+    elif substitution == "reserved-identity":
+        identity = reserved_paths.inspect_generic_path(vault, directory.relative_to(vault).as_posix())
+        monkeypatch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root:
+                            reserved_paths.IdentityCatalogue({
+                                (identity.device, identity.inode, identity.kind): "governance-tree",
+                            }))
+    else:
+        directory.chmod(0)
+    try:
+        with request_scope(who):
+            inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+            assert inspected["available"] is False, inspected
+            assert contract.history_refusal(vault, spec)["available"] is False
+            with pytest.raises(registry.RegistryError, match="REGISTRY_UNAVAILABLE"):
+                witness.recheck()
+    finally:
+        if substitution == "unreadable":
+            directory.chmod(0o700)
+
+
+@pytest.mark.parametrize("bound_private_session", ["default-deny"], indirect=True)
+@pytest.mark.parametrize("granted_artifact", ["overlay", "history-file", "other-artifact"])
+def test_bound_history_metadata_cannot_inherit_an_artifact_byte_grant(
+    bound_private_session, vault, granted_artifact,
+):
+    """A valid grant for private bytes must not lift a default-denied directory or changed bytes."""
+    import hashlib
+
+    from exomem import commands
+    from exomem.governance import authorization_session_authority, egress, membership, policy, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import contract, instances
+
+    who, custody = bound_private_session
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        overlay = spec.overlay(vault).relative_to(vault).as_posix()
+        directory = registry_history.history_dir(vault, spec.stem)
+        directory.mkdir(parents=True)
+        retained = directory / f"{registry_history.version_id(dt.datetime.now(dt.UTC), 'retained')}.yaml"
+        retained.write_text("schema_version: 1\n", encoding="utf-8")
+        target = (overlay if granted_artifact == "overlay" else
+                  retained.relative_to(vault).as_posix() if granted_artifact == "history-file" else
+                  "Knowledge Base/_Schema/private/relation-registry.yaml")
+        if granted_artifact == "other-artifact":
+            (vault / target).write_text("schema_version: 1\nextensions: {}\n", encoding="utf-8")
+        compiled = policy.load(vault)
+        assert not compiled.empty and not compiled.blocked
+        assert contract.history_refusal(vault, spec)["available"] is False
+        paths = tuple(sorted({overlay, target}))
+        fingerprints = tuple(hashlib.sha256((vault / path).read_bytes()).hexdigest() for path in paths)
+        manifest = tuple(authorization_session_authority.SessionMembership(
+            path, fingerprint, tuple(sorted(membership.evaluate_path_only(vault, path, compiled).require_classified())),
+        ) for path, fingerprint in zip(paths, fingerprints, strict=True))
+        now = int(time.time())
+        connection = store.open_authorization_session_connection(vault)
+        try:
+            token = authorization_session_authority.mint_escalation_token(
+                connection, context=who.verified_authorization_session, signing_key=custody.keyring.active_key.key,
+                audience=who.audience_id, purpose=None, max_level=6, org_ceiling=6,
+                paths=paths, fingerprints=fingerprints, scope_ids=(SCOPE,), now=now, expires_at=now + 300,
+            )
+            authorization_session_authority.redeem_escalation_token(
+                connection, token=token, context=who.verified_authorization_session,
+                signing_key=custody.keyring.active_key.key, audience=who.audience_id, purpose=None,
+                membership=manifest, policy_fingerprint=compiled.fingerprint, now=now,
+            )
+        finally:
+            connection.close()
+        assert egress.release_level_for_path_only(vault, overlay) == egress.LEVEL_FULL
+        assert egress.release_level_for_path_only(vault, target) == egress.LEVEL_FULL
+        assert contract.history_refusal(vault, spec)["available"] is False
+        assert commands.op_schema_memory(
+            vault, "inspect", subject="entity-types", registry_scope=SCOPE,
+        )["available"] is False
+        (vault / target).write_text("Changed private bytes", encoding="utf-8")
+        assert egress.release_level_for_path_only(vault, target) == egress.LEVEL_NONE
+
+
+@pytest.mark.parametrize("bound_private_session", ["deny-history-file"], indirect=True)
+def test_bound_history_metadata_does_not_release_a_withheld_snapshot(
+    bound_private_session, vault,
+):
+    """Readable directory metadata cannot disclose snapshot bytes without their own current grant."""
+    import hashlib
+
+    from exomem import commands
+    from exomem.governance import authorization_session_authority, egress, membership, policy, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    who, custody = bound_private_session
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        directory = registry_history.history_dir(vault, spec.stem)
+        directory.mkdir(parents=True)
+        retained = directory / f"{registry_history.version_id(dt.datetime.now(dt.UTC), 'retained')}.yaml"
+        retained.write_text('# exomem-history: {"why": "Retained private state"}\nschema_version: 1\n', encoding="utf-8")
+        path = retained.relative_to(vault).as_posix()
+        compiled = policy.load(vault)
+        scopes = tuple(sorted(membership.evaluate_path_only(vault, path, compiled).require_classified()))
+        assert len(scopes) == 2, (scopes, compiled)
+        assert egress.release_level_for_path_only(vault, path) == egress.LEVEL_NONE
+        inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+        assert inspected.get("available", True), inspected
+        assert commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)["available"] is False
+        with pytest.raises(registry_history.HistoryAdmissionRefused, match="^AUDIENCE_RESTRICTED: registry history is unavailable$"):
+            registry_history.versions(vault, stem=spec.stem)
+        with pytest.raises(registry_history.HistoryAdmissionRefused, match="^AUDIENCE_RESTRICTED: registry history is unavailable$"):
+            registry_history.read_version(vault, stem=spec.stem, version=retained.stem)
+        fingerprint = hashlib.sha256(retained.read_bytes()).hexdigest()
+        now = int(time.time())
+        connection = store.open_authorization_session_connection(vault)
+        try:
+            token = authorization_session_authority.mint_escalation_token(
+                connection, context=who.verified_authorization_session, signing_key=custody.keyring.active_key.key,
+                audience=who.audience_id, purpose=None, max_level=6, org_ceiling=6,
+                paths=(path,), fingerprints=(fingerprint,), scope_ids=scopes, now=now, expires_at=now + 300,
+            )
+            authorization_session_authority.redeem_escalation_token(
+                connection, token=token, context=who.verified_authorization_session,
+                signing_key=custody.keyring.active_key.key, audience=who.audience_id, purpose=None,
+                membership=(authorization_session_authority.SessionMembership(path, fingerprint, scopes),),
+                policy_fingerprint=compiled.fingerprint, now=now,
+            )
+        finally:
+            connection.close()
+        history = commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)
+        assert history["versions"][0]["why"] == "Retained private state"
+        retained.write_text('# exomem-history: {"why": "Changed private state"}\nschema_version: 1\n', encoding="utf-8")
+        assert commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)["available"] is False
+
+
+@pytest.mark.parametrize("history_exists", [False, True])
+@pytest.mark.parametrize("bound_private_session", ["deny-history-file"], indirect=True)
+def test_history_refuses_a_denied_snapshot_created_after_preflight(
+    bound_private_session, vault, monkeypatch, history_exists,
+):
+    """A safe empty history must not authorize a newly created snapshot's reason."""
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    who, _custody = bound_private_session
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        directory = registry_history.history_dir(vault, spec.stem)
+        if history_exists:
+            directory.mkdir(parents=True)
+        versions = registry_history.versions
+
+        def create_then_read(root, *, stem):
+            directory.mkdir(parents=True, exist_ok=True)
+            name = registry_history.version_id(dt.datetime.now(dt.UTC), "new snapshot")
+            (directory / f"{name}.yaml").write_text(
+                '# exomem-history: {"why": "Withheld new state"}\nschema_version: 1\n',
+                encoding="utf-8",
+            )
+            return versions(root, stem=stem)
+
+        monkeypatch.setattr(registry_history, "versions", create_then_read)
+        result = commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)
+        assert result == {"subject": "entity-types", "available": False, "reason": "audience_restricted"}
+
+
+@pytest.fixture
+def granted_private_snapshot(bound_private_session, vault):
+    import hashlib
+
+    from exomem.governance import authorization_session_authority, membership, policy, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import instances
+
+    who, custody = bound_private_session
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC, SCOPE, authoring=True)
+        directory = registry_history.history_dir(vault, spec.stem)
+        directory.mkdir(parents=True)
+        version = registry_history.version_id(dt.datetime.now(dt.UTC), "granted snapshot")
+        retained = directory / f"{version}.yaml"
+        raw = b'# exomem-history: {"why": "Granted private state"}\nschema_version: 1\nentity_types: {}\n'
+        retained.write_bytes(raw)
+        path = retained.relative_to(vault).as_posix()
+        compiled = policy.load(vault)
+        scopes = tuple(sorted(membership.evaluate_path_only(vault, path, compiled).require_classified()))
+        fingerprint = hashlib.sha256(raw).hexdigest()
+        now = int(time.time())
+        connection = store.open_authorization_session_connection(vault)
+        try:
+            token = authorization_session_authority.mint_escalation_token(
+                connection, context=who.verified_authorization_session, signing_key=custody.keyring.active_key.key,
+                audience=who.audience_id, purpose=None, max_level=6, org_ceiling=6,
+                paths=(path,), fingerprints=(fingerprint,), scope_ids=scopes, now=now, expires_at=now + 300,
+            )
+            authorization_session_authority.redeem_escalation_token(
+                connection, token=token, context=who.verified_authorization_session,
+                signing_key=custody.keyring.active_key.key, audience=who.audience_id, purpose=None,
+                membership=(authorization_session_authority.SessionMembership(path, fingerprint, scopes),),
+                policy_fingerprint=compiled.fingerprint, now=now,
+            )
+        finally:
+            connection.close()
+    return who, custody, spec, retained, raw, version
+
+
+@pytest.mark.parametrize("bound_private_session", ["deny-history-file"], indirect=True)
+@pytest.mark.parametrize("operation", ["history", "restore"])
+@pytest.mark.parametrize("change", ["consumed-replacement", "closed-session"])
+def test_history_and_restore_refuse_snapshot_authority_lost_after_preflight(
+    granted_private_snapshot, private_writer, vault, monkeypatch, operation, change,
+):
+    """Consumed bytes and live custody must remain admitted before parsing or publication."""
+    from exomem import _held_fs_posix, commands
+    from exomem.governance import authorization_session_lifecycle, store
+    from exomem.governance.principal import request_scope
+
+    who, custody, spec, retained, raw, version = granted_private_snapshot
+    manager, _control = private_writer
+    read = _held_fs_posix.PosixHeldFilesystem.read
+    changed = False
+    consuming = False
+
+    def begin_consumption(reader):
+        def consume(*args, **kwargs):
+            nonlocal consuming
+            consuming = True
+            return reader(*args, **kwargs)
+        return consume
+
+    def change_during_read(filesystem, file):
+        nonlocal changed
+        if not consuming or file.name != retained.name or changed:
+            return read(filesystem, file)
+        changed = True
+        if change == "consumed-replacement":
+            retained.write_bytes(raw.replace(b"Granted private state", b"Withheld changed state"))
+            result = read(filesystem, file)
+            retained.write_bytes(raw)
+            return result
+        result = read(filesystem, file)
+        connection = store.open_authorization_session_connection(vault)
+        try:
+            authorization_session_lifecycle.close_verified_session(
+                connection, custody=custody, context=who.verified_authorization_session, now=int(time.time()),
+            )
+        finally:
+            connection.close()
+        return result
+
+    with request_scope(replace(who, purpose=None)):
+        inspected = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
+        assert commands.op_schema_memory(
+            vault, "history", subject="entity-types", registry_scope=SCOPE,
+        )["versions"][0]["why"] == "Granted private state"
+        overlay = spec.overlay(vault).read_bytes()
+        kept = sorted(retained.parent.iterdir())
+        monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "read", change_during_read)
+        reader = "history_view" if operation == "history" else "read_version"
+        monkeypatch.setattr(registry_history, reader, begin_consumption(getattr(registry_history, reader)))
+        arguments = {"operation": operation, "subject": "entity-types", "registry_scope": SCOPE}
+        if operation == "restore":
+            arguments.update(version=version, expected_hash=inspected["content_hash"], why="Restore admitted state")
+            command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory")
+            result = manager.invoke(command, (vault,), arguments, idempotency_key="withheld-restore", read_only=False)
+        else:
+            result = commands.op_schema_memory(vault, **arguments)
+        assert changed
+        assert result == {"subject": "entity-types", "available": False, "reason": "audience_restricted"}
+        assert spec.overlay(vault).read_bytes() == overlay
+        assert sorted(retained.parent.iterdir()) == kept
+
+
+def test_bootstrap_does_not_reuse_history_after_session_closes(
+    bound_private_session, vault, monkeypatch,
+):
+    """A previously populated bootstrap must omit new keys after current custody is lost."""
+    from exomem.governance import authorization_session_lifecycle, store
+    from exomem.governance.principal import request_scope
+    from exomem.vocabulary import bootstrap, instances
+
+    who, custody = bound_private_session
+    monkeypatch.setattr(bootstrap, "registry_specs", lambda: {"entity-types": entity_types.SPEC})
+    with request_scope(who):
+        spec = instances.select(vault, entity_types.SPEC)
+        spec.overlay(vault).parent.mkdir(parents=True, exist_ok=True)
+        spec.overlay(vault).write_text("schema_version: 1\nentity_types: {}\n", encoding="utf-8")
+        directory = registry_history.history_dir(vault, spec.stem)
+        directory.mkdir(parents=True)
+        version = registry_history.version_id(dt.datetime.now(dt.UTC), "public addition")
+        (directory / f"{version}.yaml").write_text(
+            '# exomem-history: ' + json.dumps({
+                "at": dt.datetime.now(dt.UTC).isoformat(), "added": {"entity-types": ["concept"]},
+            }) + '\nschema_version: 1\n', encoding="utf-8",
+        )
+        populated = bootstrap.block(vault, inspect_route="schema_memory")
+        assert populated["entity-types"].get("new") == ["concept"], populated
+        recently_added = bootstrap.recently_added
+
+        def close_then_read(root, spec, snapshot, *, since):
+            if spec.name == "entity-types":
+                connection = store.open_authorization_session_connection(vault)
+                try:
+                    authorization_session_lifecycle.close_verified_session(
+                        connection, custody=custody, context=who.verified_authorization_session, now=int(time.time()),
+                    )
+                finally:
+                    connection.close()
+            return recently_added(root, spec, snapshot, since=since)
+
+        monkeypatch.setattr(bootstrap, "recently_added", close_then_read)
+        result = bootstrap.block(vault, inspect_route="schema_memory")
+        assert "new" not in result["entity-types"]
+        assert "top" in result["entity-types"]
+        assert "new_since" not in result
 
 
 @pytest.mark.parametrize(("client", "destination_allowed"), [

@@ -82,6 +82,49 @@ class RegistryFileTooLarge(ValueError):
     """A regular override exceeds its registry's existing read limit."""
 
 
+class HistoryAdmissionRefused(ValueError):
+    """A consumed registry snapshot lacks current disclosure authority."""
+
+    def __init__(self) -> None:
+        super().__init__("AUDIENCE_RESTRICTED: registry history is unavailable")
+
+
+def _require_snapshot_admission(root: Path, path: str, raw: bytes) -> None:
+    """Admit the held bytes before any history header or override is parsed."""
+    from .governance import egress, policy, raw_protection
+    from .governance.authorization_session_lifecycle import AuthorizationSessionContext
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    context = who.verified_authorization_session
+    if not who.resolved or (who.authorization_session_id is not None and context is None):
+        raise HistoryAdmissionRefused
+    purpose = who.purpose
+    if context is not None:
+        if (not isinstance(context, AuthorizationSessionContext)
+                or who.audience_id != context.principal_id
+                or who.authorization_session_id != context.session_id
+                or who.issuer_family != context.issuer_family):
+            raise HistoryAdmissionRefused
+        # Verified owners must retain live custody even under an open policy.
+        valid, trusted_purpose = raw_protection._authority(root, who)
+        if not valid:
+            raise HistoryAdmissionRefused
+        if purpose is None:
+            purpose = trusted_purpose
+    if not egress.content_permits(root, path, who, snapshot=raw):
+        raise HistoryAdmissionRefused
+    try:
+        level = egress._release_level_for_path_only_snapshot(
+            root, path, principal=who, purpose=purpose, policy=policy.load(root),
+            content_fingerprint=hashlib.sha256(raw).hexdigest(),
+        )
+    except egress.AuthorizationSessionDecisionUnavailable:
+        raise HistoryAdmissionRefused from None
+    if level < egress.LEVEL_FULL:
+        raise HistoryAdmissionRefused
+
+
 def read_previous(
     root: Path, path: Path, *, max_bytes: int | None = None, guard_absence: bool = True
 ) -> tuple[str | None, vault_module.PathGuard | None]:
@@ -344,7 +387,10 @@ def kept_names(vault_root: Path, relative_dir: str, *, suffix: str) -> list[str]
             return _snapshot_names(filesystem, directory, suffix)
 
 
-def read_kept(vault_root: Path, relative_dir: str, name: str) -> str | None:
+def read_kept(
+    vault_root: Path, relative_dir: str, name: str, *,
+    _admit_raw: Callable[[Path, str, bytes], None] | None = None,
+) -> str | None:
     """One kept file's text, read through the held vault root, or None."""
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
@@ -359,10 +405,15 @@ def read_kept(vault_root: Path, relative_dir: str, name: str) -> str | None:
                 return None
             with opened.require() as file:
                 read = filesystem.read(file) if file.identity.link_count == 1 else None
-                if read is None or not read.ok or not filesystem.validate_directory(directory).ok:
+                if read is None or not read.ok:
+                    return None
+                raw = read.require()
+                if _admit_raw is not None:
+                    _admit_raw(Path(vault_root), (Path(relative_dir) / name).as_posix(), raw)
+                if not filesystem.validate_directory(directory).ok:
                     return None
                 try:
-                    return read.require().decode("utf-8")
+                    return raw.decode("utf-8")
                 except UnicodeDecodeError:
                     return None
 
@@ -426,10 +477,13 @@ def versions(vault_root: Path, *, stem: str) -> list[dict[str, Any]]:
                     read = filesystem.read(file)
                     if not read.ok:
                         continue
+                    raw = read.require()
+                    path = (history_dir(root, stem) / name).relative_to(root).as_posix()
+                    _require_snapshot_admission(root, path, raw)
                     if not filesystem.validate_directory(directory).ok:
                         continue
                     try:
-                        header, _ = _split(read.require().decode("utf-8"))
+                        header, _ = _split(raw.decode("utf-8"))
                     except UnicodeDecodeError:
                         continue
                 version = name[:-5]
@@ -491,7 +545,7 @@ def read_version(vault_root: Path, *, stem: str, version: str) -> str:
         raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} is not a kept version")
     root = Path(vault_root)
     relative = history_dir(root, stem).relative_to(root).as_posix()
-    text = read_kept(root, relative, f"{clean}.yaml")
+    text = read_kept(root, relative, f"{clean}.yaml", _admit_raw=_require_snapshot_admission)
     if text is None:
         raise ValueError(f"UNKNOWN_REGISTRY_VERSION: {version!r} is not a kept version")
     return _split(text)[1]

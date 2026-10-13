@@ -610,19 +610,22 @@ def test_registry_restore_keeps_crlf_bytes_and_the_effective_hash(
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))
 def test_first_save_snapshots_a_restorable_empty_override(bare_vault: Path, subject: str) -> None:
+    from exomem.governance.principal import library_scope
+
     before_roles = context_roles.load_roles(bare_vault).roles
     before_conventions = ac.load_conventions(bare_vault).conventions
     _governed_save(bare_vault, subject, "firstword", "first")
     version = _history(bare_vault, subject)[0]["version"]
 
-    restored = commands.op_schema_memory(
-        bare_vault,
-        subject=subject,
-        operation="restore",
-        version=version,
-        why="return to shipped behavior",
-        expected_hash=_SUBJECTS[subject][2](bare_vault),
-    )
+    with library_scope():
+        restored = commands.op_schema_memory(
+            bare_vault,
+            subject=subject,
+            operation="restore",
+            version=version,
+            why="return to shipped behavior",
+            expected_hash=_SUBJECTS[subject][2](bare_vault),
+        )
 
     assert restored["valid"] is True
     if subject == "context-roles":
@@ -657,6 +660,8 @@ def test_a_governed_save_logs_its_why_and_hashes(vault: Path, subject: str) -> N
 
 @pytest.mark.parametrize("subject", sorted(_SUBJECTS))
 def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: str) -> None:
+    from exomem.governance.principal import library_scope
+
     context_roles.clear_cache()
     ac.clear_cache()
     current = _SUBJECTS[subject][2]
@@ -667,14 +672,15 @@ def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: 
     # The newest version is the state the second save replaced: the first.
     version = _history(vault, subject)[0]["version"]
 
-    restored = commands.op_schema_memory(
-        vault,
-        subject=subject,
-        operation="restore",
-        version=version,
-        why="the second change was wrong",
-        expected_hash=current(vault),
-    )
+    with library_scope():
+        restored = commands.op_schema_memory(
+            vault,
+            subject=subject,
+            operation="restore",
+            version=version,
+            why="the second change was wrong",
+            expected_hash=current(vault),
+        )
 
     assert restored["valid"] is True
     assert current(vault) == first_hash
@@ -685,13 +691,15 @@ def test_restore_returns_a_registry_to_a_previous_version(vault: Path, subject: 
 
 
 def test_restore_refuses_a_stale_hash(bare_vault: Path) -> None:
+    from exomem.governance.principal import library_scope
+
     _governed_save(bare_vault, "activation-conventions", "Vorlagen", "first")
     version = _history(bare_vault, "activation-conventions")[0]["version"]
     stale = ac.load_conventions(bare_vault).content_hash
     _governed_save(bare_vault, "activation-conventions", "Modelle", "second")
     on_disk = ac.override_path(bare_vault).read_bytes()
 
-    with pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
+    with library_scope(), pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
         commands.op_schema_memory(
             bare_vault,
             subject="activation-conventions",

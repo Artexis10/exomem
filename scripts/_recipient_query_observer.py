@@ -24,6 +24,7 @@ def observe_query_timeouts(log_path: Path):
     Process CPU includes other service threads; it does not prove contention.
     Coarse phase CPU excludes new per-row samples. The first-check location
     and wall-clock anchor help align a failure with the service log.
+    Parent phases and one largest hydration retain context without a call log.
     """
     originals = []
 
@@ -75,16 +76,32 @@ def observe_query_timeouts(log_path: Path):
                     frame, mark = measurement
                     label, started, cpu_started = mark
                     cpu_ended = phase_cpu(label)
-                    phase = frame["phases"].setdefault(
-                        label, {"elapsed_ms": 0.0, "calls": 0,
-                                "thread_cpu_ms": 0.0 if cpu_started is not None else None},
-                    )
-                    phase["elapsed_ms"] += (time.perf_counter() - started) * 1000
-                    phase["calls"] += 1
-                    if cpu_started is None or cpu_ended is None:
-                        phase["thread_cpu_ms"] = None
-                    elif phase["thread_cpu_ms"] is not None:
-                        phase["thread_cpu_ms"] += (cpu_ended - cpu_started) * 1000
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    labels = (label,)
+                    if label == "authorization.init":
+                        # Parent labels come only from this observer's fixed technical call boundaries.
+                        parent = frame["stack"][-2][0] if len(frame["stack"]) > 1 else "root"
+                        labels += (f"{label}@{parent}",)
+                    for key in labels:
+                        phase = frame["phases"].setdefault(
+                            key, {"elapsed_ms": 0.0, "calls": 0,
+                                  "thread_cpu_ms": 0.0 if cpu_started is not None else None},
+                        )
+                        phase["elapsed_ms"] += elapsed_ms
+                        phase["calls"] += 1
+                        if cpu_started is None or cpu_ended is None:
+                            phase["thread_cpu_ms"] = None
+                        elif phase["thread_cpu_ms"] is not None:
+                            phase["thread_cpu_ms"] += (cpu_ended - cpu_started) * 1000
+                    if label == "typed.selected_current_values":
+                        previous = frame["largest_selected_values"]
+                        clock = getattr(state, "query_clock", None)
+                        if previous is None or elapsed_ms > previous["elapsed_ms"]:
+                            frame["largest_selected_values"] = {
+                                "elapsed_ms": elapsed_ms,
+                                "started_after_query_ms": (started - clock[0]) * 1000 if clock else None,
+                                "parent_phases": [entry[0] for entry in frame["stack"][:-1]],
+                            }
                     frame["stack"].pop()
             except Exception:  # noqa: BLE001 - observation must not change execution
                 pass
@@ -146,6 +163,14 @@ def observe_query_timeouts(log_path: Path):
                                 "module": module, "function": caller.f_code.co_name,
                                 "line": caller.f_lineno,
                             }
+                        parent = caller.f_back
+                        if parent is not None:
+                            module = parent.f_globals.get("__name__", "")
+                            if module.startswith("exomem.query_engine."):
+                                frame["failure_check_parent"] = {
+                                    "module": module, "function": parent.f_code.co_name,
+                                    "line": parent.f_lineno,
+                                }
                         frame["timeout_ms"] = session.limits.timeout_ms
                         frame["query_deadline_elapsed_ms"] = deadline_elapsed(session)
                         started = getattr(state, "query_clock", None)
@@ -232,6 +257,7 @@ def observe_query_timeouts(log_path: Path):
                          "observed_query_window_ms": None, "query_thread_cpu_ms": None,
                          "query_process_cpu_ms": None,
                          "query_started_unix_ns": None, "failure_check_caller": None,
+                         "failure_check_parent": None, "largest_selected_values": None,
                          "body_returned": None, "body_return_deadline_elapsed_ms": None}
                 started = time.perf_counter()
             except Exception:  # noqa: BLE001 - observation must not change execution
