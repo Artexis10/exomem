@@ -19,6 +19,7 @@ import pytest
 from exomem import (
     attention,
     audit,
+    commands,
     dreamer,
     dreamer_families,
     dreamer_store,
@@ -28,7 +29,9 @@ from exomem import (
     relation_queue,
     review_state,
     upkeep,
+    writer_lease,
 )
+from exomem.governance.principal import library_scope
 
 NOW = dt.datetime(2026, 6, 1, 12, 0, tzinfo=dt.UTC)
 TODAY = NOW.date()
@@ -158,3 +161,52 @@ def test_quieting_upkeep_leaves_integrity_byte_identical(
     after = _surfaces(vault)
     for surface in before:
         assert after[surface] == before[surface], (mode, surface)
+
+
+@pytest.mark.parametrize("mode", ["families_quiet", "crashed"])
+def test_capture_and_recall_continue_when_optional_upkeep_is_quiet_or_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    vault = _vault(tmp_path)
+    if mode == "families_quiet":
+        _quiet_families(vault, "quiet")
+        payload = review_state.ReviewStateStore(vault).load()
+        assert dreamer.setting() == "on"
+        assert all(
+            review_state.disposition_for(family.name, payload=payload) == "quiet"
+            for family in dreamer_families.REGISTRY
+        )
+    else:
+        _crash(vault, monkeypatch)
+
+    observation = "The primingcheck inspection records nine successful starts."
+    kwargs = {
+        "content": f"## Observations\n\n- [finding] {observation}\n",
+        "title": "Pump start inspection",
+        "slug": "pump-start-inspection",
+        "sources": [],
+        "suggestions": False,
+    }
+    remember = next(c for c in commands.product_commands_for("mcp") if c.name == "remember")
+    # This in-process caller owns only the invented fixture vault.
+    with library_scope():
+        validation = writer_lease.invoke_command(remember, vault, validate_only=True, **kwargs)
+        result = writer_lease.invoke_command(
+            remember,
+            vault,
+            draft_id=validation["draft_id"],
+            draft_hash=validation["draft_hash"],
+            draft_token=validation["draft_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation["draft_hash"],
+            relation_review_reason="The start count has no supported typed relation in this fixture.",
+            **kwargs,
+        )
+        path = result["path"]
+        assert observation in (vault / path).read_text(encoding="utf-8")
+        readback = commands.op_read_memory(vault, path)
+        assert observation in readback["body"]
+        recalled = commands.op_find(vault, query="primingcheck", mode="keyword", graph=False)
+        hits = [hit for hit in recalled if hit["path"] == path]
+        assert hits, recalled
+        assert observation in hits[0]["excerpt"]
