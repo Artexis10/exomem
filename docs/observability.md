@@ -302,12 +302,13 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
 | `recall.due_state` | Serving the advisory due-state block a recall carries. On a memo hit its re-checks are `recall.due_state.verdicts` (`paths` = release verdicts re-asked), `recall.due_state.role` and `recall.due_state.exists` (`rows`); on a miss, `recall.due_state.build`. |
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
-| `command.leaf`, `command.postfilter` | The two halves of a tool's `duration_ms`: the command itself, then the MCP-layer post-filter and scrub of its result. |
+| `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
+| `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Read-only dispatcher stages: invoke the command, filter its result or error, then emit the disclosure receipt. Failed stages retain their duration. |
 | `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 | `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
 | `encode.by.<module>` | Beside every `embeddings.encode`: the Exomem module that asked for the encode (`context_pack`, `semantic_segments`, `index_sync`, ...). The name is the attribution because span fields are integers. |
 | `index.embeddings.reuse` | Inside `index.embeddings`, once for the page's chunks and once for its semantic units: `texts` the write needed vectors for and `reused` how many came from the page's published rows instead of the encoder. `reused` near `texts` is an append; `reused` 0 on a long page is a first index or a rewrite. `reused` counts only texts whose vector came from the page's own published rows, the same meaning as on `advisory.best_cosine`. `recalled`, when present and disjoint from `reused`, counts texts that took an advisory sweep's just-encoded vector instead: an `add` commit taking the vectors its pre-commit sweep encoded. The encoder was handed `texts` minus both. |
-| `read.page`, `read.history`, `read.links` | A direct read's phases: the page read, the edit log (`entries`), and the wikilink summary (`inbound`, `outbound`). |
+| `read.page`, `read.history`, `read.links` | Decode the prepared page, read the edit log (`entries`), and build the wikilink summary (`inbound`, `outbound`). Page preparation precedes `read.page`. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
