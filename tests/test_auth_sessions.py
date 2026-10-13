@@ -392,6 +392,39 @@ async def test_refresh_rotation_is_cross_authority_idempotent_then_revokes_on_re
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("delayed_collection", ["grace", "redemption"])
+async def test_slow_first_refresh_keeps_the_family_active(delayed_collection: str) -> None:
+    now = [1_800_000_000.0]
+
+    class SlowReceiptStore(AtomicMemoryStore):
+        async def put_if_absent(self, key, value, *, collection=None, ttl=None):
+            created = await super().put_if_absent(key, value, collection=collection, ttl=ttl)
+            delayed = (
+                authority.refresh_grace_collection
+                if delayed_collection == "grace"
+                else authority.refresh_redemptions_collection
+            )
+            if created and collection == delayed:
+                now[0] += REFRESH_RETRY_GRACE_SECONDS + 1
+            return created
+
+    raw = SlowReceiptStore()
+    raw.clock = lambda: now[0]
+    authority = _authority(raw, clock=lambda: now[0])
+    original_access, _, refresh = await authority.issue_offline(
+        client_id="chatgpt", scopes=("offline_access",), identity=_identity()
+    )
+
+    access, record, next_refresh = await authority.rotate_refresh(
+        refresh, client_id="chatgpt", scopes=("offline_access",)
+    )
+
+    assert await authority.validate(original_access) is not None
+    assert await authority.validate(access) == record
+    assert await authority.validate_refresh(next_refresh, client_id="chatgpt") is not None
+
+
+@pytest.mark.anyio
 async def test_refresh_grace_uses_store_time_not_replica_clocks() -> None:
     raw = AtomicMemoryStore()
     store_now = [1_800_000_000.0]
