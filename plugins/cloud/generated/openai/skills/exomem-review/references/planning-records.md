@@ -30,12 +30,17 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
-For a Planning change, discover the collection with `browse_memory`, then
-`plan_memory(action="inspect", collection=...)` and a bounded `query` to
-identify exactly one item. `inspect` requires a collection. Use the returned
+For a Planning change, call `plan_memory(action="inspect")` to list admitted
+collections. Copy the chosen `manifest_path` into `collection`, then inspect
+that collection and run a bounded `query` to identify exactly one item.
+If collection titles repeat, use their separate manifest paths. Use the returned
 `snapshot` as `expected_container_hash`, and that query row's `plan_id`
 and `item_version` as `plan_id` and `expected_item_version`. These are
 returned identities and versions, not filenames or values to invent.
+
+The `area` and `parent` fields require `exomem://plan/<collection-uuid>/<plan-uuid>`
+references. Query the chosen collection for `collection_id` and `plan_id` before
+writing those fields. Display titles do not identify relationship targets.
 
 Pass `changes={"title": "..."}` to `update`; for an explicit intent change
 pass `transition` to `triage`, with the same guards and an audit `why`.

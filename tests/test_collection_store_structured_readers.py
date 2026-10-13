@@ -72,6 +72,18 @@ def test_current_state_uses_canonical_contract_when_manifest_view_is_stale(store
     assert result[0]["statement"] == "status: ready"
 
 
+def test_planning_command_inventory_reads_canonical_store_collections(store):
+    from exomem.plan_memory import plan_memory
+
+    create(store, "planning")
+    with preview_store(store.root, store.handle):
+        result = plan_memory(store.root, "inspect")
+    assert result["kind"] == "planning_inventory"
+    assert len(result["collections"]) == 1
+    assert result["collections"][0]["collection_id"] == CID
+    assert result["collections"][0]["semantic_profile"] == "planning"
+
+
 def test_outcome_audit_joins_canonical_rows_without_manifest_or_item_views(store):
     store.create_collection(PLANNING_PATH, planning_manifest(), why="create", scaffold=False)
     store.create_collection(RECORDS_PATH, records_manifest(), why="create", scaffold=False)

@@ -43,7 +43,8 @@ merge or substantial curation requires confirmed `restructure_execution`.
 `plan_memory` is the one public command for human-owned intended future state.
 It has exactly nine actions: read-only `inspect`, `validate`, and `query`, plus
 guarded `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`.
-`inspect` requires one collection; use `browse_memory` to discover collections.
+Use `plan_memory(action="inspect")` without `collection` to discover Planning
+collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
 `Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
 Outcomes, initiatives, and work items may form an explicit hierarchy; areas are

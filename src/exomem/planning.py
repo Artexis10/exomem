@@ -1889,8 +1889,15 @@ def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool =
             type(values[name]) is not str or parse_plan_ref(values[name]) is None
         ):
             if name == "area":
-                _invalid("area must be exomem://plan/<collection-uuid>/<plan-uuid>")
-            _invalid(f"{name} must be a Planning reference")
+                _invalid(
+                    "area must be exomem://plan/<collection-uuid>/<plan-uuid>; "
+                    "query this collection for collection_id and plan_id"
+                )
+            _invalid(
+                f"{name} must be a Planning reference "
+                "(exomem://plan/<collection-uuid>/<plan-uuid>); "
+                "query this collection for collection_id and plan_id"
+            )
     if "tags" in values:
         tags = values["tags"]
         if (
