@@ -1438,7 +1438,8 @@ def op_bootstrap(
             "plan_memory before treating them as observed Records."
         ),
         "inventory": (
-            "Discover collections with browse_memory; inspect requires collection. "
+            "Discover collections with plan_memory(action='inspect') without collection. "
+            "Copy a returned manifest_path to inspect one collection. "
             "Query by title or natural key plus lifecycle/status. For update/triage, "
             "use inspect/query snapshot as expected_container_hash and the chosen "
             "query row's plan_id and item_version as plan_id and expected_item_version. "
