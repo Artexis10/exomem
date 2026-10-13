@@ -16,7 +16,7 @@ the streamable-http MCP endpoint and the REST facade (``server_rest`` and
 ``server_assets`` register their routes onto the same FastMCP instance via
 ``custom_route``) — one middleware insertion covers both surfaces.
 
-Enforcement fires only when ALL of the following hold: writer-lease
+Enforcement fires only when ALL of the following hold: multi-host writer-lease
 coordination is enabled and a token is configured, the kill switch
 (``EXOMEM_EDGE_STAMP_ENFORCE=0``) is not set, the request carries a
 ``cf-ray`` header (i.e. it transited Cloudflare — local CLI/REST/health
@@ -170,7 +170,8 @@ class EdgeIngressMiddleware:
             config = self._config = LeaseConfig.from_env()
         headers = scope.get("headers") or []
         violation = is_ingress_violation(
-            lease_enabled=config.enabled,
+            # Only multi-host coordination requires transit through an HA edge.
+            lease_enabled=config.enabled and config.topology == "multi-host",
             token=config.token,
             method=str(scope.get("method") or ""),
             has_cf_ray=_header_value(headers, b"cf-ray") is not None,
