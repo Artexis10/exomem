@@ -71,45 +71,57 @@ def sidecar_path(vault_root: Path) -> Path:
 def open_readonly_connection(vault_root: Path) -> sqlite3.Connection | None:
     """Open an existing supported sidecar without migration, DDL, or creation."""
 
-    with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(
-            vault_root,
-            descriptor_ids=("governance-store",),
-            identity_may_change=False,
-        ):
-            return _open_readonly_connection_owned(vault_root)
-
-
-def _open_readonly_connection_owned(vault_root: Path) -> sqlite3.Connection | None:
-    path = sidecar_path(vault_root)
     try:
-        with reserved_paths._sqlite_owner_target_scope(
-            vault_root,
-            path,
-            "governance-store",
-            create=False,
-        ) as retained_path:
-            conn = sqlite3.connect(f"{retained_path.as_uri()}?mode=ro", uri=True)
-            try:
-                conn.execute("PRAGMA query_only=ON")
-                if (
-                    int(conn.execute("PRAGMA user_version").fetchone()[0])
-                    != SCHEMA_USER_VERSION
-                ):
-                    conn.close()
-                    return None
-                reserved_paths._publish_sqlite_owner_family(
+        connection, version = _open_existing_read_connection(vault_root)
+    except (FileNotFoundError, RuntimeError, sqlite3.Error, OSError):
+        return None
+    if version != SCHEMA_USER_VERSION:
+        connection.close()
+        return None
+    return connection
+
+
+def _open_existing_read_connection(
+    vault_root: Path,
+) -> tuple[sqlite3.Connection, int]:
+    connection: sqlite3.Connection | None = None
+    # Scope exit can refuse the opened target, so cleanup encloses every scope.
+    try:
+        with reserved_paths._subsystem_authority_scope("governance.store"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("governance-store",),
+                # External sidecar families do not change the vault's private inventory.
+                identity_may_change=False,
+            ):
+                path = sidecar_path(vault_root)
+                with reserved_paths._sqlite_owner_target_scope(
                     vault_root,
                     path,
                     "governance-store",
-                    conn,
-                )
-                return conn
-            except BaseException:
-                conn.close()
-                raise
-    except (FileNotFoundError, RuntimeError, sqlite3.Error, OSError):
-        return None
+                    create=False,
+                ) as retained_path:
+                    connection = sqlite3.connect(
+                        f"{retained_path.as_uri()}?mode=ro", uri=True
+                    )
+                    connection.execute("PRAGMA query_only=ON")
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                    from . import schema_v4
+
+                    if version not in (SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION):
+                        raise UnsupportedGovernanceSchema(
+                            "governance read requires an existing v3 or v4 store"
+                        )
+                    reserved_paths._publish_sqlite_owner_family(
+                        vault_root, path, "governance-store", connection
+                    )
+        return connection, version
+    except BaseException:
+        if connection is not None:
+            connection.close()
+        raise
 
 
 def open_connection(
@@ -295,19 +307,10 @@ def authorization_session_schema_version(vault_root: Path) -> int | None:
         raise GovernanceStoreUnreadable from None
     connection: sqlite3.Connection | None = None
     try:
-        connection = open_authorization_session_connection(vault_root)
-    except UnsupportedGovernanceSchema:
-        legacy = open_readonly_connection(vault_root)
-        if legacy is None:
-            raise GovernanceStoreUnreadable from None
-        legacy.close()
-        return SCHEMA_USER_VERSION
+        connection, version = _open_existing_read_connection(vault_root)
+        return version
     except (OSError, RuntimeError, sqlite3.Error):
         raise GovernanceStoreUnreadable from None
-    else:
-        from . import schema_v4
-
-        return schema_v4.SCHEMA_USER_VERSION
     finally:
         if connection is not None:
             connection.close()
