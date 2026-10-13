@@ -94,9 +94,9 @@ _JOB_TOKEN = re.compile(r"import-job:([0-9a-f]{32})")
 _BOM = b"\xef\xbb\xbf"
 _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
-# Store refusals a later tick outlives; any other batch error fails the job.
+# Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
 _STORE_STATE = frozenset(
-    {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST}
+    {"MUTATION_BUSY", takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST}
 )
 
 
