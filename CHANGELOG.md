@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.117.1](https://github.com/Artexis10/exomem/compare/v0.117.0...v0.117.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **collections:** support first-store setup on a single host ([#1735](https://github.com/Artexis10/exomem/issues/1735)) ([b628ec2](https://github.com/Artexis10/exomem/commit/b628ec2ccd8917e63d16e4510eccaf6f03f2d3ab))
+* **import:** preserve jobs during writer contention ([#1739](https://github.com/Artexis10/exomem/issues/1739)) ([78492c3](https://github.com/Artexis10/exomem/commit/78492c3e6b54bfc5f9b272cc8226b23647c95591))
+* **registry:** admit consumed history snapshots ([#1726](https://github.com/Artexis10/exomem/issues/1726)) ([990c1c9](https://github.com/Artexis10/exomem/commit/990c1c9878e8d51949a9c30d8aec66ee8acc15ca))
+
 ## [0.117.0](https://github.com/Artexis10/exomem/compare/v0.116.0...v0.117.0) (2026-10-13)
 
 
