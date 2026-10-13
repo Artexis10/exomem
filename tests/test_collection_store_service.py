@@ -155,6 +155,49 @@ def service(tmp_path, monkeypatch):
                 started.stop()
 
 
+def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_path, monkeypatch):
+    """A recoverable declaration in trash cannot block enrollment of a new store."""
+    root = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
+    monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
+    (root / "Knowledge Base/_Schema").mkdir(parents=True)
+    (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
+    state_migration.require_vault_state_ready(root)
+    trashed = root / "Knowledge Base/_trash/2026-01-01/removed/_collection.md"
+    trashed.parent.mkdir(parents=True)
+    original = summary_text().encode()
+    trashed.write_bytes(original)
+    source = tmp_path / "manifest.md"
+    source.write_bytes(original)
+    for name, value in {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "gate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, source, manifest_path(), why="first store collection") == 0
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert [entry["collection_id"] for entry in marker["collections"]] == [CID]
+    assert trashed.read_bytes() == original
+
+
+def test_nested_archive_declarations_retain_file_source_ownership(tmp_path):
+    """A live declaration in a nested archive still owns its source outside that directory."""
+    root = tmp_path / "vault"
+    path = "Knowledge Base/Records/_archive/Declared/_collection.md"
+    source = "Knowledge Base/Records/Work/Items"
+    manifest = root / path
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(manifest_text().replace("source: Items", "source: " + source))
+    assert collections.load_manifest(root, path).storage.source == source
+    proposed = {"manifest_path": DAILY_PATH, "source_path": source, "layout": "markdown-items"}
+    refused(lambda: authority.require_new_file_ownership(root, None, proposed),
+            "COLLECTION_STORE_MARKER_CONFLICT")
+
+
 def test_the_service_startup_gate_admits_the_mixed_vault(service):
     """Defect: the installed service refuses to start on a vault whose marker routes C to the store."""
     state_migration.require_vault_state_ready(service.root)
