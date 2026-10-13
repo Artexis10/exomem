@@ -48,23 +48,31 @@
 
 - [x] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
   Evidence (#1368): `infra/cellctl/pyproject.toml`; `tests/test_fixture_schema.py` (`test_generation_bumps_only_on_desired_column_change`, `test_cellctl_role_cannot_write_desired_columns`, `test_gateway_role_cannot_write_desired_state`); fixtures refreshed from Substrate `2b38730` (#1387).
-- [ ] 3.2 Write red-first unit tests for the rendered manifests (D5):
+- [x] 3.2 Write red-first unit tests for the rendered manifests (D5):
   - Pod Security labels, quota, and a default-deny policy with gateway-only ingress;
   - no runtime egress (not even DNS), and backup egress limited to 443 plus DNS;
   - no ServiceAccount token, `readOnlyRootFilesystem`, the `/tmp` emptyDir, and `fsGroup` 10001 with `fsGroupChangePolicy: OnRootMismatch`;
   - the `cell-init` init container;
   - readiness on `/health/ready`, liveness on `/health`;
   - the encrypted `reclaimPolicy: Delete` class.
-- [ ] 3.3 Implement the reconcile loop (D4):
+  Evidence (#1368, #1396): `tests/test_manifests.py` covers security labels, quota, network isolation, runtime mounts, init, probes and PVC class selection.
+  `tests/test_platform_chart_headers.py::test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes` covers the rendered encrypted `Delete` class.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed both suites on exact release source `886a0a9`.
+  Its chart step rejects skipped cases. The isolated original-image qualification also passed the manifest cases on 2026-10-13.
+- [x] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
   - readiness from pod conditions;
-  - rendering the current image on every ordinary pass;
+  - rendering the cell's current image whenever ordinary convergence requires an apply;
   - the `exomem.io/hold` marker pinning image and replicas, recorded on the row and resumed after a restart;
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
-- [ ] 3.4 Implement the rollout (D6) and prove each property:
+  Evidence (#1368): `tests/test_reconcile.py` covers notification reconnects, holds, readiness changes, retries and the init deadline against disposable Postgres.
+  `tests/test_decide.py`, `tests/test_db.py` and `tests/test_k8s_client.py` cover current-image selection, generation matching, observed-column writes and server-side apply.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed 504 fast cases, with two skips, on exact release source `886a0a9`.
+  The settled-row optimization in D4 avoids redundant applies; required renders still preserve the cell's current image.
+- [x] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
   - stop, then backup, then start, with annotations as attempt state;
@@ -73,12 +81,20 @@
   - a failed restore holding the cell stopped with `RESTORE_FAILED` and retrying;
   - resumption of each hold after a cellctl restart;
   - no flap while paused.
-- [ ] 3.5 Implement secrets (D7):
+  Evidence (#1368): `tests/test_rollout.py`, `tests/test_decide.py`, `tests/test_jobs.py` and `tests/test_k8s_client.py` cover these source properties.
+  The isolated original 0.116 controller image passed all 234 selected boundary cases on 2026-10-13, including those rollout cases.
+  Failed-restore, absent-Job retry and recorded-restoration cases jointly prove recovery without repeating Kubernetes TTL behavior.
+  This closes implementation and property-test scope; production rollout and recovery acceptance remain in section 6.
+- [x] 3.5 Implement secrets (D7):
   - the C4 bearer, with current and previous versions;
   - per-cell data keys, AES-GCM envelope, versioned, with a write-once `backup_key_wrapped`;
   - per-cell prefix-restricted B2 keys stored write-once as `b2_key_id` and `b2_key_wrapped`, deleting the losing key on a race;
-  - Secrets rendered from the row on every pass, never read back.
+  - tenant Secrets rendered from the row whenever an apply is required, never read back.
   Test that plaintext keys never reach the database, and that one cell's key cannot read another cell's prefix.
+  Evidence (#1368, #1422): `tests/test_secrets.py` and `tests/test_db.py` cover bearer overlap, authenticated envelopes and atomic, wrapped-only persistence.
+  `tests/test_reconcile.py` covers losing-key deletion and rendering tenant Secrets from stored rows; `tests/test_b2.py` checks the requested bucket and cell prefix.
+  Backblaze's [application-key contract](https://www.backblaze.com/apidocs/b2-create-key) restricts access to the requested prefix; [older Native API versions remain supported](https://www.backblaze.com/docs/cloud-storage-native-api-versions).
+  The exact-source fast suite above passed. Prefix isolation combines the tested adapter request with that provider contract, without claiming a live cross-prefix refusal probe.
 - [x] 3.6 Implement backups (D8):
   - the nightly stop-backup-start window under a `backup` hold, with its deadline;
   - the pre-upgrade backup;
@@ -87,13 +103,16 @@
   - a restore Job using `--delete`.
   The operator export runbook moved to 6.4 (deferred).
   Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); the live K3s suite, run 36199720123 on `feat/cloud-cellctl` `24fcb49`, the head that merged as #1368.
-- [ ] 3.7 Implement verified deletion (D10) in this order:
+- [x] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
   3. every B2 object version under the prefix;
   4. the per-cell B2 key, by `b2_key_id`;
   5. the wrapped keys.
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
+  Evidence (#1368, #1395, #1402): `tests/test_reconcile.py` and `tests/test_decide.py` cover ordered absence checks and retaining wrapped keys after failed observations.
+  `tests/test_b2_pagination.py` covers every object version and refuses incomplete listings; `docs/runbooks/cloud-cell-deletion.md` records the etcd snapshot residual.
+  The exact-source fast suite above passed. Disposable-cluster deletion acceptance remains in task 3.10.
 - [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
   Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
 - [ ] 3.9 Add platform chart entries:
@@ -233,17 +252,23 @@
 ### Launch and resilience roadmap
 
 Current evidence separates healthy service from recovery and launch acceptance.
-On 2026-10-11, the operator API reports three ready cells on 0.114, with no active holds.
-Their requests remain `1Gi/250m`, with limits `3Gi/2CPU`.
-Shared selection remains off. Capacity currently charges scheduler requests rather than measured peaks.
-Today's backup rows do not prove a B2 restore. Endpoint probes pass; connector sign-in and refresh remain unverified.
-The 0.116 release is not yet published. Existing per-cell pins do not prove that the fleet default selects the reviewed release.
+On 2026-10-13, isolated qualification accepted the published 0.116 Cloud and cellctl images by original digest, source and provenance.
+That qualification does not prove a production rollout, OAuth refresh or owner-sized admission.
+The signed registry and cluster admission dry run pass. The prepared gateway, controller and ordered cell rollout remain unapplied.
+The recorded production window remains pending. The latest fleet receipt retains the previous cell image and requests of `1Gi/250m`, with limits of `3Gi/2CPU`.
+Shared selection remains off. Warm-peak qualification remains open; current capacity charges scheduler requests rather than measured peaks.
+A deployed-image B2 backup and scratch restore matched both vault and host state, with scratch cleanup verified.
+That proof does not close in-place restore, historical rollback, connector sign-in or token refresh.
+Existing per-cell pins do not prove that the fleet default selects the qualified release.
 The Neon cutover and project deletion are closed; do not repeat them.
 Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
 
 - [ ] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
-  That proof did not compare `/data/host` runtime state. Complete vault and host comparisons, cleanup absence proofs and the recurring operator procedure.
+  That historical proof did not compare `/data/host` runtime state.
+  On 2026-10-13, a stopped-source backup and scratch restore matched both vault and host state; scratch absence proofs passed.
+  This accepts the deployed-image dual-root comparison, not a 0.116 rollout or historical rollback.
+  Reconcile that receipt with the repeatable operator procedure before closing this task.
 - [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
   Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
   Verify old-image route reads/writes, custody and durable debt before any live pin.
@@ -254,7 +279,9 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Never restore pre-upgrade S0 over later committed writes or add a downmigration.
 - [ ] 6.7 Resilience 3: recheck damaged-volume or bad-import recovery through the existing in-place B2 restore helper.
   The 2026-10-09 QA restore matched 45/45 vault files with 93 seconds of downtime.
-  Host-state comparison was absent. Reconcile that missing scope and verify authenticated service, custody, holds and cleanup.
+  Host-state comparison was absent from that historical in-place run.
+  The 2026-10-13 deployed-image scratch recovery matched both roots and verified custody, service authentication and cleanup.
+  Scratch recovery does not close the in-place failure path or gateway OAuth acceptance. Keep those scopes open.
 - [ ] 6.8 Resilience 4: prove recovery after actual CSI node loss on approved disposable infrastructure.
   Verify surviving-volume reattachment or B2 recovery, canonical data, host custody and service readiness.
   The older local-storage CI node-loss run does not prove the current CSI deployment's failure path.
@@ -278,6 +305,8 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
   A production request change to `512Mi/125m` requires separate operator restart go.
   If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
+  The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
+  Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
 - [ ] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
   Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
   The 2026-09-28 exercise does not close this current-release acceptance.
@@ -300,6 +329,9 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   `hosted-agent-surface` also has no active delta and is retired after its generic contracts were reconciled.
   Registry, bootstrap, capture doctrine, and Cloud parity remain in their current command-surface, bootstrap, portable-agent, and Cloud cell contracts.
   Historical Hosted packages and their original receipts remain immutable. Three capabilities remain blocked by active deltas.
+  The retired browser transfer routes, provisioning v2, security SQLite authority, credential state machine and operator probe requirements are removed.
+  Private authenticated ingress retains its generic authentication and tenant-isolation requirements without the deleted transfer exceptions.
+  Session outage tolerance, portability, memory limits and frozen-verifier requirements remain with their active consumers and deltas.
   Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
   Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
   Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
