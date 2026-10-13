@@ -6425,7 +6425,7 @@ def op_activate_context(
 
     Follow the user's recall settings. For initial recall, pass the current user
     message verbatim once per turn; reuse context already supplied.
-    Use conversation only for an unclear subject: selected relevant cues, never full history.
+    Use conversation only for relevant subject or attachment cues; never full history.
 
     Returns bounded authorized context, current state, references and provenance.
     Abstains on unresolved subjects; retry with a chosen visible anchor.

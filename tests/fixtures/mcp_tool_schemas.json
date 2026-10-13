@@ -8,7 +8,7 @@
     }
   },
   "activate_context": {
-    "description": "Compile authorized stored context for the user's current turn.\n\nFollow the user's recall settings. For initial recall, pass the current user\nmessage verbatim once per turn; reuse context already supplied.\nUse conversation only for an unclear subject: selected relevant cues, never full history.\n\nReturns bounded authorized context, current state, references and provenance.\nAbstains on unresolved subjects; retry with a chosen visible anchor.\nOrigin labels distinguish cues from user words. Reads no attachments and writes no memory.\nDue items and upkeep grant no write authority.\nUse ask_memory for a known gap; read_memory opens a chosen ref.",
+    "description": "Compile authorized stored context for the user's current turn.\n\nFollow the user's recall settings. For initial recall, pass the current user\nmessage verbatim once per turn; reuse context already supplied.\nUse conversation only for relevant subject or attachment cues; never full history.\n\nReturns bounded authorized context, current state, references and provenance.\nAbstains on unresolved subjects; retry with a chosen visible anchor.\nOrigin labels distinguish cues from user words. Reads no attachments and writes no memory.\nDue items and upkeep grant no write authority.\nUse ask_memory for a known gap; read_memory opens a chosen ref.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
