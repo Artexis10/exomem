@@ -1085,6 +1085,7 @@ class SessionAuthority:
             receipt_key,
             collection=self.refresh_redemptions_collection,
         )
+        receipt_created = False
         if raw_receipt is None:
             proposed = RefreshRedemptionRecord(
                 schema_version=_ACCESS_SCHEMA_VERSION,
@@ -1130,21 +1131,24 @@ class SessionAuthority:
         else:
             receipt = parse_redemption(raw_receipt, label="redemption")
 
-        raw_grace = await self._storage.get(
-            receipt_key,
-            collection=self.refresh_grace_collection,
-        )
-        grace = (
-            None
-            if raw_grace is None
-            else parse_redemption(raw_grace, label="grace")
-        )
-        if grace is None or grace.claim_id != receipt.claim_id:
-            await self._revoke_family(
-                grant.family_id,
-                reason="refresh-token-reuse",
+        # Only an existing redemption can be a replay. Storage delay does not
+        # turn the atomic first-redemption winner into token reuse.
+        if not receipt_created:
+            raw_grace = await self._storage.get(
+                receipt_key,
+                collection=self.refresh_grace_collection,
             )
-            raise InvalidRefreshToken("refresh token reuse detected")
+            grace = (
+                None
+                if raw_grace is None
+                else parse_redemption(raw_grace, label="grace")
+            )
+            if grace is None or grace.claim_id != receipt.claim_id:
+                await self._revoke_family(
+                    grant.family_id,
+                    reason="refresh-token-reuse",
+                )
+                raise InvalidRefreshToken("refresh token reuse detected")
 
         family = await self._load_family(grant.family_id)
         if family is None or not await self._family_is_active(family):
