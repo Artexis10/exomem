@@ -45,6 +45,16 @@ def test_cancel_and_expiry_stop_active_import_before_cleanup():
     assert expired.import_updates["error_code"] == "IMPORT_HOLD_EXPIRED"
 
 
+def test_prepare_rejects_an_empty_termination_report_without_publishing_a_key():
+    """A successful Pod without a recipient must not admit an unusable encrypted upload."""
+    row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1, hold_kind="import", hold_started_at=NOW)
+    item = ImportRow(str(uuid.uuid4()), CELL, "adopt", 4, 1, "requested", NOW)
+    observed = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell", statefulset_hold_kind="import")
+    result = decide_import(row, item, observed, {"prepare": ImportJob(exists=True, succeeded=True)}, now=NOW)
+    assert result.import_updates == {"error_code": "IMPORT_KEY_INVALID"}
+    assert result.hold_kind == "import" and result.replicas == 0
+
+
 def test_completed_protected_import_needs_cleanup_before_done():
     row = CellRow(CELL, uuid.uuid4(), 10, 0, "running", None, 1, hold_kind="import", hold_started_at=NOW)
     item = ImportRow(str(uuid.uuid4()), CELL, "archive_members", 12, 2, "uploaded", NOW, recipient="age1" + "a" * 58)

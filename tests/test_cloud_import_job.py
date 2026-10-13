@@ -197,3 +197,111 @@ def test_command_wrong_key_reports_only_a_content_free_error(vault, tmp_path, mo
     assert json.loads(message.read_text()) == {"ok": False, "error": "ARCHIVE_UNDECRYPTABLE"}
     output = capsys.readouterr()
     assert output.out == output.err == ""
+
+
+def test_commands_keep_identity_private_and_discard_only_the_named_import(vault, tmp_path, monkeypatch, capsys, caplog):
+    """A leaked identity or an overbroad discard would expose or erase another import."""
+    caplog.set_level("DEBUG")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    import_id, other_id = str(uuid.uuid4()), str(uuid.uuid4())
+    message = tmp_path / "termination.json"
+    command = ["--vault", str(vault), "--import-id", import_id, "--termination-log", str(message)]
+    assert cloud_import_job.main(["prepare", *command]) == 0
+    identity = vault.parent / ".import-keys" / import_id / "identity"
+    assert identity.stat().st_mode & 0o777 == 0o600
+    assert not identity.is_relative_to(vault) and not identity.is_relative_to(vault.parent / "host")
+    recipient = subprocess.run(["age-keygen", "-y", str(identity)], capture_output=True, check=True).stdout.decode().strip()
+    assert recipient.startswith("age1")
+    assert json.loads(message.read_text()) == {"ok": True, "recipient": recipient}
+    output = capsys.readouterr()
+    # age fixes this identity prefix; it is a wire token, not user vocabulary.
+    assert "AGE-SECRET-KEY-" not in output.out + output.err + caplog.text + message.read_text()
+
+    content = b"Invented imported note\n"
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        member = tarfile.TarInfo("member-canary.md")
+        member.size = len(content)
+        tar.addfile(member, io.BytesIO(content))
+    ciphertext = subprocess.run(["age", "-r", recipient], input=archive.getvalue(), capture_output=True, check=True).stdout
+    request = cloud_import_job.CloudImportRequest(
+        import_id=import_id, cell_id=CELL, kind="adopt", declared_files=1, declared_bytes=len(content),
+        ciphertext_bytes=len(ciphertext), ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest(),
+    )
+    monkeypatch.setattr(cloud_import_job, "urlopen", lambda *args, **kwargs: io.BytesIO(ciphertext))
+    assert cloud_import_job.main(["import", *command, "--request", request.model_dump_json(),
+                                  "--url", "https://storage.example/import"]) == 0
+    assert (vault / "_Imports" / import_id / "member-canary.md").read_bytes() == content
+    assert json.loads(message.read_text()) == {"ok": True, "files": 1, "bytes": len(content)}
+    output = capsys.readouterr()
+    public_output = output.out + output.err + caplog.text + message.read_text()
+    assert "member-canary.md" not in public_output and content.decode().strip() not in public_output
+    assert "AGE-SECRET-KEY-" not in public_output
+
+    staging = vault.parent / f".import-{import_id}"
+    staging.mkdir()
+    (staging / "member-canary.md").write_bytes(content)
+    unrelated = [vault.parent / ".import-keys" / other_id,
+                 vault.parent / f".import-{other_id}", vault / "_Imports" / other_id]
+    for directory in unrelated:
+        directory.mkdir(parents=True)
+        (directory / "retained.md").write_bytes(b"Retained unrelated import\n")
+    outside = {path.relative_to(vault.parent): path.read_bytes() for path in vault.parent.rglob("*")
+               if path.is_file() and path != message and not any(path.is_relative_to(target) for target in
+                   [identity.parent, staging, vault / "_Imports" / import_id])}
+    assert cloud_import_job.main(["discard", *command]) == 0
+    assert json.loads(message.read_text()) == {"ok": True}
+    assert not identity.parent.exists() and not staging.exists() and not (vault / "_Imports" / import_id).exists()
+    for relative, expected in outside.items():
+        assert (vault.parent / relative).read_bytes() == expected
+    assert not any(path.is_file() and path.read_bytes() == content for path in vault.rglob("*"))
+    output = capsys.readouterr()
+    public_output = output.out + output.err + caplog.text + message.read_text()
+    assert "member-canary.md" not in public_output and content.decode().strip() not in public_output
+    assert "AGE-SECRET-KEY-" not in public_output
+
+
+@pytest.mark.parametrize(("failure", "code"), [("digest", "ARCHIVE_DIGEST_MISMATCH"),
+                                               ("age-final-chunk", "ARCHIVE_UNDECRYPTABLE")])
+def test_command_refuses_digest_or_late_decryptor_failure_without_committing(vault, tmp_path, monkeypatch, capsys, caplog, failure, code):
+    """A complete tar must not commit when its ciphertext or final age chunk is invalid."""
+    caplog.set_level("DEBUG")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    import_id = str(uuid.uuid4())
+    recipient = cloud_import_job.prepare(vault.parent, import_id, CELL)
+    archive = io.BytesIO()
+    content = b"Invented refused note\n"
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        member = tarfile.TarInfo("refused-member-canary.md")
+        member.size = len(content)
+        tar.addfile(member, io.BytesIO(content))
+    # Tar padding lets age emit a complete archive before rejecting its final chunk.
+    ciphertext = subprocess.run(["age", "-r", recipient], input=archive.getvalue() + bytes(65536),
+                                capture_output=True, check=True).stdout
+    if failure == "age-final-chunk":
+        ciphertext = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+        decrypted = subprocess.run(["age", "-d", "-i", str(vault.parent / ".import-keys" / import_id / "identity")],
+                                   input=ciphertext, capture_output=True)
+        assert decrypted.returncode != 0
+        with tarfile.open(fileobj=io.BytesIO(decrypted.stdout)) as tar:
+            assert tar.extractfile("refused-member-canary.md").read() == content
+    digest = "0" * 64 if failure == "digest" else hashlib.sha256(ciphertext).hexdigest()
+    request = cloud_import_job.CloudImportRequest(
+        import_id=import_id, cell_id=CELL, kind="adopt", declared_files=1, declared_bytes=len(content),
+        ciphertext_bytes=len(ciphertext), ciphertext_sha256=digest,
+    )
+    before = {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    monkeypatch.setattr(cloud_import_job, "urlopen", lambda *args, **kwargs: io.BytesIO(ciphertext))
+    message = tmp_path / "termination.json"
+    assert cloud_import_job.main(["import", "--vault", str(vault), "--import-id", import_id,
+        "--request", request.model_dump_json(), "--url", "https://storage.example/import",
+        "--termination-log", str(message)]) == 1
+    assert json.loads(message.read_text()) == {"ok": False, "error": code}
+    assert before == {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    assert not (vault.parent / f".import-{import_id}").exists()
+    output = capsys.readouterr()
+    public_output = output.out + output.err + caplog.text + message.read_text()
+    assert "refused-member-canary.md" not in public_output and content.decode().strip() not in public_output
+    assert "AGE-SECRET-KEY-" not in public_output
