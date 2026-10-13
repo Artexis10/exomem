@@ -20,6 +20,7 @@ at-scale evidence.
 from __future__ import annotations
 
 import collections
+import json
 import random
 import sys
 import threading
@@ -310,12 +311,12 @@ def test_the_dreamer_yields_to_a_write_burst_and_changes_nothing_for_readers(
     # the lease or the barrier costs whole seconds). One run of each arm on a
     # shared CI runner varies far more than 10%: a burst with no tick inside it
     # measured p95 0.164 s against a control of 0.097 s.
-    assert burst.p95() <= control.p95() * 2.0 + CONTENTION_ALLOWANCE_SECONDS, (
-        burst.p95(),
-        control.p95(),
+    assert burst.p95() <= control.p95() * 2.0 + CONTENTION_ALLOWANCE_SECONDS, json.dumps(
         # Numeric intervals share one clock; phase names are the existing
         # read-span protocol. Failure output contains no page or query text.
         {
+            "upkeep_p95": burst.p95(),
+            "control_p95": control.p95(),
             "control_reads": control.read_intervals,
             "upkeep_reads": burst.read_intervals,
             "control_writes": control.write_intervals,
