@@ -26,9 +26,12 @@ Setting and clearing one context, with the revision compare-and-set, already exi
 
 Measured on a cloud cell with the default empty policy: `ask_memory` returned five notes while the disclosure collector's `path_outcomes` stayed empty.
 That set is the receipt's dedupe key, and the empty-policy shortcut releases without a receipt.
-The collector therefore keeps a separate set of released identities, filled wherever a release decision is made, whatever the policy.
-The release decisions are the receipt schema's closed set (`released`, `release_authorized`).
-The outermost read boundary of a call reports the size of that set.
+The outermost read boundary therefore counts subjects from the final published response, independently of receipt and admission decisions.
+It uses only the tool's supported response fields and the producer's page or canonical-item identity.
+It deduplicates page representations and excludes filing references, discovery references and admission probes.
+Distinct canonical rows cannot collapse into their shared source path.
+Unsupported rich projections and canonical projections without retained row identity report an unknown count.
+The outer boundary explicitly replaces a nested count with unknown when its complete basis is unavailable.
 
 ### Access and write targets
 

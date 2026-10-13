@@ -7,6 +7,12 @@
 Ledger rows SHALL use schema version 2 and carry `access` and `item_count`.
 `access` SHALL be `read` or `write` as the dispatcher classified the invocation, or null when no classification reached the row.
 For a successful read, `item_count` SHALL be the number of distinct items the call's disclosure boundary released, whatever the governance policy.
+The count SHALL use the subjects that survive terminal publication, rather than admission probes or receipt decisions.
+An authored page or canonical stored item SHALL count once when the response delivers its content or declared fields.
+Representation aliases SHALL NOT add items. Provenance and discovery references SHALL NOT add items.
+Distinct canonical items SHALL remain distinct when they share a source path.
+When the response lacks a complete subject identity basis, its count SHALL be null.
+An unknown outer read boundary SHALL replace any numeric count from a nested boundary.
 For a successful write, `item_count` SHALL be the number of distinct pages the commit reported, or, when it reported none, the number of distinct targets the call addressed. It SHALL be null when neither names a page.
 Targets SHALL be compared whole; a bound on the paths a row shows MUST NOT merge distinct targets.
 For any other outcome, `item_count` SHALL be null. A null count MUST NOT be written as zero.
@@ -16,6 +22,16 @@ Both fields SHALL survive content-private logging, because neither carries conte
 
 - **WHEN** a recall on a vault with an empty policy returns five distinct notes
 - **THEN** its row records `access: read` and `item_count: 5`
+
+#### Scenario: Admission work does not change a recall count
+
+- **WHEN** cold and warm activation calls deliver the same two subjects under empty and unrelated governance policies
+- **THEN** each call records `item_count: 2`, regardless of directory probes, filing references, or unit aliases
+
+#### Scenario: Canonical rows lack publication identity
+
+- **WHEN** a response represents canonical rows through a shared source path without retaining their individual identities
+- **THEN** its row records a null count rather than treating that path as one item
 
 #### Scenario: A save whose destination the server chose
 
