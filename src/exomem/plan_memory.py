@@ -198,8 +198,7 @@ def plan_memory(
     Help: bootstrap(section="records_planning").
 
     Args:
-        collection: Manifest path/UUID/ref; inspect without one lists Planning collections.
-        item: Authored fields. area and parent use exomem://plan/<collection-uuid>/<plan-uuid>; query supplies both IDs.
+        collection: Inspect: omit to list.
         plan_id: row plan_id.
         expected_container_hash: inspect/query snapshot.
         expected_item_version: row item_version.

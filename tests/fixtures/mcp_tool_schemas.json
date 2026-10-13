@@ -2231,7 +2231,7 @@
         },
         "collection": {
           "type": "string",
-          "description": "Manifest path/UUID/ref; inspect without one lists Planning collections."
+          "description": "Inspect: omit to list."
         },
         "manifest_path": {
           "type": "string"
@@ -2318,8 +2318,7 @@
           "type": "string"
         },
         "item": {
-          "type": "object",
-          "description": "Authored fields. area and parent use exomem://plan/<collection-uuid>/<plan-uuid>; query supplies both IDs."
+          "type": "object"
         },
         "plan_id": {
           "type": "string",
