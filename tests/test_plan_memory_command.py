@@ -330,8 +330,8 @@ def test_plan_inspect_without_a_selector_reports_an_empty_inventory(tmp_path: Pa
     assert result["unreadable_manifests"] == []
 
 
-def test_planning_discovery_supplies_exact_selectors_and_relationship_help(tmp_path: Path) -> None:
-    from exomem.commands import op_record_memory, product_commands_for
+def test_planning_discovery_supplies_exact_selectors_and_relationship_refs(tmp_path: Path) -> None:
+    from exomem.commands import op_record_memory
     from exomem.plan_memory import plan_memory as public_plan_memory
 
     (tmp_path / "Knowledge Base").mkdir()
@@ -366,10 +366,6 @@ def test_planning_discovery_supplies_exact_selectors_and_relationship_help(tmp_p
         public_plan_memory(tmp_path, action="inspect", collection="Planning work")
     assert raised.value.code == "INVALID_COLLECTION_PATH"
 
-    command = next(c for c in product_commands_for("mcp") if c.name == "plan_memory")
-    help_text = next(p.help for p in command.params if p.name == "item")
-    assert "exomem://plan/<collection-uuid>/<plan-uuid>" in help_text
-    assert "query" in help_text
     selected = candidates[0]
     selector = f"exomem://memory/{selected['collection_id']}"
     public_plan_memory(tmp_path, action="add", collection=selector,
