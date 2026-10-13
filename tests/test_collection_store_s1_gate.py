@@ -422,6 +422,31 @@ def test_restart_reacquires_its_own_head_without_waiting(abc, tmp_path):
     assert meta[schema.META_INSTANCE_ID] == instance
 
 
+def _restart_and_publish(found):
+    result = _restart(found)
+    found.release()
+    return result
+
+
+def test_enabled_core_sync_without_root_evidence_preserves_create_restart_and_publication(ab, tmp_path):
+    """A built-in plugin capability bit must not block a verified local store workflow."""
+    config = ab.root / ".obsidian"
+    config.mkdir()
+    (config / "core-plugins.json").write_text('{"sync": true}')
+    before = ab_bytes(ab.root)
+    assert create_c(ab)["status"] == "marker_admitted"
+    assert ab.write_c(ROW, "Canonical")["outcome"] == "committed"
+    marker = authority.read_marker(ab.root)
+    instance = ab.meta()[schema.META_INSTANCE_ID]
+    ab.release()
+    status, outcome, meta = run_host(tmp_path, tmp_path / "state", "host-a", _restart_and_publish)
+    assert status == {"status": "admitted"} and outcome == "committed"
+    assert meta[schema.META_INSTANCE_ID] == instance
+    assert authority.read_marker(ab.root) == marker and ab_bytes(ab.root) == before
+    with closing(connection.open_reader(replica.replica_path(ab.root))) as reader:
+        assert reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_COMMIT_SEQ,)).fetchone() == ("3",)
+
+
 def _handoff_on_b(found):
     status = found.open()
     rows = found.read_c()

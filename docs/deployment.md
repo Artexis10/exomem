@@ -495,6 +495,12 @@ database. Store custody stays unverified while the vault or the state directory
 is inside a file-sync root. Custody recognizes a root from the evidence in the
 `sync-providers` vocabulary registry: client metadata files, cloud document
 paths, platform variables, Windows sync folder names and vault sync plugins.
+The built-in sync plugin's enabled bit does not identify a connection or sync
+root, so the shipped pack does not treat that bit as root evidence. The
+single-host adapter still checks configured roots, root metadata, platform
+paths, and separation between the vault and live state. An overlay that
+explicitly declares core-plugin evidence retains its conservative refusal.
+No plugin toggle or declaration grants custody.
 If your sync client is not in the shipped pack, add it with
 `schema_memory(subject="sync-providers", operation="save")` or in
 `_Schema/sync-providers.yaml`. You can also list sync roots as absolute paths
@@ -594,6 +600,54 @@ For an RTX 50-series GPU, expect `True`, `sm_120`, and the startup log line sayi
 the embedding model is ready on CUDA; otherwise `find` falls back to keyword/BM25.
 
 ### Automatic single-writer lease and laptop takeover
+
+One managed service can also use the included coordinator locally for collection
+store admission. Set the explicit single-host topology in that service's
+environment:
+
+```dotenv
+EXOMEM_WRITER_LEASE_TOPOLOGY=single-host
+EXOMEM_WRITER_LEASE_URL=http://127.0.0.1:8770
+EXOMEM_WRITER_LEASE_VAULT_ID=main
+EXOMEM_WRITER_LEASE_REPLICA_ID=local
+EXOMEM_WRITER_LEASE_TOKEN=<coordinator-writer-secret>
+```
+
+Run the coordinator under the service manager on the same host, bound to
+`127.0.0.1`, with its database outside the vault. Give the coordinator the same
+writer credential through `EXOMEM_LEASE_COORDINATOR_TOKEN`. Keep its distinct
+operator credential in `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN` in the protected
+coordinator environment and offline operator storage. Ordinary service requests
+receive only the writer credential. Keep the existing vault identifier,
+replica identifier, signing key, and FastMCP home stable.
+
+The source template is `scripts/exomem-lease-coordinator.service`. Render
+`__VENV_PYTHON__` with the installed interpreter, `__COORDINATOR_ENV_FILE__` with
+the protected coordinator environment file, and `__PORT__` with the loopback
+port. Render `__COORDINATOR_STATE_DIRECTORY__` and `__COORDINATOR_DATABASE__` with
+the persistent external directory and database path. Keep these private inputs
+outside the repository. The environment file must allow only its owner to read
+it; the unit's `UMask=0077` protects files the coordinator creates. Run systemd's
+native unit verification on the rendered file before installing it as
+`exomem-lease-coordinator.service` in the user manager. The template restarts a
+failed coordinator and binds only to loopback. It does not install or enable
+itself.
+
+Single-host accepts only a credential-free literal loopback HTTP origin,
+including IPv6 loopback. Paths, queries, fragments, and hostname aliases refuse.
+Its coordinator requests bypass proxies and refuse redirects to another origin.
+This restriction prevents a shared remote coordinator from silently using local
+session identities. A false refusal delays setup for the deployment owner.
+
+The service keeps its existing durable sessions and FastMCP OAuth storage when
+`EXOMEM_OAUTH_STORAGE_URL` is absent. Supplying that URL still selects shared
+storage and requires its existing credentials and namespace. Omitting the
+topology retains multi-host behavior and its shared OAuth requirement.
+`exomem doctor --profile ha --probe` checks the local coordinator and lease
+configuration without requiring an HA edge or two replica origins. The store
+still requires its capability fence, head checks, mutation lock, verified custody,
+and supported reader admission. This setup does not enable store creation or
+migrate an existing collection.
 
 The lease is replication-agnostic. It decides which replica may mutate; it does
 not copy vault files. This desktop/laptop example uses Syncthing, but self-hosters
