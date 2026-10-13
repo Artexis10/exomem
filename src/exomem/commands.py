@@ -6423,37 +6423,31 @@ def op_activate_context(
 ) -> dict:
     """Compile authorized stored context for the user's current turn.
 
-    Use when live policy calls for initial recall; bootstrap reports unknown/changed
-    settings. Pass the turn verbatim. For known gaps, ask_memory recalls and
-    read_memory opens selected refs; neither writes the user's answer.
-    Read-only: bounded recent_context, anchored units, provenance, pointers and
-    governed current_state. Abstains rather than guesses.
-    For ambiguous or unresolved candidates, choose a ref and retry with anchor.
-    episode_due, upkeep and relevant_due_refs are advisory, never mutation authority.
-    Raise at most one relevant due item per maintained client conversation.
-    Details: bootstrap(profile="full") reference index, references/recall.md.
+    Follow the user's recall settings. For initial recall, pass the current user
+    message verbatim once per turn; reuse context already supplied.
+    Use conversation only for an unclear subject: selected relevant cues, never full history.
 
-    Use optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.
-    Returned `origin` labels cues, not the user's words. Activation reads no attachment.
-    For a missed subject, retry with `conversation.focus`; see the engagement reference.
+    Returns bounded authorized context, current state, references and provenance.
+    Abstains on unresolved subjects; retry with a chosen visible anchor.
+    Origin labels distinguish cues from user words. Reads no attachments and writes no memory.
+    Due items and upkeep grant no write authority.
+    Use ask_memory for a known gap; read_memory opens a chosen ref.
 
     Args:
         turn: Current user message verbatim, not a rewritten query. Empty abstains.
         max_chars: Text ceiling, clamped to 500..8,000; overflow becomes pointers.
         purpose: Declared purpose; governs visibility, never ranking.
-        continuity: Previous packet's token, unchanged; drop on new session or
-            compaction. Strengthens reached anchors; resumes unnamed turns.
+        continuity: Previous packet's token unchanged; drop on new session or
+            compaction. Helps reach prior anchors.
         anchor: Chosen visible compiled ref, not Sources/Evidence. Ineligible
             and hidden refs refuse identically.
         include_timings: Per-stage timings.
         client: Lowercase client label; invalid labels are ignored.
         session: Same opaque conversation id each turn; max 256 characters.
         workspace: Project/folder key for thread continuity; max 256 characters.
-        conversation: Pass only relevant context to resolve this turn: {focus?: str,
-            recent?: [{role: "user"|"assistant", text: str}], refs?: [str]}.
-            At most six excerpts and 2,400 characters total; focus 240 characters,
-            refs twelve; never full history or unrelated personal data.
-            Unknown fields ignored; omit when the turn suffices.
+        conversation: Optional focus, already-read refs and up to six relevant excerpts
+            (2,400 characters total). Omit when the turn suffices; never full history
+            or unrelated personal data. The server clips excess and ignores unknown fields.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -13150,15 +13144,6 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
-        # Keep the reference in the description, before any Args/Returns
-        # sections that MCP's docstring parser consumes as schema metadata.
-        introduction, separator, details = desc.partition("\n\n")
-        desc = (
-            introduction.rstrip()
-            + "\n\n    API reference: "
-            "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
-            + (separator + details if separator else "\n")
-        )
         cmds.append(
             Command(
                 name=name,

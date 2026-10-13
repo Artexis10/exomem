@@ -394,6 +394,22 @@ def bind_vault(
         )
         for p in visible
     ]
+    if command is not None and command.name == "activate_context":
+        from .working_set_conversation import public_input_schema
+
+        # Discovery describes existing bounds; validation still uses the permissive dict.
+        visible = [
+            parameter.replace(
+                annotation=typing.Annotated[
+                    dict[str, typing.Any] | None,
+                    WithJsonSchema({"anyOf": [public_input_schema(), {"type": "null"}]}),
+                    Field(description=help_text["conversation"]),
+                ],
+            )
+            if parameter.name == "conversation"
+            else parameter
+            for parameter in visible
+        ]
     if command is not None and command.name == "edit_memory":
         from .edit_operations import EditOperation, public_edit_operation_schema
 
@@ -436,29 +452,7 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
-    if command is not None and (
-        surface_descriptor is None or surface_descriptor.surface == "mcp"
-    ):
-        authorization_credential = inspect.Parameter(
-            "authorization_session_credential",
-            kind=inspect.Parameter.KEYWORD_ONLY,
-            default=None,
-            annotation=typing.Annotated[
-                str | None,
-                Field(
-                    description="Reserved; leave unset."
-                ),
-            ],
-        )
-        insert_at = next(
-            (
-                index
-                for index, parameter in enumerate(visible)
-                if parameter.kind is inspect.Parameter.VAR_KEYWORD
-            ),
-            len(visible),
-        )
-        visible.insert(insert_at, authorization_credential)
+    # Raw transport consumes credentials before validation; tools advertise task inputs only.
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
