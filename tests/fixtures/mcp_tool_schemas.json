@@ -2231,7 +2231,7 @@
         },
         "collection": {
           "type": "string",
-          "description": "browse_memory path/ref."
+          "description": "Inspect: omit to list."
         },
         "manifest_path": {
           "type": "string"
