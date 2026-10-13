@@ -2679,11 +2679,13 @@ def _check_remote_owner_former_audience(vault_root: Path | None) -> list[DoctorC
 def _check_ha_env() -> list[DoctorCheck]:
     from .writer_lease import LeaseConfig
 
+    checks: list[DoctorCheck] = []
     try:
         config = LeaseConfig.from_env()
     except ValueError as error:
-        return [_check("ha.config", "fail", str(error), "Fix the writer-lease environment configuration.")]
-    shared_auth = config.topology != "single-host" or bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
+        config = None
+        checks.append(_check("ha.config", "fail", str(error), "Fix the writer-lease environment configuration."))
+    shared_auth = config is None or config.topology != "single-host" or bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
     required = {
         "EXOMEM_BASE_URL": "Set the stable public OAuth origin.",
         "EXOMEM_JWT_SIGNING_KEY": "Set the stable durable-session signing root.",
@@ -2697,7 +2699,6 @@ def _check_ha_env() -> list[DoctorCheck]:
     if not shared_auth:
         for key in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_OAUTH_STORAGE_TOKEN", "EXOMEM_LEASE_COORDINATOR_TOKEN"):
             del required[key]
-    checks: list[DoctorCheck] = []
     for key, remediation in required.items():
         if os.environ.get(key, "").strip():
             checks.append(_check(f"ha.env.{key}", "pass", f"{key} is set."))
@@ -2757,7 +2758,7 @@ def _check_ha_env() -> list[DoctorCheck]:
                 "Use one bearer value for writer lease, OAuth storage, and the coordinator."
             ),
         ))
-    if config.topology == "single-host":
+    if config is not None and config.topology == "single-host":
         return checks
     raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
     try:
