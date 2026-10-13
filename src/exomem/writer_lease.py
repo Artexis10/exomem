@@ -4742,15 +4742,14 @@ class LeaseManager:
 
                         vocabulary_application.refuse_identity_preparation(leaf_result)
                     if _ACTIVE_MUTATION_COMMITTED.get():
-                        return attach_evidence(
-                            committed_terminal(
-                                leaf_result,
-                                request_id=request_id,
-                                receipt_id=receipt,
-                                idempotency_key=effective_public_idempotency_key,
-                            ),
-                            gate_context,
+                        terminal = committed_terminal(
+                            leaf_result,
+                            request_id=request_id,
+                            receipt_id=receipt,
+                            idempotency_key=effective_public_idempotency_key,
                         )
+                        _note_committed_terminal_targets(terminal)
+                        return attach_evidence(terminal, gate_context)
                     if isinstance(leaf_result, _CanonicalRequestReplay) or ((
                         command.name in {"record_memory", "plan_memory"}
                         and valid_collection_receipt(leaf_result)
@@ -6592,6 +6591,20 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _note_committed_terminal_targets(terminal: Mapping[str, Any]) -> None:
+    """Hand the call ledger the pages this write committed, from the terminal's
+    own path projection, so a write whose destination the server derived still
+    reports what it saved. Paths only; the ledger keeps a count where paths are
+    content."""
+    from . import call_ledger
+
+    path = terminal.get("path")
+    paths = terminal.get("paths")
+    call_ledger.note_committed_targets(
+        [path] if isinstance(path, str) else paths if isinstance(paths, list) else []
+    )
+
+
 def _request_prominence_context(func):
     @wraps(func)
     def wrapped(command, *injected, **kwargs):
@@ -6773,6 +6786,10 @@ def invoke_command(
             emit_boundary_receipt(collector)
             raise
         emit_boundary_receipt(collector)
+        from . import call_ledger
+        from .governance.egress import released_item_count
+
+        call_ledger.note_released_items(released_item_count(collector))
         return result
 
 

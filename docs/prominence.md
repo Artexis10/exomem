@@ -64,7 +64,9 @@ removing a saved value cannot contradict the pin, and refusing would leave saved
 context values stuck. A *set* that conflicts with the pin is still refused.
 
 The context that applies to a request is **detected from the calling client**, or
-from an operator's explicit `EXOMEM_SURFACE`. No argument selects it, and it is an
+from an operator's explicit `EXOMEM_SURFACE`. On Exomem Cloud, the control plane's
+client registry assigns each connected app its context, and the cell applies that
+before detection. No argument selects it, and it is an
 eagerness knob only: it never picks an identity, a vault, a storage path, or an
 authority ceiling. An unrecognised client is treated as `coding`, so it keeps the
 generic default.

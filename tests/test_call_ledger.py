@@ -1312,3 +1312,100 @@ def test_equal_request_ids_and_late_workers_cannot_exchange_activation_results(
     assert [row["activation_result"]["abstained"] for row in rows] == (
         [False] if cancel_first else [False, True]
     )
+
+
+# ------------------------------------------------------------------ schema 2
+
+
+def version_1_row(*, sequence: int, prev_hash: str, tool: str, ts_utc: str) -> dict:
+    """A row exactly as the version 1 builder wrote it: no `access`, no `item_count`."""
+    row = {
+        "schema_version": 1,
+        "sequence": sequence,
+        "prev_hash": prev_hash,
+        "ts_utc": ts_utc,
+        "request_id": "request",
+        "session_id": None,
+        "client_name": "claude.ai",
+        "client_version": None,
+        "transport": "http",
+        "caller_principal_hash": None,
+        "principal_kind": "owner",
+        "tool": tool,
+        "arg_names": [],
+        "args": {},
+        "target_paths": [],
+        "outcome": "ok",
+        "error_code": None,
+        "duration_ms": 1.0,
+        "total_ms": 1.0,
+        "request_bytes": 0,
+        "spans": [],
+        "budget": None,
+        "truncated": False,
+    }
+    row["row_hash"] = call_ledger.row_hash(row)
+    return row
+
+
+def test_an_upgraded_ledger_verifies_across_its_version_1_rows(ledger_dir: Path) -> None:
+    """The first image that writes version 2 rows starts on a ledger an older image
+    filled. Rejecting those rows, or breaking the chain where the versions meet,
+    would make `exomem ledger verify` report tampering after every upgrade."""
+    from exomem import obs_cli
+
+    first = version_1_row(
+        sequence=1, prev_hash=call_ledger.GENESIS_HASH, tool="ask_memory",
+        ts_utc="2026-03-01T09:00:00.000+00:00",
+    )
+    second = version_1_row(
+        sequence=2, prev_hash=first["row_hash"], tool="remember",
+        ts_utc="2026-03-01T09:01:00.000+00:00",
+    )
+    ledger_dir.mkdir()
+    for row in (first, second):
+        call_ledger.append_row(row, path=ledger_dir / "ledger.jsonl")
+    call_ledger.reset_chain_cache()  # the upgraded process starts on that file
+
+    _drive("ask_memory", {"query": "anything"}, _ok)
+
+    upgraded = _rows(ledger_dir)[-1]
+    assert upgraded["schema_version"] == 2
+    assert upgraded["prev_hash"] == second["row_hash"]
+    assert obs_cli.verify_ledger() == []
+
+
+def test_two_long_paths_that_share_their_start_are_two_pages(ledger_dir: Path) -> None:
+    """A row bounds each path it shows. A move of two pages deep in one long folder
+    must still count two pages, not one."""
+    folder = "Notes/" + "a-very-long-folder-name/" * 30
+    row = call_ledger.build_row(
+        sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
+        tool="move_memory", outcome="ok", duration_ms=1.0, access="write",
+        arguments={"paths": [folder + "first.md", folder + "second.md"]},
+    )
+
+    assert row["item_count"] == 2
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs POSIX permissions that bind the caller",
+)
+def test_the_gap_marker_is_never_earlier_than_the_failure_it_marks(ledger_dir: Path) -> None:
+    """A reader in another process starts its activity interval after the marker's
+    time. A marker stamped before the failure, as a coarse file system clock does,
+    would put the lost call back inside that interval."""
+    _drive("ask_memory", {"query": "anything"}, _ok)
+    path = ledger_dir / "ledger.jsonl"
+    path.chmod(0o400)
+    try:
+        for _ in range(100):
+            before = time.time_ns() // 1000 * 1000
+            lost = call_ledger.record_call(
+                request_id="request", tool="ask_memory", outcome="ok", duration_ms=1.0
+            )
+            assert lost is None, "sanity: the append failed"
+            assert call_ledger.gap_marker_path().stat().st_mtime_ns >= before
+    finally:
+        path.chmod(0o600)

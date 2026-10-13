@@ -494,6 +494,9 @@ def bind_vault(
                 # uncovered selector before its leaf. This preliminary result
                 # exists only to keep retry/admission metadata conservative.
                 invocation_read_only = False
+            from . import call_ledger
+
+            call_ledger.note_call_access(invocation_read_only)
             request_id = mcp_request_id()
             tool_name = command.name
             # Computed at most once per call, and only for a mutation: a
@@ -670,6 +673,9 @@ def mcp_caller_identity() -> dict[str, str | None]:
     "which client?" while protecting nothing. The per-principal identity stays
     hashed and separate.
 
+    The name comes from `clientInfo`, then (cloud mode only) the gateway's
+    `cloud_cell.GATEWAY_CLIENT_HEADER`, then `User-Agent`.
+
     Never raises. Outside an MCP call every field is simply `None`.
     """
     identity: dict[str, str | None] = {
@@ -703,12 +709,40 @@ def mcp_caller_identity() -> dict[str, str | None]:
         # transport signal; there is no separate flag to read.
         headers = get_http_headers()
         identity["transport"] = "http" if headers else "stdio"
+        if not identity["client_name"]:
+            from . import cloud_cell
+
+            if cloud_cell.cloud_mode_enabled():
+                gateway_client = str(
+                    headers.get(cloud_cell.GATEWAY_CLIENT_HEADER, "") or ""
+                ).strip()
+                identity["client_name"] = gateway_client or None
         agent = str(headers.get("user-agent", "") or "").strip()
         if agent and not identity["client_name"]:
             identity["client_name"] = agent
     except (LookupError, RuntimeError):
         identity["transport"] = identity["transport"] or "stdio"
     return identity
+
+
+def gateway_client_context() -> str | None:
+    """The engagement context the Cloud gateway declared for this request.
+
+    Cloud mode only, for the reason `cloud_cell.GATEWAY_CONTEXT_HEADER` gives.
+    A value outside the closed context set is ignored, not refused: the header
+    tunes eagerness only, and name detection still answers without it.
+    """
+    from . import cloud_cell, prominence
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+
+        value = get_http_headers().get(cloud_cell.GATEWAY_CONTEXT_HEADER)
+    except (ImportError, LookupError, RuntimeError):
+        return None
+    return value if value in prominence.CONTEXTS else None
 
 
 def peek_request_id() -> str | None:
