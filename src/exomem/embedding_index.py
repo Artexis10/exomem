@@ -139,6 +139,21 @@ class _EmbCache(NamedTuple):
     matrix: np.ndarray
 
 
+def _cache_covers_publication(
+    cached: _EmbCache | None, token: tuple[int, ...] | None
+) -> bool:
+    """A failed token probe must not serve a snapshot known to precede publication."""
+    if cached is None:
+        return False
+    if token is None:
+        return True
+    # Semantic-unit generation does not change the chunk matrix.
+    epoch, generation, instance = token[:3]
+    return cached.instance == instance and (
+        cached.epoch, cached.generation
+    ) >= (epoch, generation)
+
+
 class _MaskCache(NamedTuple):
     """One memoized eligibility row mask for `search`'s allowed-paths filter.
 
@@ -1045,19 +1060,15 @@ class EmbeddingIndex:
         return mirror
 
     def _invalidate_before(self, token: tuple[int, int, int]) -> None:
-        """Release only caches older than this completed publication."""
-        epoch, generation, instance = token
+        """Retain compatible immutable rows for verified catch-up after publication."""
+        epoch, _generation, instance = token
         with self._lock:
             cached = self._cache
-            current = (
-                cached is not None
-                and cached.instance == instance
-                and (
-                    cached.epoch > epoch
-                    or (cached.epoch == epoch and cached.generation >= generation)
-                )
-            )
-            if not current:
+            current = _cache_covers_publication(cached, token)
+            # Same-epoch rows can catch up; a changed space or instance must reload.
+            if not current and (
+                cached is None or cached.instance != instance or cached.epoch != epoch
+            ):
                 self._cache = None
             mask = self._mask_cache
             if mask is not None and (not current or mask.metadata is not cached.metadata):
@@ -1543,7 +1554,7 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None:
+        if served is not None and _cache_covers_publication(served, self._identity_token):
             self._hits += 1
             return served.metadata, served.matrix
         with self._lock:
@@ -1555,7 +1566,7 @@ class EmbeddingIndex:
                 if c is not None and c.recall_policy_identity == policy_identity
                 else None
             )
-            if served is not None:
+            if served is not None and _cache_covers_publication(served, self._identity_token):
                 self._hits += 1
                 return served.metadata, served.matrix
             # Bounded catch-up BEFORE the full reload: a cache a couple of
