@@ -12,6 +12,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -514,9 +515,98 @@ def _row(manager: LeaseManager, public_key: str) -> tuple[str, str, bytes | None
 
 def test_config_is_default_off_and_requires_identities() -> None:
     assert LeaseConfig.from_env({}).enabled is False
+    assert LeaseConfig.from_env({}).topology == "multi-host"
     assert LeaseConfig.from_env({}).schema_version == 4
     with pytest.raises(ValueError, match="WRITER_LEASE_CONFIG"):
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8766", "https://127.2.3.4/", "http://[::1]:8766"])
+def test_single_host_coordination_accepts_literal_loopback_origins(url: str) -> None:
+    config = LeaseConfig.from_env({
+        "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+        "EXOMEM_WRITER_LEASE_URL": url,
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+    })
+    assert config.enabled and config.topology == "single-host"
+
+
+@pytest.mark.parametrize("url", [
+    "", "http://localhost:8766", "https://lease.example", "http://192.0.2.1",
+    "http://operator:secret@127.0.0.1", "http://127.0.0.1/coordinator",
+    "http://127.0.0.1?key=value", "http://127.0.0.1#fragment", "file://127.0.0.1",
+    "http://127.0.0.1:invalid", "http://[::1", "http://[::1%25eth0]",
+])
+def test_single_host_coordination_refuses_origins_that_cannot_prove_locality(url: str) -> None:
+    with pytest.raises(ValueError, match="WRITER_LEASE_CONFIG"):
+        LeaseConfig.from_env({
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_URL": url,
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+        })
+
+
+def test_unknown_writer_topology_refuses_even_without_a_coordinator() -> None:
+    with pytest.raises(ValueError, match="EXOMEM_WRITER_LEASE_TOPOLOGY"):
+        LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_TOPOLOGY": "unrecognized"})
+
+
+def test_constructed_single_host_configuration_cannot_bypass_loopback_validation() -> None:
+    with pytest.raises(ValueError, match="literal loopback"):
+        LeaseConfig(topology="single-host", url="https://lease.example",
+                    vault_id="main", replica_id="local")
+
+
+@pytest.mark.parametrize("same_origin", [False, True])
+def test_single_host_coordinator_redirect_cannot_forward_authority_to_another_origin(same_origin, monkeypatch):
+    """A local coordinator redirect must not send the writer bearer to another authority."""
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/redirected":
+                port = self.server.server_port if same_origin else target.server_port
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/redirected")
+                self.end_headers()
+                return
+            received.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"holder":null,"expires_at":null,"fencing_token":0}')
+
+        def log_message(self, *_args):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (target, origin)]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{target.server_port}")
+        monkeypatch.setenv("no_proxy", "")
+        config = LeaseConfig.from_env({
+            "EXOMEM_WRITER_LEASE_TOPOLOGY": "single-host",
+            "EXOMEM_WRITER_LEASE_URL": f"http://127.0.0.1:{origin.server_port}",
+            "EXOMEM_WRITER_LEASE_VAULT_ID": "main", "EXOMEM_WRITER_LEASE_REPLICA_ID": "local",
+            "EXOMEM_WRITER_LEASE_TOKEN": "writer-secret",
+        })
+        client = writer_lease_module.LeaseCoordinatorClient(config)
+        if same_origin:
+            assert client.status().holder is None
+            assert received == ["Bearer writer-secret"]
+        else:
+            with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+                client.status()
+            assert received == []
+    finally:
+        for server, thread in zip((target, origin), threads, strict=True):
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
 
 def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:

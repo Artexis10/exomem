@@ -98,6 +98,25 @@ store activation/publication unavailable without disabling unrelated file
 collections or knowledge access. Arbitrary unmanaged sync programs SHALL NOT
 be presented as covered by that supported deployment guarantee.
 
+A built-in sync plugin's enabled bit SHALL NOT establish a sync connection or
+root overlap. The shipped adapter SHALL verify configured supported roots,
+root metadata, platform paths, and vault/state separation. It SHALL read
+core-plugin configuration only when the registry declares core-plugin evidence.
+Explicit owner overlays SHALL retain their conservative evidence checks.
+No plugin bit, declaration, or boolean override SHALL grant custody.
+
+#### Scenario: Enabled built-in capability has no overlapping sync root
+
+- **WHEN** the built-in sync plugin is enabled and the adapter verifies no overlapping supported root evidence
+- **THEN** production store creation, marker readmission, restart, and replica publication remain available
+- **AND** actual-root overlap or custody loss still preserves pending intent and bytes while refusing activation or publication
+
+#### Scenario: Unused application configuration is malformed
+
+- **WHEN** core-plugin configuration is unreadable or malformed and the registry declares no core-plugin evidence
+- **THEN** that unused configuration does not prevent otherwise verified custody
+- **AND** an explicit core-plugin evidence overlay still requires its configured evidence to be readable and safe
+
 #### Scenario: A copied store vault rejects an unsupported managed candidate
 
 - **WHEN** a mixed/store vault is copied or restored with a fresh external state root and a supported launcher is asked to start an actual interpreter without its required store capability
