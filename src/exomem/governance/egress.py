@@ -172,13 +172,22 @@ def _packet_publications(packet: Any) -> set[str] | None:
             if not isinstance(entry, Mapping):
                 return None
             if block == "units":
-                entry = entry.get("provenance")
-                if not isinstance(entry, Mapping):
+                provenance = entry.get("provenance")
+                if not isinstance(provenance, Mapping):
                     return None
-                key = "path"
+                # `planning` is this producer's fixed class, not a customer role.
+                if provenance.get("source") == "planning":
+                    if entry.get("ref") == provenance.get("path"):
+                        return None  # A filing-home fallback loses the individual item basis.
+                    key = "ref"
+                else:
+                    entry = provenance
+                    key = "path"
             else:
                 # `plan` is the catalogue producer's fixed item class; path is its filing home.
                 key = "ref" if block != "current_state" and entry.get("kind") == "plan" else "path"
+                if key == "ref" and entry.get("ref") == entry.get("path"):
+                    return None  # A filing-home fallback loses the individual item basis.
             selected = _published_paths([entry], key)
             if selected is None:
                 return None
