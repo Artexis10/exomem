@@ -2739,7 +2739,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
         run_phase("environment creation", ["uv", "venv", str(venv)], env=env, cwd=work, timeout=30)
         run_phase(
             "wheel installation",
-            ["uv", "pip", "install", "--python", str(python), str(wheels[-1])],
+            [
+                "uv", "pip", "install", "--compile-bytecode",
+                "--python", str(python), str(wheels[-1]),
+            ],
             env=env,
             cwd=work,
             timeout=min(args.budget_seconds, 120),
