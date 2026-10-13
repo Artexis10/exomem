@@ -6442,7 +6442,7 @@ def op_activate_context(
         client: Lowercase client label; invalid labels ignored.
         session: Stable opaque conversation ID, at most 256 characters.
         workspace: Thread project key, at most 256 characters.
-        conversation: Bounded focus, read refs and relevant excerpts; never full history.
+        conversation: Focus, read refs, six relevant excerpts/2,400 chars; never full history.
         trigger: user_turn for initial recall; task_refresh keeps turn and uses focus.
         initiator: Descriptive caller label; grants no authority. Invalid labels ignored.
     """

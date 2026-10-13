@@ -97,7 +97,7 @@
             }
           },
           "type": "object",
-          "description": "Bounded focus, read refs and relevant excerpts; never full history."
+          "description": "Focus, read refs, six relevant excerpts/2,400 chars; never full history."
         },
         "trigger": {
           "default": "user_turn",
