@@ -5078,16 +5078,33 @@ class EpistemicGraphIndex:
         were created by this batch. Deletes, non-KB changes, and unexplained
         missing rows remain unprovable and force the whole-graph fallback.
         """
-        if delta.deleted or not created_rels <= {
+        # These fixed diagnostic tokens name proof branches; omit paths and titles.
+        if delta.deleted:
+            log.info(
+                "graph stored resolver proof declined reason=retained_deletions deleted_count=%d",
+                len(delta.deleted),
+            )
+            return None
+        if not created_rels <= {
             rel
             for raw_path in delta.changed
             if (rel := _vault_rel(self.vault_root, Path(raw_path))) is not None
         }:
+            log.info(
+                "graph stored resolver proof declined reason=caller_create_outside_delta "
+                "created_count=%d changed_count=%d",
+                len(created_rels), len(delta.changed),
+            )
             return None
         entries: dict[str, tuple[bool, str | None]] = {}
         for raw_path in delta.changed:
             rel = _vault_rel(self.vault_root, Path(raw_path))
             if rel is None or not rel.startswith(kb_prefix()):
+                log.info(
+                    "graph stored resolver proof declined reason=changed_path_outside_kb "
+                    "changed_count=%d",
+                    len(delta.changed),
+                )
                 return None
             row = conn.execute(
                 "SELECT title FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
@@ -5095,10 +5112,20 @@ class EpistemicGraphIndex:
             ).fetchone()
             if row is None:
                 if rel not in created_rels:
+                    log.info(
+                        "graph stored resolver proof declined reason=missing_row_without_create "
+                        "changed_count=%d created_count=%d",
+                        len(delta.changed), len(created_rels),
+                    )
                     return None
                 entries[rel] = (False, None)
                 continue
             if rel in created_rels:
+                log.info(
+                    "graph stored resolver proof declined reason=existing_row_with_create "
+                    "changed_count=%d created_count=%d",
+                    len(delta.changed), len(created_rels),
+                )
                 return None
             entries[rel] = (
                 True,

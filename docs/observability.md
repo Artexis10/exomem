@@ -130,6 +130,15 @@ edges — while a governed write on an unaffected path takes the incremental pat
 as usual. `freshness.snapshot()["external_pending_paths"]` names what is still
 unrepaired.
 
+When an incremental pass reports `stored_resolver_entries_unreadable`, the
+preceding `graph stored resolver proof declined` record identifies its proof
+branch. The reason distinguishes retained deletions, a caller create outside
+the delta, a changed path outside the knowledge base, a missing row without
+create proof, and an existing row with create proof. The record contains only
+numeric counts; it emits no paths, titles or source text. These are provenance
+failures, not evidence of a SQLite read error. A later sidecar snapshot cannot
+identify which branch a historical attempt took.
+
 ## Event schema
 
 A structured log record (`src/exomem/log_events.py`) carries:
@@ -302,8 +311,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
-never raises: a missing span means that path did not run, not that the call
-failed.
+never raises. A missing span leaves that phase's duration unknown.
 
 Some spans also carry `fields`: named integer counts beside the duration. A
 duration alone cannot separate a slow step from a large one — `embeddings.encode`
