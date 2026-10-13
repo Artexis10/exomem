@@ -362,12 +362,12 @@ def note_call_access(read_only: bool) -> None:
     _note_call_fact(lambda entry: entry.update(access=access))
 
 
-def note_released_items(count: int) -> None:
+def note_released_items(count: int | None) -> None:
     """Record how many distinct items this read's disclosure boundary released.
 
     The outermost boundary of a call finishes last, so its count is the one kept.
     """
-    _note_call_fact(lambda entry: entry.update(released=int(count)))
+    _note_call_fact(lambda entry: entry.update(released=None if count is None else int(count)))
 
 
 def pop_call_facts(token: str | None) -> dict[str, Any]:

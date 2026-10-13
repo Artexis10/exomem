@@ -133,23 +133,104 @@ class DisclosureCollector:
     command_name: str
     outcomes: list[DisclosureOutcome | _DisclosureBatch] = field(default_factory=list)
     path_outcomes: set[tuple[str, str, int | None]] = field(default_factory=set)
-    #: Every identity released to the caller, kept apart from `path_outcomes`:
-    #: that set is the receipt's dedupe key and stays empty under an empty
-    #: policy, which releases without a receipt.
-    released: set[str] = field(default_factory=set)
     credential_redactions: int = 0
     credential_principal: str | None = None
     credential_purpose: str | None = None
 
 
-#: Receipt decisions that put an item in front of the caller. The receipt
-#: schema fixes the closed decision set (`receipts` validates it).
-RELEASE_DECISIONS = frozenset({"released", "release_authorized"})
+def _published_paths(entries: Any, field_name: str) -> set[str] | None:
+    if not isinstance(entries, list):
+        return None
+    paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            return None
+        path = entry.get(field_name)
+        if not isinstance(path, str) or not path:
+            return None
+        # A canonical item reference needs its producer's row identity, not a file path.
+        if path.startswith("exomem://"):
+            return None
+        paths.add(path)
+    return paths
 
 
-def released_item_count(collector: DisclosureCollector) -> int:
-    """Distinct items this boundary released to the caller."""
-    return len(collector.released)
+def _packet_publications(packet: Any) -> set[str] | None:
+    """Read selected subjects from the fixed working-set response fields."""
+    if not isinstance(packet, Mapping) or "abstained" not in packet:
+        return None
+    # Pointers do not carry their producer's authored-page/canonical-item basis.
+    if packet.get("pointers"):
+        return None
+    paths: set[str] = set()
+    # These are packet schema blocks, not customer-defined roles or meanings.
+    for block in ("anchors", "recent_context", "current_state", "units"):
+        entries = packet.get(block, [])
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                return None
+            if block == "units":
+                entry = entry.get("provenance")
+                if not isinstance(entry, Mapping):
+                    return None
+                key = "path"
+            else:
+                # `plan` is the catalogue producer's fixed item class; path is its filing home.
+                key = "ref" if block != "current_state" and entry.get("kind") == "plan" else "path"
+            selected = _published_paths([entry], key)
+            if selected is None:
+                return None
+            paths.update(selected)
+    return paths
+
+
+def released_item_count(collector: DisclosureCollector, result: Any) -> int | None:
+    """Count terminal publication, never admission probes or receipt decisions.
+
+    Unsupported representations keep their count unknown. Canonical store rows
+    can share a file path, and these projections do not retain their identity.
+    """
+    # These command names and response fields belong to the fixed public tool schema.
+    if collector.command_name not in {"ask_memory", "activate_context", "read_memory"}:
+        return None
+    from ..collection_store import authority
+    from ..collection_store.preview import bound_writer
+
+    if bound_writer(collector.vault_root) is not None:
+        return None
+    try:
+        authority.marker_path(collector.vault_root).stat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    else:
+        # A mixed store may publish rows whose identity the packet index already discarded.
+        return None
+    if collector.command_name == "activate_context":
+        paths = _packet_publications(result)
+    elif collector.command_name == "read_memory":
+        paths = _published_paths([result], "path")
+    else:
+        if isinstance(result, Mapping):
+            # Rich packs publish additional subjects without a complete retained basis.
+            if result.get("pack") or result.get("working_set"):
+                return None
+            result = result.get("hits")
+        if not isinstance(result, list):
+            return None
+        paths = set()
+        for hit in result:
+            if not isinstance(hit, Mapping):
+                return None
+            key = "parent_path" if hit.get("result_type") == "semantic_unit" else "path"
+            selected = _published_paths([hit], key)
+            if selected is None:
+                return None
+            paths.update(selected)
+    return None if paths is None else len(paths)
 
 
 _DISCLOSURE_COLLECTOR: ContextVar[DisclosureCollector | None] = ContextVar(
@@ -346,8 +427,6 @@ def _outcome_for_decision(
     compiler, then by the guard) is neither hashed nor recorded twice.
     """
     collector = _collector()
-    if collector is not None and outcome in RELEASE_DECISIONS:
-        collector.released.add(rel_path)
     if (decision is not None and _file_policy_empty(vault_root, policy)
             and not raw_protection.marked(rel_path)):
         return
@@ -1764,8 +1843,6 @@ def canonical_subject_notices(
     for identity, fingerprint, payload_hash, decision in entries:
         outcome = "release_authorized" if decision.level >= LEVEL_FULL else "withheld"
         if collector is not None:
-            if outcome in RELEASE_DECISIONS:
-                collector.released.add(identity)
             if _claim_path_outcome(collector, identity, outcome, decision.level):
                 reusable = (type(decision.level) is int and type(decision.scope_ids) is tuple
                             and all(type(value) is str for value in decision.scope_ids)
