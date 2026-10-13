@@ -3,9 +3,10 @@
 Two orthogonal axes classify a captured source: what the artifact **is**
 (`source_kind`) and what it is **about** (`domain`). Both are open. Any value
 that normalizes to a safe canonical key is accepted, including one this code has
-never seen, and it auto-registers into
-`Knowledge Base/_Schema/source-taxonomy.yaml` on first use — the same contract
-`project_keys` already gives the project axis.
+never seen, and it auto-registers into the selected source-taxonomy overlay on
+first use. Unbound vaults use `Knowledge Base/_Schema/source-taxonomy.yaml`;
+bound vaults use their instance's configured overlay. This is the same contract
+that `project_keys` already gives the project axis.
 
 The semantic keys are authoritative; the directory layout is a *projection* of
 them. A canonical machine key (`research-report`) is deliberately separate from
