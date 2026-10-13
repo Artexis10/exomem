@@ -2039,15 +2039,25 @@ def _decide_path(
         except membership_module.MembershipUnresolved:
             return None
     else:
-        page = find_corpus.parse_page(full_path, mtime, vault_root, content=raw)
-        if page is None:
-            # A `.md` that will not decode IS a genuine read failure, which is
-            # the one meaning `None` still carries.
-            return None
+        from ..foreground_activity import checkpoint
+
+        # A memo hit still yields before reading current registry authority.
+        checkpoint(vault_root)
         try:
-            scope_ids = membership_module.evaluate_snapshot(
-                page, policy, content_hash=live_content_hash or ""
+            scope_ids = membership_module.cached_snapshot_membership(
+                vault_root, find_corpus.page_relative_path(full_path, vault_root), policy,
+                content_hash=live_content_hash or "",
             )
+            if scope_ids is None:
+                page = find_corpus._parse_page_after_checkpoint(
+                    full_path, mtime, vault_root, content=raw
+                )
+                if page is None:
+                    # Undecodable Markdown retains the ordinary read refusal.
+                    return None
+                scope_ids = membership_module.evaluate_snapshot(
+                    page, policy, content_hash=live_content_hash or ""
+                )
         except membership_module.MembershipUnresolved:
             # Same fail-closed signal as the stat failure above: no decision,
             # so every consumer withholds. Reached on a TOCTOU race — the page

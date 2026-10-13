@@ -1713,43 +1713,57 @@ class EmbeddingIndex:
 
     def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
         """Load one serving snapshot directly into its final float32 matrix."""
-        if policy_identity is None:
-            from . import recall_policy
+        with call_spans.span("embeddings.matrix_load.policy"):
+            if policy_identity is None:
+                from . import recall_policy
 
-            policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-        conn = self._connect()
+                policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+        with call_spans.span("embeddings.matrix_load.connect"):
+            conn = self._connect()
         try:
-            conn.execute("BEGIN")
+            with call_spans.span("embeddings.matrix_load.snapshot"):
+                conn.execute("BEGIN")
             try:
-                snapshot_token = self._build_token(conn)
-                epoch, gen, instance = snapshot_token[:3]
-                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-                width = identity.dim if identity is not None else recall_space.current_dim()
-                count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-                matrix = np.empty((count, width), dtype=np.float32)
-                metadata: list[tuple[str, int]] = []
-                cursor = conn.execute(
-                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                )
-                for row, (fp, idx, blob) in enumerate(cursor):
-                    if len(blob) != width * np.dtype(np.float32).itemsize:
-                        raise ValueError("embedding row width differs from stored space")
-                    if row >= count:
-                        raise ValueError("embedding row count differs from snapshot")
-                    matrix[row] = np.frombuffer(blob, dtype=np.float32)
-                    metadata.append((sys.intern(fp), idx))
-                if len(metadata) != count:
-                    raise ValueError("embedding row count differs from snapshot")
+                with call_spans.span("embeddings.matrix_load.snapshot"):
+                    snapshot_token = self._build_token(conn)
+                    epoch, gen, instance = snapshot_token[:3]
+                    identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                    width = identity.dim if identity is not None else recall_space.current_dim()
+                    count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                with call_spans.span("embeddings.matrix_load.allocate"):
+                    matrix = np.empty((count, width), dtype=np.float32)
+                    metadata: list[tuple[str, int]] = []
+                fields = {"expected_rows": count, "width_sum": width}
+                with call_spans.span("embeddings.matrix_load.rows", fields):
+                    try:
+                        cursor = conn.execute(
+                            "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                        )
+                        for row, (fp, idx, blob) in enumerate(cursor):
+                            if len(blob) != width * np.dtype(np.float32).itemsize:
+                                raise ValueError("embedding row width differs from stored space")
+                            if row >= count:
+                                raise ValueError("embedding row count differs from snapshot")
+                            matrix[row] = np.frombuffer(blob, dtype=np.float32)
+                            metadata.append((sys.intern(fp), idx))
+                        if len(metadata) != count:
+                            raise ValueError("embedding row count differs from snapshot")
+                    finally:
+                        fields["rows"] = len(metadata)
+                        fields["vector_bytes"] = len(metadata) * width * np.dtype(np.float32).itemsize
             finally:
-                conn.rollback()
+                with call_spans.span("embeddings.matrix_load.release"):
+                    conn.rollback()
         finally:
-            conn.close()
-        self._observe_identity(identity, snapshot_token)
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
+            with call_spans.span("embeddings.matrix_load.release"):
+                conn.close()
+        with call_spans.span("embeddings.matrix_load.finalize"):
+            self._observe_identity(identity, snapshot_token)
+            try:
+                mtime = self.path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix)
 
     def search(
         self,

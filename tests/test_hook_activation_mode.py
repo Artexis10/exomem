@@ -468,13 +468,22 @@ def test_unrepresentable_windows_override_is_omitted_on_unix(tmp_path, unsafe):
 
 
 @pytest.mark.parametrize("mode", ["mcp", "working-set"])
-def test_managed_refresh_preserves_explicit_activation_mode(tmp_path, mode):
+@pytest.mark.parametrize("explicit_home", [True, False])
+def test_managed_refresh_preserves_activation_mode_and_profile(tmp_path, mode, explicit_home):
     import sys
 
     home = tmp_path / "home"
     profile = home / ".claude-work"
     settings = profile / "settings.json"
     installer.install_hook(hook_dir=profile / "hooks", settings_path=settings, activation_mode=mode)
+    if not explicit_home:
+        config = json.loads(settings.read_text())
+        hook = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        args = shlex.split(hook["command"])
+        position = args.index("--hook-home")
+        del args[position:position + 2]
+        hook["command"] = shlex.join(args)
+        settings.write_text(json.dumps(config))
     report = installer.refresh_wired_profiles(sys.executable, home=home)
     assert report["success"], report
     assert installer.check_hooks(

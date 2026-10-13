@@ -90,6 +90,56 @@ def test_matrix_loads_once_and_is_reused(tmp_path, monkeypatch):
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
 
 
+def test_failed_matrix_load_retains_partial_counts_in_the_call_ledger(tmp_path, monkeypatch):
+    """A rejected vector must retain the load phase and completed row counts."""
+    from exomem import call_ledger, call_spans
+
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.EmbeddingIndex(vault)
+    idx.upsert_file("a.md", ["first"], _mat([1, 0]), 1.0)
+    idx.upsert_file("b.md", ["second"], _mat([0, 1]), 1.0)
+    with sqlite3.connect(idx.path) as conn:
+        conn.execute("UPDATE chunks SET vector = ? WHERE file_path = ?", (b"bad", "b.md"))
+
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    call_ledger.reset_chain_cache()
+    handle = call_spans.MCP_CALL_TOKEN.set("matrix-load-failure")
+    try:
+        with pytest.raises(ValueError, match="embedding row width differs"):
+            idx.all_vectors()
+    finally:
+        spans = call_spans.pop_call_spans("matrix-load-failure")
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    row = call_ledger.record_call(
+        request_id="failed-load",
+        tool="ask_memory",
+        outcome="error",
+        duration_ms=None,
+        spans=spans,
+    )
+    assert row is not None
+    measured = {span["name"]: span for span in row["spans"]}
+    assert measured["embeddings.matrix_load.rows"]["fields"] == {
+        "expected_rows": 2,
+        "width_sum": embeddings.VECTOR_DIM,
+        "rows": 1,
+        "vector_bytes": embeddings.VECTOR_DIM * np.dtype(np.float32).itemsize,
+    }
+    assert measured["embeddings.matrix_load.release"]["ms"] >= 0
+    assert call_ledger.verify() == []
+
+    # A failed load still releases its snapshot and permits the next valid read.
+    with sqlite3.connect(idx.path) as conn:
+        conn.execute(
+            "UPDATE chunks SET vector = ? WHERE file_path = ?",
+            (_pad([0, 1]).tobytes(), "b.md"),
+        )
+    metadata, matrix = idx.all_vectors()
+    assert metadata == [("a.md", 0), ("b.md", 0)]
+    assert np.array_equal(matrix, _mat([1, 0], [0, 1]))
+
+
 def test_index_cache_status_and_unload_are_non_destructive(tmp_path):
     vault = _fresh_vault(tmp_path)
     emb = embeddings.get_embedding_index(vault)
