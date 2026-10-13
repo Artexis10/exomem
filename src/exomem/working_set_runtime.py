@@ -797,11 +797,13 @@ def visible_marks(
     return out
 
 
-def reset_caches_for_tests() -> None:
+def reset_caches_for_tests(*, packets_only: bool = False) -> None:
     """Drop the packet cache, any in-flight build marker, and the manifests the
-    index published for request threads."""
+    index published for request threads, or only packets for warm measurements."""
     with _CACHE_LOCK:
         _PACKET_CACHE.clear()
+        if packets_only:
+            return
         _BUILDS.clear()
         _REEMBED_SCHEDULED.clear()
         _INLINE_LOCKS.clear()

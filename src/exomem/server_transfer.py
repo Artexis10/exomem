@@ -906,7 +906,7 @@ button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;w
 <h1>Add evidence to the KB</h1>
 <form id=f>
 <label>File <small>(max {config.upload_max_bytes // (1024 * 1024)} MB; a public link may be capped lower by the proxy)</small></label><input type=file name=file required>
-<label>Scope</label><input name=scope value="{_attr('scope')}" placeholder="e.g. Yolo" required>
+<label>Scope</label><input name=scope value="{_attr('scope')}" placeholder="e.g. Rental" required>
 <label>Category</label><input name=category value="{_attr('category')}" placeholder="e.g. 01 - Check-in" required>
 <label>Filename (optional)</label><input name=filename value="{_attr('filename')}">
 <label>Description (optional)</label><input name=description value="{_attr('description')}">

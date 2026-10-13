@@ -15,7 +15,7 @@
 
 - [ ] 3.1 Run completion-boundary suites/privacy/strict OpenSpec gates, deliver reviewed source through ordinary PRs and coordinate exact signed image/chart prerequisites with the rollout owner.
 - [ ] 3.2 Verify reviewer-only native file preservation, fresh hash/readback, isolation and saved preferences on the delivered transport; rescan directory drafts and retain truthful provider-review exceptions without changing recall or nudging.
-- [ ] 3.3 Synchronize/archive this change once its non-optional delivery and acceptance tasks are proved; keep both Submit/Publish actions held for Hugo review.
+- [ ] 3.3 Synchronize/archive this change once its non-optional delivery and acceptance tasks are proved; keep both Submit/Publish actions held for rollout owner review.
 
 Source acceptance covers real gateway grants, schema validation, broker HTTP,
 cell staging, canonical Sources/Evidence writers and fresh-process readback in

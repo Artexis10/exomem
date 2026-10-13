@@ -112,7 +112,7 @@
 - [x] 11.1 Run focused parser/registry/contract/index/filter/recall/explanation/context/mutation/surface/adoption/benchmark tests with embeddings disabled.
 - [x] 11.2 Run schema validation, OpenSpec validation, capability generation checks, OpenAPI/MCP fidelity, scaffold leak tests, and Ruff on every changed Python file.
 - [x] 11.3 Run the complete lean suite with embeddings disabled and record totals plus any unrelated baseline failures.
-- [ ] 11.4 Run the corrected full-profile semantic/hybrid, media-extension, and direct-contender benchmark on a quiesced host with a working native model stack, then record revisions/config/results/raw envelopes.
+- [x] 11.4 Superseded and transferred: retain unfinished single-product full-profile proof in `add-context-activation-benchmark` task 4.9. Retire direct-contender acceptance; no full-profile acceptance is claimed.
 - [x] 11.5 Have an independent reviewer verify implementation against every OpenSpec scenario and inspect filter safety/parity, score truth, migration, mutation safety, backward compatibility, generation freshness, benchmark completeness, and claim scope.
 - [x] 11.6 Update the product gap matrix and graph/semantic comparison docs only from recorded benchmark evidence; do not claim unscoped overall product superiority.
 - [x] 11.7 Capture the durable final decision/results in Exomem with typed relations to the earlier comparison and semantic-block registry notes.
@@ -131,6 +131,31 @@ native Torch/SentenceTransformers BGE load before a valid report can be emitted;
 the unexecuted full media lane and superseded pre-correction performance failure
 remain recorded in the comparison docs.
 Independent adversarial re-review cleared the explanation, lifecycle/reconcile,
-performance-boundary, and content-bearing media-fixture proofs. The durable
-claim boundary is captured in Exomem at
-`Notes/Insights/semantic-local-core-benchmark-closes-lean-proof-full-profile-remains-host-gated.md`.
+performance-boundary, and content-bearing media-fixture proofs. The verification
+record above preserves the lean claim and the unverified full-profile boundary.
+
+## Closure boundary
+
+The shipped product contracts are synchronized into canonical specs.
+The `core-product-comparison-benchmark` delta remains historical in this archive;
+it is excluded from canonical sync and creates no comparison capability.
+The unfinished single-product full-profile proof remains open in
+`add-context-activation-benchmark` task 4.9 and its design inheritance clause.
+Contender parity, competitor environments, paired bands, dominance and local-core advantage are retired.
+Historical results remain scoped history, not current full-profile acceptance.
+Archive only after strict validation with
+`openspec archive add-first-class-semantic-language --skip-specs --json`.
+OpenSpec CLI 1.14.0 completed the command on 2026-10-11 and returned
+`archivedAs: 2026-10-11-add-first-class-semantic-language`.
+Its `specsUpdated: false` records the skipped mechanical sync after the selective
+product merge; the comparison delta remains historical and unsynchronized.
+
+## Released product evidence
+
+The product implementation shipped through PRs #232, #241, #242, #245 and #250.
+Their merged commits are ancestors of [v0.115.0](https://github.com/Artexis10/exomem/releases/tag/v0.115.0),
+commit `5abed4438ae767af5c89ccd1438c63e35df107d8`.
+The last slice, [PR #250](https://github.com/Artexis10/exomem/pull/250), merged as
+`7e35b461a1b4ccb76d3a0bcf333cddce3a0179e4` after final head
+`f20195d2b0972eaed8b91e17a72c65fb1b0d9858` passed all ten reported checks.
+Release inclusion establishes the shipped product, not a full-profile benchmark pass.

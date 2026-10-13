@@ -2603,8 +2603,6 @@ class EpistemicGraphIndex:
             return False
         if not self._republish_attempt_due():
             return False
-        from .entity_types import extension_registry_path as entity_registry_path
-
         # Parse and reconstruct topology without excluding canonical writers.
         # The final seal still rechecks exact bytes, not a size/mtime census.
         recall = freshness.prepare_recall_publication(self.vault_root, "vault")
@@ -2614,23 +2612,7 @@ class EpistemicGraphIndex:
         try:
             epoch = graph_sync.canonical_publication_epoch(self.vault_root)
             sidecar_identity = self._availability_sidecar_identity()
-            registry_guards: list[tuple[Path, vault_module.PathGuard | None]] = []
-            for path in (
-                relation_registry.extension_registry_path(self.vault_root),
-                semantic_language_registry.registry_path(self.vault_root),
-                entity_registry_path(self.vault_root),
-            ):
-                try:
-                    path.lstat()
-                except FileNotFoundError:
-                    registry_guards.append((path, None))
-                else:
-                    _, guard = vault_module.read_bounded_guarded_bytes(
-                        self.vault_root,
-                        path.relative_to(self.vault_root).as_posix(),
-                        limit=1024 * 1024,
-                    )
-                    registry_guards.append((path, guard))
+            # Neutral republication proves topology; each caller interprets selected definitions.
             snapshot = self._open_read_snapshot(require_current_projection=False)
             if snapshot is None:
                 return False
@@ -2654,12 +2636,6 @@ class EpistemicGraphIndex:
                 return False
 
             def still_current() -> bool:
-                for path, guard in registry_guards:
-                    if guard is None:
-                        if os.path.lexists(path):
-                            return False
-                    else:
-                        guard.recheck(self.vault_root)
                 return (
                     graph_sync.canonical_publication_epoch(self.vault_root) == epoch
                     and freshness.peek_recall_publication(self.vault_root, "vault", ticket=recall)
@@ -7165,19 +7141,19 @@ class EpistemicGraphIndex:
             ):
                 return
             paths.add(page)
+            if page in provenance:
+                return
+            # The first admitted match owns page provenance.
             requested_relation, resolved_relation = _query_identity(
                 matched_key, matched_via
             )
-            provenance.setdefault(
-                page,
-                RelationMatch(
-                    relation_type,
-                    cand_dir,
-                    counterpart,
-                    matched_via,
-                    requested_relation,
-                    resolved_relation,
-                ),
+            provenance[page] = RelationMatch(
+                relation_type,
+                cand_dir,
+                counterpart,
+                matched_via,
+                requested_relation,
+                resolved_relation,
             )
 
         for src_path, dst_path, relation_type, matched_via, matched_key, symmetric in rows:

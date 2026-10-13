@@ -1,8 +1,8 @@
-"""Pure, fail-closed classification of staged vocabulary write images.
+"""Classify staged vocabulary writes against their selected definitions.
 
-This is deliberately a byte-image classifier.  It neither reads a corpus nor
-writes a file; the mutation terminal supplies the exact images it will later
-commit under its content lock.
+The mutation terminal supplies the exact images it will commit under its
+content lock. Operation-local snapshots interpret the complete batch before
+and after publication; classification never writes a file.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import yaml
 from . import entity_types, memory_refs, relation_registry, semantic_contract, vault
 from .kbdir import kb_dirname
 from .semantic_contract import _derive_relation_facts
+from .vocabulary import contract, instances
+from .vocabulary import registry as vocabulary_registry
 
 _SCHEMA_PREFIX = f"{kb_dirname()}/_Schema/"
 _ALLOWED_ACTIONS = frozenset({"entity.create", "entity_type.add", "relation_type.add", "edge.add"})
@@ -141,25 +143,115 @@ def _unique_yaml_keys(node: yaml.Node | None) -> bool:
     return True
 
 
-def _registry_from_image(
-    image: CanonicalWriteImage | None,
-    value: bytes | None,
-    *,
-    kind: str,
-    vault_root: Path,
-):
+@dataclass(frozen=True)
+class RegistryTransition:
+    """One selected registry's admitted snapshots for this complete operation."""
+
+    spec: vocabulary_registry.RegistrySpec
+    before: vocabulary_registry.Snapshot
+    after: vocabulary_registry.Snapshot
+    admission: contract.RegistryAdmission
+    guard: Any = None
+    image: CanonicalWriteImage | None = None
+
+    def recheck(self, root: Path, *, after: bool = False) -> None:
+        self.admission.recheck()
+        if self.image is not None:
+            if not after:
+                instances.recheck(root, self.spec)
+                current = vocabulary_registry.load(self.spec, root)
+                if (current.content_hash, current.effective_digest) != (self.before.content_hash, self.before.effective_digest):
+                    raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: operation definitions changed")
+            path = self.spec.overlay(root).relative_to(root).as_posix()
+            expected = self.after if after else self.before
+            raw_image = self.image.after if after else self.image.before
+            raw_hash = self.image.after_sha256 if after else self.image.before_sha256
+            if raw_image is None:
+                current_guard = vault.PathGuard.capture(root, path, leaf_policy="absent")
+                text = None
+            else:
+                raw, current_guard = vault.read_bounded_guarded_bytes(
+                    root, path, limit=vocabulary_registry.MAX_OVERLAY_BYTES,
+                    expected_hash=raw_hash,
+                )
+                text = raw.decode("utf-8")
+            current = vocabulary_registry._build(self.spec, text)
+            if (current.content_hash, current.effective_digest) != (expected.content_hash, expected.effective_digest):
+                raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: operation definitions changed")
+            current_guard.recheck(root)
+            # The batch writer also checks its installed inode and ancestor guards.
+            return
+        instances.recheck(root, self.spec)
+        if self.guard is not None:
+            self.guard.recheck(root)
+        expected = self.after if after else self.before
+        current = vocabulary_registry.load(self.spec, root)
+        if (current.content_hash, current.effective_digest) != (expected.content_hash, expected.effective_digest):
+            raise vocabulary_registry.RegistryError("REGISTRY_UNAVAILABLE: operation definitions changed")
+
+
+def capture_transition(
+    root: Path,
+    spec: vocabulary_registry.RegistrySpec,
+    images: Mapping[str, CanonicalWriteImage],
+    transitions: dict[tuple[str, str], RegistryTransition],
+) -> RegistryTransition:
+    """Capture only a consumed selection; staged bytes never substitute for admission."""
+    key = (spec.name, spec.instance_id)
+    if key in transitions:
+        return transitions[key]
+    path = spec.overlay(root).relative_to(root).as_posix()
+    image = images.get(path)
+    guard = None
     if image is None:
-        return (
-            entity_types.load_entity_types(vault_root)
-            if kind == "entity"
-            else relation_registry.load_registry(vault_root)
-        )
-    if value is None:
-        return entity_types.core_registry() if kind == "entity" else relation_registry.core_registry()
-    data = _yaml_image(image, value)
-    if data is None:
-        return None
-    return entity_types.load_entity_types(proposal=data) if kind == "entity" else relation_registry.load_registry(proposal=data)
+        instances.recheck(root, spec)
+        try:
+            text, guard = vault.read_guarded_text(root, root / path)
+        except FileNotFoundError:
+            text = None
+            guard = vault.PathGuard.capture(root, path, leaf_policy="absent")
+        before = after = vocabulary_registry._build(spec, text)
+        admission = contract.capture_admission(root, spec, text.encode("utf-8") if text is not None else None)
+    else:
+        admission = contract.capture_admission(root, spec, image.before)
+        snapshots = []
+        for raw in (image.before, image.after):
+            if raw is not None and _yaml_image(image, raw) is None:
+                raise vocabulary_registry.RegistryError("INVALID_REGISTRY_OVERLAY: staged registry is malformed")
+            snapshots.append(vocabulary_registry._build(spec, raw.decode("utf-8") if raw is not None else None))
+        before, after = snapshots
+    if before.findings or after.findings:
+        raise vocabulary_registry.RegistryError("INVALID_REGISTRY_OVERLAY: operation definitions are invalid")
+    transition = RegistryTransition(spec, before, after, admission, guard, image)
+    transitions[key] = transition
+    return transition
+
+
+def staged_page_state(
+    root: Path, path: str, source: str, *, after: bool,
+    images: Mapping[str, CanonicalWriteImage],
+    transitions: dict[tuple[str, str], RegistryTransition],
+) -> semantic_contract.SemanticPageState:
+    """Enrich the maintained detached parser with this image's selected snapshots."""
+    from . import lifecycle_statuses
+    from .vocabulary import registry_spec
+
+    state = semantic_contract._parse_page_state(root, path, source, complete_authored_effects=True)
+    scope = instances.page_scope(root, state.path, dict(state.frontmatter))
+    snapshots = {}
+    binding = None
+    for subject in semantic_contract._PAGE_DEFINITION_SUBJECTS:
+        spec = instances.select(root, registry_spec(subject), scope)
+        transition = capture_transition(root, spec, images, transitions)
+        snapshots[subject] = transition.after if after else transition.before
+        binding = spec.binding_revision
+    definitions = instances.PageDefinitions(
+        scope or instances.PUBLIC_INSTANCE, binding, snapshots, state.path, state.frontmatter,
+    )
+    return semantic_contract.enrich_page_state(
+        root, state, lifecycle_statuses.Basis(root),
+        page_definitions=definitions,
+    )
 
 
 def _registry_effects(
@@ -194,24 +286,23 @@ def _state_for(
     root: Path,
     image: CanonicalWriteImage,
     source: bytes,
-    registry: relation_registry.RelationRegistry,
+    *,
+    after: bool,
+    images: Mapping[str, CanonicalWriteImage],
+    transitions: dict[tuple[str, str], RegistryTransition],
 ) -> semantic_contract.SemanticPageState | None:
     text = _text(image, source)
     if text is None:
         return None
     try:
-        return semantic_contract.build_page_state(
-            root,
-            image.path,
-            text,
-            relation_registry=registry,
-            complete_authored_effects=True,
+        return staged_page_state(
+            root, image.path, text, after=after, images=images, transitions=transitions,
         )
     except (TypeError, ValueError, yaml.YAMLError):
         return None
 
 
-def _fact_key(fact: semantic_contract.RelationFact) -> tuple[str, str, str, str, str, str]:
+def _fact_key(fact: semantic_contract.RelationFact) -> tuple[str, ...]:
     return (
         fact.authored_path,
         fact.logical_source_path,
@@ -219,6 +310,7 @@ def _fact_key(fact: semantic_contract.RelationFact) -> tuple[str, str, str, str,
         str(fact.canonical_relation),
         fact.origin,
         str(fact.authored_anchor),
+        str(fact.registry_instance),
     )
 
 
@@ -230,8 +322,10 @@ def classify_additive_effects(
     identity_reader: Callable[[str], str | None] | None = None,
     identity_paths_for_id: Callable[[str], Iterable[str] | None] | None = None,
     derived_roles: Mapping[str, str] = MappingProxyType({}),
+    registry_transitions: dict[tuple[str, str], RegistryTransition] | None = None,
+    page_states: dict[tuple[str, bool], semantic_contract.SemanticPageState] | None = None,
 ) -> AdditiveEffectClassification:
-    """Classify a complete staged batch without touching mutable vault content.
+    """Classify a complete staged batch using operation-local selected snapshots.
 
     ``resolver_entries`` and ``identity_reader`` are authoritative point-index
     snapshots supplied by the caller.  This function will not cold-build either
@@ -256,10 +350,23 @@ def classify_additive_effects(
         if image is None or image.role != role:
             reasons.append(ClassificationReason("derived_auxiliary_invalid", path))
     active = tuple(image for image in active if image.path not in derived_paths)
-    entity_registry_path = entity_types.extension_registry_path(root).relative_to(root).as_posix()
-    relation_registry_path = relation_registry.extension_registry_path(root).relative_to(root).as_posix()
+    transitions = registry_transitions if registry_transitions is not None else {}
+    states = page_states if page_states is not None else {}
     project_keys_path = (root / kb_dirname() / "_Schema" / "project-keys.yaml").relative_to(root).as_posix()
-    schema_paths = {entity_registry_path, relation_registry_path, project_keys_path}
+    schema_paths = {project_keys_path}
+    registry_images = []
+    for image in active:
+        try:
+            # These two adapters implement the additive type actions; other subjects retain their own authority.
+            for base, action in ((entity_types.SPEC, "entity_type.add"), (relation_registry.SPEC, "relation_type.add")):
+                spec = instances.match_overlay(root, base, image.path, authoring=True)
+                if spec is not None:
+                    schema_paths.add(image.path)
+                    transition = capture_transition(root, spec, indexed, transitions)
+                    registry_images.append((image, transition, action))
+                    break
+        except (ValueError, OSError):
+            reasons.append(ClassificationReason("registry_invalid", image.path))
     for image in active:
         if image.path.startswith(_SCHEMA_PREFIX) and image.path not in schema_paths:
             reasons.append(ClassificationReason("unknown_schema_change", image.path))
@@ -268,21 +375,11 @@ def classify_additive_effects(
     if reasons:
         return _result("unsupported", (), reasons, received)
 
-    entity_image = indexed.get(entity_registry_path)
-    relation_image = indexed.get(relation_registry_path)
-    before_entities = _registry_from_image(entity_image, entity_image.before if entity_image else None, kind="entity", vault_root=root)
-    after_entities = _registry_from_image(entity_image, entity_image.after if entity_image else None, kind="entity", vault_root=root)
-    before_relations = _registry_from_image(relation_image, relation_image.before if relation_image else None, kind="relation", vault_root=root)
-    after_relations = _registry_from_image(relation_image, relation_image.after if relation_image else None, kind="relation", vault_root=root)
-
     effects: list[Effect] = []
-    if entity_image is not None:
-        effects.extend(_registry_effects(before_entities, after_entities, action="entity_type.add", path=entity_image.path, reasons=reasons))
-    if relation_image is not None:
-        effects.extend(_registry_effects(before_relations, after_relations, action="relation_type.add", path=relation_image.path, reasons=reasons))
+    for image, transition, action in registry_images:
+        effects.extend(_registry_effects(transition.before.typed, transition.after.typed, action=action, path=image.path, reasons=reasons))
     if any(reason.code == "registry_invalid" for reason in reasons):
         return _result("unsupported", (), reasons, received)
-    assert after_entities is not None and after_relations is not None
 
     before_states: dict[str, semantic_contract.SemanticPageState] = {}
     after_states: dict[str, semantic_contract.SemanticPageState] = {}
@@ -296,13 +393,17 @@ def classify_additive_effects(
             continue
         ordinary.append(image)
         if image.before is not None:
-            state = _state_for(root, image, image.before, before_relations)
+            state = states.get((image.path, False)) or _state_for(
+                root, image, image.before, after=False, images=indexed, transitions=transitions,
+            )
             if state is None:
                 reasons.append(ClassificationReason("markdown_parse_invalid", image.path))
             else:
                 before_states[image.path] = state
         if image.after is not None:
-            state = _state_for(root, image, image.after, after_relations)
+            state = states.get((image.path, True)) or _state_for(
+                root, image, image.after, after=True, images=indexed, transitions=transitions,
+            )
             if state is None:
                 reasons.append(ClassificationReason("markdown_parse_invalid", image.path))
             else:
@@ -337,11 +438,19 @@ def classify_additive_effects(
             reasons.append(ClassificationReason("existing_page_converted_to_entity", image.path))
             continue
         if new_is_entity and old is None:
+            assert new is not None and new.definitions is not None
             frontmatter = new.frontmatter
             title = frontmatter.get("title")
             entity_type = frontmatter.get("entity_type")
             identifier = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
-            definition = after_entities.resolve(str(entity_type or ""))
+            try:
+                # Folder validation consumes entity types; page parsing needs only relations and categories.
+                spec = instances.select(root, entity_types.SPEC, new.definitions.instance_id)
+                entities = capture_transition(root, spec, indexed, transitions).after.typed
+            except (ValueError, OSError):
+                reasons.append(ClassificationReason("registry_invalid", image.path))
+                continue
+            definition = entities.resolve(str(entity_type or ""))
             if not isinstance(title, str) or identifier is None or definition is None or new.status != "active":
                 reasons.append(ClassificationReason("new_entity_invalid", image.path))
             elif not _entity_path_is_canonical(image.path, definition):
@@ -383,7 +492,7 @@ def classify_additive_effects(
         root,
         before_states,
         resolver,
-        before_relations,
+        relation_registry.core_registry(),
         target_states=before_states,
         complete_authored_effects=True,
     )
@@ -391,7 +500,7 @@ def classify_additive_effects(
         root,
         after_states,
         resolver,
-        after_relations,
+        relation_registry.core_registry(),
         target_states=after_states,
         complete_authored_effects=True,
     )

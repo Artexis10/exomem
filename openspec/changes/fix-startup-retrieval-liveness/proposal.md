@@ -1,6 +1,6 @@
 ## Why
 
-After a restart, a large Windows vault can report runtime readiness while ordinary keyword and hybrid recall still synchronously reconcile or scan the full corpus. Held-file custody makes that work safe but expensive enough to exceed the public ingress deadline, producing disruptive HTTP 504s from otherwise healthy ChatGPT and POLLY connections.
+After a restart, a large Windows vault can report runtime readiness while ordinary keyword and hybrid recall still synchronously reconcile or scan the full corpus. Held-file custody makes that work safe but expensive enough to exceed the public ingress deadline, producing disruptive HTTP 504s from otherwise healthy ChatGPT and client cell connections.
 
 ## What Changes
 

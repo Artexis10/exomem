@@ -45,6 +45,7 @@ from typing import Any
 
 import yaml
 
+from . import registry_history, vault
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -327,20 +328,22 @@ def load_conventions(
         return shipped
     path = override_path(vault_root)
     try:
-        raw = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError):
-        return shipped
-    except OSError:
+        raw, _ = registry_history.read_previous(
+            Path(vault_root), path, max_bytes=MAX_FILE_BYTES, guard_absence=False
+        )
+    except registry_history.RegistryFileTooLarge:
+        return replace(
+            shipped,
+            findings=(_finding("file_too_large", "conventions", f"override exceeds {MAX_FILE_BYTES} bytes"),),
+        )
+    except (OSError, UnicodeError, vault.PathGuardError):
         log.warning("activation-conventions override unreadable at %s", path, exc_info=True)
         return replace(
             shipped,
             findings=(_finding("unreadable", "conventions", "override could not be read"),),
         )
-    if len(raw.encode("utf-8")) > MAX_FILE_BYTES:
-        return replace(
-            shipped,
-            findings=(_finding("file_too_large", "conventions", f"override exceeds {MAX_FILE_BYTES} bytes"),),
-        )
+    if raw is None:
+        return shipped
     file_digest = _hash(raw)
     cached = _CACHE.get(path)
     if cached is not None and cached[0] == file_digest:
@@ -385,7 +388,7 @@ def save_conventions(
     from . import registry_history
 
     path = override_path(vault_root)
-    previous, guard = registry_history.read_previous(Path(vault_root), path)
+    previous, guard = registry_history.read_previous(Path(vault_root), path, max_bytes=MAX_FILE_BYTES)
     current = load_conventions(vault_root)
     if current.content_hash != expected_hash:
         raise ValueError(

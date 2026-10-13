@@ -2275,7 +2275,7 @@ def _check_wikilinks(
         full_paths.add(no_ext)
         kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
         names_to_paths.setdefault(md_path.stem, []).append(no_ext)
-        # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
+        # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
             text, _guard = vault_module.read_guarded_text(vault_root, md_path)
@@ -2733,8 +2733,8 @@ _TAG_NORMALIZE_PATTERN = re.compile(r"[\s_]+")
 def _normalize_tag(tag: str) -> str:
     """Lowercase + collapse whitespace/underscores to dashes for cluster keying.
 
-    `Warning-Letter-Incident`, `warning_letter_incident`, `warning  letter  incident`
-    all normalize to `warning-letter-incident`.
+    `Move-In-Checklist`, `move_in_checklist`, `move  in  checklist`
+    all normalize to `move-in-checklist`.
     """
     return _TAG_NORMALIZE_PATTERN.sub("-", tag.strip().lower())
 
@@ -2755,8 +2755,8 @@ def _check_tag_inconsistency(
     pages: list[find_module.ParsedPage],
 ) -> list[AuditFinding]:
     """Detect variant clusters: distinct raw tags that normalize to the same
-    key (e.g. `warning_letter_incident` vs `warning-letter-incident` vs
-    `Warning-Letter-Incident`).
+    key (e.g. `move_in_checklist` vs `move-in-checklist` vs
+    `Move-In-Checklist`).
 
     Only mechanical drift (case + separator) is detected. Semantic
     near-duplicates like `workflow` vs `workflows` are NOT flagged — that

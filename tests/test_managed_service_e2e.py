@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import traceback
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
@@ -19,6 +20,47 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Managed service runtime is Linux-only"
 )
 FIXTURE = Path(__file__).parent / "fixtures/managed_service.py"
+
+
+@pytest.fixture
+def observe_managed_requests(monkeypatch):
+    """Retain failed request identity until the managed transport diagnosis closes."""
+    import httpx2
+    from fastmcp import Client
+
+    send = httpx2.AsyncClient.send
+    exit_client = Client.__aexit__
+
+    async def observed_send(client, request, *args, **kwargs):
+        try:
+            return await send(client, request, *args, **kwargs)
+        except Exception as error:
+            try:
+                body = json.loads(request.content)
+            except (ValueError, httpx2.RequestNotRead):
+                body = None
+            if isinstance(body, dict):
+                # JSON-RPC fixes these fields; omit arguments, headers and tokens.
+                identity = {key: body.get(key) for key in ("id", "method")}
+                params = body.get("params")
+                if isinstance(params, dict):
+                    identity["tool"] = params.get("name")
+                error.add_note(f"Managed fixture request: {json.dumps(identity)}")
+            else:
+                error.add_note("Managed fixture request identity unavailable")
+            raise
+
+    async def observed_exit(client, exc_type, exc_value, exc_tb):
+        # FastMCP can replace this body error while awaiting its failed session task.
+        if exc_value is not None:
+            try:
+                traceback.print_exception(exc_value)
+            except (OSError, ValueError):
+                pass  # A broken capture stream must not prevent client cleanup.
+        return await exit_client(client, exc_type, exc_value, exc_tb)
+
+    monkeypatch.setattr(httpx2.AsyncClient, "send", observed_send)
+    monkeypatch.setattr(Client, "__aexit__", observed_exit)
 
 
 async def control(root: Path, command: str):
@@ -112,6 +154,18 @@ async def live_fixture(tmp_path, *, env_file=None, warm_seconds="30"):
                         pass
                     await asyncio.sleep(0.05)
         yield f"http://127.0.0.1:{port}/mcp", (tmp_path / "token").read_text(), child
+    except BaseException as error:
+        error.add_note(f"Managed supervisor before cleanup: {child.poll()!r}")
+        for name in ("events.jsonl", "service.log"):
+            try:
+                with (tmp_path / name).open("rb") as evidence:
+                    size = evidence.seek(0, os.SEEK_END)
+                    evidence.seek(max(0, size - 20000))
+                    tail = evidence.read(20000).decode(errors="replace")
+                error.add_note(f"Managed fixture {name} ({size} bytes, tail):\n{tail}")
+            except OSError as observation_error:
+                error.add_note(f"Managed fixture {name} unavailable: {observation_error}")
+        raise
     finally:
         if child.poll() is None:
             child.terminate()
@@ -494,7 +548,9 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(tmp_pat
     asyncio.run(scenario())
 
 
-def test_a_standby_is_spawned_with_the_current_service_environment_file(tmp_path):
+def test_a_standby_is_spawned_with_the_current_service_environment_file(
+    tmp_path, observe_managed_requests
+):
     """An edited service environment reaches the next worker without a restart."""
     from fastmcp import Client
 

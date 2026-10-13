@@ -31,8 +31,6 @@ unanswerable within a day.
 Neither test suite catches this. The memory-proof benchmark models knowledge time
 in *weeks* (`recorded_week`), so it is structurally blind to sub-day ordering.
 
-KB note: `Knowledge Base/Notes/Failures/exomem-records-note-knowledge-time-to-the-day-not-to-the-second.md`
-
 ## Decisions already made — do not relitigate
 
 1. **Second granularity.** Not milliseconds: false precision for hand-authored

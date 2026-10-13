@@ -62,4 +62,4 @@
 - [ ] 5.4 Desk-side smoke (media extra, live service): call `get_video_frames` from a
       connected claude.ai session on a real vault video → frames render inline;
       windowed drill-down around a `find` `clip_match_at` timestamp works.
-      **(Hugo runs — needs the live connector.)**
+      **(the operator runs — needs the live connector.)**

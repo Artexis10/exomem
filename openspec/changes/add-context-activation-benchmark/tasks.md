@@ -70,6 +70,16 @@ Checked tasks record the delivered instrument, not proof that the corpus exercis
 
 - [ ] 4.8 Extend 4.6 with the accepted substrate case: exact observation plus compiled interpretation, two corrections and product-readable history, current/historical fresh-session answers, unchanged-source replay and an out-of-scope counterexample. Add the generic creator-product and operation-authority/tenant-isolation variant only where it catches distinct boundary failures; distinguish synthetic interface proof from actual consumer integration. If a worker/model-switch arm is selected, retain source-independence and incorrect/stale proposal controls. Reuse 4.5's full quality-cost vector and existing native runner; no extra framework, automatic paid trial or gate on unrelated releases.
 
+- [ ] 4.9 Prove inherited single-product full-profile behavior through existing Exomem probe seams; report separate results and visible incomplete states.
+      This retains semantic-language task 11.4 without claiming acceptance.
+      Exercise nonlexical semantic retrieval, adversarial hybrid retrieval and explanation isolation, plus public PDF/image/audio/video preservation, search and read.
+      Use a working native stack and quiesced disposable state.
+      Freeze expectations before execution and bind corpus, configuration, source, model, backend, device, runtime, raw-envelope and mutation identities.
+      Report correctness, lifecycle integrity, explanation truth, performance and extensions separately.
+      Keep missing, failed and unexecuted states visible.
+      The current `graph_value_benchmark` direct command couples both contenders and is not a ready single-product instrument.
+      Contender parity, competitor environments, paired bands, dominance and local-core advantage are retired; they are not inherited acceptance gates.
+
 ## 5. Delivery
 
 - [ ] 5.1 `openspec validate --all --strict`; scoped suites green; privacy gate green;

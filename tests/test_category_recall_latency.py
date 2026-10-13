@@ -26,7 +26,7 @@ SPEC.loader.exec_module(crl)
 from exomem import cli_ops  # noqa: E402
 
 SECRET_CATEGORY = "super-secret-real-category-xyz"
-SECRET_VAULT = Path("/vaults/hugo-real-vault-secret-name")
+SECRET_VAULT = Path("/vaults/fixture-tenant/private-content")
 
 
 def _envelope(total_ms: float, filter_eligibility_ms: float | None) -> dict:
@@ -500,7 +500,7 @@ def test_report_never_leaks_category_query_path_or_exact_counts():
     )
     blob = json.dumps(report)
     assert SECRET_CATEGORY not in blob
-    assert "hugo-real-vault-secret-name" not in blob
+    assert SECRET_VAULT.name not in blob
     assert str(SECRET_VAULT) not in blob
     assert "a.md" not in blob and "b.md" not in blob
 

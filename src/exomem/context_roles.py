@@ -26,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from . import context_intents, semantic_language_registry
+from . import context_intents, registry_history, semantic_language_registry, vault
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -177,6 +177,8 @@ def _finding(code: str, field_name: str, message: str) -> dict[str, str]:
 
 
 def _hash(raw: str) -> str:
+    # Preserve the universal-newline hashes returned by the previous text reader.
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -241,19 +243,21 @@ def load_roles(vault_root: Path | None = None, *, proposal: Any | None = None) -
         return semantic_shipped
     path = override_path(vault_root)
     try:
-        raw = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError):
-        return semantic_shipped
-    except OSError:
-        log.warning("context-role override unreadable at %s", path, exc_info=True)
-        return replace(
-            semantic_shipped, findings=(_finding("unreadable", "roles", "override could not be read"),)
+        raw, _ = registry_history.read_previous(
+            Path(vault_root), path, max_bytes=MAX_FILE_BYTES, guard_absence=False
         )
-    if len(raw.encode("utf-8")) > MAX_FILE_BYTES:
+    except registry_history.RegistryFileTooLarge:
         return replace(
             semantic_shipped,
             findings=(_finding("file_too_large", "roles", f"override exceeds {MAX_FILE_BYTES} bytes"),),
         )
+    except (OSError, UnicodeError, vault.PathGuardError):
+        log.warning("context-role override unreadable at %s", path, exc_info=True)
+        return replace(
+            semantic_shipped, findings=(_finding("unreadable", "roles", "override could not be read"),)
+        )
+    if raw is None:
+        return semantic_shipped
     digest = _hash(raw)
     cache_key = f"{digest}:{resolver.content_hash}"
     cached = _CACHE.get(path)
@@ -310,7 +314,7 @@ def save_roles(
     from . import registry_history
 
     path = override_path(vault_root)
-    previous, guard = registry_history.read_previous(Path(vault_root), path)
+    previous, guard = registry_history.read_previous(Path(vault_root), path, max_bytes=MAX_FILE_BYTES)
     current = load_roles(vault_root)
     if current.roles_hash != expected_hash:
         raise ValueError(

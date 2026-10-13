@@ -1,91 +1,80 @@
 ---
 type: tracker
 tracks: x3
-started: 2025-01-01
-rep_counting_started: 2025-04-27
-created: 2026-06-06
-updated: 2026-07-16
+started: 2024-01-12
+rep_counting_started: 2024-02-05
+created: 2024-09-20
+updated: 2024-11-19
 ---
 # X3 Training Log
 
-> **New session:** run **Templates → Insert template → "X3 Push"** (or **"X3 Pull"**) at the top of *Sessions* below. The date + your current bands auto-fill — just type the rep numbers. Changed a band? Overwrite that one word.
-> No template set up yet? Just **copy the most recent block below, paste it on top, change the date + reps**.
+This is an invented training log for Records acceptance tests. Its dates, bands,
+counts, notes, and historical entries describe no person's training.
+
+> **New session:** insert **"X3 Push"** or **"X3 Pull"** from the template folder at the top of *Sessions*. Fill in the date, bands, and rep counts.
 > Line format: `Movement | band | reps`. Notation is in the **Legend**.
-> Pre-2026 history (undated, verbatim) lives in [[Records/Health/X3/Historical Reps (undated)]].
+> The invented undated archive lives in [[Records/Health/X3/Historical Reps (undated)]].
 
 ## Sessions (newest first)
 
+### 2024-11-19 · Push
+- Overhead Press | blue short | 12
+- Split Squat L | green short | 19
+- Chest Press | green short | 14+4
+- Tricep Press | blue short | 17
+- Split Squat R | green short | 20
 
-### 2026-08-02 · Push
-- Overhead Press | white short paraforce | 8
-- Split Squat L | grey short paraforce | 21 
-- Chest Press | grey short paraforce | 15
-- Tricep Press | white short paraforce | 15 
-- Split Squat R | white short paraforce | 18
+### 2024-10-14 · Push (Stopped early)
+- Overhead Press | blue short | 6
+- Split Squat L | green short | 
+- Chest Press | green short | 
+- Tricep Press | blue short | 
+- Split Squat R | green short | 
 
-### 2026-06-25 · Push (Stopped, didn't feel like it, circadian and recovery)
-- Overhead Press | white short paraforce | 8
-- Split Squat L | grey short paraforce | 
-- Chest Press | grey short paraforce | 
-- Tricep Press | white short paraforce | 
-- Split Squat R | grey short paraforce | 
+### 2024-10-13 · Pull
+- Deadlift | green short | 24
+- Bent Row | blue short | 13
+- Bicep Curl | blue short | 10?
+- Calf Raise | green short | 32
 
-### 2026-06-24 · Pull
-- Deadlift | grey short paraforce | 21 
-- Bent Row | white short paraforce | 11 
-- Bicep Curl | white short paraforce | 11 
-- Calf Raise | grey short paraforce | 33
-### 2026-06-08 · Push
-- Overhead Press | white short paraforce | 9 
-- Split Squat L | grey short paraforce | 18 
-- Chest Press | grey short paraforce | 17 
-- Tricep Press | white short paraforce | 16
-- Split Squat R | grey short paraforce | 18 
+### 2024-10-02 · Push
+- Overhead Press | blue short | 11
+- Split Squat L | green short | 18
+- Chest Press | green short | 16
+- Tricep Press | blue short | 14
+- Split Squat R | green short | 19
 
-### 2026-06-04 · Pull
-- Deadlift | grey short paraforce | 18
-- Bent Row | white short paraforce | 8
-- Bicep Curl | white short paraforce | 8
-- Calf Raise | grey short paraforce | 30
+### 2024-09-28 · Pull
+- Deadlift | green short | 22
+- Bent Row | blue short | 12
+- Bicep Curl | blue short | 9
+- Calf Raise | green short | 28
 
-### 2026-06-03 · Push
-- Overhead Press | white short paraforce | 7
-- Split Squat L | grey short paraforce | 20
-- Chest Press | grey short paraforce | 15
-- Tricep Press | white short paraforce | 13
-- Split Squat R | grey short paraforce | 18
+### 2024-09-27 · Push
+- Overhead Press | blue short | 10
+- Split Squat L | green short | 16
+- Chest Press | green short | 13
+- Tricep Press | blue short | 12
+- Split Squat R | green short | 17
 
-## Current bands (what the templates prefill — you're on paraforce now)
+## Current bands (what the example templates prefill)
 
-- **Push:** Overhead Press `white short paraforce` · Split Squat L/R `grey short paraforce` · Chest Press `grey short paraforce` · Tricep Press `white short paraforce`
-- **Pull:** Deadlift `grey short paraforce` · Bent Row `white short paraforce` · Bicep Curl `white short paraforce` · Calf Raise `grey short paraforce`
+- **Push:** Overhead Press and Tricep Press use `blue short`; the other movements use `green short`.
+- **Pull:** Bent Row and Bicep Curl use `blue short`; Deadlift and Calf Raise use `green short`.
 
 ## Legend
 
 **Notation**
-- `21+6` — 21 reps, then a rest-pause for 6 more (`+` = with rest/pause)
-- `!` — continuous reps (no pauses). In the historical archive, numbers *before* the `!` were done with pauses (since 2025-09-30) → treat as softer than continuous reps.
-- `?` — rep count uncertain
-- `short` — a 34" band · `long` — the longer band
-- **Stacked bands** (write in the *band* field): `dark grey ×2` = two of the same band looped together · `dark grey + white` = two different bands stacked. Resistance ≈ the sum. ParaForce only — durable enough to stack; latex isn't. NB: `+` in the **band** field = stacked bands; `+` in the **reps** field = rest-pause.
+- `14+4` — 14 reps, then a rest-pause for four more.
+- `!` — continuous reps after `!` in the historical archive.
+- `?` — an uncertain rep count.
+- `short` and `long` — example band lengths.
+- `green ×2` or `green + blue` in the band field — stacked bands. A `+` in the reps field means rest-pause.
+- A blank rep field stays blank when a session stops early.
 
 **Session structure**
-- **Push:** Overhead Press → Split Squat (one leg) → Chest Press → Tricep Press → Split Squat (other leg). Last two are sometimes swapped; the two split-squat efforts are deliberately separated within the session.
+- **Push:** Overhead Press → Split Squat L → Chest Press → Tricep Press → Split Squat R.
 - **Pull:** Deadlift → Bent Row → Bicep Curl → Calf Raise.
 
-**Band resistance — lightest → heaviest** (verified against X3 + Serious Steel specs)
-
-Resistance is set by **color**; within a color, **ParaForce > latex** — aggressive curve, heavier through the top of the range, higher peak force at full extension. All 34" ("short") unless noted. ≈lb = latex nominal equivalent.
-
-1. **purple** — Serious Steel (≈5–35 lb)
-2. **white** (X3) ≈ **red** (Serious Steel) — ≈10–50 lb
-3. **light grey** (X3) ≈ **blue** (Serious Steel) — ≈25–80 lb
-4. **dark grey** (X3) — ≈50–120 lb
-5. **black** (X3) — ≈60–150 lb
-
-- **ParaForce = your current set:** the *nominal* weight-equivalent per colour reads ~the same as latex (single-loop: White 10–50 · Light Grey 25–80 · Dark Grey 50–120 · Black 60–150 lb) — **but that rating undersells it.** The aggressive force curve is *lighter at the bottom, much heavier at the top*, so it delivers a **higher peak force at full extension** than the latex twin, and the rubber is more durable (resists snapping → tolerates more). Net: substantially harder *and* a genuinely higher peak (white paraforce ≈ 7 reps vs ~30 on white latex). So within a colour, `paraforce` clearly outranks latex — e.g. `dark grey paraforce` ≳ `dark grey` latex, still < `black`.
-- **Doubling / stacking** (ParaForce only — Jaquish discourages it on latex): `×2` doubles one band (≈2×, e.g. `black ×2` ≈ 300+ lb); `+` combines two different bands (≈ their sum). This is how you exceed a single band's ceiling — no Elite band required until stacking your big lifts gets fiddly.
-- **Length:** 34" "short" > 41" "long" (less stretch = more tension).
-- **Legacy labels in the archive:** old `grey` = **light grey**; `dark grey` = dark grey.
-
-This list is the **single source of truth** for analysis — the KB note points here, doesn't copy it. A rep drop right after moving to a harder band is *progress*, not regression.
+The labels and notation remain ordinary Markdown data. The collection schema
+defines how Records reads the rows; it does not judge training progress.

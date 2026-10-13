@@ -257,6 +257,24 @@ def selected_overlay(root: Path, spec: RegistrySpec, *, authoring: bool = False)
     return select(root, spec, authoring=authoring).overlay(root).relative_to(root).as_posix()
 
 
+def match_overlay(root: Path, spec: RegistrySpec, relative_path: str, *,
+                  authoring: bool = False) -> RegistrySpec | None:
+    """Match one adapter's assigned overlay using metadata only; grant no admission."""
+    root = Path(root)
+    try:
+        document = configuration(root)
+    except AssignmentRequired:
+        if spec.overlay(root).relative_to(root).as_posix() != relative_path:
+            return None
+        return select(root, spec, authoring=authoring)
+    if document is None:
+        return spec if spec.overlay(root).relative_to(root).as_posix() == relative_path else None
+    for scope, binding in ((None, document["public"]), *document["private"].items()):
+        if storage(spec, binding)[0] == relative_path:
+            return select(root, spec, scope, authoring=authoring)
+    return None
+
+
 def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
     """Supply assigned registry membership without decoding its definitions."""
     from .. import registry_history
@@ -285,7 +303,7 @@ def bound_scopes(root: Path, path: str, compiled: Any) -> frozenset[str] | None:
 def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str | None = None,
                prospective: bool = False) -> str | None:
     """Resolve canonical page membership before looking up any definition or folder."""
-    from .. import find_types
+    from .. import find_types, semantic_contract
     from ..governance import membership, policy
 
     if registry_scope is None:
@@ -303,7 +321,7 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
         return None
     compiled = policy.load(root)
     page = find_types.ParsedPage(path=Path(root) / path, rel_path=path,
-                                frontmatter=frontmatter, body="", title="", mtime=0)
+                                frontmatter=semantic_contract._thaw(frontmatter), body="", title="", mtime=0)
     scopes = membership._evaluate_markdown_scopes(page, compiled)
     candidates = set(scopes).intersection(document["private"])
     destinations = {scope for folder, scope in document["destinations"].items() if _contains(folder, path)}
@@ -326,13 +344,22 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     return selected
 
 
-def recheck(root: Path, spec: RegistrySpec) -> None:
-    """Recheck the same binding and its current admission at the existing write seam."""
+def recheck_binding(root: Path, spec: RegistrySpec) -> RegistrySpec:
+    """Select fresh storage and require the operation's original binding."""
     from . import registry_spec
-    from .contract import admission_refusal
 
     current = select(root, registry_spec(spec.name),
                      None if spec.instance_id == PUBLIC_INSTANCE else spec.instance_id)
-    if (current.binding_revision != spec.binding_revision or current.stem != spec.stem
-            or current.overlay(root) != spec.overlay(root) or admission_refusal(root, current)):
+    if (current.instance_id != spec.instance_id or current.binding_revision != spec.binding_revision
+            or current.stem != spec.stem or current.overlay(root) != spec.overlay(root)):
+        raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")
+    return current
+
+
+def recheck(root: Path, spec: RegistrySpec) -> None:
+    """Recheck the same binding and its current admission at the existing write seam."""
+    from .contract import admission_refusal
+
+    current = recheck_binding(root, spec)
+    if admission_refusal(root, current):
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")

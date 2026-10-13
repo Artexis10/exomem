@@ -1812,14 +1812,37 @@ def op_bootstrap(
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
                 "due_state": (
-                    "Advisory counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated references. They cover predictions past authored check dates, experiments past their window without results, long-unanswered questions and broken supersession chains. Absent when nothing is due."
+                    "Counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated refs. Absent when none are due."
                     if profile == "compact"
                     else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
                 ),
                 "due_state_handling": (
-                    "Read incoming counts; do not poll or interrupt. Consult review when useful. expected_fingerprint acts on due rows; usually no audit. Check fingerprint state before resurfacing dismissed/snoozed items; wait for authored changes. Use the user's language, mention once per interaction, and use judgement for moderate signals; prefer silence."
+                    "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
+                    "Keep mentions through compaction and renewal; receipts are not mentions. "
+                    "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
+                    "Absent advice proves nothing; prefer silence."
                     if profile == "compact"
-                    else "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. To read or triage a due row, pass its fingerprint as expected_fingerprint, which usually resolves that item without a whole-vault audit. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy"
+                    else
+                    "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
+                    "Raise at most one due item per maintained client conversation in the user's language. "
+                    "Remember any due mention through hooks, MCP, REST, continuation, compaction and OAuth renewal; "
+                    "receipt is not a mention. Dismissed or snoozed fingerprints stay quiet until state changes. "
+                    "Missing advice does not mean nothing is due. Prefer silence for moderate signals."
+                ),
+                "relevant_due_handling": (
+                    "Read review_item_context(ref, expected_fingerprint); refresh on REVIEW_ITEM_CHANGED. "
+                    "Audit wider if needed. Resolve with unit fingerprint and parent hash, "
+                    "not due fingerprint; no extra triage. triage_memory only dismisses advice. "
+                    "Keep write authority."
+                    if profile == "compact"
+                    else
+                    "For relevant_due_refs, read review_item_context(ref, expected_fingerprint); bounded context may need a wider audit. "
+                    "review_memory has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
+                    "One applicable writer, such as observe_memory(operation='update'), resolves with the real unit "
+                    "fingerprint and parent hash. Its delta clears the finding without extra triage; "
+                    "a due fingerprint is not a unit fingerprint. One triage_memory(ref, action='dismiss', "
+                    "expected_fingerprint, why) records presentation disposition, not authored resolution. "
+                    "Preserve existing mutation authority."
                 ),
                 "artifact_role_state_handling": (
                     "read supporting units for role/state review; choose a home by role, "
@@ -1831,7 +1854,7 @@ def op_bootstrap(
                     "MCP cannot observe tool-free turns"
                 ),
                 "due_state_authority": (
-                    "Advisory counts measure authored state. The runtime never judges, resolves, closes, archives or writes for them, or changes retrieval ordering."
+                    "Advisory counts of authored state; runtime never resolves, writes or reorders retrieval."
                     if profile == "compact"
                     else "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering"
                 ),
@@ -2293,16 +2316,7 @@ def _bootstrap_latency_block(*, full: bool = False) -> list[dict] | None:
         return None
 
 
-_SESSION_POST_WRITE_KEYS = (
-    "due_state",
-    "due_state_handling",
-    "due_state_authority",
-    "capture_sweep_handling",
-    "artifact_role_state_handling",
-    "review_reason",
-    "family_disposition",
-    "family_disposition_reading",
-)
+_SESSION_POST_WRITE_KEYS = bootstrap_core_module.SESSION_POST_WRITE_KEYS
 
 
 def _session_bootstrap_projection(compact: dict) -> dict:
@@ -3769,8 +3783,8 @@ def op_audit(
       original or remove the unsupported citation; audit never reconstructs it.
     - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
     - `tag_inconsistency`: case/separator variants of the same tag
-      (`warning_letter_incident` vs `warning-letter-incident` vs
-      `Warning-Letter-Incident`). Mechanical drift only; semantic
+      (`move_in_checklist` vs `move-in-checklist` vs
+      `Move-In-Checklist`). Mechanical drift only; semantic
       near-duplicates like `workflow` vs `workflows` aren't flagged.
     - `frontmatter_compliance`: per-page-type required-field gaps,
       a `tenant:` set without the expected project, patterns using singular
@@ -6409,20 +6423,19 @@ def op_activate_context(
 ) -> dict:
     """Compile authorized stored context for the user's current turn.
 
-    Use for initial context when live engagement policy calls for recall; bootstrap
-    reports unknown/changed settings. Pass the current turn verbatim to resolve
-    its subjects. For a known information gap, use ask_memory; read_memory opens
-    selected refs. Neither tool writes the user's answer.
-    Read-only: returns bounded recent_context, anchored units, provenance,
-    pointers and governed current_state. Abstains rather than guesses.
-    On ambiguous or unresolved candidates, choose a ref and retry with anchor.
-    episode_due and upkeep are advisory, never mutation authority.
+    Use when live policy calls for initial recall; bootstrap reports unknown/changed
+    settings. Pass the turn verbatim. For known gaps, ask_memory recalls and
+    read_memory opens selected refs; neither writes the user's answer.
+    Read-only: bounded recent_context, anchored units, provenance, pointers and
+    governed current_state. Abstains rather than guesses.
+    For ambiguous or unresolved candidates, choose a ref and retry with anchor.
+    episode_due, upkeep and relevant_due_refs are advisory, never mutation authority.
+    Raise at most one relevant due item per maintained client conversation.
     Details: bootstrap(profile="full") reference index, references/recall.md.
 
-    If needed, also pass `conversation`: optional `focus`, `refs`, `recent`
-    for subject or attachment cues. Returned `origin` labels their contribution,
-    not the user's words; activation reads no attachment. See the engagement reference.
-    If a hook missed the subject, retry with `conversation.focus`.
+    Use optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.
+    Returned `origin` labels cues, not the user's words. Activation reads no attachment.
+    For a missed subject, retry with `conversation.focus`; see the engagement reference.
 
     Args:
         turn: Current user message verbatim, not a rewritten query. Empty abstains.
@@ -6526,12 +6539,22 @@ def op_activate_context(
             upkeep_module.for_packet(vault_root, packet, session=session)
             # Also outside the cache: each resolved anchor page's sensed status.
             sensed_model.for_packet(vault_root, packet)
+            from . import due_state as due_state_module
+
+            # Guarded material supplies relevance; the agent decides whether to raise it.
+            due_state_module.for_activation(vault_root, packet, purpose=purpose)
         _carry_thread_through_abstention(packet, continuity)
         _withhold_vault_generation(vault_root, packet)
         # Every packet reports how its conversation was bounded; the compiler has
         # already said `absent` when it skipped the stage for the request's budget.
         if isinstance(packet.get("generation"), dict):
             packet["generation"].setdefault("conversation", bounded.state)
+        # Served packets include optional omissions; abstentions retain their own cause.
+        if packet.get("abstained") is False:
+            active_budget = request_budget_module.current()
+            block = active_budget.as_response_block() if active_budget is not None else None
+            if block is not None:
+                packet["request_budget"] = block
         return packet
     except Exception as error:
         outcome = "refused" if isinstance(error, ValueError) else "error"
@@ -10513,6 +10536,9 @@ def op_schema_memory(
         if refusal is not None:
             return refusal
     if operation in _REGISTRY_OPERATIONS and subject in _registry_subjects():
+        _validate_vocabulary_binding(
+            vocabulary_ref, vocabulary_fingerprint, supported=operation == "save",
+        )
         return _registry_schema_operation(
             vault_root,
             subject=subject,
@@ -10704,9 +10730,11 @@ def op_schema_memory(
                     )
                 current = semantic_language_registry_module.load_registry(vault_root)
                 candidate = semantic_language_registry_module.load_registry(proposal=proposal)
-                registry_file_exists = semantic_language_registry_module.registry_path(
-                    vault_root
-                ).exists()
+                from .vocabulary import instances
+
+                registry_file_exists = instances.select(
+                    vault_root, semantic_language_registry_module.CATEGORY_SPEC
+                ).overlay(vault_root).exists()
                 if (
                     registry_file_exists
                     and not candidate.findings
@@ -11238,7 +11266,9 @@ def _registry_schema_operation(
     """One registry contract for every vocabulary subject."""
     from .vocabulary import contract, registry_spec
 
-    supplied = sorted(name for name, value in unexpected.items() if value is not None)
+    # The writer binds this correlation pair before the save leaf; inspect and propose never accept it.
+    supplied = sorted(name for name, value in unexpected.items() if value is not None
+                      and not (operation == "save" and name in ("vocabulary_ref", "vocabulary_fingerprint")))
     allowed = {
         "inspect": {"limit", "continuation"},
         "propose": {"proposal"},

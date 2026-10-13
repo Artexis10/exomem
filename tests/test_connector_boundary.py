@@ -664,6 +664,56 @@ def test_private_registry_blocks_vocabulary_currency_before_work_item_lookup(con
                 operation()
 
 
+@pytest.mark.parametrize("public_registry_available", [False, True])
+@pytest.mark.parametrize("operation", ["context", "decide"])
+def test_review_lookup_hides_missing_and_withheld_work_alike(
+    configured_boundary, vault, public_registry_available, operation,
+):
+    """A hidden ordinary row or proposal cannot change a lookup's complete refusal."""
+    import hashlib
+
+    from exomem import entity_types, vocabulary_review
+    from exomem.vocabulary import contract, registry
+    from exomem.vocabulary_state import VocabularyState
+    from exomem.vocabulary_workflow import make_item
+
+    _, authenticate = configured_boundary
+    store = VocabularyState(vault)
+    with principal.request_scope(authenticate("full")):
+        item = make_item(
+            family="relation-type/v1", signal="generic-pair",
+            targets={PRIVATE: hashlib.sha256((vault / PRIVATE).read_bytes()).hexdigest()},
+            evidence=[], registry_hashes=vocabulary_review.registry_hashes(vault),
+            projection_status="current",
+        )
+        store.observe(item)
+        proposal = contract.queue_for_owner(
+            vault, entity_types.SPEC, registry.load(entity_types.SPEC, vault),
+            {"upsert": {"venue": {"label": "Venue", "guidance": "A recurring place.",
+                                   "attributes": {"folder": "Venues"}}}},
+            "Recurring places", "audience_restricted",
+        )
+    if public_registry_available:
+        (vault / "Knowledge Base/_Governance/scopes/private.yaml").write_text(
+            f'governance_version: 1\nid: {SCOPE}\npaths: ["Notes/private.md"]\n',
+            encoding="utf-8",
+        )
+    before = store.store.load()
+    outcomes = []
+    with principal.request_scope(authenticate("limited")):
+        for ref in ("missing-work-item", item.ref, proposal["item_ref"]):
+            with pytest.raises(ValueError) as refused:
+                if operation == "context":
+                    vocabulary_review.context(vault, ref=ref)
+                else:
+                    vocabulary_review.decide(vault, ref=ref, decision={})
+            outcomes.append(str(refused.value))
+    expected = ("VOCABULARY_ITEM_NOT_FOUND: refresh observed work" if public_registry_available
+                else "GOVERNANCE_OPERATION_UNAVAILABLE: registry observation is unavailable")
+    assert outcomes == [expected] * 3
+    assert store.store.load() == before
+
+
 @pytest.mark.parametrize("implicit", [False, True], ids=["explicit", "implicit"])
 def test_file_retry_separates_clients_and_survives_reauthentication(configured_boundary, vault, monkeypatch, implicit):
     """Owner clients cannot borrow terminals, while the same client's lost response remains replayable."""

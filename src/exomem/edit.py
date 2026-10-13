@@ -506,7 +506,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
     # syscalls). On a case-insensitive filesystem a caller addressing
-    # `…/Polly/x.md` for an on-disk `…/POLLY/` would otherwise carry its own
+    # `…/Acme/x.md` for an on-disk `…/ACME/` would otherwise carry its own
     # spelling into every identity comparison keyed on `rel_path`. Rebuilding
     # from `kb_prefix()` also re-spells segment 1 to the configured KB name,
     # matching `vault.canonical_vault_rel`; fail open to the literal form.

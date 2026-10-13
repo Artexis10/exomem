@@ -78,8 +78,8 @@ def test_clip_device_env_and_asr_gating(monkeypatch) -> None:
 
 def test_clip_index_upsert_search_has_delete(vault) -> None:
     idx = embeddings.ClipIndex(vault)
-    a_path = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
-    b_path = "Knowledge Base/Evidence/Yolo/photos/b.jpg"
+    a_path = "Knowledge Base/Evidence/Rental/photos/a.jpg"
+    b_path = "Knowledge Base/Evidence/Rental/photos/b.jpg"
     idx.upsert(a_path, _unit(0), 1.0)
     idx.upsert(b_path, _unit(1), 2.0)
 
@@ -120,7 +120,7 @@ def test_find_clip_surfaces_textless_image(vault, monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     # Image + sidecar; the text deliberately does NOT contain the query terms.
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="scene.jpg", data=b"\xff\xd8\xff",
+        vault, scope="Rental", category="photos", filename="scene.jpg", data=b"\xff\xd8\xff",
         text="a calm beach at sunset",
     )
     img_vec = _unit(3)
@@ -149,8 +149,8 @@ def test_has_frames_distinguishes_legacy_single_vector_video(vault) -> None:
     """A video carrying only a legacy single-vector row (frame_ts NULL) must read as
     NOT per-keyframe-indexed, so backfill/worker re-index it instead of skipping."""
     idx = embeddings.ClipIndex(vault)
-    img = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
-    vid = "Knowledge Base/Evidence/Yolo/vids/legacy.mp4"
+    img = "Knowledge Base/Evidence/Rental/photos/a.jpg"
+    vid = "Knowledge Base/Evidence/Rental/vids/legacy.mp4"
 
     idx.upsert(img, _unit(0), 1.0)            # normal image
     idx.upsert(vid, _unit(1), 1.0)            # STALE single-vector video (frame_ts NULL)
@@ -190,7 +190,7 @@ def test_backfill_reindexes_legacy_single_vector_video(vault, monkeypatch: pytes
 def test_find_clip_skipped_when_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="scene2.jpg", data=b"\xff\xd8\xff",
+        vault, scope="Rental", category="photos", filename="scene2.jpg", data=b"\xff\xd8\xff",
         text="a calm beach at sunset",
     )
     embeddings.ClipIndex(vault).upsert(res.path, _unit(3), 1.0)
@@ -212,7 +212,7 @@ def test_clip_index_image_upsert_no_duplicate(vault) -> None:
     """Re-upserting the same image replaces its single NULL-frame_ts row (NULL is
     DISTINCT in a SQLite PK, so INSERT OR REPLACE would have duplicated it)."""
     idx = embeddings.ClipIndex(vault)
-    a = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
+    a = "Knowledge Base/Evidence/Rental/photos/a.jpg"
     idx.upsert(a, _unit(0), 1.0)
     idx.upsert(a, _unit(1), 2.0)  # second write must not add a row
     paths, frame_ts, matrix = idx.all_vectors()
@@ -223,7 +223,7 @@ def test_clip_index_image_upsert_no_duplicate(vault) -> None:
 
 def test_clip_index_upsert_frames_search_ts_delete(vault) -> None:
     idx = embeddings.ClipIndex(vault)
-    v = "Knowledge Base/Evidence/Yolo/vids/m.mp4"
+    v = "Knowledge Base/Evidence/Rental/vids/m.mp4"
     idx.upsert_frames(v, [(10.0, _unit(0)), (20.0, _unit(1)), (30.0, _unit(2))], 5.0)
 
     assert idx.has(v)
@@ -244,7 +244,7 @@ def test_clip_index_upsert_frames_replaces_prior_rows(vault) -> None:
     """upsert_frames clears all prior rows for the file — including a stale
     mean-pooled NULL-ts row from the old single-vector path."""
     idx = embeddings.ClipIndex(vault)
-    v = "Knowledge Base/Evidence/Yolo/vids/m.mp4"
+    v = "Knowledge Base/Evidence/Rental/vids/m.mp4"
     idx.upsert(v, _unit(7), 1.0)  # simulate an old single (NULL-ts) video vector
     idx.upsert_frames(v, [(1.0, _unit(0)), (2.0, _unit(1))], 2.0)
     paths, frame_ts, _ = idx.all_vectors()
@@ -263,14 +263,14 @@ def test_clip_index_migration_adds_frame_ts(vault) -> None:
     )
     conn.execute(
         "INSERT INTO images VALUES (?, ?, ?)",
-        ("Knowledge Base/Evidence/Yolo/photos/old.jpg", _unit(0).astype(np.float32).tobytes(), 1.0),
+        ("Knowledge Base/Evidence/Rental/photos/old.jpg", _unit(0).astype(np.float32).tobytes(), 1.0),
     )
     conn.commit()
     conn.close()
 
     idx = embeddings.ClipIndex(vault)
     paths, frame_ts, matrix = idx.all_vectors()  # triggers _connect → migration
-    assert paths == ["Knowledge Base/Evidence/Yolo/photos/old.jpg"]
+    assert paths == ["Knowledge Base/Evidence/Rental/photos/old.jpg"]
     assert frame_ts == [None]
     assert round(float(matrix[0] @ _unit(0)), 3) == 1.0
 
@@ -318,7 +318,7 @@ def test_find_video_clip_at_timestamp(vault, monkeypatch: pytest.MonkeyPatch) ->
     with the matching timestamp as `clip_match_at`."""
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="vids", filename="meeting.mp4", data=b"\x00\x00",
+        vault, scope="Rental", category="vids", filename="meeting.mp4", data=b"\x00\x00",
         text="quarterly planning meeting",
     )
     frames = [(0.0, _unit(1)), (42.0, _unit(3)), (120.0, _unit(5))]

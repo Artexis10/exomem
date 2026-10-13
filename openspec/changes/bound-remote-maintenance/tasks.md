@@ -14,4 +14,4 @@ Retirement scope (2026-10-11): Retirement supersedes the Hosted adapter cases. M
 
 - [x] 3.1 Run focused command-surface tests, Ruff, privacy validation, and strict OpenSpec validation.
 - [x] 3.2 Obtain independent adversarial review and address every actionable finding.
-- [ ] 3.3 Merge, publish a patch release, deploy both personal and POLLY cells, then verify readiness, recall, immediate remote refusal, and a free mutation boundary.
+- [ ] 3.3 Merge, publish a patch release, deploy both the personal cell and the client cell, then verify readiness, recall, immediate remote refusal, and a free mutation boundary.

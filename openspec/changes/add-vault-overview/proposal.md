@@ -11,11 +11,14 @@ lands first.
 
 ## What Changes
 
-- New read-only **Tier 1** registry op `overview`: a dependency-free vault-structure
+This artifact describes the current public surface. The eight unchecked tasks
+remain open; this contract refresh does not establish their acceptance.
+
+- Read-only **Tier 1** structural operation `overview`: a dependency-free vault-structure
   report — folder tree with per-folder counts, frontmatter coverage, dominant
   filename patterns, junk detection (zero-byte files, sync-conflict duplicates),
-  largest/oldest files, and explicit truncation markers. Exposed through all three
-  doors (MCP tool, `kb overview` CLI, `/api/overview` REST) from one leaf.
+  largest/oldest files, and explicit truncation markers. The current public contract exposes `browse_memory(mode="overview")` through
+  MCP, CLI and REST. Every door delegates to the same `op_overview` leaf.
 - Core function `overview.overview(root)` works on **un-initialized vaults** (no
   `Knowledge Base/` required) so the setup wizard can scan pre-init; the registry
   leaf wraps it with the usual resolved `vault_root`.
@@ -23,10 +26,11 @@ lands first.
   capped junk/sample lists with exact counts) — token-bounded on arbitrarily large
   vaults. Pure filesystem walk + regex; no new dependencies, no model — measurement
   only, in line with the pure-substrate constraint.
-- Scaffold `SKILL.md`: `overview` added to the Tier 1 table, phrasing mappings
-  ("what does this vault look like" → overview), and a short "Assessing a vault you
-  didn't build" block (overview → `list_directory` → `find scope="vault"` →
-  targeted `get`; never bulk-read). Generic wording only (leak test gates).
+- Scaffold `SKILL.md`: `browse_memory` documented in the Tier 1 table, phrasing mappings
+  ("what does this vault look like" → `browse_memory(mode="overview")`), and a short "Assessing or adopting a vault you
+  didn't build" block (`browse_memory(mode="overview")` →
+  `browse_memory(mode="list")` → `ask_memory(scope="vault")` →
+  targeted `read_memory`; never bulk-read). Generic wording only (leak test gates).
 - README core-tools table gains one row.
 - MCP schema fidelity baseline regenerated (`tests/fixtures/mcp_tool_schemas.json`).
 
@@ -55,4 +59,4 @@ is untouched)
   (via `scripts/dump-tool-schemas.py`) so `test_mcp_schema_fidelity` stays green;
   `test_scaffold_no_leak.py` guards the SKILL.md wording.
 - No API/dependency changes elsewhere; `EXOMEM_DISABLE_TIER2=1` deployments keep
-  the op (Tier 1 — the tool that prevents bulk reads must not be hideable).
+  the public `browse_memory` door (Tier 1 — the tool that prevents bulk reads must not be hideable).

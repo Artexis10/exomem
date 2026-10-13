@@ -30,6 +30,7 @@ from . import activation_result, working_set_anaphora
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
+    MAX_ANCHORS as _CATALOGUE_ANCHOR_CAP,
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
     derived_short_name,
@@ -1247,20 +1248,28 @@ def row_lexicon(row: AnchorFacts) -> RowLexicon:
 
     The file name counts as a registered name because the vault resolves a
     link by it (`[[Name]]` reaches `Name.md` whatever its title says)."""
-    file_name = PurePosixPath(row.path).stem if row.path else ""
+    return _row_lexicon(row.path, row.title, row.aliases, row.terms)
+
+
+# Cache only immutable lexical inputs, within the existing catalogue capacity.
+@functools.lru_cache(maxsize=_CATALOGUE_ANCHOR_CAP)
+def _row_lexicon(
+    path: str, title: str, aliases: tuple[str, ...], terms: tuple[str, ...]
+) -> RowLexicon:
+    file_name = PurePosixPath(path).stem if path else ""
     return RowLexicon(
-        names=frozenset({normalize(row.title), *row.aliases} - {""}),
+        names=frozenset({normalize(title), *aliases} - {""}),
         name_terms=frozenset(
             folded
-            for term in tokens_of(" ".join((row.title, *row.aliases)))
+            for term in tokens_of(" ".join((title, *aliases)))
             if (folded := _fold_lexical_term(term)) is not None
         ),
         terms=frozenset(
-            folded for term in row.terms if (folded := _fold_lexical_term(term)) is not None
+            folded for term in terms if (folded := _fold_lexical_term(term)) is not None
         ),
         whole_name_terms=frozenset(
             folded
-            for name in (row.title, *row.aliases, file_name)
+            for name in (title, *aliases, file_name)
             if len(words := tokens_of(name)) == 1
             and (folded := _fold_lexical_term(words[0])) is not None
         ),

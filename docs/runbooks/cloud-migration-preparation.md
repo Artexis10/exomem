@@ -121,7 +121,7 @@ cellctl roles only from the K3s server's `/32`, as design decision 10 of
 `separate-shared-substrate-control-infrastructure` defines. The chart pins the
 gateway and cellctl to the server node, so their egress leaves from that address.
 
-List the database's public address, `167.233.57.60/32`, in both workloads'
+List the database's public address, `<database public address>/32`, in both workloads'
 `databaseEgressCidrs`. NetworkPolicy `ipBlock` entries are literal addresses,
 not DNS names. Changing the address requires updating both egress lists, then
 rolling these two Deployments.

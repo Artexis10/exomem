@@ -296,7 +296,7 @@ def test_log_update_replaces_only_target_block_and_direct_edit_is_stale(tmp_path
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
     target = parsed.records[0]
     before = source.read_bytes()
-    source.write_bytes(before.replace(b"2026-08-02", b"2026-08-04", 1))
+    source.write_bytes(before.replace(b"2024-11-19", b"2024-11-21", 1))
 
     with pytest.raises(collections.CollectionError, match="STALE_RECORD"):
         records.update_record(
@@ -335,7 +335,7 @@ def test_log_update_replaces_the_exact_resolved_block(tmp_path: Path) -> None:
     assert result["outcome"] == "committed"
     assert after.startswith(before[: target.span.start])
     assert after.endswith(before[target.span.end :])
-    assert b"### 2026-08-02 \xc2\xb7 Pull" in after
+    assert b"### 2024-11-19 \xc2\xb7 Pull" in after
 
 
 def test_aborted_log_append_round_trips_note_and_refuses_heading_delimiters(tmp_path: Path) -> None:
@@ -348,7 +348,7 @@ def test_aborted_log_append_round_trips_note_and_refuses_heading_delimiters(tmp_
     item = {
         "occurred_on": "2026-08-03",
         "title": "Push",
-        "note": "Stopped, didn't feel like it, circadian and recovery",
+        "note": "Stopped early",
         "status": "aborted",
         "movements": [{"movement": "Press", "band": "grey", "repetitions": ""}],
     }
@@ -711,8 +711,8 @@ def test_log_body_refuses_and_partial_status_is_declarative(tmp_path: Path) -> N
     manifest_path = fixture / "_collection.md"
     manifest_path.write_text(
         manifest_path.read_text(encoding="utf-8").replace(
-            '    - equals: "Stopped, didn\'t feel like it, circadian and recovery"\n      values:\n        status: aborted\n',
-            '    - equals: "Stopped, didn\'t feel like it, circadian and recovery"\n      values:\n        status: aborted\n    - equals: "Partial"\n      values:\n        status: partial\n',
+            '    - equals: "Stopped early"\n      values:\n        status: aborted\n',
+            '    - equals: "Stopped early"\n      values:\n        status: aborted\n    - equals: "Partial"\n      values:\n        status: partial\n',
         ),
         encoding="utf-8",
     )

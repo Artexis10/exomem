@@ -71,5 +71,5 @@
       regression (old REST had no guard + no `edits`), but mirror the MCP middleware for consistency.
 - [ ] 9.4 `kb <tier2-op>` with `KB_MCP_DISABLE_TIER2` falls through to the serve parser — emit a
       clear "op unavailable" instead of an argparse error.
-- [ ] 9.5 (separate change — needs a fixture regen, breaks byte-identical) genericize the `"Yolo"` /
-      `"Mother Cancer"` example tokens in the `preserve`/`note` descriptions for the public release.
+- [ ] 9.5 (separate change — needs a fixture regen, breaks byte-identical) genericize the personal
+      example scope tokens in the `preserve`/`note` descriptions for the public release.

@@ -88,6 +88,7 @@ _VERBATIM = ("contract_version", "profile", "governance", "workflow", "active_ca
 SESSION_POST_WRITE_KEYS = (
     "due_state",
     "due_state_handling",
+    "relevant_due_handling",
     "due_state_authority",
     "capture_sweep_handling",
     "artifact_role_state_handling",

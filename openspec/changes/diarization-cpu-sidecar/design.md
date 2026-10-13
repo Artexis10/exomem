@@ -3,7 +3,7 @@
 ## Context
 
 `extract._diarize` runs pyannote `speaker-diarization-3.1` → `[(start,end,raw_label)]` →
-ECAPA named attribution → `[Speaker A]:` / `[Hugo]:` turns, gated by `EXOMEM_DIARIZE`,
+ECAPA named attribution → `[Speaker A]:` / `[Fixture Speaker]:` turns, gated by `EXOMEM_DIARIZE`,
 soft-fail to plain transcript. The named-attribution layer works on the main cu132 venv; the
 pyannote pipeline does not load there at all. Six version walls were diagnosed and confirmed
 un-patchable on cu132 (torchcodec, torchaudio API removals, speechbrain LazyModule, hf_hub

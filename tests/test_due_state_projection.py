@@ -607,8 +607,9 @@ def test_a_withheld_item_contributes_zero_everywhere(vault: Path) -> None:
     assert [row["due_since"] for row in block["top"]] == ["2026-08-01"]
 
 
+@pytest.mark.parametrize("bounded", [False, True])
 def test_the_served_view_is_byte_identical_to_a_vault_without_the_item(
-    vault: Path, tmp_path: Path
+    vault: Path, tmp_path: Path, bounded: bool,
 ) -> None:
     """Withheld must be indistinguishable from nonexistent — including in ORDERING.
 
@@ -622,18 +623,48 @@ def test_the_served_view_is_byte_identical_to_a_vault_without_the_item(
     due_state_module.reconcile(vault, today=TODAY)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         _reset_governance_caches()
-        withheld_view = _served(vault)
+        withheld_view = (
+            due_state_module.served_entries(
+                vault, today=TODAY, paths=frozenset({f"{RESTRICTED}/hidden.md", f"{INSIGHTS}/visible.md"}), recover=False,
+            ) if bounded else _served(vault)
+        )
 
     (vault / f"{RESTRICTED}/hidden.md").unlink()
     find_module.clear_cache()
     due_state_module.reconcile(vault, today=TODAY)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         _reset_governance_caches()
-        absent_view = _served(vault)
+        absent_view = (
+            due_state_module.served_entries(
+                vault, today=TODAY, paths=frozenset({f"{RESTRICTED}/hidden.md", f"{INSIGHTS}/visible.md"}), recover=False,
+            ) if bounded else _served(vault)
+        )
 
     assert json.dumps(withheld_view, sort_keys=True) == json.dumps(
         absent_view, sort_keys=True
     )
+
+
+def test_bounded_due_reads_follow_the_current_principal_and_release_policy(vault: Path) -> None:
+    """A warm owner list must not leak into a subset read after authority changes."""
+    path = _prediction(vault, "restricted", check_by="2026-08-01", folder=RESTRICTED)
+    due_state_module.reconcile(vault, today=TODAY)
+    _restrict_patterns(vault)
+    owner = RequestPrincipal(audience_id="owner", surface="cli")
+    external = RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
+    before = due_state_module.served_entries(vault, today=TODAY, principal=owner)
+    assert [row["path"] for row in before] == [path]
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=external, paths=frozenset({path}), recover=False,
+    ) == []
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=owner, paths=frozenset({path}), recover=False,
+    ) == before
+
+    _restrict_patterns(vault, ceiling=5)
+    assert due_state_module.served_entries(
+        vault, today=TODAY, principal=external, paths=frozenset({path}), recover=False,
+    ) == before
 
 
 def test_an_audience_that_may_see_everything_sees_everything(vault: Path) -> None:

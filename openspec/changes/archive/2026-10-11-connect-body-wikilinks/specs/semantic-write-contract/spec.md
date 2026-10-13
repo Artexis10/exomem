@@ -122,3 +122,21 @@ imposed in either lane.
 - **WHEN** a caller submits a reviewed-none decision for a page that satisfies the disposition through connectivity
 - **THEN** the write reports the decision as not applicable and names the connectivity satisfaction
 - **AND** the page commits without a review artifact
+
+#### Scenario: Generic links do not satisfy typed relation review
+- **WHEN** a page contains only inline wikilinks, `links_to`, or source/evidence provenance
+- **THEN** those connections do not qualify as typed epistemic edges
+- **AND** an eligible resolved outbound connection may satisfy the separate connectivity lane, while frontmatter provenance alone does not
+
+#### Scenario: Inactive or excluded-family relation does not qualify
+- **WHEN** a page has only an inactive relation or a relation in the `citation`, `evidence`, or `link` family
+- **THEN** the edge remains visible in its own semantics but does not qualify as a typed edge
+- **AND** an active scope-valid excluded-family relation to a connectable target may satisfy connectivity, while an inactive relation satisfies neither lane
+
+#### Scenario: Supersession frontmatter qualifies narrowly
+- **WHEN** a registered active scope-valid supersession edge is authored through the supported frontmatter lifecycle field
+- **THEN** it qualifies without making other frontmatter links relation-review eligible
+
+#### Scenario: Inactive body wikilink target does not connect
+- **WHEN** a compiled page's only outbound body wikilink resolves to an inactive page
+- **THEN** that link does not satisfy connectivity or qualify as a typed edge
