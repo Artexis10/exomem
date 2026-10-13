@@ -305,6 +305,8 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
   A production request change to `512Mi/125m` requires separate operator restart go.
   If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
+  The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
+  Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
 - [ ] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
   Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
   The 2026-09-28 exercise does not close this current-release acceptance.

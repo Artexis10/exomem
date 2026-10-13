@@ -414,14 +414,19 @@ def cell_environment(
 ) -> dict[str, str]:
     """The cloud image's and cellctl's cell environment, with all state in `scratch`.
 
-    Every inherited ``EXOMEM_*`` (and legacy ``KB_MCP_*`` alias) is dropped so an
-    operator's or test runner's own settings never shape the measurement.
+    Keep the selected Cloud resource policy. Drop inherited state, credentials
+    and other ``EXOMEM_*`` overrides, including legacy ``KB_MCP_*`` aliases.
     """
+    from exomem.cloud_cell import RESOURCE_POLICY_ENV
+
     env = {
         k: v
         for k, v in base.items()
         if not k.startswith(("EXOMEM_", "KB_MCP_")) and k != "MALLOC_ARENA_MAX"
     }
+    # The policy selects the measured runtime profile, not personal state.
+    if RESOURCE_POLICY_ENV in base:
+        env[RESOURCE_POLICY_ENV] = base[RESOURCE_POLICY_ENV]
     if malloc_arena_max > 0:
         # The hosted image's bound (Dockerfile). Unbounded, glibc makes up to
         # 8 arenas per core, so figures would depend on the machine's core count.
@@ -821,6 +826,8 @@ def _git_commit() -> str | None:
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
     """Run all stages in a fresh scratch root; return the report and any leaks."""
+    from exomem.cloud_cell import resource_policy
+
     scratch = Path(tempfile.mkdtemp(prefix="exomem-cell-memory-"))
     args.scratch = str(scratch)
     try:
@@ -842,6 +849,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
             "platform": platform.system().lower(),
             "cpus": os.cpu_count(),
             "encoder": args.encoder,
+            "resource_policy": resource_policy(env),
             "model": env["EXOMEM_RECALL_MODEL"],
             "malloc_arena_max": int(env["MALLOC_ARENA_MAX"]) if "MALLOC_ARENA_MAX" in env else None,
             "note": NOTE,
