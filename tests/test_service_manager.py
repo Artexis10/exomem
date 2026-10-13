@@ -712,7 +712,7 @@ class _StandbyRuntime(_Runtime):
     async def start_standby(self, target, timeout):
         self.events.append("start-standby")
         assert self.pid, "the standby must warm while the old worker still serves"
-        if self.standby_failure == "budget":
+        if self.standby_failure in {"budget", "cleanup"}:
             raise TimeoutError("standby warm budget expired")
         if self.standby_failure == "spawn":
             raise RuntimeError("standby could not be spawned")
@@ -720,6 +720,8 @@ class _StandbyRuntime(_Runtime):
 
     async def discard_standby(self, timeout=10):
         self.events.append("discard-standby")
+        if self.standby_failure == "cleanup":
+            raise TimeoutError("candidate exit was not proven")
 
     def migration_required(self, target):
         return self.migration
@@ -837,24 +839,31 @@ def test_a_declared_migration_runs_with_no_worker_owning_state(tmp_path):
     asyncio.run(scenario())
 
 
-def test_a_standby_that_misses_its_warm_budget_leaves_the_old_worker_serving(tmp_path):
+@pytest.mark.parametrize(
+    ("failure", "reason", "standby"),
+    [
+        ("budget", "warm budget expired", "discarded"),
+        ("spawn", "candidate could not warm", "discarded"),
+        ("cleanup", "warm budget expired", "discard_failed"),
+    ],
+)
+def test_a_rejected_standby_leaves_the_old_worker_serving(tmp_path, failure, reason, standby):
     async def scenario():
         manager, ingress, runtime, target = _standby_supervisor(tmp_path)
-        runtime.standby_failure = "budget"
+        serving = runtime.pid
+        active = manager.status()["active"]
+        runtime.standby_failure = failure
         result = await manager.upgrade(target)
-        assert result["ok"] is True
-        # The candidate is discarded with the component it waited on recorded,
-        # and the upgrade falls back to the one-worker sequence.
-        assert runtime.events == [
-            "inspect",
-            "start-standby",
-            "discard-standby",
-            "stop",
-            "start",
-        ]
-        assert result["handoff"]["standby"] == "discarded"
+        assert result["ok"] is False
+        assert runtime.pid == serving
+        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
+        assert ingress.events == []
+        assert manager.phase == "ready"
+        assert manager.status()["active"] == active
+        assert manager.records.pending() is None
+        assert result["handoff"]["standby"] == standby
         assert result["handoff"]["waiting"] == "graph_snapshot"
-        assert result["handoff"]["reason"] == "warm budget expired"
+        assert result["handoff"]["reason"] == reason
 
     asyncio.run(scenario())
 
@@ -1205,9 +1214,8 @@ def test_environment_warnings_reach_a_discarded_handoff_record(tmp_path):
         runtime.standby_failure = "budget"
         runtime.environment_warnings = ["unreadable: service.env"]
         result = await manager.upgrade(target)
-        assert result["ok"] is True
-        # A stale inherited environment is exactly what the fallback path has to
-        # report; it must not be visible only on the path that promoted.
+        assert result["ok"] is False
+        # A rejected candidate must report its environment warning as well.
         assert result["handoff"]["standby"] == "discarded"
         assert result["handoff"]["environment"] == ["unreadable: service.env"]
 
@@ -1305,17 +1313,16 @@ class _NeverReadyClient(_PromotingClient):
         return _FakeResponse(503, {"status": "not_ready"})
 
 
-def test_a_promotion_accepted_before_a_readiness_timeout_is_not_thrown_away(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "failure", ["timeout", "exit", "cancel", "post_timeout", "post_cancel", "invalid_response"]
+)
+def test_a_replacement_remains_owned_when_promotion_or_readiness_fails(
+    tmp_path, monkeypatch, failure
 ):
-    """A promoted worker that has not answered yet is not a spare candidate.
+    """An interrupted promotion can leave the replacement owning state and children.
 
-    On the migrated path the promote POST can consume most of the cutover
-    budget, leaving the readiness wait almost none. The process on the other end
-    already holds the writer lease by then, so the failure has to say the
-    handover happened and the runtime has to track it as the serving worker --
-    otherwise recovery stops the wrong tree and the record loses the one fact
-    that distinguishes a restart from a rollback.
+    Recovery must track that tree even when no promotion receipt arrives.
+    Otherwise cleanup treats the new owner as a childless spare candidate.
     """
     module = _manager()
     monkeypatch.setattr(module, "_descendants", lambda **kwargs: {})
@@ -1324,12 +1331,45 @@ def test_a_promotion_accepted_before_a_readiness_timeout_is_not_thrown_away(
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
         runtime.standby = _FakeChild()
         runtime.standby_client = _NeverReadyClient()
+        if failure == "exit":
+            runtime.standby.returncode = 1
+        elif failure == "cancel":
+            async def cancelled_readiness(path):
+                raise asyncio.CancelledError
+
+            runtime.standby_client.get = cancelled_readiness
+        elif failure.startswith("post_"):
+            async def interrupted_post(path, json=None):
+                if failure == "post_cancel":
+                    raise asyncio.CancelledError
+                raise TimeoutError
+
+            runtime.standby_client.post = interrupted_post
+        elif failure == "invalid_response":
+            async def invalid_response(path, json=None):
+                response = _FakeResponse(200, None)
+
+                def invalid_json():
+                    raise ValueError("invalid promotion response")
+
+                response.json = invalid_json
+                return response
+
+            runtime.standby_client.post = invalid_response
         original_socket = runtime.socket_path
-        with pytest.raises(RuntimeError, match="readiness"):
+        expected_error = (
+            asyncio.CancelledError if failure in {"cancel", "post_cancel"}
+            else TimeoutError if failure == "post_timeout"
+            else ValueError if failure == "invalid_response"
+            else RuntimeError
+        )
+        with pytest.raises(expected_error):
             await runtime.promote_standby(migrated=True, timeout=0.3)
-        # Promotion was accepted, and is retained for the handoff record.
-        assert runtime.promotion_record["snapshot"] == "current"
-        # Ownership moved: this is the serving worker now, not a standby.
+        if failure in {"post_timeout", "post_cancel", "invalid_response"}:
+            assert runtime.promotion_record is None
+        else:
+            assert runtime.promotion_record["snapshot"] == "current"
+        # Process cleanup owns the replacement even when state ownership is unknown.
         assert runtime.standby is None
         assert runtime.child is not None
         assert runtime.socket_path != original_socket
@@ -1597,15 +1637,10 @@ def test_a_failed_handoff_records_the_window_it_burned_and_what_it_waited_on(
     asyncio.run(scenario())
 
 
-def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
+def test_a_discarded_standby_never_enters_the_replacement_window(
     tmp_path, replacement_timeout_clock
 ):
-    """The incident shape: a candidate discarded, then its replacement stuck.
-
-    Both facts are needed to read the record -- which component the discarded
-    candidate was warming, and what the cold replacement could not finish -- so
-    neither is allowed to overwrite the other.
-    """
+    """A slow cold replacement cannot take down a worker after candidate rejection."""
 
     async def scenario():
         manager, ingress, runtime, target = _slow_supervisor(
@@ -1614,22 +1649,17 @@ def test_a_discarded_standby_and_a_failed_replacement_each_keep_their_own_field(
         runtime.standby_failure = "budget"
         result = await manager.upgrade(target)
         assert result["ok"] is False
-        assert runtime.replacement_timeouts == [0.6]
+        assert runtime.replacement_timeouts == []
         handoff = result["handoff"]
-        # The candidate was discarded for missing its warm budget...
         assert handoff["standby"] == "discarded"
         assert handoff["reason"] == "warm budget expired"
         assert handoff["waiting"] == "graph_snapshot"
-        # ...and the one-worker replacement it fell back to never came up.
-        assert handoff["replacement_waiting"] == "retrieval_unavailable (repair: rebuilding)"
-        assert runtime.events == [
-            "inspect",
-            "start-standby",
-            "discard-standby",
-            "stop",
-            "start",
-            "stop",
-        ]
+        assert "replacement_waiting" not in handoff
+        assert "ready_after_ms" not in handoff
+        assert "unavailable_ms" not in handoff
+        assert runtime.events == ["inspect", "start-standby", "discard-standby"]
+        assert manager.phase == "ready"
+        assert manager.records.pending() is None
 
     asyncio.run(scenario())
 

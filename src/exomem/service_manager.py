@@ -150,15 +150,11 @@ def _descendants(
 ) -> dict[int, tuple[int, str]]:
     """Read the current descendant tree, including subreaper-adopted children.
 
-    ``ignore_sessions`` excludes the session of a deliberately co-owned tree so
-    one worker's exit can be proven while another is still running. Every worker
-    and migrator is spawned with ``start_new_session=True``, so a session id is
-    exactly one spawned tree and nothing in it calls ``setsid`` again. A standby
-    is the only tree this supervisor ever runs beside the serving worker, and
-    each one's stop proof is still exhaustive within its own session.
+    ``ignore_sessions`` excludes only a known childless standby. Serving
+    descendants may start their own sessions or become adopted children;
+    both remain in the exhaustive exit proof before migration and promotion.
     """
     processes: dict[int, tuple[int, str]] = {}
-    sessions: dict[int, int] = {}
     for path in Path("/proc").iterdir():
         if not path.name.isdigit():
             continue
@@ -166,7 +162,6 @@ def _descendants(
             fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
             pid = int(path.name)
             processes[pid] = (int(fields[1]), fields[0])
-            sessions[pid] = int(fields[3])
         except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
             continue
     owned: dict[int, tuple[int, str]] = {}
@@ -183,7 +178,7 @@ def _descendants(
         owned = {
             pid: value
             for pid, value in owned.items()
-            if sessions.get(pid) not in ignore_sessions
+            if pid not in ignore_sessions
         }
     return owned
 
@@ -473,8 +468,8 @@ class Supervisor:
 
         Nothing here pauses, drains or signals the worker that is serving. A
         candidate that cannot reach cutover readiness inside the warm budget is
-        discarded with the component it waited on recorded, and the upgrade
-        continues through the one-worker sequence — reported, never silent
+        discarded with the component it waited on recorded. The serving worker
+        remains admitted when the candidate is rejected
         (`seamless-managed-worker-handoff` D7).
         """
         if resume:
@@ -492,40 +487,41 @@ class Supervisor:
                 target, timeout=self.standby_warm_timeout
             )
         except TimeoutError:
-            await self._discard_standby("pending")
+            cleaned = await self._discard_standby("pending")
             return self._environment_notes(
                 {
-                    "standby": "discarded",
+                    "standby": "discarded" if cleaned else "discard_failed",
                     "reason": "warm budget expired",
                     "waiting": getattr(self.runtime, "standby_waiting", None),
                 }
             ), None
         except Exception:  # noqa: BLE001 - a candidate failure never touches the serving worker
-            await self._discard_standby("pending")
+            cleaned = await self._discard_standby("pending")
             return self._environment_notes(
                 {
-                    "standby": "discarded",
+                    "standby": "discarded" if cleaned else "discard_failed",
                     "reason": "candidate could not warm",
                     "waiting": getattr(self.runtime, "standby_waiting", None),
                 }
             ), None
         return self._environment_notes({"standby": "ready"}), standby
 
-    async def _discard_standby(self, candidate: Any) -> None:
+    async def _discard_standby(self, candidate: Any) -> bool:
         """Stop a candidate without ever signalling the worker that is serving.
 
         Any truthy ``candidate`` means one may exist; discarding when none does
         is a no-op in the runtime.
         """
         if not candidate:
-            return
+            return True
         discard = getattr(self.runtime, "discard_standby", None)
         if discard is None:
-            return
+            return False
         try:
             await discard(timeout=10)
         except Exception:  # noqa: BLE001 - a stuck candidate must not mask the outcome
-            pass
+            return False
+        return True
 
     def _migration_declared(self, target: dict[str, Any]) -> tuple[bool, str]:
         """Whether the staged target declares a state migration."""
@@ -574,6 +570,14 @@ class Supervisor:
             # what a polling operator has to be able to see.
             self.phase = "upgrading"
             handoff, standby = await self._warm_standby(target, resume=resume)
+            if handoff.get("standby") in {"discarded", "discard_failed"}:
+                # A rejected candidate must not turn a serving worker into a cold start.
+                self.phase = "ready"
+                return {
+                    "ok": False,
+                    "error": "standby could not reach cutover readiness; current worker is still serving",
+                    "handoff": handoff,
+                }
             deadline = Deadline(self.transition_timeout)
             # Bound before the try so the failure path can tell a handoff that
             # burned the whole replacement window from one that died at the
@@ -879,8 +883,8 @@ class WorkerRuntime:
     """Own every state-touching child through stop, migration and readiness.
 
     At most two owned worker trees exist at once: the one serving and, during an
-    upgrade, the standby warming beside it. Each is its own session, so each
-    one's exit proof stays exhaustive inside its session while the other runs.
+    upgrade, the childless standby warming beside it. Retiring the serving
+    worker proves every descendant has exited, excluding only that standby.
     Only one of them ever owns state, and promotion is the single moment that
     changes.
     """
@@ -941,12 +945,14 @@ class WorkerRuntime:
         if reason:
             self.replacement_waiting = reason
 
-    def _other_sessions(self, *, standby: bool) -> frozenset[int]:
-        """The co-owned session a stop or spawn proof must leave alone."""
-        other = self.standby if not standby else self.child
-        # ``start_new_session=True`` makes the session id the spawned pid, and it
-        # stays valid for members that outlive the direct child.
-        return frozenset({other.pid}) if other is not None else frozenset()
+    def _standby_session(self) -> frozenset[int]:
+        """Exclude only the live standby, which cannot own descendants."""
+        candidate = self.standby
+        return (
+            frozenset({candidate.pid})
+            if candidate is not None and candidate.returncode is None
+            else frozenset()
+        )
 
     def _child_environment(self) -> dict[str, str] | None:
         """Overlay the unit's current environment file for the child only.
@@ -1093,9 +1099,14 @@ class WorkerRuntime:
         }
 
     async def _spawn(self, command: list[str], *, standby: bool = False) -> None:
-        ignore = self._other_sessions(standby=standby)
         occupied = self.standby if standby else self.child
-        if occupied is not None or _descendants(ignore_sessions=ignore):
+        if occupied is not None:
+            raise RuntimeError("previous owned process exit has not been proven")
+        if standby:
+            # The childless candidate warms while the serving tree remains live.
+            if not self.pid:
+                raise RuntimeError("standby requires a live serving worker")
+        elif _descendants(ignore_sessions=self._standby_session()):
             raise RuntimeError("previous owned process exit has not been proven")
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
@@ -1121,7 +1132,7 @@ class WorkerRuntime:
             self.child = spawned
 
     async def stop(self, timeout: float) -> None:
-        ignore = self._other_sessions(standby=False)
+        ignore = self._standby_session()
         if self.child is not None:
             await stop_owned_process(
                 self.child, timeout=timeout, include_adopted=True, ignore_sessions=ignore
@@ -1330,11 +1341,11 @@ class WorkerRuntime:
     async def discard_standby(self, timeout: float = 10) -> None:
         """Stop the candidate's tree without touching the serving worker's."""
         if self.standby is not None:
+            # Standby cannot own descendants; adopted children belong to serving work.
             await stop_owned_process(
                 self.standby,
                 timeout=timeout,
-                include_adopted=True,
-                ignore_sessions=self._other_sessions(standby=True),
+                include_adopted=False,
             )
             self.standby = None
         if self.standby_client is not None:
@@ -1342,11 +1353,8 @@ class WorkerRuntime:
             self.standby_client = None
         remove_stale_socket(self.standby_socket)
 
-    def _assume_promoted(self) -> None:
-        """One owner at a time: the promoted tree becomes the serving one.
-
-        Idempotent, because the readiness-timeout path calls it before raising.
-        """
+    def _adopt_replacement(self) -> None:
+        """Track the replacement tree for cleanup before it can activate."""
         if self.standby is None:
             return
         self.child, self.standby = self.standby, None
@@ -1365,9 +1373,11 @@ class WorkerRuntime:
         if self.standby is None or self.standby_client is None:
             raise RuntimeError("no standby worker to promote")
         if self.child is not None or _descendants(
-            ignore_sessions=frozenset({self.standby.pid})
+            ignore_sessions=self._standby_session()
         ):
             raise RuntimeError("previous owned process exit has not been proven")
+        # A promotion request can activate before its reply; cleanup must own the tree.
+        self._adopt_replacement()
         deadline = Deadline(timeout)
         # A migrated promotion re-runs the whole source proof inside this POST
         # -- seconds on a large vault, and it grows with the corpus -- so the
@@ -1380,24 +1390,24 @@ class WorkerRuntime:
         # either way.
         promote_budget = deadline.remaining(timeout if migrated else 10)
         async with asyncio.timeout(promote_budget):
-            response = await self.standby_client.post(
+            response = await self.client.post(
                 "/control/promote", json={"migrated": bool(migrated)}
             )
         if response.status_code != 200:
             raise RuntimeError("standby refused promotion")
         # Ownership has already changed hands. Record that before waiting on
         # readiness so an exhausted wait cannot lose the fact that it happened.
-        record = response.json()
-        self.promotion_record = record
-        self.replacement_waiting = "unreachable"
         try:
+            record = response.json()
+            self.promotion_record = record
+            self.replacement_waiting = "unreachable"
             while True:
-                if self.standby.returncode is not None:
+                if self.child.returncode is not None:
                     raise RuntimeError("promoted worker exited before readiness")
                 try:
                     async with asyncio.timeout(deadline.remaining(2)):
-                        health = await self.standby_client.get("/health")
-                        ready = await self.standby_client.get("/health/ready")
+                        health = await self.client.get("/health")
+                        ready = await self.client.get("/health/ready")
                     if (
                         health.status_code == 200
                         and ready.status_code == 200
@@ -1412,15 +1422,11 @@ class WorkerRuntime:
         except TimeoutError:
             # The promotion itself was accepted, so this process already holds
             # the writer lease: it is the serving worker that has not answered
-            # yet, not a candidate to throw away. Track it as such so the
-            # failure path stops the right tree, and say which of the two
-            # happened rather than reporting a generic cutover failure.
-            self._assume_promoted()
+            # yet, not a candidate to throw away.
             raise RuntimeError(
                 "promotion was accepted but the worker did not report readiness "
                 "inside the cold-start budget"
             ) from None
-        self._assume_promoted()
         return self.client, record
 
 
