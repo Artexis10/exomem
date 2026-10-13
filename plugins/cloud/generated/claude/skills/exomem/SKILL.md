@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: a163b0ab922eed89db20091bba40c564c91968aeac4cca81c22a25308a834028
+  skill_contract: ae07b06f3a28a574456743aac7e94350297f1cd6f7b6c15611686a384779285f
   version: "0.32.0"
 ---
 
@@ -135,6 +135,13 @@ Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
 authorize sending context or saving it.
 
 Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+
+After new evidence, a task change, or continuation restoration, judge whether
+the context needs refresh. When the exposed tool supports it, set
+`trigger="task_refresh"` and `initiator="agent"`. Keep the original human `turn`
+and put the current task in `conversation.focus`. Reuse relevant held material;
+memory replies alone do not justify another refresh. Refresh grants no write
+authority. See [recall](references/recall.md) for qualification and client limits.
 
 Only when needed to resolve the current subject in a long thread or attachments, also pass `conversation`: relevant `focus` (including attachment names) and `refs`; never rewrite the turn or send full history.
 
