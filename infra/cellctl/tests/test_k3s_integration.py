@@ -1136,6 +1136,33 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         timeout=60, interval=2, description="cell to resume running before the upgrade scenarios",
     )
 
+    print("[3.10] scenario: explicit stop and resume preserve the volume and stored data")
+    pvc_before = json.loads(
+        _kubectl(k3s.name, ["get", "pvc", "cell-data", "--namespace", namespace, "--output=json"]).stdout
+    )["metadata"]["uid"]
+    # C1 fixes these desired states; the fixture owner supplies controller inputs.
+    asyncio.run(_exec_admin("UPDATE exomem_cloud_cells SET desired_state = 'stopped' WHERE cell_id = $1", cell_id))
+    _wait_for(
+        lambda: _reconciled_to("stopped"),
+        timeout=120, interval=2, description="the explicit stopped input to stop the runtime",
+    )
+    assert asyncio.run(_row())["ready"] is False
+    runtime_pods = json.loads(
+        _kubectl(k3s.name, ["get", "pods", "--namespace", namespace, f"--selector=!{JOB_KIND_LABEL}", "--output=json"]).stdout
+    )["items"]
+    assert not runtime_pods, runtime_pods
+    asyncio.run(_exec_admin("UPDATE exomem_cloud_cells SET desired_state = 'running' WHERE cell_id = $1", cell_id))
+    _wait_for(
+        _converged, timeout=180, interval=2, description="the stopped cell to resume Ready",
+    )
+    resumed_pod = _pod_name()
+    assert _exec_py(k3s.name, namespace, resumed_pod, read_source).stdout.strip() == "k3s-integration-canary"
+    _assert_owner_only_modes_intact(resumed_pod)
+    pvc_after = json.loads(
+        _kubectl(k3s.name, ["get", "pvc", "cell-data", "--namespace", namespace, "--output=json"]).stdout
+    )["metadata"]["uid"]
+    assert pvc_after == pvc_before
+
     # === B1/H9 regression, at the live-cluster level: this row already
     # carries a `last_backup_snapshot` from the nightly backup above (this
     # is deliberate -- both this scenario and the outage scenario below
