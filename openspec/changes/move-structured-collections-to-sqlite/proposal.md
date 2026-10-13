@@ -66,6 +66,7 @@ None. The store is a storage change inside existing capabilities.
 - `governance-kernel`: governance granularity follows the row, not the file; Planning mutation still requires the complete authorized state; a type's `owner` default audience is a subject-level default-deny.
 - `machine-local-state-placement`: a new `external-canonical` placement class for the live store.
 - `hosted-vault-portability`: export carries the collection store snapshot as canonical data.
+- `multi-host-writer-lease`: an explicit single-host topology reuses the loopback coordinator while preserving local authentication storage.
 
 ## Impact
 

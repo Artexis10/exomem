@@ -61,9 +61,6 @@ entries:
   icloud-drive-folder:
     label: iCloud Drive
     attributes: {evidence: windows-folder, value: iclouddrive}
-  obsidian-sync:
-    label: Obsidian Sync
-    attributes: {evidence: vault-core-plugin, value: sync}
   obsidian-livesync:
     label: Self-hosted LiveSync
     attributes: {evidence: vault-community-plugin, value: obsidian-livesync}
