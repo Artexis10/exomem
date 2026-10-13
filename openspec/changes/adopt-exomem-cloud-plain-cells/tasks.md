@@ -48,13 +48,17 @@
 
 - [x] 3.1 Scaffold `infra/cellctl/` as a Python package with its own pyproject and tests, plus `tests/fixtures/exomem_cloud_schema.sql` copied from Substrate migration `0056` (every C1 column, including the write-once key columns and the hold columns) and the grants script
   Evidence (#1368): `infra/cellctl/pyproject.toml`; `tests/test_fixture_schema.py` (`test_generation_bumps_only_on_desired_column_change`, `test_cellctl_role_cannot_write_desired_columns`, `test_gateway_role_cannot_write_desired_state`); fixtures refreshed from Substrate `2b38730` (#1387).
-- [ ] 3.2 Write red-first unit tests for the rendered manifests (D5):
+- [x] 3.2 Write red-first unit tests for the rendered manifests (D5):
   - Pod Security labels, quota, and a default-deny policy with gateway-only ingress;
   - no runtime egress (not even DNS), and backup egress limited to 443 plus DNS;
   - no ServiceAccount token, `readOnlyRootFilesystem`, the `/tmp` emptyDir, and `fsGroup` 10001 with `fsGroupChangePolicy: OnRootMismatch`;
   - the `cell-init` init container;
   - readiness on `/health/ready`, liveness on `/health`;
   - the encrypted `reclaimPolicy: Delete` class.
+  Evidence (#1368, #1396): `tests/test_manifests.py` covers security labels, quota, network isolation, runtime mounts, init, probes and PVC class selection.
+  `tests/test_platform_chart_headers.py::test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes` covers the rendered encrypted `Delete` class.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed both suites on exact release source `886a0a9`.
+  Its chart step rejects skipped cases. The isolated original-image qualification also passed the manifest cases on 2026-10-13.
 - [ ] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
@@ -64,7 +68,7 @@
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
-- [ ] 3.4 Implement the rollout (D6) and prove each property:
+- [x] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
   - stop, then backup, then start, with annotations as attempt state;
@@ -73,6 +77,10 @@
   - a failed restore holding the cell stopped with `RESTORE_FAILED` and retrying;
   - resumption of each hold after a cellctl restart;
   - no flap while paused.
+  Evidence (#1368): `tests/test_rollout.py`, `tests/test_decide.py`, `tests/test_jobs.py` and `tests/test_k8s_client.py` cover these source properties.
+  The isolated original 0.116 controller image passed all 234 selected boundary cases on 2026-10-13, including those rollout cases.
+  Failed-restore, absent-Job retry and recorded-restoration cases jointly prove recovery without repeating Kubernetes TTL behavior.
+  This closes implementation and property-test scope; production rollout and recovery acceptance remain in section 6.
 - [ ] 3.5 Implement secrets (D7):
   - the C4 bearer, with current and previous versions;
   - per-cell data keys, AES-GCM envelope, versioned, with a write-once `backup_key_wrapped`;
