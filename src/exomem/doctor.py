@@ -2677,6 +2677,13 @@ def _check_remote_owner_former_audience(vault_root: Path | None) -> list[DoctorC
 
 
 def _check_ha_env() -> list[DoctorCheck]:
+    from .writer_lease import LeaseConfig
+
+    try:
+        config = LeaseConfig.from_env()
+    except ValueError as error:
+        return [_check("ha.config", "fail", str(error), "Fix the writer-lease environment configuration.")]
+    shared_auth = config.topology != "single-host" or bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
     required = {
         "EXOMEM_BASE_URL": "Set the stable public OAuth origin.",
         "EXOMEM_JWT_SIGNING_KEY": "Set the stable durable-session signing root.",
@@ -2687,6 +2694,9 @@ def _check_ha_env() -> list[DoctorCheck]:
         "EXOMEM_OAUTH_STORAGE_TOKEN": "Set the coordinator bearer credential for auth state.",
         "EXOMEM_LEASE_COORDINATOR_TOKEN": "Set the bearer enforced by the coordinator service.",
     }
+    if not shared_auth:
+        for key in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_OAUTH_STORAGE_TOKEN", "EXOMEM_LEASE_COORDINATOR_TOKEN"):
+            del required[key]
     checks: list[DoctorCheck] = []
     for key, remediation in required.items():
         if os.environ.get(key, "").strip():
@@ -2700,22 +2710,23 @@ def _check_ha_env() -> list[DoctorCheck]:
             "ha.env.EXOMEM_WRITER_LEASE_TOKEN",
             "fail",
             "Writer lease token is not set.",
-            "Set EXOMEM_WRITER_LEASE_TOKEN to the same bearer as EXOMEM_OAUTH_STORAGE_TOKEN.",
+            "Set EXOMEM_WRITER_LEASE_TOKEN to the coordinator's bearer credential.",
         ))
     namespace = (
         os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
         or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
     )
-    checks.append(_check(
-        "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
-        "pass" if namespace else "fail",
-        "OAuth storage namespace is set."
-        if namespace
-        else "OAuth storage namespace is not set.",
-        None if namespace else (
-            "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
-        ),
-    ))
+    if shared_auth:
+        checks.append(_check(
+            "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
+            "pass" if namespace else "fail",
+            "OAuth storage namespace is set."
+            if namespace
+            else "OAuth storage namespace is not set.",
+            None if namespace else (
+                "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
+            ),
+        ))
     raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
     try:
         valid_user_id = raw_user_id.isdecimal() and int(raw_user_id) > 0
@@ -2735,16 +2746,19 @@ def _check_ha_env() -> list[DoctorCheck]:
         os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip(),
     ]
     credentials_match = all(credential_values) and len(set(credential_values)) == 1
-    checks.append(_check(
-        "ha.auth.credentials_match",
-        "pass" if credentials_match else "fail",
-        "HA coordinator credentials are present and match."
-        if credentials_match
-        else "HA coordinator credentials are missing or do not match.",
-        None if credentials_match else (
-            "Use one bearer value for writer lease, OAuth storage, and the coordinator."
-        ),
-    ))
+    if shared_auth:
+        checks.append(_check(
+            "ha.auth.credentials_match",
+            "pass" if credentials_match else "fail",
+            "HA coordinator credentials are present and match."
+            if credentials_match
+            else "HA coordinator credentials are missing or do not match.",
+            None if credentials_match else (
+                "Use one bearer value for writer lease, OAuth storage, and the coordinator."
+            ),
+        ))
+    if config.topology == "single-host":
+        return checks
     raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
     try:
         contracts = _parse_runtime_contracts(raw_contracts)
@@ -3080,6 +3094,14 @@ def _check_ha_auth_probes(*, prefix: str = "ha.auth") -> list[DoctorCheck]:
 
 def _ha_auth_configured() -> bool:
     """Whether this environment declares any part of a replica/HA topology."""
+    from .writer_lease import LeaseConfig
+
+    try:
+        config = LeaseConfig.from_env()
+    except ValueError:
+        return True  # The environment checks report the invalid configuration.
+    if config.topology == "single-host":
+        return bool(os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip())
     return any(
         os.environ.get(key, "").strip()
         for key in HA_AUTH_ENV_KEYS
@@ -3635,8 +3657,9 @@ def _check_managed_hook_refresh() -> DoctorCheck:
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
-    entirely when writer-lease coordination is disabled."""
-    if not os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip():
+    entirely when writer-lease coordination is disabled; single-host probes only its coordinator."""
+    if not (os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()
+            or os.environ.get("EXOMEM_WRITER_LEASE_TOPOLOGY", "").strip()):
         return []
     from .writer_lease import LeaseConfig
 
@@ -3649,6 +3672,8 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
             str(e),
             "Fix the writer-lease environment configuration.",
         )]
+    if not config.enabled:
+        return []
 
     checks: list[DoctorCheck] = []
     if config.ttl_seconds < 30:
@@ -3667,6 +3692,18 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
         ))
 
     if not probe:
+        return checks
+
+    if config.topology == "single-host":
+        from .writer_lease import LeaseCoordinatorClient
+
+        try:
+            LeaseCoordinatorClient(config).status()
+        except OpError as error:
+            checks.append(_check("writer_lease.coordinator", "fail", str(error),
+                                 "Check the local coordinator service and writer credential."))
+        else:
+            checks.append(_check("writer_lease.coordinator", "pass", "The local coordinator answers the lease status request."))
         return checks
 
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
@@ -3785,18 +3822,25 @@ def doctor(
     if profile == "ha":
         checks.extend(_check_ha_env())
         if probe:
-            checks.extend(_check_ha_auth_probes())
+            if _ha_auth_configured():
+                checks.extend(_check_ha_auth_probes())
+            from .writer_lease import LeaseConfig
+
             try:
-                urls = _ha_replica_urls(replica_urls)
-            except ValueError as exc:
-                checks.append(_check(
-                    "ha.replica_urls",
-                    "fail",
-                    str(exc),
-                    "Pass credential-free replica origins such as https://replica.example.com.",
-                ))
+                config = LeaseConfig.from_env()
+            except ValueError:
+                pass  # The environment and coordinator sections expose this failure.
             else:
-                checks.extend(_check_ha_probes(urls))
+                if config.topology != "single-host":
+                    try:
+                        urls = _ha_replica_urls(replica_urls)
+                    except ValueError as exc:
+                        checks.append(_check(
+                            "ha.replica_urls", "fail", str(exc),
+                            "Pass credential-free replica origins such as https://replica.example.com.",
+                        ))
+                    else:
+                        checks.extend(_check_ha_probes(urls))
 
     # Not profile-gated: any profile can run with writer-lease coordination
     # enabled, and the section self-skips when it is not (design.md Decision 3).

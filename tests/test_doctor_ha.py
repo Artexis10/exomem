@@ -64,6 +64,39 @@ def test_ha_profile_is_offline_by_default(
     assert not any(check_id.startswith("ha.replica.") for check_id in checks)
 
 
+def test_single_host_doctor_checks_the_lease_without_requiring_ha_services(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_ha_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOPOLOGY", "single-host")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:8766")
+    for key in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_OAUTH_STORAGE_TOKEN",
+                "EXOMEM_OAUTH_STORAGE_NAMESPACE", "EXOMEM_LEASE_COORDINATOR_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    from exomem.writer_lease import LeaseRecord
+
+    monkeypatch.setattr("exomem.writer_lease.LeaseCoordinatorClient.status",
+                        lambda _self: LeaseRecord(None, None, 0))
+    monkeypatch.setattr(doctor_module, "_probe_get", lambda _url: pytest.fail("HA edge probe"))
+    report = doctor_module.doctor(vault=str(vault), profile="ha", probe=True)
+    checks = {check.id: check for check in report.checks}
+    assert checks["edge_ingress.lease_ttl"].status == "pass"
+    assert checks["writer_lease.coordinator"].status == "pass"
+    assert not any(check_id.startswith("ha.auth.") or check_id.startswith("ha.replica")
+                   for check_id in checks)
+    assert report.success
+
+
+def test_single_host_doctor_reports_invalid_topology_without_probing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOPOLOGY", "single-host")
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    report = doctor_module.doctor(vault=str(vault), profile="lean", probe=True)
+    check = next(c for c in report.checks if c.id == "edge_ingress.config")
+    assert check.status == "fail" and "loopback" in check.message
+
+
 def test_ha_profile_reports_missing_coordination_configuration(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
