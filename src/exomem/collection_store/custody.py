@@ -7,6 +7,7 @@ every participating endpoint; until one exists its custody stays unknown, which
 leaves store activation pending without touching file collections or knowledge.
 Unmanaged sync programs that leave no evidence on these paths are outside the
 supported deployment boundary.
+An enabled built-in plugin is a capability bit, not a connected sync root.
 """
 
 from __future__ import annotations
@@ -112,7 +113,8 @@ def _vault_application_sync(vault: Path, evidence) -> str | None:
             return {key for key, on in value.items() if on is True}
         return set(value) if isinstance(value, list) else set()
 
-    if enabled("core-plugins.json") & set(evidence["vault-core-plugin"]):
+    # Only explicit registry evidence makes core-plugin state relevant to custody.
+    if evidence["vault-core-plugin"] and enabled("core-plugins.json") & set(evidence["vault-core-plugin"]):
         return "vault application sync is enabled"
     found = enabled("community-plugins.json") & set(evidence["vault-community-plugin"])
     return f"vault sync plugin {sorted(found)[0]} is enabled" if found else None

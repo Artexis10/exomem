@@ -119,7 +119,23 @@ def worker(root, socket_path, standby=False):
         return {"marker": marker, "pid": os.getpid()}
 
     @app.tool
-    async def escaped_child() -> dict:
+    async def escaped_child(orphan_after_standby: bool = False) -> dict:
+        if orphan_after_standby:
+            code = """import os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+os.setsid()
+if os.fork() == 0:
+    os.setsid()
+    (root / 'orphan.pid').write_text(str(os.getpid()))
+    time.sleep(120)
+else:
+    deadline = time.monotonic() + 20
+    while not (root / 'standby.pid').exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+"""
+            child = subprocess.Popen([sys.executable, "-c", code, str(root)])
+            return {"pid": child.pid}
         child = subprocess.Popen(
             [sys.executable, "-c", "import os,time; os.setsid(); time.sleep(120)"]
         )

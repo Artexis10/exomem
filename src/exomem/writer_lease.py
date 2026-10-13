@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -1699,6 +1700,38 @@ class LeaseConfig:
     # view of the vault. Pre-v4 clients omit the field entirely; the external
     # coordinator interprets that released wire shape as schema 3.
     schema_version: int = 4
+    # These deployment modes are a closed protocol contract, not vault vocabulary.
+    topology: str = "multi-host"
+
+    def __post_init__(self) -> None:
+        if self.topology not in {"multi-host", "single-host"}:  # nosemgrep: ep-word-set -- Closed deployment modes select implemented auth boundaries.
+            raise ValueError(
+                "WRITER_LEASE_CONFIG: EXOMEM_WRITER_LEASE_TOPOLOGY must be multi-host or single-host"
+            )
+        if self.topology == "single-host":
+            # Local session identities are safe only while authority stays on this host.
+            try:
+                origin = urllib.parse.urlsplit(self.url or "")
+                address = ipaddress.ip_address(origin.hostname or "")
+                origin.port  # Validate the URL parser's port field before using the origin.
+            except ValueError:
+                origin = None
+            if (
+                origin is None
+                or origin.scheme not in ("http", "https")
+                or not address.is_loopback
+                or getattr(address, "scope_id", None) is not None
+                or origin.username is not None
+                or origin.password is not None
+                or origin.path not in ("", "/")
+                or origin.query or origin.fragment
+                or self.url not in (f"{origin.scheme}://{origin.netloc}", f"{origin.scheme}://{origin.netloc}/")
+            ):
+                raise ValueError(
+                    "WRITER_LEASE_CONFIG: single-host requires EXOMEM_WRITER_LEASE_URL "
+                    "to be a credential-free literal loopback HTTP origin"
+                )
+            object.__setattr__(self, "url", f"{origin.scheme}://{origin.netloc}")
 
     @property
     def enabled(self) -> bool:
@@ -1708,6 +1741,7 @@ class LeaseConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> LeaseConfig:
         values = os.environ if env is None else env
         url = values.get("EXOMEM_WRITER_LEASE_URL", "").strip() or None
+        topology = values.get("EXOMEM_WRITER_LEASE_TOPOLOGY", "").strip() or "multi-host"
         state_raw = values.get("EXOMEM_WRITER_LEASE_STATE_DIR", "").strip()
         ttl_seconds = _positive_float(values, "EXOMEM_WRITER_LEASE_TTL", 30.0)
         idle_raw = values.get("EXOMEM_WRITER_LEASE_IDLE_SECONDS", "").strip()
@@ -1725,7 +1759,7 @@ class LeaseConfig:
             # alone can never trip the idle>=ttl validation and brick startup.
             idle_release_seconds = max(60.0, ttl_seconds)
         config = cls(
-            url=url.rstrip("/") if url else None,
+            url=url if topology == "single-host" else (url.rstrip("/") if url else None),
             vault_id=values.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip() or None,
             replica_id=values.get("EXOMEM_WRITER_LEASE_REPLICA_ID", "").strip() or None,
             token=values.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip() or None,
@@ -1735,6 +1769,7 @@ class LeaseConfig:
             state_dir=Path(state_raw).expanduser() if state_raw else _default_state_dir(),
             mutation_timeout_seconds=_positive_float(values, "EXOMEM_MUTATION_TIMEOUT", 5.0),
             idle_release_seconds=idle_release_seconds,
+            topology=topology,
         )
         if config.enabled and (not config.vault_id or not config.replica_id):
             raise ValueError(
@@ -2091,6 +2126,17 @@ def _contract_absent_error(url: str, route: str, status: int) -> OpError:
     )
 
 
+class _SingleHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A local authority cannot forward its bearer to another coordinator origin."""
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        previous = urllib.parse.urlsplit(request.full_url)
+        target = urllib.parse.urlsplit(new_url)
+        if (target.scheme, target.netloc) != (previous.scheme, previous.netloc):
+            raise urllib.error.URLError("single-host coordinator redirected outside its origin")
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
 class LeaseCoordinatorClient:
     """Small stdlib HTTP client for the provider-neutral lease contract."""
 
@@ -2163,6 +2209,18 @@ class LeaseCoordinatorClient:
 
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
+
+    def anonymous_status_code(self) -> int:
+        """Return the native HTTP result without sending the writer credential."""
+        request = urllib.request.Request(f"{self.config.url}{self._lease_route()}")
+        try:
+            with self._open_request(request) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise _coordinator_unavailable_error(error) from None
 
     def collection_store_fence(self) -> CollectionStoreFenceState:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
@@ -2282,13 +2340,15 @@ class LeaseCoordinatorClient:
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
-    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
+    def _lease_route(self, operation: str = "") -> str:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
-        route = f"/v1/vaults/{vault}/lease{suffix}"
+        return f"/v1/vaults/{vault}/lease{suffix}"
+
+    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         payload = self._request_json(
             method,
-            route,
+            self._lease_route(operation),
             body,
             contract_route="/v1/vaults/<id>/lease" + (f"/{operation}" if operation else ""),
         )
@@ -2296,6 +2356,15 @@ class LeaseCoordinatorClient:
             return LeaseRecord.from_json(payload)
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+    def _open_request(self, request: urllib.request.Request):
+        open_request = urllib.request.urlopen
+        if self.config.topology == "single-host":
+            # Proxies and cross-origin redirects must not move local authority off-host.
+            open_request = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
+            ).open
+        return open_request(request, timeout=self.config.timeout_seconds)
 
     def _request_json(
         self,
@@ -2315,7 +2384,7 @@ class LeaseCoordinatorClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            with self._open_request(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
