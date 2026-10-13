@@ -2210,6 +2210,18 @@ class LeaseCoordinatorClient:
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
 
+    def anonymous_status_code(self) -> int:
+        """Return the native HTTP result without sending the writer credential."""
+        request = urllib.request.Request(f"{self.config.url}{self._lease_route()}")
+        try:
+            with self._open_request(request) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise _coordinator_unavailable_error(error) from None
+
     def collection_store_fence(self) -> CollectionStoreFenceState:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         payload = self._request_json(
@@ -2328,13 +2340,15 @@ class LeaseCoordinatorClient:
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
-    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
+    def _lease_route(self, operation: str = "") -> str:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
-        route = f"/v1/vaults/{vault}/lease{suffix}"
+        return f"/v1/vaults/{vault}/lease{suffix}"
+
+    def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         payload = self._request_json(
             method,
-            route,
+            self._lease_route(operation),
             body,
             contract_route="/v1/vaults/<id>/lease" + (f"/{operation}" if operation else ""),
         )
@@ -2342,6 +2356,15 @@ class LeaseCoordinatorClient:
             return LeaseRecord.from_json(payload)
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+    def _open_request(self, request: urllib.request.Request):
+        open_request = urllib.request.urlopen
+        if self.config.topology == "single-host":
+            # Proxies and cross-origin redirects must not move local authority off-host.
+            open_request = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
+            ).open
+        return open_request(request, timeout=self.config.timeout_seconds)
 
     def _request_json(
         self,
@@ -2361,13 +2384,7 @@ class LeaseCoordinatorClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            open_request = urllib.request.urlopen
-            if self.config.topology == "single-host":
-                # Proxies and cross-origin redirects must not move local authority off-host.
-                open_request = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
-                ).open
-            with open_request(request, timeout=self.config.timeout_seconds) as response:
+            with self._open_request(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")

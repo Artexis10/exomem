@@ -8,6 +8,8 @@ Exomem SHALL preserve its current single-host behavior unless writer-lease coord
 
 Single-host coordination SHALL preserve the existing local session authority, FastMCP OAuth storage, signing key, and identity when no shared OAuth storage URL is configured. An explicit shared OAuth storage URL SHALL retain its existing selection and validation. Doctor SHALL retain applicable lease configuration and coordinator checks while omitting HA edge and two-replica checks for single-host. It SHALL require shared-auth checks only when shared OAuth storage is configured in that topology. Invalid configuration SHALL remain visible as a failure. This topology SHALL reuse the existing lease, fence, and store-head protocol without changing governance, deadlines, or supported-reader admission.
 
+Doctor SHALL verify coordinator bearer enforcement through authenticated and credential-free native lease status requests.
+
 #### Scenario: Existing single-host installation
 
 - **WHEN** no writer-lease coordinator is configured
@@ -33,3 +35,5 @@ Single-host coordination SHALL preserve the existing local session authority, Fa
 
 - **WHEN** doctor probes a valid single-host deployment without shared OAuth storage
 - **THEN** it checks the local coordinator and lease settings without requiring an HA edge, shared auth service, or two replica origins
+- **AND** authenticated lease status succeeds and credential-free lease status returns native HTTP 401
+- **AND** anonymous success, another HTTP status, or unavailable transport fails the diagnostic visibly

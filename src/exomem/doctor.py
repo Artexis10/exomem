@@ -3697,13 +3697,27 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     if config.topology == "single-host":
         from .writer_lease import LeaseCoordinatorClient
 
+        client = LeaseCoordinatorClient(config)
         try:
-            LeaseCoordinatorClient(config).status()
+            client.status()
         except OpError as error:
             checks.append(_check("writer_lease.coordinator", "fail", str(error),
                                  "Check the local coordinator service and writer credential."))
         else:
             checks.append(_check("writer_lease.coordinator", "pass", "The local coordinator answers the lease status request."))
+        # A reachable coordinator can still leave writer authority unauthenticated.
+        try:
+            status = client.anonymous_status_code()
+        except OpError as error:
+            checks.append(_check("writer_lease.anonymous_rejected", "fail", str(error),
+                                 "Check the local coordinator before verifying anonymous rejection."))
+        else:
+            checks.append(_check(
+                "writer_lease.anonymous_rejected", "pass" if status == 401 else "fail",
+                "The local coordinator rejects anonymous lease status requests (HTTP 401)."
+                if status == 401 else f"The local coordinator returned HTTP {status} for anonymous lease status; expected HTTP 401.",
+                None if status == 401 else "Require the writer bearer credential on the local coordinator.",
+            ))
         return checks
 
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
