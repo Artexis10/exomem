@@ -485,6 +485,14 @@ def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
     return snapshot.data if snapshot is not None else None
 
 
+def page_relative_path(path: Path, vault_root: Path) -> str:
+    """The canonical path identity used by the page parser."""
+    try:
+        return path.resolve().relative_to(vault_root.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def parse_page(
     path: Path,
     mtime: float,
@@ -496,6 +504,20 @@ def parse_page(
     from .foreground_activity import checkpoint
 
     checkpoint(vault_root)
+    return _parse_page_after_checkpoint(
+        path, mtime, vault_root, content=content, resolved_relative=resolved_relative
+    )
+
+
+def _parse_page_after_checkpoint(
+    path: Path,
+    mtime: float,
+    vault_root: Path,
+    *,
+    content: bytes | None = None,
+    resolved_relative: str | None = None,
+) -> ParsedPage | None:
+    """Parse one representation after the caller's foreground checkpoint."""
     if content is None:
         content = _read_page_bytes(path, vault_root)
         if content is None:
@@ -551,10 +573,7 @@ def parse_page(
     if resolved_relative is not None:
         rel_path = resolved_relative
     else:
-        try:
-            rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
-        except ValueError:
-            rel_path = path.as_posix()
+        rel_path = page_relative_path(path, vault_root)
 
     from . import provenance
     from .vault import resolve_display_title

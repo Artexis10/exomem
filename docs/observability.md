@@ -329,6 +329,14 @@ The row fields sum across loads, so `width_sum` equals the vector width only for
 A slow row phase alone does not distinguish storage, row conversion, copying or
 memory pressure.
 
+Governed walks reuse membership only for the same canonical path, vault, exact
+source bytes, policy fingerprint and current registry assignment. A valid hit
+skips Markdown parsing. Each walk still checks source freshness, tombstones,
+content floors, projection authority, grants, sessions and bridges. Each fresh
+carry still admits the whole non-raw corpus. Reuse depends on resident entries
+in the bounded memo. A corpus walk larger than that memo can still parse every
+page. This reuse does not establish a live latency improvement.
+
 ### Mutation-lock events dominate the log under writes
 
 `mutation_lock_acquired`/`released` are logged per boundary acquisition, and the
