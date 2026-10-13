@@ -62,21 +62,57 @@ def test_matrix_rejects_blob_width_different_from_snapshot_identity(root):
     assert index._cache is None
 
 
-def test_batch_replaces_parents_once_without_splicing_retained_matrix(root, monkeypatch):
+def test_batch_replaces_parents_without_reloading_or_mutating_retained_matrix(root, monkeypatch):
     index = EmbeddingIndex(root)
     index.upsert_file("one.md", ["old"], vectors(1), 1)
     _, old = index.all_vectors()
     before = token(index)
     monkeypatch.setattr(index, "_patch_cache", lambda *_args: pytest.fail("per-file splice"))
+    monkeypatch.setattr(
+        index, "_load_all_rows", lambda: pytest.fail("full reload after a bounded parent update")
+    )
     index.upsert_batch(
         [("one.md", ["new"], vectors(1, 2), 2), ("two.md", ["two"], vectors(1, 3), 2)],
         identity=recall_space.current_identity(8),
     )
     after = token(index)
     assert after[1] == before[1] + 1
-    assert index._cache is None
     np.testing.assert_array_equal(old, vectors(1))
-    assert index.all_vectors()[1].shape == (2, 8)
+    metadata, current = index.all_vectors()
+    assert metadata == [("one.md", 0), ("two.md", 0)]
+    np.testing.assert_array_equal(current, np.concatenate([vectors(1, 2), vectors(1, 3)]))
+
+
+@pytest.mark.parametrize("publish_during_probe", [False, True])
+def test_batch_read_never_serves_known_old_vectors_when_token_probe_fails(
+    root, monkeypatch, publish_during_probe
+):
+    index = EmbeddingIndex(root)
+    index.upsert_file("one.md", ["old"], vectors(1), 1)
+    _, old = index.all_vectors()
+
+    def publish():
+        index.upsert_batch(
+            [("one.md", ["new"], vectors(1, 2), 2)],
+            identity=recall_space.current_identity(8),
+        )
+
+    published = not publish_during_probe
+    if published:
+        publish()
+
+    def unavailable_token(*_args, **_kwargs):
+        nonlocal published
+        if not published:
+            publish()
+            published = True
+        return None
+
+    monkeypatch.setattr(sidecar_store, "peek_sidecar_token", unavailable_token)
+    metadata, current = index.all_vectors()
+    assert metadata == [("one.md", 0)]
+    np.testing.assert_array_equal(current, vectors(1, 2))
+    np.testing.assert_array_equal(old, vectors(1))
 
 
 def test_batch_same_width_different_model_refuses_inside_transaction(root):
