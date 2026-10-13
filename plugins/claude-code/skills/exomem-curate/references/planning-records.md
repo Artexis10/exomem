@@ -60,11 +60,11 @@ canonical operations are implementation leaves underneath them. Do not ask the
 user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema
 blocks, or supersession internals unless that detail changes what will happen.
 
-Native assistant memory (Claude, ChatGPT, Codex, and similar) is short-term or
-behavioural memory for preferences, style, identity facts, working context, and
-routing rules such as "use Exomem for my project knowledge." Exomem is long-term
-governed memory for sourced conclusions, project context, decisions, failures,
-experiments, proof-bearing records, review, and supersession.
+Keep temporary working context in the current conversation. Exomem is the durable
+home for preferences, feedback, personal baselines, project context, decisions,
+sourced conclusions, failures, experiments, and proof-bearing records.
+Capture follows the live engagement policy. Native memory is an explicit fallback
+when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|

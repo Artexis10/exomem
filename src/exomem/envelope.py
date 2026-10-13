@@ -128,22 +128,21 @@ CONFIRM_REQUIRED: str = (
     "personal vault, additive entity creation follows proactive_capture"
 )
 
-#: The protocol the agent contract teaches, per action the agent is about to
-#: take. Four moves, in order, and the order is the mechanism: an agent that
+#: The protocol the agent contract teaches for actions covered by the envelope.
+#: Read-only recall follows governance, not capture or restructure dispositions.
+#: Four moves, in order, and the order is the mechanism: an agent that
 #: checks the disposition before naming the class has already decided which
 #: cell it is reading from.
 #:
 #: Command-free for the same reason as everything else served here.
 DECIDER_PROTOCOL: tuple[str, ...] = (
-    "name the action class before acting; an unclassified action has no envelope "
-    "cell and therefore no authority",
-    "check the ceiling: an intent above it becomes a proposal, never an act",
-    "check the disposition — off: do not initiate, though an explicit request is "
-    "never blocked; advisory: surface it in the user's own language and stop; "
-    "silent: act, narrating as the prominence contract says; confirm or "
-    "confirm-shortcut: obtain the confirmation first, a confirm-shortcut being an "
-    "inline one-action approval of that one item",
-    "record the outcome through triage, so the decision is durable and countable",
+    "for envelope actions, name the action class first; an unclassified action "
+    "has no authority; read-only recall follows governance",
+    "check the ceiling: above it, propose, never act",
+    "check disposition: off blocks initiation, never explicit requests; advisory: "
+    "surface and stop; silent: act under prominence; confirm or confirm-shortcut: "
+    "obtain confirmation first, the shortcut approving one named action inline",
+    "triage addressed review decisions only; ordinary writes keep their mutation receipts",
 )
 
 _CONFIG_KEY = "envelope"

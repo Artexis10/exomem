@@ -6423,48 +6423,28 @@ def op_activate_context(
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
 ) -> dict:
-    """Compile authorized context for a human turn or an agent task refresh.
+    """Compile authorized context for a human turn or agent task refresh.
 
-    Use when live policy calls for initial recall; bootstrap reports unknown/changed
-    settings. Pass the turn verbatim. For known gaps, ask_memory recalls and
-    read_memory opens selected refs; neither writes the user's answer.
-    Read-only: bounded recent_context, anchored units, provenance, pointers and
-    governed current_state. Abstains rather than guesses.
-    For ambiguous or unresolved candidates, choose a ref and retry with anchor.
-    episode_due, upkeep and relevant_due_refs are advisory, never mutation authority.
-    Raise at most one relevant due item per maintained client conversation.
-    Details: bootstrap(profile="full") reference index, references/recall.md.
-
-    Use optional `conversation` for subject or attachment cues in `focus`, `refs`, `recent`.
-    Returned `origin` labels cues, not the user's words. Activation reads no attachment.
-    For a missed subject, retry with `conversation.focus`; see the engagement reference.
-
-    Default trigger is `user_turn`. For an agent checkpoint, set `task_refresh`,
-    keep `turn` verbatim, and put the current task in `conversation.focus`.
-    `intent_resolution` qualifies the human request separately from the task packet.
-    Refresh grants no capture, edit or external-effect authority.
+    Follow live recall policy; reuse injected context. Keep turn verbatim.
+    For task_refresh, put the task in conversation.focus. intent_resolution
+    qualifies the human request separately. Origin labels cues, not human words.
+    Returns bounded context, state, refs and provenance; abstains instead of guessing.
+    Choose a visible anchor for ambiguity. ask_memory recalls gaps; read_memory opens refs.
+    Reads no attachments. Due items and refresh grant no write authority.
 
     Args:
-        turn: Current user message verbatim, not a rewritten query. Empty abstains.
-        max_chars: Text ceiling, clamped to 500..8,000; overflow becomes pointers.
-        purpose: Declared purpose; governs visibility, never ranking.
-        continuity: Previous packet's token, unchanged; drop on new session or
-            compaction. Strengthens reached anchors; resumes unnamed turns.
-        anchor: Chosen visible compiled ref, not Sources/Evidence. Ineligible
-            and hidden refs refuse identically.
-        include_timings: Per-stage timings.
-        client: Lowercase client label; invalid labels are ignored.
-        session: Same opaque conversation id each turn; max 256 characters.
-        workspace: Project/folder key for thread continuity; max 256 characters.
-        conversation: Pass only relevant context to resolve this turn: {focus?: str,
-            recent?: [{role: "user"|"assistant", text: str}], refs?: [str]}.
-            At most six excerpts and 2,400 characters total; focus 240 characters,
-            refs twelve; never full history or unrelated personal data.
-            Unknown fields ignored; omit when the turn suffices.
-        trigger: Initial human-turn activation or agent task refresh. Refresh keeps
-            turn unchanged and selects task context from conversation.focus.
-        initiator: Optional client label for the caller's declared attribution.
-            Invalid labels are ignored; attribution grants no authority.
+        turn: Original human message verbatim. Empty abstains.
+        max_chars: Prose ceiling, clamped to 500..8,000; overflow becomes pointers.
+        purpose: Visibility purpose; never ranking.
+        continuity: Prior token unchanged; drop on compaction or new session.
+        anchor: Chosen visible compiled ref; hidden and ineligible refs refuse alike.
+        include_timings: Include stage timings.
+        client: Lowercase client label; invalid labels ignored.
+        session: Stable opaque conversation ID, at most 256 characters.
+        workspace: Thread project key, at most 256 characters.
+        conversation: Bounded focus, read refs and relevant excerpts; never full history.
+        trigger: user_turn for initial recall; task_refresh keeps turn and uses focus.
+        initiator: Descriptive caller label; grants no authority. Invalid labels ignored.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -13190,15 +13170,6 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
-        # Keep the reference in the description, before any Args/Returns
-        # sections that MCP's docstring parser consumes as schema metadata.
-        introduction, separator, details = desc.partition("\n\n")
-        desc = (
-            introduction.rstrip()
-            + "\n\n    API reference: "
-            "https://github.com/Artexis10/exomem/blob/main/docs/capabilities.md"
-            + (separator + details if separator else "\n")
-        )
         cmds.append(
             Command(
                 name=name,

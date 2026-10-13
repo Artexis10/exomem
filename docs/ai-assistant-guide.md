@@ -5,9 +5,9 @@
 This guide is for agents using Exomem after the MCP server or connector is
 available. It keeps the contract simple:
 
-- Use the assistant's native memory or custom instructions as short-term or
-  behavioural memory: preferences, routing rules, and working context.
-- Use Exomem as long-term governed memory: project context, decisions, sourced
+- Keep temporary working context in the current conversation. Custom instructions
+  can guide one client; native memory is an explicit fallback when Exomem cannot capture.
+- Use Exomem as long-term governed memory: eligible durable preferences, personal baselines, project context, decisions, sourced
   conclusions, failures, experiments, proof-bearing records, and anything that
   should be searchable, citeable, reviewable, or supersedable across clients.
 - Do not make the user choose internal folders or page types unless the choice
@@ -342,14 +342,14 @@ content-read smoke-tested before their new digest is marked verified.
 
 ## Copyable instruction block
 
-For clients that support neither Skills nor hooks — claude.ai custom
-instructions, ChatGPT, generic MCP clients. **Claude Code and Codex do not need
-this**: both load the real skills from disk via `exomem setup`.
+Use this block when a client has no loaded Exomem skill. Claude Chat and ChatGPT
+can load the skills from a plugin. Claude Code and Codex load them through
+`exomem setup`.
 
 Trim the tone line to your preference.
 
 ```text
-Use Exomem for governed knowledge, sources, evidence, decisions, and reusable conclusions; assistant-native memory is short-term/behavioural only.
+Use Exomem for eligible durable preferences, personal baselines, governed knowledge, sources, evidence, decisions, and reusable conclusions. Keep temporary working context in the current conversation.
 
 Without a loaded skill, call bootstrap(profile="compact") once per session and follow it.
 

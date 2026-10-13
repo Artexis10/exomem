@@ -39,7 +39,7 @@ def _server(vault, monkeypatch: pytest.MonkeyPatch):
     return server.build_server(require_auth=False)
 
 
-def test_generated_mcp_schema_exposes_only_optional_consumed_placeholder(
+def test_generated_mcp_schema_keeps_authorization_carriers_out_of_task_inputs(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tools = {
@@ -49,8 +49,7 @@ def test_generated_mcp_schema_exposes_only_optional_consumed_placeholder(
 
     for name in ("ask_memory", "govern_memory"):
         schema = tools[name]["inputSchema"]
-        assert "authorization_session_credential" in schema["properties"]
-        assert "authorization_session_credential" not in schema.get("required", [])
+        assert "authorization_session_credential" not in schema["properties"]
         assert "principal" not in schema["properties"]
         assert "principal_scope" not in schema["properties"]
         assert "issuer" not in schema["properties"]

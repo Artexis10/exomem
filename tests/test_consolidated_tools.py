@@ -107,7 +107,6 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
     assert "not supported relation syntax" in description
 
     assert set(schema["properties"]) == {
-        "authorization_session_credential",
         "path",
         "why",
         "operation",
