@@ -233,17 +233,23 @@
 ### Launch and resilience roadmap
 
 Current evidence separates healthy service from recovery and launch acceptance.
-On 2026-10-11, the operator API reports three ready cells on 0.114, with no active holds.
-Their requests remain `1Gi/250m`, with limits `3Gi/2CPU`.
-Shared selection remains off. Capacity currently charges scheduler requests rather than measured peaks.
-Today's backup rows do not prove a B2 restore. Endpoint probes pass; connector sign-in and refresh remain unverified.
-The 0.116 release is not yet published. Existing per-cell pins do not prove that the fleet default selects the reviewed release.
+On 2026-10-13, isolated qualification accepted the published 0.116 Cloud and cellctl images by original digest, source and provenance.
+That qualification does not prove a production rollout, OAuth refresh or owner-sized admission.
+The signed registry and cluster admission dry run pass. The prepared gateway, controller and ordered cell rollout remain unapplied.
+The recorded production window remains pending. The latest fleet receipt retains the previous cell image and requests of `1Gi/250m`, with limits of `3Gi/2CPU`.
+Shared selection remains off. Warm-peak qualification remains open; current capacity charges scheduler requests rather than measured peaks.
+A deployed-image B2 backup and scratch restore matched both vault and host state, with scratch cleanup verified.
+That proof does not close in-place restore, historical rollback, connector sign-in or token refresh.
+Existing per-cell pins do not prove that the fleet default selects the qualified release.
 The Neon cutover and project deletion are closed; do not repeat them.
 Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
 
 - [ ] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
-  That proof did not compare `/data/host` runtime state. Complete vault and host comparisons, cleanup absence proofs and the recurring operator procedure.
+  That historical proof did not compare `/data/host` runtime state.
+  On 2026-10-13, a stopped-source backup and scratch restore matched both vault and host state; scratch absence proofs passed.
+  This accepts the deployed-image dual-root comparison, not a 0.116 rollout or historical rollback.
+  Reconcile that receipt with the repeatable operator procedure before closing this task.
 - [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
   Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
   Verify old-image route reads/writes, custody and durable debt before any live pin.
@@ -254,7 +260,9 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   Never restore pre-upgrade S0 over later committed writes or add a downmigration.
 - [ ] 6.7 Resilience 3: recheck damaged-volume or bad-import recovery through the existing in-place B2 restore helper.
   The 2026-10-09 QA restore matched 45/45 vault files with 93 seconds of downtime.
-  Host-state comparison was absent. Reconcile that missing scope and verify authenticated service, custody, holds and cleanup.
+  Host-state comparison was absent from that historical in-place run.
+  The 2026-10-13 deployed-image scratch recovery matched both roots and verified custody, service authentication and cleanup.
+  Scratch recovery does not close the in-place failure path or gateway OAuth acceptance. Keep those scopes open.
 - [ ] 6.8 Resilience 4: prove recovery after actual CSI node loss on approved disposable infrastructure.
   Verify surviving-volume reattachment or B2 recovery, canonical data, host custody and service readiness.
   The older local-storage CI node-loss run does not prove the current CSI deployment's failure path.
