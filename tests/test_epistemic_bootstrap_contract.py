@@ -383,8 +383,9 @@ def test_bootstrap_teaches_the_planning_inventory_and_the_resolving_query(
     planning = json.dumps(_op(vault)["planning"]).lower()
 
     assert "inventory" in planning
-    assert "discover collections with browse_memory" in planning
-    assert "inspect requires collection" in planning
+    assert "plan_memory(action='inspect')" in planning
+    assert "without collection" in planning
+    assert "manifest_path" in planning
     # The resolution form D4 keeps instead of a new `match` action.
     assert "natural key" in planning
     assert "lifecycle" in planning and "status" in planning

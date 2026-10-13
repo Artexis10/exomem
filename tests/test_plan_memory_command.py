@@ -138,7 +138,8 @@ def test_plan_memory_create_uses_shared_preflight_for_planning(tmp_path: Path) -
         ),
         (
             {"title": "Invalid area", "area": "not-a-plan-reference"},
-            "area must be exomem://plan/<collection-uuid>/<plan-uuid>",
+            "area must be exomem://plan/<collection-uuid>/<plan-uuid>; "
+            "query this collection for collection_id and plan_id",
         ),
     ),
 )
@@ -319,16 +320,66 @@ def test_plan_memory_mutation_text_surrogates_are_bounded_planning_errors(
         plan_memory(tmp_path, "add", **arguments)
 
 
-# Collection-targeted inspection is deliberate: inventory remains available
-# through the collection discovery surface, while this finite action never
-# guesses which governed Planning collection the caller meant.
-def test_plan_inspect_requires_one_collection_selector(tmp_path: Path) -> None:
+def test_plan_inspect_without_a_selector_reports_an_empty_inventory(tmp_path: Path) -> None:
     from exomem.plan_memory import plan_memory
 
-    with pytest.raises(OpError) as raised:
-        plan_memory(tmp_path, "inspect")
+    result = plan_memory(tmp_path, "inspect")
 
-    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert result["kind"] == "planning_inventory"
+    assert result["collections"] == []
+    assert result["unreadable_manifests"] == []
+
+
+def test_planning_discovery_supplies_exact_selectors_and_relationship_refs(tmp_path: Path) -> None:
+    from exomem.commands import op_record_memory
+    from exomem.plan_memory import plan_memory as public_plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base/log.md").write_text("# Log\n", encoding="utf-8")
+    for folder, collection_id in (
+        ("Alpha", "11111111-1111-4111-8111-111111111111"),
+        ("Beta", "22222222-2222-4222-8222-222222222222"),
+    ):
+        public_plan_memory(
+            tmp_path,
+            action="create",
+            manifest_path=f"Knowledge Base/Planning/{folder}/_collection.md",
+            manifest_text=_manifest().replace("2db90f18-70df-4e41-986e-2d7d7db1caca", collection_id),
+            why="create the Planning fixture",
+        )
+    example = op_record_memory(tmp_path, action="describe")["examples"]["minimal"]
+    op_record_memory(
+        tmp_path, action="create", manifest_path=example["manifest_path"],
+        manifest_text=example["manifest_text"], why="create the Records fixture",
+    )
+
+    inventory = public_plan_memory(tmp_path, action="inspect")
+    candidates = inventory["collections"]
+    assert len(candidates) == 2
+    assert {row["title"] for row in candidates} == {"Planning work"}
+    assert len({row["collection_id"] for row in candidates}) == 2
+    assert all(row["semantic_profile"] == "planning" for row in candidates)
+    for candidate in candidates:
+        inspected = public_plan_memory(tmp_path, action="inspect", collection=candidate["manifest_path"])
+        assert inspected["contract"]["collection_id"] == candidate["collection_id"]
+    with pytest.raises(OpError) as raised:
+        public_plan_memory(tmp_path, action="inspect", collection="Planning work")
+    assert raised.value.code == "INVALID_COLLECTION_PATH"
+
+    selected = candidates[0]
+    selector = f"exomem://memory/{selected['collection_id']}"
+    public_plan_memory(tmp_path, action="add", collection=selector,
+                   item={"title": "Operations", "kind": "area"}, why="capture the area")
+    queried = public_plan_memory(tmp_path, action="query", collection=selector)
+    area = queried["rows"][0]
+    reference = f"exomem://plan/{queried['collection_id']}/{area['plan_id']}"
+    public_plan_memory(
+        tmp_path, action="add", collection=selected["manifest_path"],
+        item={"title": "Planned change", "area": reference},
+        expected_container_hash=queried["snapshot"], why="capture related intent",
+    )
+    rows = public_plan_memory(tmp_path, action="query", collection=selector)["rows"]
+    assert next(row for row in rows if row["title"] == "Planned change")["area"] == reference
 
 
 @pytest.mark.parametrize("action", ["query", "add", "update", "triage"])

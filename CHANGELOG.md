@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.117.0](https://github.com/Artexis10/exomem/compare/v0.116.0...v0.117.0) (2026-10-13)
+
+
+### Features
+
+* **exomem:** serve Cloud Home's owner facts over MCP ([#1710](https://github.com/Artexis10/exomem/issues/1710)) ([861f5e9](https://github.com/Artexis10/exomem/commit/861f5e98c7156ac8a6c6760e3696727e02e00e07))
+
+
+### Bug Fixes
+
+* **activity:** count terminal recall publication ([#1724](https://github.com/Artexis10/exomem/issues/1724)) ([a53eccf](https://github.com/Artexis10/exomem/commit/a53eccf16a4a5a3abc4e96f165f773ada004b6f5))
+* **planning:** expose governed collection discovery ([#1723](https://github.com/Artexis10/exomem/issues/1723)) ([ce536c9](https://github.com/Artexis10/exomem/commit/ce536c9642ca6b79f86b6d80f9cd34e93510f583))
+
 ## [0.116.0](https://github.com/Artexis10/exomem/compare/v0.115.0...v0.116.0) (2026-10-12)
 
 
