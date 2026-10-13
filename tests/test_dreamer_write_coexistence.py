@@ -20,16 +20,19 @@ at-scale evidence.
 from __future__ import annotations
 
 import collections
+import json
 import random
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from exomem import (
+    call_spans,
     commands,
     deferred_index,
     dreamer,
@@ -103,6 +106,8 @@ class _Burst:
         self.pages = pages
         self.seed = seed
         self.reads: list[float] = []
+        self.read_intervals: list[dict] = []
+        self.write_intervals: list[tuple[float, float]] = []
         self.writes = 0
         self.errors: collections.Counter[str] = collections.Counter()
         self.first_write_at: float | None = None
@@ -129,14 +134,17 @@ class _Burst:
                 return {"status": "committed", "mutated": True}
 
             command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+            started = time.perf_counter()
             try:
                 with foreground_activity.foreground_scope(self.root):
                     get_manager().invoke(command, (self.root,), {})
             except Exception as error:  # noqa: BLE001 - counted, never raised
                 with self.lock:
                     self.errors[type(error).__name__] += 1
+            finished = time.perf_counter()
             now = time.monotonic()
             with self.lock:
+                self.write_intervals.append((started, finished))
                 self.writes += 1
                 self.first_write_at = self.first_write_at or now
                 self.last_write_at = now
@@ -147,11 +155,27 @@ class _Burst:
         while not stop.is_set():
             page = self.pages[rng.randrange(len(self.pages))]
             rel = page.relative_to(self.root).as_posix()
+            call_token = uuid.uuid4().hex
+            context_token = call_spans.MCP_CALL_TOKEN.set(call_token)
+            cpu_started = time.thread_time()
             started = time.perf_counter()
-            with foreground_activity.foreground_scope(self.root):
-                commands.op_read_memory(self.root, rel, links=True)
-            with self.lock:
-                self.reads.append(time.perf_counter() - started)
+            try:
+                with foreground_activity.foreground_scope(self.root):
+                    commands.op_read_memory(self.root, rel, links=True)
+                with self.lock:
+                    finished = time.perf_counter()
+                    self.reads.append(finished - started)
+                self.read_intervals.append(
+                    {
+                        "started": started,
+                        "finished": finished,
+                        "cpu": time.thread_time() - cpu_started,
+                        "phases": call_spans.pop_call_spans(call_token),
+                    }
+                )
+            finally:
+                call_spans.MCP_CALL_TOKEN.reset(context_token)
+                call_spans.pop_call_spans(call_token)
             stop.wait(0.1)
 
     def run(self) -> None:
@@ -182,13 +206,19 @@ def _settle(root: Path, timeout: float = 30.0) -> bool:
     return False
 
 
-def _instrument(monkeypatch: pytest.MonkeyPatch) -> dict[str, collections.Counter]:
+def _instrument(
+    monkeypatch: pytest.MonkeyPatch, rebuild_intervals: list[tuple[float, float]]
+) -> dict[str, collections.Counter]:
     counts: dict[str, collections.Counter] = {"drain": collections.Counter()}
     original_pass = epistemic_graph.EpistemicGraphIndex._rebuild_all_pass
 
     def counted_pass(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         counts["drain"]["whole_vault_passes"] += 1
-        return original_pass(self, *args, **kwargs)
+        started = time.perf_counter()
+        try:
+            return original_pass(self, *args, **kwargs)
+        finally:
+            rebuild_intervals.append((started, time.perf_counter()))
 
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_pass", counted_pass)
     for module, name, label in (
@@ -210,14 +240,31 @@ def test_the_dreamer_yields_to_a_write_burst_and_changes_nothing_for_readers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, pages = _vault(tmp_path)
-    counts = _instrument(monkeypatch)
+    rebuild_intervals: list[tuple[float, float]] = []
+    counts = _instrument(monkeypatch, rebuild_intervals)
     ticks: list[float] = []
+    tick_intervals: list[dict] = []
     real_run_once = dreamer.run_once
-    monkeypatch.setattr(
-        dreamer,
-        "run_once",
-        lambda *a, **k: (ticks.append(time.monotonic()), real_run_once(*a, **k))[1],
-    )
+
+    def observed_tick(*args, **kwargs):  # noqa: ANN002, ANN003
+        ticks.append(time.monotonic())
+        started = time.perf_counter()
+        result = None
+        try:
+            result = real_run_once(*args, **kwargs)
+            return result
+        finally:
+            tick_intervals.append(
+                {
+                    "started": started,
+                    "finished": time.perf_counter(),
+                    "ran": result.ran if result else None,
+                    "processed": len(result.processed) if result else None,
+                    "stop_reason": result.stop_reason if result else None,
+                }
+            )
+
+    monkeypatch.setattr(dreamer, "run_once", observed_tick)
     graph_drain.start(root)
     assert _settle(root)
     for page in pages[:5]:
@@ -228,6 +275,8 @@ def test_the_dreamer_yields_to_a_write_burst_and_changes_nothing_for_readers(
     control.run()
     assert _settle(root)
     control_drain = dict(counts["drain"])
+    control_rebuilds = list(rebuild_intervals)
+    rebuild_intervals.clear()
     counts["drain"].clear()
 
     # The dreamer on, and mid-reseed when the burst starts.
@@ -262,7 +311,18 @@ def test_the_dreamer_yields_to_a_write_burst_and_changes_nothing_for_readers(
     # the lease or the barrier costs whole seconds). One run of each arm on a
     # shared CI runner varies far more than 10%: a burst with no tick inside it
     # measured p95 0.164 s against a control of 0.097 s.
-    assert burst.p95() <= control.p95() * 2.0 + CONTENTION_ALLOWANCE_SECONDS, (
-        burst.p95(),
-        control.p95(),
+    assert burst.p95() <= control.p95() * 2.0 + CONTENTION_ALLOWANCE_SECONDS, json.dumps(
+        # Numeric intervals share one clock; phase names are the existing
+        # read-span protocol. Failure output contains no page or query text.
+        {
+            "upkeep_p95": burst.p95(),
+            "control_p95": control.p95(),
+            "control_reads": control.read_intervals,
+            "upkeep_reads": burst.read_intervals,
+            "control_writes": control.write_intervals,
+            "upkeep_writes": burst.write_intervals,
+            "control_rebuilds": control_rebuilds,
+            "upkeep_rebuilds": list(rebuild_intervals),
+            "ticks": list(tick_intervals),
+        },
     )
