@@ -87,8 +87,11 @@ and supply bounded task focus. Hooks SHALL NOT infer semantic need from tool-nam
 word lists, regular expressions or response wording.
 Tool-only clients SHALL retain agent-requested refresh with best-effort initiation.
 
-The client SHALL deduplicate checkpoints within bounded conversation state using the
-human-turn identity, task revision, inspected source versions and compiler generation.
+The client SHALL deduplicate checkpoints within bounded existing conversation state using
+human-turn identity, task revision and inspected source versions.
+It MAY use compiler generation only when the caller already receives it.
+Deduplication SHALL NOT disclose vault-wide generation or freshness counters to restricted callers.
+Checkpoint bookkeeping SHALL NOT persist conversation text or its hashes.
 It SHALL impose a finite refresh count and cumulative work budget for each human turn.
 Refresh results SHALL NOT schedule another refresh.
 Memory-only reads and activations SHALL remain within their current checkpoint budget.
@@ -119,6 +122,12 @@ Injected packets SHALL retain the existing retrieved-data header and rendering c
 - **WHEN** a client exposes tools but lacks the relevant post-tool or response checkpoint
 - **THEN** its capability report states best-effort initiation for that checkpoint
 - **AND** the tools remain usable without claiming native enforcement
+
+#### Scenario: A restricted caller receives no vault-wide generation
+
+- **WHEN** disclosure removes vault-wide generation and freshness counters from a packet
+- **THEN** checkpoint deduplication uses only the available caller-visible evidence
+- **AND** it neither requests nor exposes those counters to complete bookkeeping
 
 #### Scenario: Refresh is unavailable or reaches its bound
 

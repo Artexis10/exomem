@@ -814,6 +814,12 @@ Ambiguous task focus SHALL still abstain under the existing resolution rules.
 Agent focus SHALL NOT silently resolve a human referent or become independent corroboration.
 An explicit anchor choice SHALL retain its agent-choice provenance.
 
+Both resolution views SHALL share request-local audience, index and evidence work.
+The compiler SHALL assemble material once rather than concatenate two full activations.
+`intent_resolution` SHOULD use a bounded categorical status.
+Any candidates it carries SHALL pass audience filtering, final egress and packet accounting
+under the same disclosure and total output budgets as existing candidates.
+
 Task refresh SHALL use the existing indexes, disclosure checks and total activation
 budgets. Old calls without `trigger` SHALL retain their existing behaviour.
 MCP, CLI and REST SHALL expose the same semantics through generated adapters.
@@ -838,6 +844,12 @@ Local logs SHALL NOT record either the raw human turn or agent focus.
 
 - **WHEN** agent focus reaches competing task anchors under the existing evidence rules
 - **THEN** refresh abstains with attributable candidates rather than inventing a unique task
+
+#### Scenario: Human-intent qualification names withheld candidates
+
+- **WHEN** human-intent resolution reaches a candidate that the caller cannot receive
+- **THEN** the qualification withholds it under the existing release rules
+- **AND** visible candidates consume the packet's existing accounting and output budget
 
 #### Scenario: Existing clients retain initial activation
 
