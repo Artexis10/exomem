@@ -308,6 +308,9 @@ Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
   `hosted-agent-surface` also has no active delta and is retired after its generic contracts were reconciled.
   Registry, bootstrap, capture doctrine, and Cloud parity remain in their current command-surface, bootstrap, portable-agent, and Cloud cell contracts.
   Historical Hosted packages and their original receipts remain immutable. Three capabilities remain blocked by active deltas.
+  The retired browser transfer routes, provisioning v2, security SQLite authority, credential state machine and operator probe requirements are removed.
+  Private authenticated ingress retains its generic authentication and tenant-isolation requirements without the deleted transfer exceptions.
+  Session outage tolerance, portability, memory limits and frozen-verifier requirements remain with their active consumers and deltas.
   Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
   Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
   Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
