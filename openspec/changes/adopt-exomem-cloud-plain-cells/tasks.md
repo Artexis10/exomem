@@ -59,15 +59,19 @@
   `tests/test_platform_chart_headers.py::test_cloud_storage_class_uses_the_encryption_secret_and_deletes_volumes` covers the rendered encrypted `Delete` class.
   [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed both suites on exact release source `886a0a9`.
   Its chart step rejects skipped cases. The isolated original-image qualification also passed the manifest cases on 2026-10-13.
-- [ ] 3.3 Implement the reconcile loop (D4):
+- [x] 3.3 Implement the reconcile loop (D4):
   - poll, plus `LISTEN` on a direct session;
   - server-side apply under field manager `cellctl`;
   - readiness from pod conditions;
-  - rendering the current image on every ordinary pass;
+  - rendering the cell's current image whenever ordinary convergence requires an apply;
   - the `exomem.io/hold` marker pinning image and replicas, recorded on the row and resumed after a restart;
   - observed writes and generation matching;
   - transient retry, identity-conflict failure and the init deadline.
   Test against a disposable Postgres with the fixture schema.
+  Evidence (#1368): `tests/test_reconcile.py` covers notification reconnects, holds, readiness changes, retries and the init deadline against disposable Postgres.
+  `tests/test_decide.py`, `tests/test_db.py` and `tests/test_k8s_client.py` cover current-image selection, generation matching, observed-column writes and server-side apply.
+  [Cloud cellctl run 38328922734](https://github.com/Artexis10/exomem/actions/runs/38328922734/job/115073944357) passed 504 fast cases, with two skips, on exact release source `886a0a9`.
+  The settled-row optimization in D4 avoids redundant applies; required renders still preserve the cell's current image.
 - [x] 3.4 Implement the rollout (D6) and prove each property:
   - target and initial-image selection, including `last_good_image` set at first provisioning and `NO_GOOD_IMAGE` while paused with none;
   - one attempt at a time, by priority;
@@ -81,12 +85,16 @@
   The isolated original 0.116 controller image passed all 234 selected boundary cases on 2026-10-13, including those rollout cases.
   Failed-restore, absent-Job retry and recorded-restoration cases jointly prove recovery without repeating Kubernetes TTL behavior.
   This closes implementation and property-test scope; production rollout and recovery acceptance remain in section 6.
-- [ ] 3.5 Implement secrets (D7):
+- [x] 3.5 Implement secrets (D7):
   - the C4 bearer, with current and previous versions;
   - per-cell data keys, AES-GCM envelope, versioned, with a write-once `backup_key_wrapped`;
   - per-cell prefix-restricted B2 keys stored write-once as `b2_key_id` and `b2_key_wrapped`, deleting the losing key on a race;
-  - Secrets rendered from the row on every pass, never read back.
+  - tenant Secrets rendered from the row whenever an apply is required, never read back.
   Test that plaintext keys never reach the database, and that one cell's key cannot read another cell's prefix.
+  Evidence (#1368, #1422): `tests/test_secrets.py` and `tests/test_db.py` cover bearer overlap, authenticated envelopes and atomic, wrapped-only persistence.
+  `tests/test_reconcile.py` covers losing-key deletion and rendering tenant Secrets from stored rows; `tests/test_b2.py` checks the requested bucket and cell prefix.
+  Backblaze's [application-key contract](https://www.backblaze.com/apidocs/b2-create-key) restricts access to the requested prefix; [older Native API versions remain supported](https://www.backblaze.com/docs/cloud-storage-native-api-versions).
+  The exact-source fast suite above passed. Prefix isolation combines the tested adapter request with that provider contract, without claiming a live cross-prefix refusal probe.
 - [x] 3.6 Implement backups (D8):
   - the nightly stop-backup-start window under a `backup` hold, with its deadline;
   - the pre-upgrade backup;
@@ -95,13 +103,16 @@
   - a restore Job using `--delete`.
   The operator export runbook moved to 6.4 (deferred).
   Evidence (#1368): `tests/test_decide.py` (`test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff`, `test_nightly_backup_deadline_miss_restarts_cell_with_backup_failed_and_sets_backoff`, `test_a_successful_pre_upgrade_backup_also_records_last_backup`), `tests/test_jobs.py` (`test_backup_job_runs_as_uid_10001_with_fsgroup`, `test_backup_job_mounts_the_volume_read_only_with_a_cache_emptydir`, `test_backup_job_backs_up_vault_and_host_with_retention`, `test_restore_job_uses_delete_and_writes_the_volume`); the live K3s suite, run 36199720123 on `feat/cloud-cellctl` `24fcb49`, the head that merged as #1368.
-- [ ] 3.7 Implement verified deletion (D10) in this order:
+- [x] 3.7 Implement verified deletion (D10) in this order:
   1. namespace;
   2. PV and Hetzner `volume_id`;
   3. every B2 object version under the prefix;
   4. the per-cell B2 key, by `b2_key_id`;
   5. the wrapped keys.
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
+  Evidence (#1368, #1395, #1402): `tests/test_reconcile.py` and `tests/test_decide.py` cover ordered absence checks and retaining wrapped keys after failed observations.
+  `tests/test_b2_pagination.py` covers every object version and refuses incomplete listings; `docs/runbooks/cloud-cell-deletion.md` records the etcd snapshot residual.
+  The exact-source fast suite above passed. Disposable-cluster deletion acceptance remains in task 3.10.
 - [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
   Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
 - [ ] 3.9 Add platform chart entries:
