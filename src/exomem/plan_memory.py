@@ -93,7 +93,7 @@ _ACTION_FIELDS = {
 }
 _REQUIRED_FIELDS = {
     "history": frozenset({"collection", "plan_id"}),
-    "inspect": frozenset({"collection"}),
+    "inspect": frozenset(),
     "validate": frozenset({"manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
@@ -198,7 +198,8 @@ def plan_memory(
     Help: bootstrap(section="records_planning").
 
     Args:
-        collection: browse_memory path/ref.
+        collection: Manifest path/UUID/ref; inspect without one lists Planning collections.
+        item: Authored fields. area and parent use exomem://plan/<collection-uuid>/<plan-uuid>; query supplies both IDs.
         plan_id: row plan_id.
         expected_container_hash: inspect/query snapshot.
         expected_item_version: row item_version.
@@ -210,6 +211,10 @@ def plan_memory(
     values.pop("action")
     _validate_arguments(action, values)
     try:
+        if action == "inspect" and collection is None:
+            from .record_governance import inventory_collections
+
+            return inventory_collections(vault_root, semantic_profile="planning")
         from .collection_store import preview
 
         selected, result = preview.dispatch(vault_root, "planning", action, values)
