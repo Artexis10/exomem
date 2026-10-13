@@ -606,6 +606,58 @@ def test_an_import_started_before_a_restart_completes_on_the_restarted_service(s
                     database=tmp_path / "coordinator.sqlite") == ("complete", 60)
 
 
+def test_import_status_polling_does_not_restart_blocked_summary_publication(service, monkeypatch, caplog):
+    """Progress checks must not make the store actor repeatedly wait on a busy vault."""
+    import threading
+
+    root = service.root
+    write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(1001)), SOURCE)
+    job = imported(root, mode="start", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+
+    def complete():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT state FROM import_jobs").fetchone()[0] == "complete"
+
+    _until(complete)
+    initial = imported(root, mode="status", continuation=job["continuation"])
+    assert initial["rows"]["imported"] == 1001
+    appended, resume = threading.Event(), threading.Event()
+    serve = runtime.StoreServer._serve
+
+    def pending_before_maintenance(server, request):
+        serve(server, request)
+        if isinstance(request.result, dict) and request.result.get("item_key") == LATER:
+            appended.set()
+            assert resume.wait(5), "the test did not release the store actor"
+
+    monkeypatch.setattr(runtime.StoreServer, "_serve", pending_before_maintenance)
+    boundary = service.manager._mutation_coordinator_for(root)
+    def refusals():
+        return [record for record in caplog.records
+                if getattr(record, "event", None) == "mutation_lock_refused"
+                and record.threadName == "exomem-collection-store"]
+
+    try:
+        assert call(root, "record_memory", action="append", collection=CID, item_key=LATER,
+                    item={"title": "Pending summary"}, why="pending summary")["outcome"] == "committed"
+        assert appended.wait(2)
+        with boundary.hold(timeout_seconds=0, operation="test-summary-holder", holder_kind="foreground"):
+            resume.set()
+            _until(lambda: bool(refusals()))
+            for _ in range(3):
+                status = imported(root, mode="status", continuation=job["continuation"])
+                assert status["state"] == "complete" and status["rows"] == initial["rows"]
+                time.sleep(0.15)
+            assert len(refusals()) == 1
+    finally:
+        resume.set()
+    page = root / manifest_path().replace("_collection.md", "Items/_summary.md")
+    # An ordinary mutation still wakes publication after the held boundary clears.
+    call(root, "record_memory", action="append", collection=CID,
+         item={"title": "Publication resumed"}, why="resume publication")
+    _until(lambda: page.exists() and "1004 committed rows" in page.read_text())
+
+
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
     """Public reads or governance that fall through to physical C bytes outside an explicit preview binding."""
     import yaml
