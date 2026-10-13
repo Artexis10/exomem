@@ -87,11 +87,75 @@ def admission_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | 
     return _admission_refusal(
         vault_root, spec,
         release_level=lambda path: egress.release_level_for_path_only(vault_root, path),
+        history_storage_level=lambda: _history_storage_level(vault_root, spec),
     )
+
+
+def _recheck_verified_session(root: Path, who: RequestPrincipal) -> None:
+    from ..governance import authorization_custody, authorization_session_lifecycle, store
+
+    context = who.verified_authorization_session
+    if context is None:
+        return
+    if (not who.resolved or who.audience_id != context.principal_id
+            or who.authorization_session_id != context.session_id
+            or who.issuer_family != context.issuer_family):
+        raise RegistryError("REGISTRY_UNAVAILABLE: publication session principal changed")
+    # Owner and open-policy shortcuts must still prove current session custody.
+    now = int(time.time())
+    custody = authorization_custody.load_authorization_custody(root, now=now)
+    connection = store.open_authorization_session_connection(root)
+    try:
+        authorization_session_lifecycle.status_verified_session(
+            connection, custody=custody, context=context, now=now,
+        )
+    finally:
+        connection.close()
+
+
+def _history_storage_level(
+    vault_root: Path, spec: RegistrySpec, *, principal: RequestPrincipal | None = None,
+    purpose: str | None = None, policy: Any | None = None,
+) -> tuple[int, bool]:
+    """Return metadata admission and proven absence for the declared history directory."""
+    import sqlite3
+
+    from .. import registry_history, reserved_paths, vault
+    from ..governance import authorization_custody, authorization_session_lifecycle, egress, store
+    from ..governance.principal import effective_principal
+
+    root = Path(vault_root)
+    who = principal if principal is not None else effective_principal()
+    directory = registry_history.history_dir(root, spec.stem).relative_to(root).as_posix()
+    absent = False
+    try:
+        _recheck_verified_session(root, who)
+        try:
+            identity = reserved_paths.inspect_generic_path(root, directory)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                return egress.LEVEL_NONE, False
+            vault.PathGuard.capture(root, directory, leaf_policy="absent").recheck(root)
+            absent = True
+        else:
+            if identity.kind != "directory":
+                return egress.LEVEL_NONE, False
+    except (
+        RegistryError, vault.PathGuardError, authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
+    ):
+        return egress.LEVEL_NONE, False
+    # Directory metadata has no content fingerprint; each history file retains byte admission.
+    level = egress._release_level_for_path_only_snapshot(
+        root, directory, principal=who, purpose=purpose, policy=policy, content_fingerprint=None,
+    )
+    return level, absent
 
 
 def _admission_refusal(
     vault_root: Path, spec: RegistrySpec, *, release_level: Callable[[str], int],
+    history_storage_level: Callable[[], tuple[int, bool]],
 ) -> dict[str, Any] | None:
     """Keep instance admission branches shared by readers and publication witnesses."""
     from ..governance.egress import LEVEL_FULL
@@ -105,10 +169,8 @@ def _admission_refusal(
         if document is None or instances.revision(document) != spec.binding_revision:
             return {"subject": spec.name, "available": False, "reason": "registry_binding_changed"}
         # Admit both storage owners before any definition, digest or history read.
-        from .. import registry_history
-
-        paths = (spec.overlay(root), registry_history.history_dir(root, spec.stem))
-        if any(release_level(path.relative_to(root).as_posix()) < LEVEL_FULL for path in paths):
+        path = spec.overlay(root).relative_to(root).as_posix()
+        if release_level(path) < LEVEL_FULL or history_storage_level()[0] < LEVEL_FULL:
             return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
         return None
     if is_owner(who) and restricted_reason(root) is None:
@@ -152,14 +214,7 @@ class RegistryAdmission:
 
     def recheck(self) -> None:
         from .. import registry_history
-        from ..governance import (
-            authorization_custody,
-            authorization_session_lifecycle,
-            egress,
-            membership,
-            policy,
-            store,
-        )
+        from ..governance import egress, membership, policy
         from ..governance.principal import effective_principal
 
         root = self.root
@@ -170,22 +225,7 @@ class RegistryAdmission:
         if (who != self.principal or compiled.fingerprint != self.policy_fingerprint
                 or egress._declared_purpose(root, who, None) != self.purpose):
             raise RegistryError("REGISTRY_UNAVAILABLE: publication admission changed")
-        context = who.verified_authorization_session
-        if context is not None:
-            if (not who.resolved or who.audience_id != context.principal_id
-                    or who.authorization_session_id != context.session_id
-                    or who.issuer_family != context.issuer_family):
-                raise RegistryError("REGISTRY_UNAVAILABLE: publication session principal changed")
-            # Owner and open-policy shortcuts must still prove current session custody.
-            now = int(time.time())
-            custody = authorization_custody.load_authorization_custody(root, now=now)
-            connection = store.open_authorization_session_connection(root)
-            try:
-                authorization_session_lifecycle.status_verified_session(
-                    connection, custody=custody, context=context, now=now,
-                )
-            finally:
-                connection.close()
+        _recheck_verified_session(root, who)
         paths = (self.spec.overlay(root).relative_to(root).as_posix(),)
         if self.spec.binding_revision is not None:
             paths += (registry_history.history_dir(root, self.spec.stem).relative_to(root).as_posix(),)
@@ -196,16 +236,14 @@ class RegistryAdmission:
         if any(current.state != before.state or current.scope_ids != before.scope_ids
                for current, before in zip(current_memberships, self.memberships, strict=True)):
             raise RegistryError("REGISTRY_UNAVAILABLE: publication membership changed")
-        overlay = paths[0]
         refusal = _admission_refusal(
             root, self.spec,
-            release_level=lambda path: (
-                egress._release_level_for_path_only_snapshot(
-                    root, path, principal=who, purpose=self.purpose, policy=compiled,
-                    content_fingerprint=self.before_sha256,
-                ) if path == overlay else egress.release_level_for_path_only(
-                    root, path, principal=who, purpose=self.purpose, policy=compiled,
-                )
+            release_level=lambda path: egress._release_level_for_path_only_snapshot(
+                root, path, principal=who, purpose=self.purpose, policy=compiled,
+                content_fingerprint=self.before_sha256,
+            ),
+            history_storage_level=lambda: _history_storage_level(
+                root, self.spec, principal=who, purpose=self.purpose, policy=compiled,
             ),
         )
         if refusal is not None:
@@ -243,6 +281,9 @@ def capture_admission(root: Path, spec: RegistrySpec, before: bytes | None) -> R
         root, spec,
         release_level=lambda path: egress.release_level_for_path_only(
             root, path, principal=who, purpose=purpose, policy=compiled,
+        ),
+        history_storage_level=lambda: _history_storage_level(
+            root, spec, principal=who, purpose=purpose, policy=compiled,
         ),
     )
     if refusal is not None:
@@ -296,15 +337,14 @@ def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | No
     """Admit every kept snapshot before a history producer reads its header or bytes."""
     from .. import registry_history
     from ..governance import egress
-    from ..governance.principal import effective_principal
-    from ..governance.raw_protection import is_owner
 
     root = Path(vault_root)
-    if is_owner(effective_principal()) and restricted_reason(root) is None:
-        return None
     directory = registry_history.history_dir(root, spec.stem).relative_to(root).as_posix()
-    if egress.release_level_for_path_only(root, directory) < egress.LEVEL_FULL:
+    level, absent = _history_storage_level(root, spec)
+    if level < egress.LEVEL_FULL:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
+    if absent:
+        return None
     names = registry_history.kept_names(root, directory, suffix=".yaml")
     if names is None or any(
         egress.release_level_for_path_only(root, f"{directory}/{name}") < egress.LEVEL_FULL
@@ -763,11 +803,16 @@ def history(vault_root: Path, spec: RegistrySpec) -> dict[str, Any]:
     if refusal is not None:
         return refusal
     snapshot = registry.load(spec, root)
+    try:
+        view = registry_history.history_view(
+            root, stem=spec.stem, instance_admitted=spec.binding_revision is not None,
+        )
+    except registry_history.HistoryAdmissionRefused:
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     return {
         "subject": spec.name,
         "content_hash": snapshot.content_hash,
-        **registry_history.history_view(root, stem=spec.stem,
-                                       instance_admitted=spec.binding_revision is not None),
+        **view,
     }
 
 
@@ -808,7 +853,10 @@ def restore(
         raise RegistryError(
             f"STALE_REGISTRY: {spec.name} changed since expected_hash was read; inspect again"
         )
-    text = registry_history.read_version(root, stem=spec.stem, version=version)
+    try:
+        text = registry_history.read_version(root, stem=spec.stem, version=version)
+    except registry_history.HistoryAdmissionRefused:
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     restored = spec.adapter.parse(text, registry.content_hash(text))
     # Restore preserves legacy reader meaning, but never republishes invalid bytes.
     blocking = registry.new_findings(None, tuple(spec.adapter.findings(restored)))

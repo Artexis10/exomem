@@ -695,7 +695,7 @@ def test_activated_v2_classifies_registry_history_as_derived_auxiliaries(tmp_pat
     )
 
     from exomem import reserved_paths, vocabulary_authority, vocabulary_gate
-    from exomem.governance.principal import request_scope
+    from exomem.governance.principal import library_scope, request_scope
 
     install_unit_session_boundary(monkeypatch)
     # The existing authority fixture supplies session validity without a SQL session store.
@@ -739,7 +739,8 @@ def test_activated_v2_classifies_registry_history_as_derived_auxiliaries(tmp_pat
         for use in receipt["additive_authority"]["uses"]
         for item in use["authorities"]
     ] == ["entity_type.add"]
-    assert registry_history.versions(root, stem="entity-types")[0]["why"] == "v2 grant"
+    with library_scope():
+        assert registry_history.versions(root, stem="entity-types")[0]["why"] == "v2 grant"
 
 
 @pytest.mark.usefixtures("owner_scope")
