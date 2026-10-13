@@ -2122,6 +2122,9 @@ def refresh_wired_profiles(
                 try:
                     args = shlex.split(command)
                     mode = args[args.index("--activation-mode") + 1]
+                    # Legacy commands omit the state home; explicit home options must still validate.
+                    if not any(arg.startswith("--hook-home") for arg in args):
+                        args.extend(["--hook-home", str(profile["hook_dir"].parent.absolute())])
                     bound_home = args[args.index("--hook-home") + 1]
                 except (ValueError, IndexError) as error:
                     raise ValueError("invalid installed hook activation/profile binding") from error

@@ -158,13 +158,13 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
-def _registry_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
+def _registry_scopes(vault_root: Path | None, rel_path: str, policy: Policy) -> frozenset[str]:
     from ..vocabulary import instances
 
-    if page.vault_root is None:
+    if vault_root is None:
         return frozenset()
     try:
-        return instances.bound_scopes(page.vault_root, page.rel_path, policy) or frozenset()
+        return instances.bound_scopes(vault_root, rel_path, policy) or frozenset()
     except ValueError as error:
         raise MembershipUnresolved("registry binding is unavailable") from error
 
@@ -337,7 +337,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
         raise MembershipUnresolved(
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
-    assigned = _registry_scopes(page, policy)
+    assigned = _registry_scopes(page.vault_root, page.rel_path, policy)
     key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid,
            str(page.vault_root), assigned)
     cached = _MEMO.get(key)
@@ -350,6 +350,24 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     while len(_MEMO) > _MEMO_MAX:
         _MEMO.popitem(last=False)
     return result
+
+
+def _snapshot_key(
+    vault_root: Path | None, rel_path: str, policy: Policy, content_hash: str,
+) -> tuple[str, str, str, str, frozenset[str]]:
+    assigned = _registry_scopes(vault_root, rel_path, policy)
+    return (policy.fingerprint, rel_path, content_hash, str(vault_root), assigned)
+
+
+def cached_snapshot_membership(
+    vault_root: Path, rel_path: str, policy: Policy, *, content_hash: str,
+) -> frozenset[str] | None:
+    """Reuse byte-bound membership, with current registry assignment, or miss."""
+    if policy.empty or not policy.scopes:
+        return None
+    key = _snapshot_key(vault_root, rel_path, policy, content_hash)
+    # Membership is immutable; later eviction cannot invalidate this result.
+    return _SNAPSHOT_MEMO.get(key)
 
 
 def evaluate_snapshot(
@@ -365,13 +383,12 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    assigned = _registry_scopes(page, policy)
-    key = (policy.fingerprint, page.rel_path, content_hash, str(page.vault_root), assigned)
+    key = _snapshot_key(page.vault_root, page.rel_path, policy, content_hash)
     cached = _SNAPSHOT_MEMO.get(key)
     if cached is not None:
         _SNAPSHOT_MEMO.move_to_end(key)
         return cached
-    result = _evaluate_markdown_scopes(page, policy) | assigned
+    result = _evaluate_markdown_scopes(page, policy) | key[-1]
     _SNAPSHOT_MEMO[key] = result
     _SNAPSHOT_MEMO.move_to_end(key)
     while len(_SNAPSHOT_MEMO) > _MEMO_MAX:
