@@ -345,10 +345,13 @@ def test_the_scan_covers_note_stems_titles_roots_and_probe_text(tmp_path: Path) 
 
 
 def _run_harness(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, dict]:
+    from exomem.cloud_cell import RESOURCE_POLICY_ENV
+
     out = tmp_path / "report.json"
     scratch_parent = tmp_path / "scratch"
     scratch_parent.mkdir()
-    env = {**os.environ, "TMPDIR": str(scratch_parent)}
+    # These attribution fixtures exercise legacy idle unloading, not service retention.
+    env = {**os.environ, "TMPDIR": str(scratch_parent), RESOURCE_POLICY_ENV: "legacy"}
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--out", str(out), "--settle-seconds", "30",
          "--timeout", "300"],
@@ -386,6 +389,7 @@ def test_smoke_run_profiles_a_real_cloud_cell_and_stays_content_free(tmp_path: P
     )
 
     assert report["ok"] is True
+    assert report["resource_policy"] == "legacy"
     assert report["vault"]["notes"] == 12
     assert [p["name"] for p in report["build"]["points"]] == list(profile.BUILD_POINTS)
     assert [p["name"] for p in report["cell"]["points"]] == list(profile.CELL_POINTS)
