@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import dreamer_fixture as fx
 import pytest
@@ -19,16 +20,23 @@ import pytest
 from exomem import (
     attention,
     audit,
+    commands,
     dreamer,
     dreamer_families,
+    dreamer_policy,
     dreamer_store,
     due_state,
     envelope,
+    foreground_activity,
     freshness,
+    mode,
     relation_queue,
+    resource_status,
     review_state,
     upkeep,
+    writer_lease,
 )
+from exomem.governance.principal import library_scope
 
 NOW = dt.datetime(2026, 6, 1, 12, 0, tzinfo=dt.UTC)
 TODAY = NOW.date()
@@ -158,3 +166,146 @@ def test_quieting_upkeep_leaves_integrity_byte_identical(
     after = _surfaces(vault)
     for surface in before:
         assert after[surface] == before[surface], (mode, surface)
+
+
+@pytest.mark.parametrize("mode", ["families_quiet", "crashed"])
+def test_capture_and_recall_continue_when_optional_upkeep_is_quiet_or_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    vault = _vault(tmp_path)
+    if mode == "families_quiet":
+        _quiet_families(vault, "quiet")
+        payload = review_state.ReviewStateStore(vault).load()
+        assert dreamer.setting() == "on"
+        assert all(
+            review_state.disposition_for(family.name, payload=payload) == "quiet"
+            for family in dreamer_families.REGISTRY
+        )
+    else:
+        _crash(vault, monkeypatch)
+
+    observation = "The primingcheck inspection records nine successful starts."
+    kwargs = {
+        "content": f"## Observations\n\n- [finding] {observation}\n",
+        "title": "Pump start inspection",
+        "slug": "pump-start-inspection",
+        "sources": [],
+        "suggestions": False,
+    }
+    remember = next(c for c in commands.product_commands_for("mcp") if c.name == "remember")
+    # This in-process caller owns only the invented fixture vault.
+    with library_scope():
+        validation = writer_lease.invoke_command(remember, vault, validate_only=True, **kwargs)
+        result = writer_lease.invoke_command(
+            remember,
+            vault,
+            draft_id=validation["draft_id"],
+            draft_hash=validation["draft_hash"],
+            draft_token=validation["draft_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation["draft_hash"],
+            relation_review_reason="The start count has no supported typed relation in this fixture.",
+            **kwargs,
+        )
+        path = result["path"]
+        assert observation in (vault / path).read_text(encoding="utf-8")
+        readback = commands.op_read_memory(vault, path)
+        assert observation in readback["body"]
+        recalled = commands.op_find(vault, query="primingcheck", mode="keyword", graph=False)
+        hits = [hit for hit in recalled if hit["path"] == path]
+        assert hits, recalled
+        assert observation in hits[0]["excerpt"]
+
+
+@pytest.mark.query_deadline
+def test_pressure_holds_upkeep_while_capture_recall_and_integrity_remain_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    ticks = dreamer.status()["ticks"]
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setenv("EXOMEM_AUTO_QUIET", "1")
+    monkeypatch.setattr(
+        resource_status, "gpu_headroom", lambda: {"status": "marginal", "usable": False}
+    )
+    monkeypatch.setattr(dreamer_policy, "POLL_SECONDS", 0.01)
+    assert mode.resolve_mode() == "normal"
+
+    offset = [0.0]
+
+    def monotonic() -> float:
+        return time.monotonic() + offset[0]
+
+    # Advance fixture clocks past real idle/settle thresholds; keep process clocks intact.
+    clock = dreamer.Clock
+    monkeypatch.setattr(dreamer, "Clock", lambda: clock(monotonic=monotonic))
+    monkeypatch.setattr(
+        foreground_activity, "time", SimpleNamespace(monotonic=monotonic, sleep=time.sleep)
+    )
+
+    def await_pressure() -> dict:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            offset[0] += dreamer_policy.IDLE_SECONDS + dreamer_policy.SETTLE_FLOOR_SECONDS + 1.0
+            signals = dreamer.gather_signals(vault)
+            status = dreamer.status()
+            if (
+                signals.pressure is True
+                and status["running"]
+                and status["waiting_reason"] == "pressure"
+            ):
+                return status
+            time.sleep(0.01)
+        pytest.fail(f"worker did not hold for pressure: {dreamer.status()}")
+
+    worker = dreamer.start(vault)
+    assert worker is not None
+    try:
+        assert await_pressure()["ticks"] == ticks
+        observation = "The pressurecheck inspection records eleven successful starts."
+        kwargs = {
+            "content": f"## Observations\n\n- [finding] {observation}\n",
+            "title": "Pump pressure inspection",
+            "slug": "pump-pressure-inspection",
+            "sources": [],
+            "suggestions": False,
+        }
+        remember = next(c for c in commands.product_commands_for("mcp") if c.name == "remember")
+        # This in-process caller owns only the invented fixture vault.
+        with library_scope():
+            validation = writer_lease.invoke_command(remember, vault, validate_only=True, **kwargs)
+            result = writer_lease.invoke_command(
+                remember,
+                vault,
+                draft_id=validation["draft_id"],
+                draft_hash=validation["draft_hash"],
+                draft_token=validation["draft_token"],
+                relation_disposition="reviewed_none",
+                relation_review_hash=validation["draft_hash"],
+                relation_review_reason="The start count has no supported typed relation in this fixture.",
+                **kwargs,
+            )
+            path = result["path"]
+            assert observation in (vault / path).read_text(encoding="utf-8")
+            assert observation in commands.op_read_memory(vault, path)["body"]
+            recalled = commands.op_find(vault, query="pressurecheck", mode="keyword", graph=False)
+            hits = [hit for hit in recalled if hit["path"] == path]
+            assert hits, recalled
+            assert observation in hits[0]["excerpt"]
+            surfaces = _surfaces(vault)
+            due = json.loads(surfaces["due_state"])
+            assert due["categories"]["supersession_integrity"][BROKEN]["open"]
+            findings = json.loads(surfaces["audit"])["findings"]
+            assert {"supersession_integrity", "forward_reference"} <= {
+                finding["category"] for finding in findings if finding["path"] == BROKEN
+            }
+            items = json.loads(surfaces["attention"])["items"]
+            assert any(
+                item["path"] == BROKEN and "supersession_integrity" in item["categories"]
+                for item in items
+            )
+        assert await_pressure()["ticks"] == ticks
+    finally:
+        dreamer.stop(timeout=5.0)
+        worker.join(timeout=5.0)
+        assert not worker.is_alive()
