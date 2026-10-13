@@ -340,6 +340,13 @@ def history_refusal(vault_root: Path, spec: RegistrySpec) -> dict[str, Any] | No
 
     root = Path(vault_root)
     directory = registry_history.history_dir(root, spec.stem).relative_to(root).as_posix()
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        # No vault holds history; later files still require consumed-byte admission.
+        return None
+    except OSError:
+        return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
     level, absent = _history_storage_level(root, spec)
     if level < egress.LEVEL_FULL:
         return {"subject": spec.name, "available": False, "reason": "audience_restricted"}
