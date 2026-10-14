@@ -6698,7 +6698,11 @@ def _collection_store_thread(func):
 
             server = store_runtime.route(command.name, injected[0], kwargs)
             if server is not None:
-                return server.call(lambda: func(command, *injected, **kwargs))
+                import_request = kwargs.get("import_request")
+                # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
+                import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
+                                 and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
+                return server.call(lambda: func(command, *injected, **kwargs), wake_maintenance=not import_status)
         return func(command, *injected, **kwargs)
 
     return wrapped
