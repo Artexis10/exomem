@@ -2076,7 +2076,7 @@ _REFRESH_BASES = {
     "continuation_restore",
 }
 _REFRESH_VERSION_BASES = {"content_hash", "evidence_version", "external_version", "unavailable"}
-_REFRESH_OUTCOMES = {"reserved", "success", "failure"}
+_REFRESH_OUTCOMES = {"reserved", "success", "failure"}  # nosemgrep: ep-word-set -- Fixed refresh-record state enum; persisted protocol validation.
 _REFRESH_MAX_SCOPES = 16
 _REFRESH_MAX_CHECKPOINTS = 32
 _REFRESH_MAX_BOUNDARIES = 32

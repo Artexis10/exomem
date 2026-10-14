@@ -45,6 +45,12 @@ def observe_query_timeouts(log_path: Path):
         )
         from exomem.governance import authorization_session_authority as authority
         from exomem.governance import store as authority_store
+        from exomem.governance import (
+            authorization_custody,
+            policy as governance_policy,
+            schema_v4,
+            store as governance_store,
+        )
         from exomem.query_engine import cursors, route, runtime, typed_rows
 
         state = threading.local()
@@ -55,7 +61,7 @@ def observe_query_timeouts(log_path: Path):
             # These fixed technical phases run a bounded number of times per query.
             if label in (
                 "read_session.setup", "read_session.body", "open_query_reader", "authorization.init",
-            ) or label.startswith(("authorization.input.", "derived.row_source")):
+            ) or label.startswith(("authorization.input.", "authorization.policy.", "derived.row_source")):
                 # These namespaces contain only the bounded constructor and row-source seams below.
                 try:
                     return time.thread_time()
@@ -176,6 +182,39 @@ def observe_query_timeouts(log_path: Path):
             (governance.egress, "_declared_purpose", "declared_purpose"),
         ):
             measure(owner, name, f"authorization.input.{label}", parent_only="authorization.init")
+
+        # Split the broad policy-load span into fixed acquisition and compile seams.
+        # These wrappers run only inside this query's policy load and record no paths or documents.
+        measure(
+            governance_policy,
+            "_load_v4_active_policy",
+            "authorization.policy.v4_active",
+            parent_only="authorization.input.policy_load",
+        )
+        for owner, name, label in (
+            (authorization_custody, "load_authorization_custody", "custody_load"),
+            (governance_store, "_initial_policy_read", "store_acquire"),
+            (governance_policy, "_activation_store_family_probe", "activation_store_probe"),
+            (schema_v4, "load_active_policy", "active_policy_read"),
+            (governance_policy, "compile_prospective", "workspace_snapshot"),
+        ):
+            measure(
+                owner,
+                name,
+                f"authorization.policy.{label}",
+                parent_only="authorization.policy.v4_active",
+            )
+        for owner, name, label in (
+            (governance_policy, "_clear_guard_generation", "workspace_guard"),
+            (governance_policy, "_probe_authoring_tree", "workspace_tree_probe"),
+            (governance_policy, "compile_documents", "workspace_compile"),
+        ):
+            measure(
+                owner,
+                name,
+                f"authorization.policy.{label}",
+                parent_only="authorization.policy.workspace_snapshot",
+            )
 
         def deadline_elapsed(session):
             return (time.monotonic() - session._deadline + session.limits.timeout_ms / 1000) * 1000

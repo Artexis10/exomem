@@ -246,6 +246,8 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
     record = records[0]
     assert record["timeout_ms"] == 200
     assert record["phases"]["authorization.input.policy_load@read_session.setup"]["calls"] == 1
+    assert record["phases"]["authorization.policy.v4_active"]["calls"] == 2
+    assert record["phases"]["authorization.policy.activation_store_probe"]["calls"] == 2
     assert "read_session.body" not in record["phases"]
     assert "Private fixture title" not in log.read_text()
     for opened in readers:
