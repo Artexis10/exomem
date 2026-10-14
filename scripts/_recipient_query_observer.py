@@ -43,6 +43,8 @@ def observe_query_timeouts(log_path: Path):
             typed_storage,
         )
         from exomem.query_engine import cursors, route, runtime, typed_rows
+        from exomem.governance import authorization_session_authority as authority
+        from exomem.governance import store as authority_store
 
         state = threading.local()
         emission_lock = threading.Lock()
@@ -52,7 +54,8 @@ def observe_query_timeouts(log_path: Path):
             # These fixed technical phases run a bounded number of times per query.
             if label in (
                 "read_session.setup", "read_session.body", "open_query_reader", "authorization.init",
-            ):
+            ) or label.startswith("authorization.input."):
+                # The input namespace contains only the seven constructor seams below.
                 try:
                     return time.thread_time()
                 except Exception:  # noqa: BLE001 - an unavailable clock remains unknown
@@ -81,6 +84,10 @@ def observe_query_timeouts(log_path: Path):
                     if label == "authorization.init":
                         # Parent labels come only from this observer's fixed technical call boundaries.
                         parent = frame["stack"][-2][0] if len(frame["stack"]) > 1 else "root"
+                        labels += (f"{label}@{parent}",)
+                    elif label.startswith("authorization.input."):
+                        # Immediate constructor children use its fixed caller phase.
+                        parent = frame["stack"][-3][0] if len(frame["stack"]) > 2 else "root"
                         labels += (f"{label}@{parent}",)
                     for key in labels:
                         phase = frame["phases"].setdefault(
@@ -111,11 +118,15 @@ def observe_query_timeouts(log_path: Path):
             originals.append((owner, name, original, wrapper))
             setattr(owner, name, wrapper)
 
-        def measure(owner, name, label):
+        def measure(owner, name, label, *, constructor_only=False):
             original = getattr(owner, name)
 
             @wraps(original)
             def call(*args, **kwargs):
+                if constructor_only:
+                    frame = getattr(state, "active", None)
+                    if frame is None or not frame["stack"] or frame["stack"][-1][0] != "authorization.init":
+                        return original(*args, **kwargs)
                 measurement = begin(label)
                 try:
                     return original(*args, **kwargs)
@@ -141,6 +152,18 @@ def observe_query_timeouts(log_path: Path):
             (cursors, "execute_rows", "execute_rows"),
         ):
             measure(owner, name, label)
+
+        # Measure direct inputs at the consumer alias; nested calls are excluded.
+        for owner, name, label in (
+            (governance.policy, "load", "policy_load"),
+            (governance, "effective_principal", "principal"),
+            (governance.lifecycle, "tombstoned_paths", "tombstones"),
+            (governance.access, "_policy_state", "access_policy"),
+            (authority_store, "open_authorization_session_connection", "authority_connection"),
+            (authority, "active_session_purpose", "session_purpose"),
+            (governance.egress, "_declared_purpose", "declared_purpose"),
+        ):
+            measure(owner, name, f"authorization.input.{label}", constructor_only=True)
 
         def deadline_elapsed(session):
             return (time.monotonic() - session._deadline + session.limits.timeout_ms / 1000) * 1000
