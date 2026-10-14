@@ -122,6 +122,24 @@ already injected this turn's working set. For a known information gap, use
 `ask_memory`, then `read_memory` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
+An agent can refresh context within the same human turn when new evidence or
+a task change makes held context incomplete. Use the exposed
+`trigger="task_refresh"`, set `initiator="agent"`, keep the original human
+`turn`, and supply bounded `conversation.focus`. The task packet follows that
+focus; `intent_resolution` separately qualifies the human request. An
+ambiguous human referent remains ambiguous until the agent has evidence for
+a visible choice. The label describes the caller and grants no authority.
+
+Before consequential output or after continuation restoration, inspect the
+relevant held episode open items and Planning refs against newer closure
+evidence. Refresh only for a remaining gap. Memory responses and rephrased
+summaries alone do not justify another checkpoint. Reuse bootstrap policy;
+request missing or changed sections instead of repeating full instructions.
+Follow the client's reported operation and context bounds. Tool-only clients
+have best-effort initiation; this guidance does not prove native enforcement.
+If refresh is unavailable, keep ordinary source inspection usable under its
+existing bounds and the action's own evidence requirements.
+
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
 Use `review_item_context(ref, expected_fingerprint)` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).

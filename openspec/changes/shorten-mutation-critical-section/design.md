@@ -136,6 +136,16 @@ re-entry, not a second lock.
   `SEMANTIC_CONTRACT_BLOCKED` exactly as the existing cross-invocation replay
   path already does, then commits against the fresh result.
 
+Enrichment reuses the current structural resolver maps and activation census,
+but derives relation facts under freshly admitted page definitions and lifecycle
+bases. Stable topology permits a private census replacement only for exact
+immutable base types with unchanged path and UUID ownership. The replacement
+validates the new source hash and raw status before assembly. Compiled membership
+changes and unsupported provenance retain full construction. Independent
+operations always refresh admission and writer visibility. Tuples, maps,
+eligibility and adjacency still rebuild; no constant-time or native latency
+claim follows from this reuse.
+
 ## Model pre-warm
 
 Both commit paths make a best-effort `embeddings.get_model()` call before

@@ -3339,6 +3339,7 @@ def guard_working_set(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    intent_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Apply release decisions to a working-memory packet (design D7).
 
@@ -3382,6 +3383,24 @@ def guard_working_set(
         purpose=purpose,
         record="all",
     )
+    if intent_resolution is not None:
+        witness = intent_resolution.pop("_witness", {})
+        # Reuse this guard's authority. Private losses must not change task markers.
+        intent_ctx = _packet_release(
+            vault_root, witness, release, policy=policy,
+            release_gate_active=release_gate_active, who=who, purpose=purpose,
+            record="all",
+        )
+        _paths, _names, interpretations, invalid = _working_set_paths(witness)
+        if invalid or any(
+            not any((vault_root / reading).is_file() for reading in readings)
+            for readings in interpretations.values()
+        ) or (intent_ctx is not None and any(
+            _guarded_anchor(item, intent_ctx.frozen, intent_ctx.decisions,
+                            intent_ctx.invalid_refs) is None
+            for item in witness.get("anchors", ())
+        )):
+            intent_resolution["status"] = "unavailable"
     if ctx is None:
         return guarded
     decisions, withheld = ctx.decisions, ctx.withheld

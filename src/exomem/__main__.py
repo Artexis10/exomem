@@ -3298,6 +3298,10 @@ def _install_hook_main(argv: list[str]) -> int:
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
 def _activate_main(argv: list[str]) -> int:
+    from . import commands as commands_module
+
+    activation = next(command for command in commands_module.PRODUCT_COMMANDS if command.name == "activate_context")
+    trigger = next(parameter for parameter in activation.params if parameter.name == "trigger")
     parser = argparse.ArgumentParser(
         prog="exomem activate",
         description=(
@@ -3306,6 +3310,8 @@ def _activate_main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument("turn", help="the user's turn, verbatim")
+    parser.add_argument("--trigger", choices=trigger.choices, default=None, help=trigger.help)
+    parser.add_argument("--initiator", default=None, help="declared attribution; grants no authority")
     parser.add_argument(
         "--max-chars",
         type=int,
@@ -3367,6 +3373,10 @@ def _activate_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     core = ["activate_context", args.turn]
+    if args.trigger:
+        core += ["--trigger", args.trigger]
+    if args.initiator:
+        core += ["--initiator", args.initiator]
     if args.max_chars is not None:
         core += ["--max-chars", str(args.max_chars)]
     if args.purpose:

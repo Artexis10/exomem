@@ -131,6 +131,29 @@ class ActivationCensus:
     def from_candidates(cls, candidates: Iterable[ActivationCandidate]) -> ActivationCensus:
         return cls(tuple(candidates))
 
+    def _with_replaced_candidate(self, candidate: ActivationCandidate) -> ActivationCensus | None:
+        """Replace validated data only when immutable path and UUID ownership stay fixed."""
+        if type(self) is not ActivationCensus or type(candidate) is not ActivationCandidate:
+            return None
+        if type(candidate.rel_path) is not str:
+            return None
+        previous = self.by_path.get(candidate.rel_path)
+        if previous is None or previous.normalized_id != candidate.normalized_id:
+            return None
+        if any(type(item) is not ActivationCandidate for item in self.candidates):
+            return None
+        index = self.candidates.index(previous)
+        _validate_candidate(candidate, index=index)
+        candidates = self.candidates[:index] + (candidate,) + self.candidates[index + 1:]
+        by_path = dict(self.by_path)
+        by_path[candidate.rel_path] = candidate
+        # Only the replacement changed; constructor-validated ownership remains immutable.
+        census = object.__new__(ActivationCensus)
+        object.__setattr__(census, "candidates", candidates)
+        object.__setattr__(census, "by_path", MappingProxyType(by_path))
+        object.__setattr__(census, "paths_by_id", self.paths_by_id)
+        return census
+
     def unique_path_for_id(self, normalized_id: str) -> str | None:
         paths = self.paths_by_id.get(normalized_id, ())
         return paths[0] if len(paths) == 1 else None
