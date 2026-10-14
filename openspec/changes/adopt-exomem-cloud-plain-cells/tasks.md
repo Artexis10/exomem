@@ -270,7 +270,9 @@ Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`.
 Authenticated capture, exact and paraphrased recall, and the content-free log canary now pass after connector reconnection.
 Owner performance and memory headroom acceptance remain open.
 OAuth refresh, node latency and owner-sized admission remain unproved.
-QA and reviewer cells and the fleet default retain their previous images; the two stopped cells remain stopped and unpinned.
+QA and reviewer cells also became Ready on qualified 0.116; owner-only custody and authenticated MCP reads passed with unchanged resources.
+The fleet default retains its previous image, and the two stopped cells remain stopped and unpinned.
+Capacity qualification still holds fleet-default promotion and friend admission.
 Shared selection remains off. Warm-peak qualification remains open; current capacity charges scheduler requests rather than measured peaks.
 
 A deployed-image B2 backup and scratch restore matched both vault and host state, with scratch cleanup verified.
