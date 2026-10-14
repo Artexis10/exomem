@@ -105,6 +105,13 @@ Refresh unavailability SHALL NOT create a blanket action or release gate.
 An action SHALL retain its own evidence and authorization requirements.
 Injected packets SHALL retain the existing retrieved-data header and rendering ceiling.
 
+When native events omit input origin, the client SHALL report correlation-scope accounting and unavailable human-origin enforcement separately.
+The first controller MAY cover only statically read-only operations generated from the canonical command registry.
+Its capability report SHALL identify mixed invocations and unmatched dispatch as uncovered.
+Every recognized memory response SHALL remain ineligible to create an external-evidence checkpoint, including uncovered mixed responses.
+An explicit end SHALL clear association without resetting totals or refunding reserved work.
+An exhausted checkpoint SHALL NOT block canonical writes, imports or ordinary inspection outside its active association.
+
 #### Scenario: The agent prepares a response after new evidence
 
 - **WHEN** a supported checkpoint exposes newly inspected external evidence before the final response
@@ -122,6 +129,18 @@ Injected packets SHALL retain the existing retrieved-data header and rendering c
 - **WHEN** a client exposes tools but lacks the relevant post-tool or response checkpoint
 - **THEN** its capability report states best-effort initiation for that checkpoint
 - **AND** the tools remain usable without claiming native enforcement
+
+#### Scenario: An exhausted checkpoint leaves ordinary work available
+
+- **WHEN** associated static reads exhaust a native correlation scope and the agent ends their checkpoint
+- **THEN** the controller allows ordinary inspection to reach its dispatcher
+- **AND** repeated end and late completion receipts neither restore the allowance nor reopen association
+
+#### Scenario: A mixed memory response cannot renew the allowance
+
+- **WHEN** a recognized mixed memory tool returns under partial accounting coverage
+- **THEN** the controller reports that invocation as uncovered
+- **AND** its response creates no external-evidence invitation or new allowance
 
 #### Scenario: A restricted caller receives no vault-wide generation
 
