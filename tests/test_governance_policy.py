@@ -444,6 +444,42 @@ def test_operational_evidence_does_not_invalidate_policy_cache_or_enforcement(va
     assert not [f for f in after.findings if f["code"] == "unknown_file"]
 
 
+def test_curation_records_do_not_invalidate_policy_cache_or_appear_as_findings(vault: Path) -> None:
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    _write(vault, "rules", "external", _RULE_A)
+    before = policy.load(vault)
+    root = policy.governance_root(vault)
+    signature = policy._signature(root)
+    curation = root / "curation"
+    (curation / "runs").mkdir(parents=True)
+    (curation / "runs" / ("a" * 64 + ".json")).write_text("{}\n", encoding="utf-8")
+    (curation / "episodes" / ("b" * 64)).mkdir(parents=True)
+    (curation / "episodes" / ("b" * 64) / ("c" * 64 + ".json")).write_text("{}\n", encoding="utf-8")
+    assert policy._signature(root) == signature
+    assert policy.load(vault) is before
+    policy._CACHE.clear()
+    after = policy.load(vault)
+    assert after.fingerprint == before.fingerprint
+    assert not [f for f in after.findings if f["code"] == "unknown_file"]
+
+
+def test_a_conflicted_policy_copy_still_blocks_beside_curation_records(vault: Path) -> None:
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    _write(vault, "scopes", "acmeco", _SCOPE_A)
+    gov = vault / "Knowledge Base" / "_Governance"
+    (gov / "curation" / "runs").mkdir(parents=True)
+    (gov / "curation" / "runs" / ("a" * 64 + ".json")).write_text("{}\n", encoding="utf-8")
+    (gov / "scopes" / _sync_conflict_name("acmeco")).write_text(_SCOPE_A, encoding="utf-8")
+
+    pol = policy.load(vault)
+
+    assert pol.blocked is True
+    assert [f["path"] for f in pol.findings if f["code"] == "conflicted_copy"] == [
+        f"scopes/{_sync_conflict_name('acmeco')}"
+    ]
+
+
 def test_receipt_conflict_does_not_disable_active_policy_but_blocks_append(vault: Path) -> None:
     _write(vault, "scopes", "acmeco", _SCOPE_A)
     _write(vault, "rules", "external", _RULE_A)
