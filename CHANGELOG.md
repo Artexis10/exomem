@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.117.2](https://github.com/Artexis10/exomem/compare/v0.117.1...v0.117.2) (2026-10-14)
+
+
+### Bug Fixes
+
+* **agent:** clarify context tools and durable memory guidance ([#1738](https://github.com/Artexis10/exomem/issues/1738)) ([57d4180](https://github.com/Artexis10/exomem/commit/57d4180cb622e014b466bccbccf6be0afa23ff48))
+* align Cloud memory profiling and launch contracts ([#1741](https://github.com/Artexis10/exomem/issues/1741)) ([cf31a10](https://github.com/Artexis10/exomem/commit/cf31a10b441d3419a983ad89c9e3eae27162ab15))
+* **auth:** preserve slow first refresh redemptions ([#1742](https://github.com/Artexis10/exomem/issues/1742)) ([8395543](https://github.com/Artexis10/exomem/commit/83955430104a22c2a32ebee9875c2e1220ab22ae))
+* **embeddings:** preserve bounded catch-up after batch publication ([#1747](https://github.com/Artexis10/exomem/issues/1747)) ([ea0998e](https://github.com/Artexis10/exomem/commit/ea0998e6405161eb847132ecd4d2ca6123ecffdf))
+* **governance:** preserve private inventory during schema inspection ([#1744](https://github.com/Artexis10/exomem/issues/1744)) ([bf61036](https://github.com/Artexis10/exomem/commit/bf610365490643becad51c5233ceb4b75e82d2d0))
+* **hooks:** refresh activation commands without explicit state homes ([#1740](https://github.com/Artexis10/exomem/issues/1740)) ([681839a](https://github.com/Artexis10/exomem/commit/681839a6c224b99ba88e9c5bd38e5904900d1f74))
+* **import:** preserve maintenance backoff during status polling ([#1745](https://github.com/Artexis10/exomem/issues/1745)) ([8902167](https://github.com/Artexis10/exomem/commit/8902167743e50f0c1946a57cabac1b507eb4f721))
+* **observability:** attribute bounded disk vector scoring ([#1750](https://github.com/Artexis10/exomem/issues/1750)) ([c7d4d34](https://github.com/Artexis10/exomem/commit/c7d4d34c9c0768e2579a107080ca17ac341884ab))
+* **recall:** reuse governed membership and observe slow phases ([#1737](https://github.com/Artexis10/exomem/issues/1737)) ([f55a738](https://github.com/Artexis10/exomem/commit/f55a738248d8736ce8a5831e3e604884d73c482f))
+* **service:** initialize managed worker native thread limits ([#1748](https://github.com/Artexis10/exomem/issues/1748)) ([997393f](https://github.com/Artexis10/exomem/commit/997393fd0e860a6938ed4d0f6b79ae2dc9d41ead))
+
 ## [0.117.1](https://github.com/Artexis10/exomem/compare/v0.117.0...v0.117.1) (2026-10-13)
 
 
