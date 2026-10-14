@@ -295,6 +295,14 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `embeddings.matrix_load.rows` | Read, validate and copy vector rows. Fields report `expected_rows`, completed `rows`, `width_sum` and copied `vector_bytes`, including failed loads. |
 | `embeddings.matrix_load.release` | Sum transaction rollback and connection close. |
 | `embeddings.matrix_load.finalize` | Observe the snapshot identity, read the sidecar timestamp and construct the cache. |
+| `embeddings.disk_score.connect` | Open the sidecar for the bounded, read-only `service-v1` chunk scan. |
+| `embeddings.disk_score.snapshot` | Begin the snapshot, read its generation and vector space, prepare queries and check the producer space. |
+| `embeddings.disk_score.fetch` | Execute the ordered vector query and fetch each block, including the final empty fetch. |
+| `embeddings.disk_score.decode` | Allocate each block, validate vector widths and copy vectors. Fields report completed `rows` and copied `vector_bytes`, including failed scans. |
+| `embeddings.disk_score.score` | Compute each block's matrix product. |
+| `embeddings.disk_score.select` | Apply admission, select each query's winners and merge them into the stable top-k. |
+| `embeddings.disk_score.hydrate` | Build results and, for searches that return text, read winning chunks from the scoring snapshot. |
+| `embeddings.disk_score.release` | Roll back the read transaction and close the connection. |
 | `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
 | `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after each unit write; the log line `semantic-unit matrix full load: … rows=…` names the reason. |
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
@@ -329,6 +337,14 @@ The ledger retains only the 32 slowest spans; an omitted phase has no retained d
 The row fields sum across loads, so `width_sum` equals the vector width only for one load.
 A slow row phase alone does not distinguish storage, row conversion, copying or
 memory pressure.
+
+Disk-score spans describe chunk scans that keep vectors in bounded blocks rather
+than a resident corpus matrix. Repeated phases aggregate within the call. Decode
+fields sum completed work across blocks and scans, including repeated scans for
+query blocks. They carry only integer counts, never paths, chunk text, queries or
+identifiers. These phases can sit inside broader search or advisory spans, so
+overlapping durations must not be added blindly. The same 32-span retention limit
+applies: an omitted phase means unknown duration, never zero.
 
 Governed walks reuse membership only for the same canonical path, vault, exact
 source bytes, policy fingerprint and current registry assignment. A valid hit
