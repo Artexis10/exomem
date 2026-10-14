@@ -1223,7 +1223,12 @@ def check_hooks(
             )
 
         scripts = {}
-        refresh = _refresh_check(hd, home, client, data)
+        if activation_mode is not None and activation_mode != "mcp":
+            from ._hooks import exomem_retrieve_nudge as retrieve
+
+            refresh = retrieve.refresh_capabilities(client, "disabled")
+        else:
+            refresh = _refresh_check(hd, home, client, data)
         for script, wrapper, event in _HOOK_SPECS:
             if data is None:
                 unevaluated(f"config.{event}")
@@ -1763,11 +1768,22 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
     raise RuntimeError(f"concurrent hook config changes persisted at {path}")
 
 
-def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
-    return _rewrite_hooks(path, lambda data: _merged_config(data, installed, timeout))
+def _merge_hooks(
+    path: Path, installed: list[dict], timeout: int, *, remove_refresh: bool = False
+) -> dict:
+    return _rewrite_hooks(
+        path,
+        lambda data: _merged_config(
+            _pruned_config(data, matches=_is_refresh_entry)[0] if remove_refresh else data,
+            installed,
+            timeout,
+        ),
+    )
 
 
-def _merge_one_config(path: Path, installed: list[dict], timeout: int) -> dict:
+def _merge_one_config(
+    path: Path, installed: list[dict], timeout: int, *, remove_refresh: bool = False
+) -> dict:
     """Merge into one alternate source, reporting rather than raising on failure.
 
     A yadm alternate may be a Jinja template rather than JSON, so parseability
@@ -1786,7 +1802,11 @@ def _merge_one_config(path: Path, installed: list[dict], timeout: int) -> dict:
     try:
         migration = _rewrite_hooks(
             path,
-            lambda data: _merged_config(data, installed, timeout),
+            lambda data: _merged_config(
+                _pruned_config(data, matches=_is_refresh_entry)[0] if remove_refresh else data,
+                installed,
+                timeout,
+            ),
             create=False,
         )
     except (OSError, RuntimeError, ValueError) as error:
@@ -2008,6 +2028,18 @@ def install_hook(
         installed.extend(_refresh_items(hook_dir, client, home))
         refresh_report = retrieve.refresh_capabilities(client, "available")
 
+    remove_refresh = activation_mode != "mcp" and specs is _HOOK_SPECS
+    if remove_refresh:
+        from ._hooks import exomem_retrieve_nudge as retrieve
+
+        try:
+            safe.unlink_nudge_file(hook_dir / retrieve.REFRESH_METADATA_NAME)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # The selected mode disables leftover metadata even when safe removal is unavailable.
+            refresh_report["metadata_cleanup"] = "unavailable"
+
     if activation_mode != "mcp":
         _mark_restart_pending(home / "hooks" if activation_mode else hook_dir)
 
@@ -2033,7 +2065,7 @@ def install_hook(
                 else _default_settings(client)
             )
         )
-        migration = _merge_hooks(sp, installed, timeout)
+        migration = _merge_hooks(sp, installed, timeout, remove_refresh=remove_refresh)
         result["wired"] = True
         result["settings"] = str(sp)
         result["config_changed"] = migration["changed"]
@@ -2045,7 +2077,7 @@ def install_hook(
         # of them matches the machine.
         written = Path(migration["path"]).name
         result["alternates"] = [
-            _merge_one_config(source, installed, timeout)
+            _merge_one_config(source, installed, timeout, remove_refresh=remove_refresh)
             for source in _alternate_sources(sp)
             if source.name != written
         ]
@@ -2440,7 +2472,20 @@ def _is_exomem_entry(hook: dict) -> bool:
     return bool(_command_basenames(command).intersection(continuation))
 
 
-def _pruned_config(source: dict) -> tuple[dict, int]:
+def _is_refresh_entry(hook: dict) -> bool:
+    if not _contains_any(hook, _RETRIEVE_HOOK_MARKERS):
+        return False
+    for field in ("command", "commandWindows"):
+        try:
+            # This flag identifies the closed command shape produced by the installer.
+            if "--refresh-event" in shlex.split(hook.get(field) or ""):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _pruned_config(source: dict, *, matches=_is_exomem_entry) -> tuple[dict, int]:
     """Drop every entry we own, and only the containers that became ours-only.
 
     Walks every event rather than the events the current specs name, because a
@@ -2470,7 +2515,7 @@ def _pruned_config(source: dict) -> tuple[dict, int]:
             remaining = [
                 hook
                 for hook in original
-                if not (isinstance(hook, dict) and _is_exomem_entry(hook))
+                if not (isinstance(hook, dict) and matches(hook))
             ]
             removed += len(original) - len(remaining)
             if len(remaining) == len(original):

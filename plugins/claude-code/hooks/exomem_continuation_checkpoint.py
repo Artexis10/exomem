@@ -1321,6 +1321,7 @@ class _SecureDirectory:
         self.path = path
         self.fd = fd
         self.windows_handles = windows_handles or []
+        self.session_lock_descriptor: int | None = None
 
     @property
     def windows_handle(self) -> int:
@@ -2016,15 +2017,21 @@ def _valid_session_manifest(
     client: str,
     state_name: str,
 ) -> bool:
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version",
-        "kind",
-        "client",
-        "session_id",
-        "state_name",
-        "state_root_binding",
-        "created_at_ns",
-    }:
+    # This optional one-way flag belongs to the closed session manifest protocol.
+    if (
+        not isinstance(value, dict)
+        or set(value) - {"refresh_initialized"}
+        != {
+            "schema_version",
+            "kind",
+            "client",
+            "session_id",
+            "state_name",
+            "state_root_binding",
+            "created_at_ns",
+        }
+        or value.get("refresh_initialized", True) is not True
+    ):
         return False
     session_id = value.get("session_id")
     return (
@@ -2145,7 +2152,7 @@ def _published_session_matches_pending(
         )
         return (
             status_value == "valid"
-            and manifest == dict(pending)
+            and all(manifest.get(key) == value for key, value in pending.items())
             and _same_directory_entry(root, state_name, state)
         )
     except OSError:
@@ -2349,6 +2356,32 @@ def load_session_manifest_at(
     return value, "valid"
 
 
+def initialize_refresh_state_at(
+    state: _SecureDirectory, home: Path, client: str, session_id: str
+) -> bool:
+    """Record initialization before publication; missing initialized state cannot reset totals."""
+    descriptor = state.session_lock_descriptor
+    if descriptor is None:
+        raise OSError("refresh initialization requires the held session lock")
+    manifest, status_value = load_session_manifest_at(
+        state, home, client, state.path.name, descriptor=descriptor
+    )
+    if status_value != "valid" or manifest["session_id"] != session_id:
+        raise OSError("refresh session manifest is unavailable")
+    if manifest.get("refresh_initialized") is True:
+        return False
+    manifest["refresh_initialized"] = True
+    payload = b"\0" + _canonical_bytes(manifest)
+    # Retain the existing manifest reader's byte ceiling; refusal leaves ordinary dispatch usable.
+    if len(payload) > 4096:
+        raise ValueError("refresh session manifest exceeds its byte bound")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    _write_all(descriptor, payload)
+    os.ftruncate(descriptor, len(payload))
+    os.fsync(descriptor)
+    return True
+
+
 @contextlib.contextmanager
 def _session_lock(
     home: Path,
@@ -2434,7 +2467,7 @@ def _session_lock(
                     create
                     and manifest_status == "valid"
                     and pending is not None
-                    and _manifest == pending
+                    and all(_manifest.get(key) == value for key, value in pending.items())
                     and _same_directory_entry(root_handle, state_name, state_handle)
                 ):
                     try:
@@ -2453,8 +2486,11 @@ def _session_lock(
                 state_context.__exit__(*sys.exc_info())
                 raise
         try:
+            # Windows manifest access must use the descriptor that owns its byte lock.
+            state_handle.session_lock_descriptor = session.fd
             yield state_handle
         finally:
+            state_handle.session_lock_descriptor = None
             session.__exit__(None, None, None)
             state_context.__exit__(None, None, None)
 

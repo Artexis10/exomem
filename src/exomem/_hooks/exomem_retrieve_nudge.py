@@ -2416,7 +2416,9 @@ def _refresh_load(state, client: str, home: Path, session_id: str) -> dict:
     try:
         fd = safe._open_secure_file_at(state, REFRESH_STATE_NAME, os.O_RDONLY)
     except FileNotFoundError:
-        return {
+        if not safe.initialize_refresh_state_at(state, home, client, session_id):
+            raise ValueError("initialized refresh state is missing; prior totals are unavailable")
+        value = {
             "schema_version": 1,
             "client": client,
             "session_id": session_id,
@@ -2424,6 +2426,8 @@ def _refresh_load(state, client: str, home: Path, session_id: str) -> dict:
             "observed_at_ns": time.time_ns(),
             "scopes": [],
         }
+        _refresh_save(state, value)
+        return value
     try:
         safe._require_nudge_file(state, REFRESH_STATE_NAME, fd)
         if os.name != "nt" and stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
@@ -2460,6 +2464,7 @@ def _refresh_load(state, client: str, home: Path, session_id: str) -> dict:
         {(scope["actor_id"], scope["correlation_id"]) for scope in value["scopes"]}
     ) != len(value["scopes"]):
         raise ValueError("duplicate refresh scope")
+    safe.initialize_refresh_state_at(state, home, client, session_id)
     return value
 
 
@@ -2741,7 +2746,8 @@ def _refresh_process(
                     raise ValueError("unsupported restoration event")
                 restored = []
                 for scope in state["scopes"]:
-                    if scope["actor_id"] == actor_id:
+                    # An actorless native session lifecycle event affects every actor in that session.
+                    if actor_id is None or scope["actor_id"] == actor_id:
                         scope["active_checkpoint_id"] = None
                         if event == "SessionStart":
                             boundary = {
@@ -2800,6 +2806,8 @@ def _refresh_process(
 
 def _refresh_main(args, data: object) -> bool:
     client, home = _hook_client(), _hook_home()
+    if not args.refresh and _inject_mode() != _MCP_MODE:
+        return False
     if (
         not args.refresh
         and not args.refresh_event
@@ -2933,7 +2941,8 @@ def main(argv: list[str] | None = None) -> int:
         refresh_input = (
             args.refresh
             or args.refresh_event
-            or os.path.lexists(Path(__file__).with_name(REFRESH_METADATA_NAME))
+            or _inject_mode() == _MCP_MODE
+            and os.path.lexists(Path(__file__).with_name(REFRESH_METADATA_NAME))
         )
         raw = (
             sys.stdin.read(_state_core().MAX_CHECKPOINT_BYTES + 1)

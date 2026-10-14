@@ -794,3 +794,133 @@ def test_invalid_installer_binding_does_not_deploy_an_accounting_profile(tmp_pat
             refresh_bindings=("invalid name",),
         )
     assert not (profile / "hooks").exists()
+
+
+@pytest.mark.parametrize("mode", ["working-set", None])
+def test_changing_activation_mode_removes_only_owned_refresh_configuration(tmp_path, mode):
+    profile = tmp_path / "profile"
+    install(profile, "codex")
+    bridge = profile / "hooks" / retrieve.REFRESH_METADATA_NAME
+    prior_bridge = bridge.read_bytes()
+    settings = profile / "hooks.json"
+    configuration = json.loads(settings.read_text())
+    unrelated = {"type": "command", "command": "echo external-hook"}
+    configuration["hooks"]["PreToolUse"][0]["hooks"].append(unrelated)
+    settings.write_text(json.dumps(configuration))
+    changed = installer.install_hook(
+        client="codex",
+        activation_mode=mode,
+        hook_dir=profile / "hooks",
+        settings_path=settings,
+    )
+    assert changed["refresh"]["classification"] == "disabled"
+    assert not bridge.exists()
+    configuration = json.loads(settings.read_text())
+    assert configuration["hooks"]["PreToolUse"][0]["hooks"] == [unrelated]
+    for event in ("PreCompact", "SessionStart"):
+        commands = [
+            hook["command"] for group in configuration["hooks"][event] for hook in group["hooks"]
+        ]
+        assert commands and all(
+            "exomem_continuation_checkpoint.py" in command for command in commands
+        )
+    continuation.write_nudge_file(bridge, prior_bridge)
+    if mode is not None:
+        health = installer.check_hooks(
+            clients=("codex",),
+            activation_mode=mode,
+            hook_dir=profile / "hooks",
+            settings_path=settings,
+        )
+        assert health["success"] and health["clients"][0]["refresh"]["classification"] == "disabled"
+    prompt_hook = next(row for row in changed["installed"] if row["event"] == "UserPromptSubmit")
+    output = subprocess.run(
+        shlex.split(prompt_hook["command"]),
+        input=json.dumps(
+            envelope(
+                "codex", "UserPromptSubmit", prompt="Inspect the current source adapter carefully."
+            )
+        ),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert output.returncode == 0, output.stderr
+    assert '"scope_id"' not in output.stdout and '"accounting_unavailable"' not in output.stdout
+
+
+def test_lost_initialized_refresh_state_does_not_renew_the_allowance(tmp_path):
+    profile = tmp_path / "profile"
+    report = install(profile, "codex", refresh_max_operations=1)
+    scope = metadata(
+        invoke(report, envelope("codex", "UserPromptSubmit", prompt="Inspect one source."))
+    )["scope_id"]
+    controller(report, "declare", declaration(scope))
+    invoke(report, envelope("codex", "PreToolUse", call="reserved"))
+    state = (
+        continuation.session_state_dir(profile, "codex", "session-one")
+        / retrieve.REFRESH_STATE_NAME
+    )
+    state.unlink()
+    repeated = metadata(
+        invoke(report, envelope("codex", "UserPromptSubmit", prompt="The same task."))
+    )
+    assert repeated["status"] == "accounting_unavailable" and "scope_id" not in repeated
+    assert not state.exists()
+    ordinary = invoke(report, envelope("codex", "PreToolUse", call="ordinary"))
+    assert ordinary["hookSpecificOutput"].get("permissionDecision") != "deny"
+    assert controller(report, "declare", declaration(scope))["status"] == "invalid_declaration"
+
+
+def test_interrupted_first_refresh_publication_stays_unavailable_on_restart(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    report = install(profile, "codex")
+    bridge = json.loads((profile / "hooks" / retrieve.REFRESH_METADATA_NAME).read_text())
+
+    def interrupted(*args):
+        raise OSError("Interrupted state publication.")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(retrieve, "_refresh_save", interrupted)
+        with pytest.raises(OSError):
+            retrieve._refresh_process(
+                envelope("codex", "UserPromptSubmit", prompt="Inspect a source."),
+                bridge,
+                client="codex",
+                home=profile,
+                session_id="session-one",
+                actor_id=None,
+            )
+    output = invoke(report, envelope("codex", "PreToolUse", call="after-restart"))
+    assert metadata(output)["status"] == "accounting_unavailable"
+    assert output["hookSpecificOutput"].get("permissionDecision") != "deny"
+
+
+@pytest.mark.parametrize("client", ["codex", "claude"])
+@pytest.mark.parametrize("event", ["PreCompact", "SessionStart"])
+def test_session_lifecycle_without_actor_clears_every_association_and_keeps_totals(
+    tmp_path, client, event
+):
+    report = install(tmp_path / "profile", client)
+    scopes = {}
+    for actor in (None, "actor-two"):
+        prompt = envelope(
+            client,
+            "UserPromptSubmit",
+            prompt="Inspect a source.",
+            **({"agent_id": actor} if actor else {}),
+        )
+        scope = metadata(invoke(report, prompt))["scope_id"]
+        controller(report, "declare", declaration(scope), actor=actor)
+        invoke(report, envelope(client, "PreToolUse", **({"agent_id": actor} if actor else {})))
+        scopes[actor] = scope
+    # These pinned native session lifecycle envelopes do not supply an actor.
+    lifecycle = {"hook_event_name": event, "session_id": "session-one"}
+    if event == "PreCompact":
+        lifecycle["trigger"] = "auto"
+    else:
+        lifecycle["source"] = "resume"
+    invoke(report, lifecycle)
+    for actor, scope in scopes.items():
+        status = controller(report, "status", {"scope_id": scope}, actor=actor)
+        assert status["checkpoint_id"] is None and status["reserved_operations"] == 1

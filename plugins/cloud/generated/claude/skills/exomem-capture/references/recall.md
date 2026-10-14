@@ -140,6 +140,47 @@ have best-effort initiation; this guidance does not prove native enforcement.
 If refresh is unavailable, keep ordinary source inspection usable under its
 existing bounds and the action's own evidence requirements.
 
+### Native checkpoint controller
+
+Accounting requires an explicit profile-local memory MCP binding selected during
+hook installation. Legacy profiles retain their activation and reminder behavior.
+The hook reports its local controller arguments, opaque `scope_id`, limits, and
+coverage. Local command metadata does not verify a remote server's version.
+
+1. Submit the declaration through `controller.argv` plus `controller.declare_args` on standard input; expect a checkpoint association.
+2. Use associated memory reads for the gap; expect each covered native leaf to reserve its allowance before dispatch.
+3. Send `scope_id` and `checkpoint_id` through `controller.argv` plus `controller.end_args`; expect association to clear without renewing totals.
+
+The declaration is JSON with `schema_version: 1`, `kind: "checkpoint"`, the
+reported `scope_id`, an unsigned `task_revision`, `basis`, `boundary_ids`, and
+`source_versions`. Add no prompt, focus, summary, result, or conversation hash.
+Each of at most twelve source entries has `ref`, `version`, and `version_basis`.
+The basis is `content_hash`, `evidence_version`, `external_version`, or
+`unavailable`; unavailable versions use `null` and report partial deduplication.
+The end payload contains only `scope_id` and `checkpoint_id`.
+
+The checkpoint basis is `external_evidence`, `source_correction`,
+`task_transition`, or `continuation_restore`. External and restoration boundaries
+must be IDs that the hook observed in this scope. A source correction names a
+caller-visible version. An increased task revision declares a transition; the
+controller cannot prove its meaning. Memory replies, including mixed-tool and
+unknown memory responses, cannot create external boundaries.
+
+The default cumulative scope allowance is eight associated static reads and
+three compiler-default activation character allowances. Installation can change
+the limits. Failed or missing receipts retain reservations. Repeating a
+declaration, ending an association, and declaring new evidence never renew totals.
+Compaction clears association and retains existing scope totals. A new native
+correlation creates another scope without proving human origin.
+
+An exhausted association denies only covered static reads and explains how to
+end it. Mixed operations, writes, imports, and ordinary inspection outside the
+association remain available. Missing metadata, unsafe state, and uncovered
+dispatch report unavailable accounting. They create no general action gate.
+Codex stock code-mode leaves use their native hook path; an outer wrapper does
+not count its children. External wrappers remain uncovered. Before-final checks
+remain agent guidance; these hooks do not create a Stop continuation gate.
+
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
 Use `review_item_context(ref, expected_fingerprint)` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
