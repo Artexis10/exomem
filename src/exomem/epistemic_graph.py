@@ -2233,6 +2233,7 @@ class EpistemicGraphIndex:
         *,
         require_current_projection: bool = True,
         prove: bool | str | None = None,
+        allow_cold_projection: bool = True,
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
@@ -2290,6 +2291,11 @@ class EpistemicGraphIndex:
         when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
         reader's proof is running, and True waits for that proof. A refusal
         appends ``"unproven"`` to ``outcome_out``.
+
+        ``allow_cold_projection=False`` uses only a live event checkpoint for
+        current projection checks, including checkpointless publications.
+        Missing or changed live evidence declines without a source census.
+        It retains every marker and remembered source-proof check above.
         """
         if prove is None:
             prove = self._prove_cold_snapshots
@@ -2305,6 +2311,14 @@ class EpistemicGraphIndex:
             if refusal_out is not None:
                 refusal_out.append("sidecar_missing")
             return None
+        bounded_checkpoint = None
+        if require_current_projection and not allow_cold_projection:
+            # A false miss costs temporary read unavailability, rather than a cold corpus census.
+            bounded_checkpoint = freshness.live_recall_checkpoint(self.vault_root, "vault")
+            if bounded_checkpoint is None:
+                if outcome_out is not None:
+                    outcome_out.append("live_checkpoint_unavailable")
+                return None
         sidecar_identity = _sidecar_file_identity(self.path)
         # Sampled before any proving starts. Everything below -- the marker
         # reads, the source-bytes proof over the whole corpus -- takes time a
@@ -2320,6 +2334,8 @@ class EpistemicGraphIndex:
                 readonly=True,
                 factory=_TrackedSidecarConnection,
                 check_same_thread=False,
+                # Bounded readers decline contention instead of spending SQLite's default wait.
+                **({"timeout": 0.0} if not allow_cold_projection else {}),
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
@@ -2386,19 +2402,27 @@ class EpistemicGraphIndex:
         if current and require_current_projection and values.get(_READ_BARRIER_KEY) is not None:
             current = False
         if current and require_current_projection:
-            current_checkpoint = (
-                freshness.recall_checkpoint(self.vault_root, "vault")
-                if stored_checkpoint is not None
-                else None
-            )
-            current_identity = (
-                _incremental_projection_identity(self.vault_root)
-                if stored_checkpoint is not None
-                else _recall_projection_identity(
-                    self.vault_root,
-                    disk_freshness=_disk_vault_freshness(self.vault_root),
+            if bounded_checkpoint is not None:
+                current_checkpoint = bounded_checkpoint
+                current_identity = (
+                    bounded_checkpoint.triple,
+                    bounded_checkpoint.policy_version,
+                    bounded_checkpoint.access_policy_fingerprint,
                 )
-            )
+            else:
+                current_checkpoint = (
+                    freshness.recall_checkpoint(self.vault_root, "vault")
+                    if stored_checkpoint is not None
+                    else None
+                )
+                current_identity = (
+                    _incremental_projection_identity(self.vault_root)
+                    if stored_checkpoint is not None
+                    else _recall_projection_identity(
+                        self.vault_root,
+                        disk_freshness=_disk_vault_freshness(self.vault_root),
+                    )
+                )
             current = stored_projection == _availability_freshness_value(current_identity)
             # A checkpoint is an O(delta) proof only inside the exact process
             # lineage that published it.  A cold/direct reader, or a process
@@ -2497,6 +2521,13 @@ class EpistemicGraphIndex:
                     stored_checkpoint,
                     sampled_generation=sampled_generation,
                 )
+        if bounded_checkpoint is not None and (
+            freshness.live_recall_checkpoint(self.vault_root, "vault") != bounded_checkpoint
+        ):
+            if outcome_out is not None:
+                outcome_out.append("live_checkpoint_changed")
+            conn.close()
+            return None
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
         # Class A/C signal that landed mid-proof still fails closed. Scoped to
