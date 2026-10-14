@@ -862,11 +862,12 @@ def _server(root):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work):
+    def __init__(self, work, *, wake_maintenance=True):
         import contextvars
 
         self.context = contextvars.copy_context()
         self.work = work
+        self.wake_maintenance = wake_maintenance
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -899,7 +900,7 @@ class StoreServer:
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._views_after = None  # where the current pass over pending views continues
-        self._views_passes = 0  # completed passes since the last request
+        self._views_passes = 0  # completed passes since the last maintenance wake
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self.pending_create = None  # the marker entry a served create left pending, until it finishes
@@ -909,7 +910,7 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work):
+    def call(self, work, *, wake_maintenance=True):
         """Run ``work`` on the store thread and return its result or raise its error."""
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
@@ -917,7 +918,7 @@ class StoreServer:
         entry = time.monotonic()
         completion_deadline = acknowledgement_budget_deadline(entry)
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
-        request = _Call(work)
+        request = _Call(work, wake_maintenance=wake_maintenance)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
@@ -956,9 +957,10 @@ class StoreServer:
                 request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
                 if request is not None:
                     self._serve(request)
-                    # The request may have started a job, revised a declaration or left views pending.
-                    self._ticks = dict.fromkeys(self._ticks, 0.0)
-                    self._views_after, self._views_passes = None, 0
+                    if request.wake_maintenance:
+                        # The request may have started a job, revised a declaration or left views pending.
+                        self._ticks = dict.fromkeys(self._ticks, 0.0)
+                        self._views_after, self._views_passes = None, 0
                 elif time.monotonic() >= due:
                     # One tick per turn, so a waiting request is taken between any two.
                     name = min(self._ticks, key=self._ticks.get)
@@ -1201,8 +1203,9 @@ class StoreServer:
         acknowledgement, through the store's reconcile path, as the in-process owner. A
         window holds at most ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages
         at their bounds. A view installed by one pass is confirmed current by the next, so
-        two passes follow each request; views still pending then, which cannot publish yet,
-        wait for the next request or the retry interval.
+        two passes follow each maintenance wake; views still pending then, which cannot
+        publish yet, wait for the next wake or the retry interval.
+        Import status polling preserves these passes and retry deadlines.
         """
         from ..governance import principal
         from . import capability
