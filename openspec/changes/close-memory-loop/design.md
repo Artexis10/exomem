@@ -575,6 +575,58 @@ On continuation restoration, read relevant episode open items and existing Plann
 
 Late evidence can support a correction through existing governed writers. Preserve the superseded interpretation and its source history. Refresh grants no new capture, relationship, supersession, Planning or side-effect authority. A checkpoint failure must not become a general release or user-action gate. This contract is a programme milestone, not a prerequisite for an already selected patch release.
 
+#### Native checkpoint accounting
+
+The first controller covers native correlation scopes, rather than claiming verified human origin.
+Codex 0.162.1 and Claude Code 2.1.296 command hooks expose correlation identifiers but omit input origin.
+Their capability reports separate correlation, origin, native leaf interception, completion receipts and restoration.
+Tool-only clients and dispatch without native leaf envelopes remain best effort.
+The older continuation contract retains its own version pins.
+
+Reuse the retrieve hook, continuation state locks and maintained installer.
+The installer generates operation metadata from `product_commands_for("mcp")` and `Command.read_only`.
+It records the producing package version and source hashes, plus the compiler's character bounds.
+Explicit configured MCP bindings enable accounting; an unmatched binding remains uncovered.
+Missing, invalid or demonstrably stale metadata reports unavailable classification and never gates an entire server.
+Local metadata alone does not prove the version of a remote server.
+
+Only associated, statically read-only operations consume the first controller's limits.
+Mixed invocations remain uncovered because their classification belongs to the maintained product dispatcher.
+Every recognized memory response, including a mixed-tool response, is excluded from external-evidence invitations.
+Canonical writes and imports remain ungated by this controller.
+False classification would interrupt useful work, so no approximate mixed-operation classifier is justified.
+Mixed-read coverage and observed later-response usefulness remain open acceptance work.
+
+The controller issues an opaque scope identifier for the native client, profile, session, actor and correlation.
+A local JSON declaration names that scope, an unsigned task revision, a closed boundary kind and inspected source versions.
+Boundary kinds are external evidence, source correction, task transition and continuation restoration.
+At most twelve source entries carry a reference, optional version and declared version basis.
+Bookkeeping stores neither prompts, focus, summaries, response text nor conversation hashes.
+Canonical task/source tuples deduplicate declarations; missing versions report partial deduplication.
+Caller-declared task transitions do not prove their semantic truth or create authority.
+
+An idempotent end clears association and never resets scope totals or refunds reservations.
+Pre-tool events reserve one operation and the effective compiler character allowance atomically.
+The default scope allowance is eight associated operations and three default activation allowances; installation can configure both.
+Post-tool receipts record bounded identifiers, outcome and returned activation characters when available.
+Failures, interruption and missing receipts retain reservations; late receipts cannot reopen ended association.
+Compaction and restoration clear association while preserving the scope's totals.
+A genuine new native correlation creates a new scope without asserting that its author was human.
+
+Use the existing private directories, locks, atomic writer and 64 KiB state ceiling.
+Recognize and prune the additive refresh state through the continuation controller's existing lifecycle.
+Reject oversized declarations explicitly rather than truncating identity fields.
+Lock failure, unavailable state or unsupported events degrade accounting instead of refusing ordinary work.
+Exhaustion denies only covered calls inside an active association and explains how to end that association.
+After end, ordinary inspection still reaches its dispatcher.
+These units measure reserved operations and activation characters, not CPU, elapsed time, tokens or complete packet bytes.
+
+The source batch follows the compiler batch so hook implementation does not delay the independently ready compiler correction.
+Its decisive isolated proof uses deployed hook copies and native direct and nested envelopes.
+An exhausted refresh must not reach the simulated dispatcher; an ordinary read after end must reach it.
+The same workflow covers concurrent reservations, repeated declaration and end, missing receipts, memory-only chains and continuation restoration.
+Installed hook configuration and real host use remain separate acceptance claims.
+
 #### Reuse installed instructions
 
 Clients with a current installed skill or hook contract reuse it. Use the existing session handshake and capability fingerprint for bounded live policy, availability and version information. A mismatch requests the affected contract section or one compact fallback; it does not repeatedly inject full diagnostics or all instructions. Clients with only MCP tools retain instruction-bearing bootstrap fallback. Permission checks remain live at the governed operation and never rely solely on a cached instruction bundle.
