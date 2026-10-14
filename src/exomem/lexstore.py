@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import functools
 import hashlib
 import itertools
 import json
@@ -2585,12 +2586,16 @@ _UNIT_FTS_UNITS = "unit_fts CROSS JOIN semantic_units u ON u.rowid = unit_fts.ro
 
 
 def _page_carryable(
-    status_basis: Any, status: object, path: str, shipped: dict[object, bool]
+    status_basis: Any,
+    status: object,
+    path: str,
+    shipped: dict[object, bool],
+    released: Callable[[str], bool],
 ) -> bool:
     """Whether one page's status label carries, memoizing only page-independent labels.
 
     A shipped label has one class on every page, so `shipped` keeps it. Any other
-    label classifies through its page's own selected instance.
+    label classifies through its page's own selected instance, behind `released`.
     """
     from . import lifecycle_statuses
 
@@ -2598,7 +2603,7 @@ def _page_carryable(
     if pack.lifecycle_class is not None:
         shipped[status] = pack.carryable
         return pack.carryable
-    return status_basis.classify(status, path=path).carryable
+    return status_basis.classify(status, path=path, released=released).carryable
 
 
 def _excluded_rows_clause(
@@ -7219,9 +7224,28 @@ class LexicalStore:
             pages = len(admitted)
             limit = path_limit(pages)
             excluded, params = _excluded_rows_clause(navigation=True, raw_material=True)
-            # One classification per distinct shipped label in this snapshot; a
-            # hidden row is dropped before its label is read.
+            # One classification per distinct shipped label in this snapshot, and per
+            # page for any other label however many turn words match it; a hidden row
+            # is dropped before its label is read.
             carryable: dict[object, bool] = {}
+            by_path: dict[str, bool] = {}
+
+            @functools.cache
+            def release_filter() -> Callable[[str], bool]:
+                # A label the vault defines classifies behind the release decision.
+                # Not equivalent to membership in `admitted`: `visible` is the caller's
+                # own predicate (`visible_page_filter` also passes absent files). The
+                # filter answers what `quick_page_visible` does, from one policy read.
+                from .governance import egress
+
+                keep = egress.page_release_filter(self.vault_root)
+                return keep if keep is not None else (lambda _path: True)
+
+            def released(page: str) -> bool:
+                # Built on the first vault-defined label, inside `classify`'s own
+                # error handling, so a query over shipped labels never reads the policy.
+                return release_filter()(page)
+
             frequencies: dict[str, int] = {}
             paths: dict[str, tuple[str, ...]] = {}
             for token in stemmed_tokens:
@@ -7240,7 +7264,11 @@ class LexicalStore:
                         continue
                     allowed = carryable.get(status)
                     if allowed is None:
-                        allowed = _page_carryable(status_basis, status, path, carryable)
+                        allowed = by_path.get(path)
+                    if allowed is None:
+                        allowed = by_path[path] = _page_carryable(
+                            status_basis, status, path, carryable, released
+                        )
                     if allowed:
                         count += 1
                         if len(bounded) < limit:
