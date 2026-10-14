@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import os
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def cell(vault, monkeypatch, tmp_path):
     _teardown_activation(mcp)
 
 
-async def _call(client, name, arguments, *, oauth_client=None, client_context=None):
+async def _call(client, name, arguments, *, oauth_client=None, client_context=None, app_id=None):
     """One tools/call exactly as the gateway forwards it."""
     headers = {
         "accept": "application/json, text/event-stream",
@@ -56,6 +57,8 @@ async def _call(client, name, arguments, *, oauth_client=None, client_context=No
     }
     if oauth_client is not None:
         headers[cloud_cell.GATEWAY_CLIENT_HEADER] = oauth_client
+    if app_id is not None:
+        headers[cloud_cell.GATEWAY_APP_ID_HEADER] = app_id
     if client_context is not None:
         headers[cloud_cell.GATEWAY_CONTEXT_HEADER] = client_context
     response = await client.post(
@@ -251,6 +254,7 @@ def _probe(monkeypatch, *, cloud: bool, headers: dict[str, str]) -> dict:
         with prominence.request_scope(Path("/nonexistent")):
             return {
                 "client_name": command_surface.mcp_caller_identity()["client_name"],
+                "app_id": command_surface.mcp_caller_identity().get("app_id"),
                 "context": prominence.resolved()["context"],
             }
 
@@ -316,3 +320,45 @@ def test_on_a_cloud_cell_the_registry_context_decides_which_level_applies(
     })
 
     assert seen["context"] == context
+
+
+@pytest.mark.parametrize("cloud,declared,expected", [
+    (True, "12345678-1234-4234-8234-123456789abc", "12345678-1234-4234-8234-123456789abc"),
+    (False, "12345678-1234-4234-8234-123456789abc", None),
+    (True, "12345678-1234-4234-8234-123456789ABC", None),
+    (True, "12345678123442348234123456789abc", None),
+    (True, "claimed-client", None),
+    (True, "", None),
+])
+def test_only_a_canonical_cloud_gateway_actor_can_match_a_home_app(monkeypatch, cloud, declared, expected):
+    """Malformed IDs and local callers must never attribute activity to a Home app."""
+    seen = _probe(monkeypatch, cloud=cloud, headers={cloud_cell.GATEWAY_APP_ID_HEADER: declared})
+
+    assert seen["app_id"] == expected
+
+
+def test_home_keeps_two_grants_of_one_client_family_separate(cell):
+    """An app's feedback must count its own saves, not another grant's same-family saves."""
+    first_id = "12345678-1234-4234-8234-123456789abc"
+    second_id = "87654321-4321-4321-8321-cba987654321"
+
+    async def scenario(client):
+        for app_id, title in ((first_id, "First save"), (second_id, "Second save"),
+                              (first_id, "Third save"), (None, "Unresolved save")):
+            await _call(client, "remember", {
+                "content": "The upload completed.", "title": title, "status": "draft",
+            }, oauth_client="ChatGPT", app_id=app_id)
+        return await _call(client, "bootstrap", {"section": "activity"})
+
+    after = cell(scenario)
+
+    assert [(e.get("app_id"), e["client"], e["action"], e["items"]) for e in after["events"]] == [
+        (None, "chatgpt", "saved", 1),
+        (first_id, "chatgpt", "saved", 2),
+        (second_id, "chatgpt", "saved", 1),
+    ]
+    rows = [json.loads(line) for line in call_ledger.ledger_path().read_text().splitlines()]
+    assert [row.get("app_id") for row in rows if row["tool"] == "remember"] == [
+        first_id, second_id, first_id, None,
+    ]
+    assert call_ledger.verify() == []

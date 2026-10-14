@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import call_ledger, command_surface, guards
+from exomem import call_ledger, cloud_cell, command_surface, guards
 from exomem import server as server_module
 
 
@@ -284,6 +284,7 @@ def test_caller_identity_comes_from_the_handshake(monkeypatch) -> None:
     assert identity["client_version"] == "1.2.3"
     assert identity["session_id"] == "sess-1234"
     assert identity["transport"] == "stdio"
+    assert identity["app_id"] is None
 
 
 def test_the_row_carries_the_calling_client(ledger_dir: Path, monkeypatch) -> None:
@@ -305,6 +306,7 @@ def test_identity_is_absent_rather_than_fatal_outside_a_call(ledger_dir: Path) -
     row = _rows(ledger_dir)[0]
     assert row["client_name"] is None
     assert row["session_id"] is None
+    assert row["app_id"] is None
 
 
 # -------------------------------------------------------------------- privacy
@@ -1409,3 +1411,22 @@ def test_the_gap_marker_is_never_earlier_than_the_failure_it_marks(ledger_dir: P
             assert call_ledger.gap_marker_path().stat().st_mtime_ns >= before
     finally:
         path.chmod(0o600)
+
+
+def test_a_gateway_actor_is_independent_of_the_handshake_and_absent_without_headers(monkeypatch):
+    """Caller names cannot select a Home actor, even when they look like its UUID."""
+    import fastmcp.server.dependencies as dependencies
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    actor = "12345678-1234-4234-8234-123456789abc"
+    _fake_mcp_client(monkeypatch, name=actor, version="1")
+    assert command_surface.mcp_caller_identity()["app_id"] is None
+
+    monkeypatch.setattr(dependencies, "get_http_headers", lambda: {cloud_cell.GATEWAY_APP_ID_HEADER: actor})
+    assert command_surface.mcp_caller_identity()["app_id"] == actor
+
+    def unavailable():
+        raise LookupError("no HTTP request")
+
+    monkeypatch.setattr(dependencies, "get_http_headers", unavailable)
+    assert command_surface.mcp_caller_identity()["app_id"] is None
