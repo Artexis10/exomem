@@ -112,7 +112,7 @@
   A failed observation stays `deleting`. Document the etcd snapshot residual in the runbook.
   Evidence (#1368, #1395, #1402): `tests/test_reconcile.py` and `tests/test_decide.py` cover ordered absence checks and retaining wrapped keys after failed observations.
   `tests/test_b2_pagination.py` covers every object version and refuses incomplete listings; `docs/runbooks/cloud-cell-deletion.md` records the etcd snapshot residual.
-  The exact-source fast suite above passed. Disposable-cluster deletion acceptance remains in task 3.10.
+  The exact-source fast suite above passed. Task 3.10 records disposable-cluster deletion acceptance.
 - [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
   Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
 - [ ] 3.9 Add platform chart entries:
@@ -130,7 +130,7 @@
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
 - [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
 - [x] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended. Exomem #1490 (`9cdcea434`) deployed as platform revision 71 on 2026-09-30; the actual manifest matched the reviewed server dry-run, changing only reconcile `suspend: true` to `false`. The first scheduled job completed successfully at 19:50:15 UTC, and the scheduler ledger recorded a fresh success with zero consecutive failures.
-- [ ] 3.10 Integration test on disposable K3s:
+- [x] 3.10 Integration test on disposable K3s:
   - create, then pod kill with a governed write after it;
   - owner-only modes asserted after first start, pod replacement and restore;
   - stop, resume and read-only;
@@ -139,6 +139,12 @@
   - cross-cell network denial and runtime egress denial;
   - admission denial of an out-of-scope cellctl write;
   - deletion with absence proofs.
+  Evidence ([#1746](https://github.com/Artexis10/exomem/pull/1746), merged 2026-10-14): the [disposable K3s suite](https://github.com/Artexis10/exomem/actions/runs/38480038320/job/115581227399) passed 15 cases with zero skips in 1,423.34 seconds.
+  The [Cloud rehearsal](https://github.com/Artexis10/exomem/actions/runs/38480038348/job/115581697400) passed all 12 steps with zero failures or blocked steps and `gates_node: true`.
+  The rehearsal interrupts the actual disposable controller mid-canary and verifies the held timestamp through later reconciliation, restore and a committed write.
+  Lifecycle proof explicitly stops and resumes the cell while retaining its PVC, data and owner-only modes.
+  This closes disposable-controller acceptance; production owner and fleet acceptance remain in section 6.
+  The original harness execution timeout cause remains unknown; this proof does not claim a timeout repair.
 
 ## 4. Control database server (lane D)
 
@@ -253,10 +259,20 @@
 
 Current evidence separates healthy service from recovery and launch acceptance.
 On 2026-10-13, isolated qualification accepted the published 0.116 Cloud and cellctl images by original digest, source and provenance.
-That qualification does not prove a production rollout, OAuth refresh or owner-sized admission.
-The signed registry and cluster admission dry run pass. The prepared gateway, controller and ordered cell rollout remain unapplied.
-The recorded production window remains pending. The latest fleet receipt retains the previous cell image and requests of `1Gi/250m`, with limits of `3Gi/2CPU`.
+That qualification alone does not prove a production rollout, OAuth refresh or owner-sized admission.
+
+On 2026-10-13, the operator applied the signed platform Secret set and deployed Helm revision 84.
+All 71 retired objects were absent, the retained capacity receipt remained present, and the controller and gateway were Ready.
+On 2026-10-14, the remaining rollout received window approval, and the owner cell became Ready on qualified 0.116.
+Fresh runtime verification confirmed owner-only roots, UID/GID 10001, zero container restarts and zero OOM events.
+Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`.
+
+Authenticated capture, exact and paraphrased recall, and the content-free log canary now pass after connector reconnection.
+Owner performance and memory headroom acceptance remain open.
+OAuth refresh, node latency and owner-sized admission remain unproved.
+QA and reviewer cells and the fleet default retain their previous images; the two stopped cells remain stopped and unpinned.
 Shared selection remains off. Warm-peak qualification remains open; current capacity charges scheduler requests rather than measured peaks.
+
 A deployed-image B2 backup and scratch restore matched both vault and host state, with scratch cleanup verified.
 That proof does not close in-place restore, historical rollback, connector sign-in or token refresh.
 Existing per-cell pins do not prove that the fleet default selects the qualified release.
