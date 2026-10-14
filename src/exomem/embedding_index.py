@@ -1946,62 +1946,78 @@ class EmbeddingIndex:
         if not self.path.exists():
             return [[] for _ in query_vecs]
         self.unload_cache()
-        conn = self._connect()
+        # Fixed phase names form the disk-scoring instrumentation protocol.
+        with call_spans.span("embeddings.disk_score.connect"):
+            conn = self._connect()
         try:
-            conn.execute("BEGIN")
-            token = self._build_token(conn)
-            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-            width = identity.dim if identity is not None else recall_space.current_dim()
-            queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
-            if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
-                recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
-            self._observe_identity(identity, token)
+            with call_spans.span("embeddings.disk_score.snapshot"):
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                width = identity.dim if identity is not None else recall_space.current_dim()
+                queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
+                if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
+                    recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
+                self._observe_identity(identity, token)
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
             for start in range(0, len(queries), SEARCH_MANY_BLOCK):
-                cursor = conn.execute(
-                    "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                )
-                while rows := cursor.fetchmany(self.DISK_BLOCK_ROWS):
-                    matrix = np.empty((len(rows), width), dtype=np.float32)
-                    metadata = []
-                    for n, (path, chunk, blob) in enumerate(rows):
-                        if not isinstance(blob, bytes) or len(blob) != width * 4:
-                            raise ValueError("embedding row width differs from stored space")
-                        matrix[n] = np.frombuffer(blob, dtype=np.float32)
-                        metadata.append((path, chunk))
-                    block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
-                    # Only this block's candidate verdicts live across queries.
-                    verdicts: dict[str, bool] = {}
-                    def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
-                        path = metadata[row][0]
-                        if path not in verdicts:
-                            verdicts[path] = bool(admits(path))
-                        return verdicts[path]
-                    for n, scores in enumerate(block, start):
-                        winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
-                        merged = answers[n] + winners
-                        # Stable sort preserves the existing score/tie contract.
-                        merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
-                        answers[n] = merged[:k]
+                with call_spans.span("embeddings.disk_score.fetch"):
+                    cursor = conn.execute(
+                        "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                    )
+                while True:
+                    with call_spans.span("embeddings.disk_score.fetch"):
+                        rows = cursor.fetchmany(self.DISK_BLOCK_ROWS)
+                    if not rows:
+                        break
+                    fields = {"rows": 0, "vector_bytes": 0}
+                    with call_spans.span("embeddings.disk_score.decode", fields):
+                        matrix = np.empty((len(rows), width), dtype=np.float32)
+                        metadata = []
+                        for n, (path, chunk, blob) in enumerate(rows):
+                            if not isinstance(blob, bytes) or len(blob) != width * 4:
+                                raise ValueError("embedding row width differs from stored space")
+                            matrix[n] = np.frombuffer(blob, dtype=np.float32)
+                            metadata.append((path, chunk))
+                            fields["rows"] += 1
+                            fields["vector_bytes"] += len(blob)
+                    with call_spans.span("embeddings.disk_score.score"):
+                        block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
+                    with call_spans.span("embeddings.disk_score.select"):
+                        # Only this block's candidate verdicts live across queries.
+                        verdicts: dict[str, bool] = {}
+                        def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
+                            path = metadata[row][0]
+                            if path not in verdicts:
+                                verdicts[path] = bool(admits(path))
+                            return verdicts[path]
+                        for n, scores in enumerate(block, start):
+                            winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
+                            merged = answers[n] + winners
+                            # Stable sort preserves the existing score/tie contract.
+                            merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
+                            answers[n] = merged[:k]
                     del matrix, block, rows
-            result = []
-            for hits in answers:
-                hydrated = []
-                for path, chunk, score in hits:
-                    text = ""
-                    if hydrate:
-                        text = conn.execute(
-                            "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
-                            (path, chunk),
-                        ).fetchone()[0]
-                    hydrated.append((path, chunk, text, score))
-                result.append(hydrated)
+            with call_spans.span("embeddings.disk_score.hydrate"):
+                result = []
+                for hits in answers:
+                    hydrated = []
+                    for path, chunk, score in hits:
+                        text = ""
+                        if hydrate:
+                            text = conn.execute(
+                                "SELECT chunk_text FROM chunks WHERE file_path=? AND chunk_idx=?",
+                                (path, chunk),
+                            ).fetchone()[0]
+                        hydrated.append((path, chunk, text, score))
+                    result.append(hydrated)
             return result
         finally:
-            conn.rollback()
-            conn.close()
+            with call_spans.span("embeddings.disk_score.release"):
+                conn.rollback()
+                conn.close()
 
     def pairwise_current_chunks(
         self, wanted: dict[str, list[str]],
