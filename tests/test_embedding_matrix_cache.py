@@ -982,7 +982,9 @@ def test_stored_chunks_for_returns_one_pages_rows_and_their_mtime(tmp_path, monk
 
 
 def test_service_scoring_preserves_eligible_scores_without_resident_matrix(tmp_path, monkeypatch):
-    """Governed queries and advisory blocks must not retain whole-corpus vectors."""
+    """Cold service scans need ledger phases without changing scores or residency."""
+    from exomem import call_ledger, call_spans
+
     idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
     for path, rows in [('a.md', [[1, 0], [.8, .6]]), ('denied.md', [[1, 0]]), ('z.md', [[0, 1]])]:
         idx.upsert_file(path, [f'{path}-{n}' for n in range(len(rows))], _mat(*rows), 1.0)
@@ -994,16 +996,85 @@ def test_service_scoring_preserves_eligible_scores_without_resident_matrix(tmp_p
     monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
     monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
     monkeypatch.setattr(embeddings.EmbeddingIndex, 'DISK_BLOCK_ROWS', 2)
-    actual = idx.search(query, 3, allowed_paths=allowed)
+    monkeypatch.setenv('EXOMEM_CALL_LEDGER_DIR', str(tmp_path / 'ledger'))
+    call_ledger.reset_chain_cache()
+    handle = call_spans.MCP_CALL_TOKEN.set('disk-score-success')
+    try:
+        actual = idx.search(query, 3, allowed_paths=allowed)
+        actual_many = idx.search_many(_mat([1, 0], [0, 1]), 3, admits=lambda p: p in allowed)
+    finally:
+        spans = call_spans.pop_call_spans('disk-score-success')
+        call_spans.MCP_CALL_TOKEN.reset(handle)
     assert [(p, n, text) for p, n, text, _ in actual] == [(p, n, text) for p, n, text, _ in expected]
     assert [r[3] for r in actual] == pytest.approx([r[3] for r in expected])
-    actual_many = idx.search_many(_mat([1, 0], [0, 1]), 3, admits=lambda p: p in allowed)
     for a, e in zip(actual_many, expected_many, strict=True):
         assert [(p, n) for p, n, _ in a] == [(p, n) for p, n, _ in e]
         assert [r[2] for r in a] == pytest.approx([r[2] for r in e])
     assert idx.cache_status()['loaded'] is False
+
+    row = call_ledger.record_call(
+        request_id='disk-score', tool='ask_memory', outcome='ok', duration_ms=None, spans=spans,
+    )
+    assert row is not None
+    measured = {span['name']: span for span in row['spans']}
+    assert set(measured) == {
+        'embeddings.disk_score.connect', 'embeddings.disk_score.snapshot',
+        'embeddings.disk_score.fetch', 'embeddings.disk_score.decode',
+        'embeddings.disk_score.score', 'embeddings.disk_score.select',
+        'embeddings.disk_score.hydrate', 'embeddings.disk_score.release',
+    }
+    assert measured['embeddings.disk_score.decode']['count'] == 4
+    assert measured['embeddings.disk_score.decode']['fields'] == {
+        'rows': 8,
+        'vector_bytes': 8 * embeddings.VECTOR_DIM * np.dtype(np.float32).itemsize,
+    }
+    assert all(span['ms'] >= 0 for span in measured.values())
+    assert call_ledger.verify() == []
     # A heavy explicit consumer must not change later ordinary-save residency.
     assert len(idx.all_vectors()[0]) == 4
+    assert idx.cache_status()['loaded'] is False
+
+
+def test_failed_service_scan_retains_partial_decode_counts_and_releases_snapshot(tmp_path, monkeypatch):
+    """A malformed vector must leave partial ledger counts and permit a repaired read."""
+    from exomem import call_ledger, call_spans
+
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file('a.md', ['first'], _mat([1, 0]), 1.0)
+    idx.upsert_file('b.md', ['second'], _mat([0, 1]), 1.0)
+    with sqlite3.connect(idx.path) as conn:
+        conn.execute('UPDATE chunks SET vector = ? WHERE file_path = ?', (b'bad', 'b.md'))
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    monkeypatch.setenv('EXOMEM_CALL_LEDGER_DIR', str(tmp_path / 'ledger'))
+    call_ledger.reset_chain_cache()
+    handle = call_spans.MCP_CALL_TOKEN.set('disk-score-failure')
+    try:
+        with pytest.raises(ValueError, match='embedding row width differs'):
+            idx.search(_pad([1, 0]), 2)
+    finally:
+        spans = call_spans.pop_call_spans('disk-score-failure')
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+
+    row = call_ledger.record_call(
+        request_id='failed-scan', tool='ask_memory', outcome='error', duration_ms=None, spans=spans,
+    )
+    assert row is not None
+    measured = {span['name']: span for span in row['spans']}
+    assert measured['embeddings.disk_score.decode']['fields'] == {
+        'rows': 1,
+        'vector_bytes': embeddings.VECTOR_DIM * np.dtype(np.float32).itemsize,
+    }
+    assert measured['embeddings.disk_score.release']['ms'] >= 0
+    assert call_ledger.verify() == []
+    with sqlite3.connect(idx.path) as conn:
+        conn.execute(
+            'UPDATE chunks SET vector = ? WHERE file_path = ?', (_pad([0, 1]).tobytes(), 'b.md'),
+        )
+    hits = idx.search(_pad([1, 0]), 2)
+    assert [(path, chunk, text) for path, chunk, text, _score in hits] == [
+        ('a.md', 0, 'first'), ('b.md', 0, 'second'),
+    ]
     assert idx.cache_status()['loaded'] is False
 
 
