@@ -288,13 +288,14 @@ def test_repository_inputs_exist(path: str) -> None:
     assert (images.REPO_ROOT / path).exists()
 
 
-def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
+@pytest.mark.parametrize("hostname", [tls.MCP_HOST, "127.0.0.1"])
+def test_pki_verifies_under_strict_x509(tmp_path: Path, hostname: str) -> None:
     import socket
     import ssl
     import threading
 
-    pki = tls.make_pki(tmp_path)
-    leaf = pki.leaves[tls.MCP_HOST]
+    pki = tls.make_pki(tmp_path, (hostname,))
+    leaf = pki.leaves[hostname]
     (tmp_path / "leaf.pem").write_text(leaf.cert_pem + leaf.key_pem, encoding="utf-8")
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.load_cert_chain(tmp_path / "leaf.pem")
@@ -313,7 +314,7 @@ def test_pki_verifies_under_strict_x509(tmp_path: Path) -> None:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     with socket.create_connection(("127.0.0.1", port)) as raw:
-        with client_context.wrap_socket(raw, server_hostname=tls.MCP_HOST) as wrapped:
+        with client_context.wrap_socket(raw, server_hostname=hostname) as wrapped:
             assert wrapped.version()
     thread.join(timeout=5)
     listener.close()
