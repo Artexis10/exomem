@@ -380,6 +380,5 @@ def test_chart_classifies_every_scheduler_job_by_cloud_service() -> None:
 
     job_policies = values["scheduler"]["jobs"]
     assert set(job_policies) == {job["name"] for job in contract["jobs"]}
-    assert {
-        name for name, policy in job_policies.items() if policy["servesCloud"]
-    } == {"exomem-access-delivery", "exomem-reconcile"}
+    for job in contract["jobs"]:
+        assert job_policies[job["name"]]["servesCloud"] is True
