@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -16,7 +17,16 @@ from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_egress import _external, write_rule, write_scope
 from test_private_vocabulary_instances import private_instances as private_instances
 
-from exomem import commands, epistemic_graph, find, freshness, memory_refs, request_budget, server
+from exomem import (
+    commands,
+    epistemic_graph,
+    find,
+    freshness,
+    memory_refs,
+    request_budget,
+    server,
+    vault,
+)
 from exomem.__main__ import main
 from exomem.governance import egress
 from exomem.governance.principal import library_scope, request_scope
@@ -155,6 +165,35 @@ def test_hidden_pages_and_authored_edges_do_not_change_counts_or_rank(
         assert present[field] == absent[field], field
 
 
+@pytest.mark.parametrize("bound", ["pages", "edges"])
+def test_hidden_rows_do_not_spend_the_three_admitted_inspection_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, bound: str,
+) -> None:
+    root = tmp_path / "vault"
+    _small(root)
+    _write(root, f"{NOTES}/isolated.md", "---\ntype: insight\n---\n# Isolated\n\nSee [[target]].\n")
+    hidden = "Knowledge Base/Notes/Generated/hidden.md"
+    _write(root, hidden, f"---\ntype: insight\n---\n# Hidden\n\n## Relations\n"
+           f"- supports [[{NOTES}/source]]\n- supports [[{NOTES}/target]]\n")
+    write_scope(root, paths="Notes/Generated/**")
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    monkeypatch.setenv(f"EXOMEM_VIEWER_MAP_MAX_INSPECTED_{bound.upper()}", "3")
+    warm_managed_cell(root)
+    _build(root)
+    with request_scope(_external()):
+        present = commands.op_viewer_map(root)
+    (root / hidden).unlink()
+    warm_managed_cell(root)
+    _build(root)
+    with request_scope(_external()):
+        absent = commands.op_viewer_map(root)
+    assert absent["state"] == present["state"] == "complete"
+    assert absent["counts"]["eligible_nodes"] == 3
+    assert absent["counts"]["eligible_edges"] == 3
+    for field in ("nodes", "edges", "counts", "vocabulary", "ranking_complete", "truncation"):
+        assert present[field] == absent[field], field
+
+
 def test_hidden_link_candidates_resolve_as_if_absent(tmp_path: Path, warm_managed_cell) -> None:
     root = tmp_path / "vault"
     _small(root)
@@ -186,6 +225,130 @@ def test_hidden_link_candidates_resolve_as_if_absent(tmp_path: Path, warm_manage
         no_stored_edge = commands.op_viewer_map(root)
     assert no_stored_edge["counts"]["eligible_edges"] == 3
     assert no_stored_edge["nodes"][0]["incoming_edges"] == 3
+
+
+@pytest.mark.parametrize("extra_byte", [False, True])
+def test_source_byte_boundary_accepts_supported_work_and_keeps_partial_pages(
+    tmp_path: Path, warm_managed_cell, extra_byte: bool,
+) -> None:
+    root = tmp_path / "vault"
+    _small(root)
+    source = "---\ntype: insight\n---\n# Source\n\n## Relations\n- supports [[target]]\n\n"
+    source += "x" * (65536 + int(extra_byte) - len(source.encode()))
+    _write(root, f"{NOTES}/source.md", source)
+    _write(root, "Knowledge Base/Notes/Patterns/target.md", "---\ntype: pattern\n---\n# Other target\n")
+    write_scope(root)
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    warm_managed_cell(root)
+    _build(root)
+    with request_scope(_external()):
+        result = commands.op_viewer_map(root)
+    assert result["counts"]["drawn_nodes"] == 3
+    if extra_byte:
+        assert result["state"] == "partial", result
+        assert result["counts"]["eligible_nodes"] is None
+        assert result["counts"]["eligible_edges"] is None
+        assert all(node["incoming_edges"] is None for node in result["nodes"])
+        assert {"stage": "inspection_edges", "reason": "source_work_limit", "limit": 65536} in result["truncation"]
+    else:
+        assert result["state"] == "complete", result
+        assert result["counts"]["eligible_nodes"] == 3
+        assert result["counts"]["eligible_edges"] == 1
+
+
+def test_changed_source_bytes_cannot_be_rederived_against_an_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+) -> None:
+    root = tmp_path / "vault"
+    _small(root)
+    text = "---\ntype: insight\n---\n# Source\n\nSee [[target]] and [[isolated]].\n"
+    _write(root, f"{NOTES}/source.md", text)
+    _write(root, "Knowledge Base/Notes/Patterns/target.md", "---\ntype: pattern\n---\n# Other target\n")
+    write_scope(root)
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    warm_managed_cell(root)
+    _build(root)
+    path = root / NOTES / "source.md"
+    before = path.stat()
+    original = vault.read_bounded_guarded_bytes
+    changed = False
+
+    def change_bytes(vault_root, target, **kwargs):
+        nonlocal changed
+        if target == f"{NOTES}/source.md":
+            changed = True
+            path.write_text(text.replace("Source", "Change"), encoding="utf-8")
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return original(vault_root, target, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", change_bytes)
+    with request_scope(_external()):
+        result = commands.op_viewer_map(root)
+    assert changed
+    assert result["state"] == "partial", result
+    assert result["counts"]["eligible_edges"] is None
+    assert result["counts"]["drawn_nodes"] == 3
+    assert result["edges"] == []
+    assert any(item["reason"] == "source_changed" for item in result["truncation"])
+
+
+def test_interrupted_link_stream_cannot_fall_back_to_stored_author_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+) -> None:
+    root = tmp_path / "vault"
+    _small(root)
+    _write(root, f"{NOTES}/source.md", "---\ntype: insight\n---\n# Source\n\nSee [[target]] and [[isolated]].\n")
+    _write(root, "Knowledge Base/Notes/Patterns/target.md", "---\ntype: pattern\n---\n# Other target\n")
+    write_scope(root)
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    warm_managed_cell(root)
+    _build(root)
+    original = vault.iter_body_wikilinks
+
+    def interrupt(text, *, check=None):
+        for match in original(text, check=check):
+            yield match
+            if check is not None:
+                raise TimeoutError("request interrupted")
+
+    monkeypatch.setattr(vault, "iter_body_wikilinks", interrupt)
+    with request_scope(_external()):
+        result = commands.op_viewer_map(root)
+    assert result["state"] == "partial", result
+    assert result["counts"]["eligible_edges"] is None
+    assert result["counts"]["drawn_nodes"] == 3
+    assert result["edges"] == []
+    assert any(item["reason"] == "deadline" for item in result["truncation"])
+
+
+def test_fragment_rederivation_uses_the_validated_target_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+) -> None:
+    root = tmp_path / "vault"
+    _small(root)
+    _write(root, f"{NOTES}/source.md", "---\ntype: insight\n---\n# Source\n\n"
+           "## Relations\n- supports [[target#observation]]\n")
+    _write(root, f"{NOTES}/target.md", "---\ntype: insight\n"
+           "exomem_id: 12345678-1234-4234-8234-123456789013\n---\n# Target\n\n"
+           "## Claim\n- id: observation\n\nAn admitted observation.\n")
+    _write(root, "Knowledge Base/Notes/Patterns/target.md", "---\ntype: pattern\n---\n# Other target\n")
+    write_scope(root)
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    warm_managed_cell(root)
+    _build(root)
+    original = vault.read_bytes_without_pinning
+
+    def no_target_source_read(path, *args, **kwargs):
+        assert Path(path) != root / NOTES / "target.md", "interactive fragment read opened target source"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bytes_without_pinning", no_target_source_read)
+    with request_scope(_external()):
+        result = commands.op_viewer_map(root)
+    assert result["state"] == "complete", result
+    assert result["counts"]["eligible_edges"] == 1
+    assert result["edges"][0]["dst_key"] == f"file:{NOTES}/target.md"
+    assert result["nodes"][0]["incoming_edges"] == 1
 
 
 def test_drawn_vocabulary_keeps_two_source_selected_meanings(private_instances, vault: Path) -> None:

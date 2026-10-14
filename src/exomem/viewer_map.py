@@ -27,6 +27,10 @@ _DELIVERY_SECONDS = 0.5
 _MAX_PAGES = 8000
 _MAX_EDGES = 32000
 _BATCH = 64
+# These per-author protocol bounds preserve the bridge deadline; false misses cost partial edges.
+_SOURCE_BYTES = 64 * 1024
+_SUMMARY_BYTES = 256 * 1024
+_PREPARATION_BYTES = 4 * 1024 * 1024
 
 
 class MapCounts(TypedDict):
@@ -137,6 +141,10 @@ def op_viewer_map(
             outer.note_truncated("viewer_map")
         return True
 
+    def preparation_check() -> None:
+        if expired("inspection_edges"):
+            raise TimeoutError("viewer preparation deadline")
+
     vocabulary: dict[tuple[str, str], dict[str, Any]] = {}
     try:
         # Interrupt expensive SQLite reads too; Python boundaries alone cannot bound SQL work.
@@ -164,6 +172,8 @@ def op_viewer_map(
             stop("inspection_edges", "resolver_unavailable", None)
         view = graph.GraphView(
             vault_root, conn, keep=keep, resolver=resolver, reads_placeholders=False,
+            check=preparation_check, checkpoint=checkpoint, source_limit=_SOURCE_BYTES,
+            summary_limit=_SUMMARY_BYTES, preparation_limit=_PREPARATION_BYTES,
         )
         profiles: dict[str, traversal_profiles.TraversalProfile] = {}
         degrees: dict[str, int] = {}
@@ -178,15 +188,16 @@ def op_viewer_map(
             if not rows:
                 break
             for key, path in rows:
+                after = str(key)
+                if expired("inspection_pages"):
+                    break
+                if not view.allowed(str(path)):
+                    continue
+                # Only an extra admitted page can exhaust semantic coverage.
                 if inspected_pages == page_limit:
                     stop("inspection_pages", "work_limit", page_limit)
                     break
-                if expired("inspection_pages"):
-                    break
                 inspected_pages += 1
-                after = str(key)
-                if not view.allowed(str(path)):
-                    continue
                 degrees[str(key)] = 0
                 paths[str(path)] = str(key)
                 result["counts"]["observed_nodes"] = len(degrees)
@@ -197,21 +208,25 @@ def op_viewer_map(
         observed_edges = 0
         edge_after = ("", 0)
         changed: dict[str, list[dict[str, Any]]] = {}
+        authors = sorted(paths)
+        for offset in range(0, len(authors), _BATCH):
+            if expired("inspection_edges"):
+                break
+            view.preflight(authors[offset:offset + _BATCH])
         if keep is not None and edge_coverage:
-            for author in sorted(paths):
+            for author in authors:
                 if expired("inspection_edges"):
                     break
                 # Ambiguous links can have dependencies without any stored edge row.
                 replacement = view.authored_edges(author)
                 if replacement is not None:
                     changed[author] = replacement
-        inspected_edges = 0
         observed_after = ("", 0)
         observed_replacements: dict[str, int] = {}
 
         def admitted_edge(row: dict[str, Any]) -> dict[str, Any] | None:
             author = str(row.get("source_path") or "")
-            if author not in paths or not view.allowed(author):
+            if author not in paths or author in view.interrupted or not view.allowed(author):
                 return None
             source = view.node_path(str(row.get("src_key") or ""))
             target = view.node_path(str(row.get("dst_key") or ""))
@@ -246,40 +261,33 @@ def op_viewer_map(
             }
 
         def raw_edges() -> Iterator[tuple[str, int, dict[str, Any]]]:
-            nonlocal edge_after, inspected_edges
+            nonlocal edge_after
             if not edge_coverage:
                 return
+            admitted_authors = json.dumps([author for author in authors if author not in view.interrupted])
             while not expired("inspection_edges"):
                 rows = conn.execute(
                     f"SELECT source_path, rowid, {graph.edge_columns('')} FROM graph_edges "
-                    "WHERE (source_path, rowid) > (?, ?) ORDER BY source_path, rowid LIMIT ?",
-                    (*edge_after, _BATCH),
+                    "WHERE source_path IN (SELECT value FROM json_each(?)) "
+                    "AND (source_path, rowid) > (?, ?) ORDER BY source_path, rowid LIMIT ?",
+                    (admitted_authors, *edge_after, _BATCH),
                 ).fetchall()
                 if not rows:
                     return
                 for author, position, *columns in rows:
-                    if inspected_edges == edge_limit:
-                        stop("inspection_edges", "work_limit", edge_limit)
-                        return
+                    edge_after = str(author), int(position)
                     if expired("inspection_edges"):
                         return
-                    inspected_edges += 1
-                    edge_after = str(author), int(position)
                     if author not in paths or not view.allowed(str(author)):
                         continue
                     if author not in changed:
                         yield str(author), int(position), graph._edge_row_to_dict(columns)
 
         def replacement_edges() -> Iterator[tuple[str, int, dict[str, Any]]]:
-            nonlocal inspected_edges
             for author in sorted(changed):
                 for position, edge in enumerate(changed[author]):
-                    if inspected_edges == edge_limit:
-                        stop("inspection_edges", "work_limit", edge_limit)
-                        return
                     if expired("inspection_edges"):
                         return
-                    inspected_edges += 1
                     yield author, position, edge
 
         for author, position, raw in merge(
@@ -287,10 +295,13 @@ def op_viewer_map(
         ):
             if expired("inspection_edges"):
                 break
+            edge = admitted_edge(raw)
+            if edge is not None and observed_edges == edge_limit:
+                stop("inspection_edges", "work_limit", edge_limit)
+                break
             observed_after = author, position
             if author in changed:
                 observed_replacements[author] = position + 1
-            edge = admitted_edge(raw)
             if edge is not None:
                 observed_edges += 1
                 result["counts"]["observed_edges"] = observed_edges
@@ -343,6 +354,7 @@ def op_viewer_map(
         # The draw query excludes endpoints outside the selected page set, including unit parents.
         def drawing_rows() -> Iterator[tuple[str, int, dict[str, Any]]]:
             encoded_paths = json.dumps(chosen_paths)
+            encoded_authors = json.dumps([author for author in authors if author not in view.interrupted])
             cursor = ("", 0)
             while not expired("drawing"):
                 rows = conn.execute(
@@ -351,10 +363,11 @@ def op_viewer_map(
                     "JOIN graph_nodes d ON d.node_key = e.dst_key "
                     "WHERE s.path IN (SELECT value FROM json_each(?)) "
                     "AND d.path IN (SELECT value FROM json_each(?)) "
+                    "AND e.source_path IN (SELECT value FROM json_each(?)) "
                     "AND (e.source_path, e.rowid) > (?, ?) "
                     "AND (e.source_path, e.rowid) <= (?, ?) "
                     "ORDER BY e.source_path, e.rowid LIMIT ?",
-                    (encoded_paths, encoded_paths, *cursor, *observed_after, _BATCH),
+                    (encoded_paths, encoded_paths, encoded_authors, *cursor, *observed_after, _BATCH),
                 ).fetchall()
                 if not rows:
                     break
@@ -380,6 +393,10 @@ def op_viewer_map(
                     break
         if view.unavailable:
             stop("inspection", "selected_interpretation_unavailable", None)
+        for reason in sorted(set(view.interrupted.values())):
+            limit = {"source_work_limit": _SOURCE_BYTES, "summary_work_limit": _SUMMARY_BYTES,
+                     "preparation_work_limit": _PREPARATION_BYTES}.get(reason)
+            stop("inspection_edges", reason, limit)
         if resolver is not None and checkpoint != freshness.live_recall_checkpoint(vault_root, "vault"):
             # Publishers can advance shared topology during a read; withhold mixed edges, retain partial pages.
             stop("inspection_edges", "resolver_checkpoint_changed", None)
@@ -399,17 +416,24 @@ def op_viewer_map(
             "eligible_edges": observed_edges if complete else None,
             "observed_nodes": len(degrees), "observed_edges": observed_edges,
         })
+    except TimeoutError:
+        stop("inspection", "deadline", seconds)
+        result["state"] = "partial"
+        result["ranking_complete"] = False
     except sqlite3.OperationalError as error:
         if error.sqlite_errorcode != sqlite3.SQLITE_INTERRUPT:
             raise
         stop("inspection", "deadline", seconds)
         result["state"] = "partial"
         result["ranking_complete"] = False
-        result["counts"]["eligible_nodes"] = None
-        result["counts"]["eligible_edges"] = None
     finally:
         conn.set_progress_handler(None, 0)
         conn.close()
+    if not result["ranking_complete"]:
+        result["counts"]["eligible_nodes"] = None
+        result["counts"]["eligible_edges"] = None
+        for node in result["nodes"]:
+            node["incoming_edges"] = None
     # Interrupted SQL reaches the same disclosure guard and truthful drawn counts.
     guarded = egress.guard_graph_context(vault_root, result, purpose=purpose)
     result.update(guarded)

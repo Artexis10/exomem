@@ -7269,18 +7269,22 @@ def normalize_wikilink(
     return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault")
 
 
-def _mask_code_spans(text: str) -> str:
+def _mask_code_spans(text: str, *, check: Callable[[], None] | None = None) -> str:
     """Replace code-block and inline-code regions with spaces, preserving offsets.
 
     Result is the same length as input; positions of non-code characters are
     unchanged. Used so wikilink scanners can ignore `[[X]]` inside code while
     still reporting accurate offsets into the original text.
     """
+    if check is not None:
+        check()
     out = list(text)
     # Fenced code blocks (``` or ~~~), allowing up to 3 leading spaces per CommonMark.
     fence_open = re.compile(r"^( {0,3})(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
     pos = 0
     while True:
+        if check is not None:
+            check()
         m = fence_open.search(text, pos)
         if not m:
             break
@@ -7294,6 +7298,8 @@ def _mask_code_spans(text: str) -> str:
         close_m = close_re.search(text, m.end())
         end = close_m.end() if close_m else len(text)
         for i in range(m.start(), end):
+            if check is not None and i % 4096 == 0:
+                check()
             if text[i] != "\n":
                 out[i] = " "
         pos = end
@@ -7301,7 +7307,11 @@ def _mask_code_spans(text: str) -> str:
     inline_re = re.compile(r"(`+)([^\n`]+?)\1")
     masked_str = "".join(out)
     for m in inline_re.finditer(masked_str):
+        if check is not None:
+            check()
         for i in range(m.start(), m.end()):
+            if check is not None and i % 4096 == 0:
+                check()
             if out[i] != "\n":
                 out[i] = " "
     return "".join(out)
@@ -7309,10 +7319,22 @@ def _mask_code_spans(text: str) -> str:
 
 def find_body_wikilinks(text: str) -> list[re.Match[str]]:
     """Return wikilink matches in `text`, skipping fenced code + inline code."""
+    return list(iter_body_wikilinks(text))
+
+
+def iter_body_wikilinks(
+    text: str, *, check: Callable[[], None] | None = None,
+) -> Iterator[re.Match[str]]:
+    """Stream the existing masked wikilink grammar, retaining original offsets."""
+    if check is not None:
+        check()
     if "[[" not in text:
-        return []
-    masked = _mask_code_spans(text)
-    return list(_WIKILINK_PATTERN.finditer(masked))
+        return
+    masked = _mask_code_spans(text, check=check)
+    for match in _WIKILINK_PATTERN.finditer(masked):
+        if check is not None:
+            check()
+        yield match
 
 
 def _rewritable_wikilinks(text: str) -> list[re.Match[str]]:
