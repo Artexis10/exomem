@@ -25,6 +25,7 @@ def observe_query_timeouts(log_path: Path):
     Coarse phase CPU excludes new per-row samples. The first-check location
     and wall-clock anchor help align a failure with the service log.
     Parent phases and one largest hydration retain context without a call log.
+    Derived row-source offsets cover wrapper intervals, not isolated SQL waits.
     """
     originals = []
 
@@ -42,9 +43,9 @@ def observe_query_timeouts(log_path: Path):
             governance,
             typed_storage,
         )
-        from exomem.query_engine import cursors, route, runtime, typed_rows
         from exomem.governance import authorization_session_authority as authority
         from exomem.governance import store as authority_store
+        from exomem.query_engine import cursors, route, runtime, typed_rows
 
         state = threading.local()
         emission_lock = threading.Lock()
@@ -54,8 +55,8 @@ def observe_query_timeouts(log_path: Path):
             # These fixed technical phases run a bounded number of times per query.
             if label in (
                 "read_session.setup", "read_session.body", "open_query_reader", "authorization.init",
-            ) or label.startswith("authorization.input."):
-                # The input namespace contains only the seven constructor seams below.
+            ) or label.startswith(("authorization.input.", "derived.row_source")):
+                # These namespaces contain only the bounded constructor and row-source seams below.
                 try:
                     return time.thread_time()
                 except Exception:  # noqa: BLE001 - an unavailable clock remains unknown
@@ -100,6 +101,13 @@ def observe_query_timeouts(log_path: Path):
                             phase["thread_cpu_ms"] = None
                         elif phase["thread_cpu_ms"] is not None:
                             phase["thread_cpu_ms"] += (cpu_ended - cpu_started) * 1000
+                        if label.startswith("derived.row_source"):
+                            clock = getattr(state, "query_clock", None)
+                            first = (started - clock[0]) * 1000 if clock else None
+                            last = first + elapsed_ms if first is not None else None
+                            # First/last wrapper offsets may span gaps between calls; they are not a duration sum.
+                            phase.setdefault("first_started_after_query_ms", first)
+                            phase["last_finished_after_query_ms"] = last
                     if label == "typed.selected_current_values":
                         previous = frame["largest_selected_values"]
                         clock = getattr(state, "query_clock", None)
@@ -118,14 +126,14 @@ def observe_query_timeouts(log_path: Path):
             originals.append((owner, name, original, wrapper))
             setattr(owner, name, wrapper)
 
-        def measure(owner, name, label, *, constructor_only=False):
+        def measure(owner, name, label, *, parent_only=None):
             original = getattr(owner, name)
 
             @wraps(original)
             def call(*args, **kwargs):
-                if constructor_only:
+                if parent_only is not None:
                     frame = getattr(state, "active", None)
-                    if frame is None or not frame["stack"] or frame["stack"][-1][0] != "authorization.init":
+                    if frame is None or not frame["stack"] or frame["stack"][-1][0] != parent_only:
                         return original(*args, **kwargs)
                 measurement = begin(label)
                 try:
@@ -153,6 +161,10 @@ def observe_query_timeouts(log_path: Path):
         ):
             measure(owner, name, label)
 
+        # These direct metadata seams are fixed API calls; they collect no SQL or row content.
+        for name in ("is_derived", "target", "assess"):
+            measure(derived_rows, name, f"derived.row_source.{name}", parent_only="derived.row_source")
+
         # Measure direct inputs at the consumer alias; nested calls are excluded.
         for owner, name, label in (
             (governance.policy, "load", "policy_load"),
@@ -163,7 +175,7 @@ def observe_query_timeouts(log_path: Path):
             (authority, "active_session_purpose", "session_purpose"),
             (governance.egress, "_declared_purpose", "declared_purpose"),
         ):
-            measure(owner, name, f"authorization.input.{label}", constructor_only=True)
+            measure(owner, name, f"authorization.input.{label}", parent_only="authorization.init")
 
         def deadline_elapsed(session):
             return (time.monotonic() - session._deadline + session.limits.timeout_ms / 1000) * 1000
