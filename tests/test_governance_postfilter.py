@@ -1380,6 +1380,7 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
     """
     from urllib.parse import quote
 
+    from exomem import call_spans
     from exomem import server as server_module
 
     _as_external_connector_client(monkeypatch)
@@ -1416,7 +1417,12 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
             for name in names
         ],
     }
-    out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    token = call_spans.MCP_CALL_TOKEN.set("artifact-observation-fixture")
+    try:
+        out = server_module._gated_adoption_egress(vault, "adoption_run", payload)
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
+        spans = call_spans.pop_call_spans("artifact-observation-fixture")
     serialized = json.dumps(out, default=str)
     assert "Private Artifacts" not in serialized
     assert "Private%20Artifacts" not in serialized
@@ -1437,6 +1443,12 @@ def test_nested_adoption_payload_gates_every_existing_artifact_kind_once(
         == __import__("hashlib").sha256(b"governed-artifact").hexdigest()
     ]
     assert len(report_outcomes) == len(names)
+    measured = next(span for span in spans if span["name"] == "egress.artifact_gate")
+    assert measured["count"] == 1
+    assert measured["fields"]["index_calls"] == 1
+    assert measured["fields"]["thread_cpu_us"] >= 0
+    assert measured["fields"]["thread_cpu_calls"] == 1
+    assert set(measured["fields"]) == {"index_calls", "thread_cpu_us", "thread_cpu_calls"}
 
 
 def test_nested_adoption_payload_gates_artifact_references_in_mapping_keys(

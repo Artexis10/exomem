@@ -312,6 +312,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
 | `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
 | `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Read-only dispatcher stages: invoke the command, filter its result or error, then emit the disclosure receipt. Failed stages retain their duration. |
+| `egress.artifact_gate` | Artifact-gate construction and payload filtering, including failures. Fields report observed `thread_cpu_us`, measured `thread_cpu_calls`, and vault census `index_calls`. |
 | `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 | `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
 | `encode.by.<module>` | Beside every `embeddings.encode`: the Exomem module that asked for the encode (`context_pack`, `semantic_segments`, `index_sync`, ...). The name is the attribution because span fields are integers. |
@@ -321,6 +322,10 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
 never raises. A missing span leaves that phase's duration unknown.
+
+Artifact-gate CPU is partial when `thread_cpu_calls` is less than the span's
+`count`. An unavailable clock contributes no CPU sample. Both filtering passes
+share this aggregate; it does not identify their separate costs.
 
 Some spans also carry `fields`: named integer counts beside the duration. A
 duration alone cannot separate a slow step from a large one — `embeddings.encode`
