@@ -49,13 +49,13 @@ spec:
                 - name: DATABASE_URL
                   valueFrom:
                     secretKeyRef:
-                      name: {{ $health.databaseSecretName }}
-                      key: {{ $health.databaseSecretKey }}
+                      name: {{ $health.databaseSecretName | quote }}
+                      key: {{ $health.databaseSecretKey | quote }}
                 - name: EXOMEM_HEALTH_MEMORY_BEARER
                   valueFrom:
                     secretKeyRef:
-                      name: {{ $health.bearerSecretName }}
-                      key: {{ $health.bearerSecretKey }}
+                      name: {{ $health.bearerSecretName | quote }}
+                      key: {{ $health.bearerSecretKey | quote }}
                 - name: EXOMEM_HEALTH_MEMORY_PAGE
                   value: {{ $health.page | quote }}
                 - name: EXOMEM_HEALTH_MEMORY_BODY_TEMPLATE
@@ -104,7 +104,7 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: exomem-cell
-              exomem.io/cell: {{ $health.cellId }}
+              exomem.io/cell: {{ $health.cellId | quote }}
             matchExpressions:
               - key: exomem.io/cell-job
                 operator: DoesNotExist
@@ -130,7 +130,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: exomem-cell
-      exomem.io/cell: {{ $health.cellId }}
+      exomem.io/cell: {{ $health.cellId | quote }}
     matchExpressions:
       - key: exomem.io/cell-job
         operator: DoesNotExist

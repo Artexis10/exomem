@@ -20,7 +20,7 @@ The new synthetic runner crosses a network and database boundary. A durable cont
 
 ### Modified Capabilities
 
-None. Existing controller and customer admission contracts remain unchanged.
+- `cloud-platform-operations`: Extend the schedule contract with optional functional observations.
 
 ## Impact
 
