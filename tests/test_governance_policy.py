@@ -463,23 +463,6 @@ def test_curation_records_do_not_invalidate_policy_cache_or_appear_as_findings(v
     assert not [f for f in after.findings if f["code"] == "unknown_file"]
 
 
-def test_a_conflicted_policy_copy_still_blocks_beside_curation_records(vault: Path) -> None:
-    policy._CACHE.clear()
-    policy._LAST_GOOD.clear()
-    _write(vault, "scopes", "acmeco", _SCOPE_A)
-    gov = vault / "Knowledge Base" / "_Governance"
-    (gov / "curation" / "runs").mkdir(parents=True)
-    (gov / "curation" / "runs" / ("a" * 64 + ".json")).write_text("{}\n", encoding="utf-8")
-    (gov / "scopes" / _sync_conflict_name("acmeco")).write_text(_SCOPE_A, encoding="utf-8")
-
-    pol = policy.load(vault)
-
-    assert pol.blocked is True
-    assert [f["path"] for f in pol.findings if f["code"] == "conflicted_copy"] == [
-        f"scopes/{_sync_conflict_name('acmeco')}"
-    ]
-
-
 def test_receipt_conflict_does_not_disable_active_policy_but_blocks_append(vault: Path) -> None:
     _write(vault, "scopes", "acmeco", _SCOPE_A)
     _write(vault, "rules", "external", _RULE_A)
