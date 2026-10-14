@@ -190,7 +190,8 @@ def test_displacement_crash_with_missing_stage_restores_predecessor_then_flushes
     store, monkeypatch
 ):
     root, writer = store
-    assert _publish(root, writer).status == "published"
+    initial = _publish(root, writer)
+    assert initial.status == "published", initial
     target = replica.replica_path(root)
     old_digest = hashlib.sha256(target.read_bytes()).hexdigest()
     expected = _commit(writer)
