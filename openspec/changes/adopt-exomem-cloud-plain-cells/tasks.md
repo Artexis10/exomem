@@ -269,7 +269,9 @@ Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`.
 
 Authenticated capture, exact and paraphrased recall, and the content-free log canary now pass after connector reconnection.
 Owner performance and memory headroom acceptance remain open.
-OAuth refresh, node latency and owner-sized admission remain unproved.
+The existing ChatGPT connection refreshed over 15 minutes after sign-in and read back the unchanged canary on 2026-10-14.
+Rotation metadata binds the consumed refresh token, its replacement and the new access-token expiry.
+This closes that client's refresh check; Claude-specific acceptance, node latency and owner-sized admission remain unproved.
 QA and reviewer cells also became Ready on qualified 0.116; owner-only custody and authenticated MCP reads passed with unchanged resources.
 The fleet default retains its previous image, and the two stopped cells remain stopped and unpinned.
 Capacity qualification still holds fleet-default promotion and friend admission.
@@ -281,12 +283,14 @@ Existing per-cell pins do not prove that the fleet default selects the qualified
 The Neon cutover and project deletion are closed; do not repeat them.
 Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
 
-- [ ] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
+- [x] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
   That historical proof did not compare `/data/host` runtime state.
-  On 2026-10-13, a stopped-source backup and scratch restore matched both vault and host state; scratch absence proofs passed.
-  This accepts the deployed-image dual-root comparison, not a 0.116 rollout or historical rollback.
-  Reconcile that receipt with the repeatable operator procedure before closing this task.
+  The reviewed [helper correction](https://github.com/Artexis10/exomem/pull/1704) compares every declared backup root; its 20 scoped cases passed.
+  On 2026-10-13, maintained helpers restored a snapshot correlated with stopped-source references: all 45 vault and 116 host entries matched.
+  Custody, service authentication and scratch absence checks passed.
+  The current top-level wrapper was not invoked; its source wiring, existing tests and maintained-helper recovery establish repeatability.
+  This closes repeatable dual-root comparison and deployed-image scratch recovery, without claiming a current-wrapper production run, in-place recovery or historical rollback.
 - [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
   Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
   Verify old-image route reads/writes, custody and durable debt before any live pin.
