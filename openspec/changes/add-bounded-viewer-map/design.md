@@ -39,6 +39,13 @@ Exact totals cover eligible current graph file rows, rather than the separate ac
 Complete scans can claim global ranking; interrupted scans report provisional ranking and null exact totals.
 Use paged reads, explicit inspection limits and the existing request budget below the web bridge's five-second deadline.
 Do not use full-fetch helpers or a Markdown census. Keep limits configurable within the bounded protocol.
+Charge semantic page and edge limits only after admission; an extra admitted item establishes overflow.
+Preflight every admitted author against one resident checkpoint before preparing changed sources.
+Bound source size, summary size and preparation work uniformly, independent of hidden targets.
+Reuse unchanged summaries; prepare changed authors through opt-in parser and graph checkpoints.
+Stop interrupted authors before caching or drawing their replacement edges, and report partial coverage with unknown exact totals.
+These bounds preserve the transport deadline; false early stops cost a visibly partial map.
+They do not promise timing noninterference when hidden database work consumes the wall-clock budget.
 
 ### Keep identity claims precise
 

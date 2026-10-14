@@ -6,7 +6,7 @@
 The system SHALL expose a read-only global page map through the canonical and product command registries. Pages, edge authors and endpoints SHALL pass the current caller's admission and disclosure rules before counting or ranking. Semantic-unit endpoints SHALL resolve to their owning pages. Relation vocabulary SHALL preserve each source instance's admitted meaning. The operation SHALL NOT change seeded graph context, activation or canonical memory.
 
 #### Scenario: Hidden content does not influence the visible map
-- **WHEN** a page and its authored edges are hidden from the caller
+- **WHEN** a page and its authored edges are hidden from the caller and inspection completes
 - **THEN** removing that page entirely produces the same visible counts, ranking and map
 
 #### Scenario: Two instances use the same relation spelling
@@ -46,6 +46,18 @@ The operation SHALL bound inspection time, inspected pages and edges, and return
 #### Scenario: A large vault exceeds the operation's budget
 - **WHEN** a large synthetic vault cannot be fully inspected within the configured budget
 - **THEN** the call returns a bounded partial result within the transport deadline
+
+#### Scenario: Hidden rows precede the admitted page or edge limit
+- **WHEN** hidden rows occur before admitted rows in snapshot order
+- **THEN** only admitted items consume semantic inspection limits and an extra admitted item establishes overflow
+
+#### Scenario: An admitted author exceeds preparation bounds
+- **WHEN** uniform source, summary or preparation limits interrupt an admitted author
+- **THEN** its replacement edges are neither cached nor drawn and exact totals remain unknown in a partial result
+
+#### Scenario: A changed source needs fresh derivation
+- **WHEN** an admitted author changed since its resident summary
+- **THEN** bounded parser and graph checkpoints prepare it without a whole-vault source census or cold resolver build
 
 #### Scenario: A current map is redrawn
 - **WHEN** the same current snapshot is read with the same caller and limits
