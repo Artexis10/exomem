@@ -1769,12 +1769,13 @@ def _rewrite_hooks(path: Path, transform, *, create: bool = True) -> dict:
 
 
 def _merge_hooks(
-    path: Path, installed: list[dict], timeout: int, *, remove_refresh: bool = False
+    path: Path, installed: list[dict], timeout: int, *, refresh_items: list[dict] | None = None
 ) -> dict:
     return _rewrite_hooks(
         path,
         lambda data: _merged_config(
-            _pruned_config(data, matches=_is_refresh_entry)[0] if remove_refresh else data,
+            _pruned_config(data, matches=lambda hook: _is_refresh_entry(hook, refresh_items))[0]
+            if refresh_items else data,
             installed,
             timeout,
         ),
@@ -1782,7 +1783,7 @@ def _merge_hooks(
 
 
 def _merge_one_config(
-    path: Path, installed: list[dict], timeout: int, *, remove_refresh: bool = False
+    path: Path, installed: list[dict], timeout: int, *, refresh_items: list[dict] | None = None
 ) -> dict:
     """Merge into one alternate source, reporting rather than raising on failure.
 
@@ -1803,7 +1804,8 @@ def _merge_one_config(
         migration = _rewrite_hooks(
             path,
             lambda data: _merged_config(
-                _pruned_config(data, matches=_is_refresh_entry)[0] if remove_refresh else data,
+                _pruned_config(data, matches=lambda hook: _is_refresh_entry(hook, refresh_items))[0]
+                if refresh_items else data,
                 installed,
                 timeout,
             ),
@@ -2029,9 +2031,13 @@ def install_hook(
         refresh_report = retrieve.refresh_capabilities(client, "available")
 
     remove_refresh = activation_mode != "mcp" and specs is _HOOK_SPECS
+    prior_refresh_items = None
     if remove_refresh:
         from ._hooks import exomem_retrieve_nudge as retrieve
 
+        # Legacy mode uses a different home; ownership still follows the prior MCP profile.
+        refresh_home = home if activation_mode is not None else _profile_home(client, settings_path)
+        prior_refresh_items = _refresh_items(hook_dir, client, refresh_home)
         try:
             safe.unlink_nudge_file(hook_dir / retrieve.REFRESH_METADATA_NAME)
         except FileNotFoundError:
@@ -2065,7 +2071,7 @@ def install_hook(
                 else _default_settings(client)
             )
         )
-        migration = _merge_hooks(sp, installed, timeout, remove_refresh=remove_refresh)
+        migration = _merge_hooks(sp, installed, timeout, refresh_items=prior_refresh_items)
         result["wired"] = True
         result["settings"] = str(sp)
         result["config_changed"] = migration["changed"]
@@ -2077,7 +2083,7 @@ def install_hook(
         # of them matches the machine.
         written = Path(migration["path"]).name
         result["alternates"] = [
-            _merge_one_config(source, installed, timeout, remove_refresh=remove_refresh)
+            _merge_one_config(source, installed, timeout, refresh_items=prior_refresh_items)
             for source in _alternate_sources(sp)
             if source.name != written
         ]
@@ -2472,17 +2478,30 @@ def _is_exomem_entry(hook: dict) -> bool:
     return bool(_command_basenames(command).intersection(continuation))
 
 
-def _is_refresh_entry(hook: dict) -> bool:
-    if not _contains_any(hook, _RETRIEVE_HOOK_MARKERS):
+def _is_refresh_entry(hook: dict, expected: list[dict]) -> bool:
+    if hook.get("type") != "command":
         return False
+    commands = {}
+    # These native command fields are closed; complete renderer-produced argv defines ownership.
     for field in ("command", "commandWindows"):
-        try:
-            # This flag identifies the closed command shape produced by the installer.
-            if "--refresh-event" in shlex.split(hook.get(field) or ""):
-                return True
-        except ValueError:
+        if field not in hook:
             continue
-    return False
+        command = hook[field]
+        if not isinstance(command, str):
+            return False
+        try:
+            commands[field] = shlex.split(command)
+        except ValueError:
+            return False
+        if not commands[field]:
+            return False
+    return "command" in commands and any(
+        all(
+            isinstance(item.get(field), str) and argv == shlex.split(item[field])
+            for field, argv in commands.items()
+        )
+        for item in expected
+    )
 
 
 def _pruned_config(source: dict, *, matches=_is_exomem_entry) -> tuple[dict, int]:

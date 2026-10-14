@@ -849,6 +849,47 @@ def test_changing_activation_mode_removes_only_owned_refresh_configuration(tmp_p
     assert '"scope_id"' not in output.stdout and '"accounting_unavailable"' not in output.stdout
 
 
+def test_independent_hook_registrations_survive_refresh_mode_cleanup(tmp_path):
+    profile = tmp_path / "profile"
+    install(profile, "codex")
+    settings = profile / "hooks.json"
+    audit = tmp_path / "audit_exomem_retrieve_nudge.py"
+    audit.write_text("print('Independent audit hook.')\n")
+    other = tmp_path / "other" / "exomem_retrieve_nudge.py"
+    other.parent.mkdir()
+    other.write_text("print('Separate audit hook.')\n")
+    independent = [
+        {
+            "type": "command",
+            "command": f"python3 {shlex.quote(str(audit))} --refresh-event PreToolUse",
+        },
+        {
+            "type": "command",
+            "command": f"python3 {shlex.quote(str(other))} --refresh-event PreToolUse",
+        },
+        {"type": "command", "command": "echo exomem_retrieve_nudge.py --refresh-event PreToolUse"},
+        {
+            "type": "command",
+            "command": "python3 'exomem_retrieve_nudge.py --refresh-event PreToolUse",
+        },
+    ]
+    configuration = json.loads(settings.read_text())
+    configuration["hooks"]["PreToolUse"][0]["hooks"].extend(independent)
+    settings.write_text(json.dumps(configuration))
+    installer.install_hook(
+        client="codex",
+        activation_mode="working-set",
+        hook_dir=profile / "hooks",
+        settings_path=settings,
+    )
+    retained = json.loads(settings.read_text())["hooks"]["PreToolUse"][0]["hooks"]
+    assert retained == independent
+    result = subprocess.run(
+        shlex.split(retained[0]["command"]), text=True, capture_output=True, timeout=10
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "Independent audit hook."
+
+
 def test_lost_initialized_refresh_state_does_not_renew_the_allowance(tmp_path):
     profile = tmp_path / "profile"
     report = install(profile, "codex", refresh_max_operations=1)
