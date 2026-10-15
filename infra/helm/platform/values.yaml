@@ -180,6 +180,11 @@ cellctl:
   # D3 default; not pinned exactly by the design, kept configurable per the
   # design owner's ruling rather than hardcoded.
   initDeadlineMinutes: 10
+  # C6 owner exports: an export hold not finished in this many minutes per
+  # started 10 GiB of the cell's size fails and the cell starts again, and a
+  # ready export is deleted this many hours after it is ready.
+  exportDeadlineMinutes: 30
+  exportTtlHours: 24
   databaseDsnSecretName: exomem-cellctl-database-dsn
   databaseDsnSecretKey: dsn
   cellTokenKeySecretName: exomem-cloud-cell-token-key

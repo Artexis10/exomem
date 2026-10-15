@@ -217,12 +217,8 @@ class ImportStorage:
         size = item.ciphertext_bytes
         if not size or size > 10000 * PART_BYTES:
             raise ValueError("ciphertext size exceeds multipart capacity")
-        uploads = [entry for page in self.client.get_paginator("list_multipart_uploads").paginate(
-            Bucket=self.bucket, Prefix=item.key
-        ) for entry in page.get("Uploads", []) if entry["Key"] == item.key]
-        if uploads:
-            upload_id = uploads[0]["UploadId"]
-        else:
+        upload_id = (open_uploads(self.client, self.bucket, item.key) or [None])[0]
+        if upload_id is None:
             upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=item.key)["UploadId"]
         parts = []
         for number, offset in enumerate(range(0, size, PART_BYTES), 1):
@@ -259,17 +255,26 @@ class ImportStorage:
         return self.client.generate_presigned_url("get_object", Params=params, ExpiresIn=7200)
 
     def cleanup(self, item: ImportRow) -> None:
-        for page in self.client.get_paginator("list_multipart_uploads").paginate(Bucket=self.bucket, Prefix=item.key):
-            for upload in page.get("Uploads", []):
-                if upload["Key"] == item.key:
-                    self.client.abort_multipart_upload(Bucket=self.bucket, Key=item.key, UploadId=upload["UploadId"])
-        for page in self.client.get_paginator("list_object_versions").paginate(Bucket=self.bucket, Prefix=item.key):
-            for version in page.get("Versions", []) + page.get("DeleteMarkers", []):
-                if version["Key"] == item.key:
-                    self.client.delete_object(Bucket=self.bucket, Key=item.key, VersionId=version["VersionId"])
-        for page in self.client.get_paginator("list_multipart_uploads").paginate(Bucket=self.bucket, Prefix=item.key):
-            if any(upload["Key"] == item.key for upload in page.get("Uploads", [])):
-                raise RuntimeError("import transport cleanup remains pending")
-        for page in self.client.get_paginator("list_object_versions").paginate(Bucket=self.bucket, Prefix=item.key):
-            if any(version["Key"] == item.key for version in page.get("Versions", []) + page.get("DeleteMarkers", [])):
-                raise RuntimeError("import transport cleanup remains pending")
+        remove_object(self.client, self.bucket, item.key)
+
+
+def open_uploads(client, bucket: str, key: str) -> list[str]:
+    """The ids of every unfinished multipart upload of exactly `key`."""
+    return [upload["UploadId"] for page in client.get_paginator("list_multipart_uploads").paginate(
+        Bucket=bucket, Prefix=key) for upload in page.get("Uploads", []) if upload["Key"] == key]
+
+
+def _versions(client, bucket: str, key: str) -> list[str]:
+    return [version["VersionId"] for page in client.get_paginator("list_object_versions").paginate(
+        Bucket=bucket, Prefix=key) for version in page.get("Versions", []) + page.get("DeleteMarkers", [])
+        if version["Key"] == key]
+
+
+def remove_object(client, bucket: str, key: str) -> None:
+    """Abort every upload of `key` and delete every version of it, then prove both are gone."""
+    for upload_id in open_uploads(client, bucket, key):
+        client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+    for version_id in _versions(client, bucket, key):
+        client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+    if open_uploads(client, bucket, key) or _versions(client, bucket, key):
+        raise RuntimeError("object transport removal remains pending")

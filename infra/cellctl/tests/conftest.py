@@ -195,6 +195,7 @@ async def _create_cell_db(server: PostgresServer) -> str:
                                        "redirect_uris_digest bytea)")
         await owner_connection.execute((FIXTURES / "exomem_cloud_imports.sql").read_text())
         await owner_connection.execute((FIXTURES / "exomem_cloud_import_cleanup.sql").read_text())
+        await owner_connection.execute((FIXTURES / "exomem_cloud_exports.sql").read_text())
         await owner_connection.execute(GRANTS_SQL)
     finally:
         await owner_connection.close()

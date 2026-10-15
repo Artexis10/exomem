@@ -100,6 +100,10 @@ class FakeB2:
     # -- test-only: a per-cell key's restricted view, documenting the real B2
     # prefix-restriction property that protects a backup/restore Job --
 
+    def authorize(self, key_id: str, name: str) -> None:
+        """Refuse `key_id` for an object name outside its prefix, as B2 does."""
+        self._require_prefix(key_id, name)
+
     def list_as_key(self, key_id: str, prefix: str) -> list[ObjectVersion]:
         self._require_prefix(key_id, prefix)
         return self.list_object_versions(prefix)
