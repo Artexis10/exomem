@@ -30,7 +30,7 @@ from .typed_storage import TypedStorageError
 
 # Function version, components and file roles are closed persisted wire values.
 FUNCTION = "exomem_native_operand_v1"
-COMPONENTS = ("tag", "band", "key")
+COMPONENTS = ("tag", "band", "key")  # nosemgrep: ep-word-set -- The versioned operand function fixes these output components.
 
 
 class FileRole(StrEnum):
