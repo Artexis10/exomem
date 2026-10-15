@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, find, freshness, memory_refs, request_budget
+from . import epistemic_graph, find, freshness, memory_refs, relation_registry, request_budget
 from .governance import egress
 
 # These are closed relation-schema families whose authored facts inform a claim.
@@ -84,7 +84,8 @@ def discover(
             check_deadline()
             target = seeds.get(edge.get("dst_key"))
             family = (edge.get("metadata") or {}).get("relation_family")
-            if target is None or family not in CORRECTIVE_FAMILIES:
+            if (target is None or family not in CORRECTIVE_FAMILIES
+                    or not relation_registry.traversable_resolution_status(edge.get("registry_status"))):
                 return False
             node = view.node(str(edge.get("src_key") or ""))
             metadata = (node or {}).get("metadata") or {}

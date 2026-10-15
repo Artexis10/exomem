@@ -773,6 +773,28 @@ def test_the_hooks_call_and_the_agents_duplicate_share_one_cache_entry(
     assert _resolved(hook) == _resolved(agent)
 
 
+def test_transient_unavailable_packet_recovers_without_a_vault_change(
+    heat_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_compile = working_set.compile_packet
+    unavailable = [True]
+
+    def compile_packet(*args, **kwargs):
+        if unavailable:
+            unavailable.pop()
+            return working_set.abstained_packet(
+                reason="unavailable", max_chars=kwargs["max_chars"],
+                generation={"continuity": "absent"},
+            )
+        return real_compile(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "compile_packet", compile_packet)
+    first = commands.op_activate_context(heat_vault, turn=SLED_TURN)
+    assert first["abstained"] and first["abstention"]["reason"] == "unavailable"
+    recovered = commands.op_activate_context(heat_vault, turn=SLED_TURN)
+    assert not recovered["abstained"] and _resolved(recovered) == [SLED]
+
+
 # --------------------------------------------------------------------------- #
 # Episodes are heat
 # --------------------------------------------------------------------------- #

@@ -8885,7 +8885,7 @@ def graph_context(
                         },
                     )
                     continue
-                if status == "scope_violation":
+                if not relation_registry.traversable_resolution_status(status):
                     excluded_scope += 1
                     continue
                 authored = view.registry_for(str(edge.get("source_path") or ""))

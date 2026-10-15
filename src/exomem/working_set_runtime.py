@@ -2306,6 +2306,9 @@ def serve(
     changed = evidence_changed()
     if changed is not None:
         return changed
+    if packet.get("abstained") and packet.get("abstention", {}).get("reason") == UNAVAILABLE:
+        # Resident evidence can recover without changing this packet's cache key.
+        return packet
     if index_stale:
         # Transient, so never cached: the scheduled build may leave the vault's
         # rows and the sidecar token exactly as they were, and a cached copy

@@ -552,11 +552,17 @@ def build_packet(
     # the first role in registry priority order that reached it — the most
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
-    ordered = _without_lede_repeats(
-        _deduplicated(
-            sorted(working_set_currency.annotate(items, status_basis=status_basis), key=_sort_key)
+    try:
+        current_items = working_set_currency.annotate(items, status_basis=status_basis, visible=visible)
+    except working_set_currency.CurrencyUnavailable:
+        return abstained_packet(
+            reason=activation_result.UNAVAILABLE, max_chars=limit,
+            generation={**generation, **({"correction_context": correction_status}
+                                        if correction_status is not None else {})},
+            anchors=anchors, ambiguity=ambiguity, missing=missing, recent_context=recent_context,
+            conversation_inferred=conversation_inferred, status_basis=status_basis,
         )
-    )
+    ordered = _without_lede_repeats(_deduplicated(sorted(current_items, key=_sort_key)))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}

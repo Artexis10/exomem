@@ -191,6 +191,12 @@ class RelationRegistry:
         )
 
 
+def traversable_resolution_status(status: str | None) -> bool:
+    """Whether a selected relation resolution supplies an authored graph fact."""
+    # These are closed resolver outcomes; deprecated facts remain traversable.
+    return status in {"core", "alias", "extension", "deprecated"}
+
+
 def normalize_relation(label: str) -> str:
     return re.sub(r"[\s-]+", "_", str(label or "").strip().lower().rstrip(":"))
 

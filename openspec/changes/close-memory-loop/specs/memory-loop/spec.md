@@ -368,6 +368,13 @@ Activation SHALL resolve anchors, apply task-conditioned roles and bounded typed
 - **AND** a project anchor with no declared members still resolves and
   reports no material, rather than fabricating any
 
+#### Scenario: Applicable constraints inform an external artifact
+
+- **WHEN** an agent prepares an external artifact and admitted memory contains an applicable confidentiality constraint
+- **THEN** supported lifecycle context surfaces the constraint with its supported scope
+- **AND** the agent uses the constraint without treating owner recall permission as permission to disclose private facts
+- **AND** acceptance reports useful context, output authority and actual host enforcement separately
+
 ### Requirement: Activation semantic work stays within the anchor catalogue
 
 Activation SHALL use the derived anchor signature vectors for optional semantic

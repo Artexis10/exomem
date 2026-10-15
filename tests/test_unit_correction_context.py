@@ -536,3 +536,165 @@ def test_public_deep_pack_keeps_notice_level_body_admission(tmp_path: Path) -> N
     assert unit["unit_ref"].endswith("#correction") and "excerpt" not in unit
     block, = wire["pack"]["semantic_blocks"][SOURCE]
     assert "body" not in block
+
+
+@pytest.mark.parametrize("meaning", ["alias", "deprecated"])
+def test_corrective_counterparts_share_graph_scope_before_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, meaning: str,
+) -> None:
+    import yaml
+
+    root, index = _built(tmp_path)
+    allowed = {"parent": "supports", "description": "Supports the measured interval"}
+    if meaning == "alias":
+        allowed["aliases"] = ["measured_support"]
+        label = "measured_support"
+    else:
+        allowed.update(status="deprecated", replaced_by="supports")
+        label = "study.allowed"
+    _write(root, "Knowledge Base/_Schema/relation-registry.yaml", yaml.safe_dump({
+        "schema_version": 1,
+        "extensions": {
+            "study.scoped": {"parent": "supports", "description": "Supports an experiment",
+                             "scope": {"page_types": ["experiment"]}},
+            "study.allowed": allowed,
+        },
+    }))
+    outside_scope = "".join(
+        f"## Claim\n- category: config\n- id: outside-{number}\n"
+        f"- relations: study.scoped: [[{TARGET}#rich-1]]\n\n"
+        "This experiment-only relation was authored on an insight.\n\n"
+        for number in range(5)
+    )
+    _write(root, SOURCE,
+           f"---\ntype: insight\nexomem_id: {SOURCE_ID}\n---\n\n" + outside_scope
+           + "## Claim\n- category: config\n- id: admitted\n"
+           + f"- relations: {label}: [[{TARGET}#rich-1]]\n\nThe measured interval is 45 seconds.\n")
+    lexstore.ensure_fresh(root)
+    _publish(index)
+    target = semantic_index.current_parent_index_state(root, TARGET).document.resolve_fragment("rich-1").unit
+    graph = commands.op_graph_context(root, unit_ref=target.unit_ref)
+    meanings = {edge["relation_type"] for edge in graph["edges"]}
+    assert "study.allowed" in meanings and "study.scoped" not in meanings
+    packet = _target_packet(root)
+    assert {unit["ref"].split("#")[-1] for unit in packet["units"]} == {"rich-1", "admitted"}
+    monkeypatch.setenv("EXOMEM_PACK_MAX_UNITS", "2")
+    monkeypatch.setenv("EXOMEM_PACK_MAX_UNITS_PER_PAGE", "1")
+    wire = _public_deep(root)
+    assert {unit["unit_ref"].split("#")[-1] for group in wire["pack"]["semantic_units"].values()
+            for unit in group["units"]} == {"rich-1", "admitted"}
+
+
+@pytest.mark.parametrize("target", [f"{TARGET}#rich-1", "Frag target#rich-1"])
+def test_incoming_supersession_borrows_the_resident_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
+) -> None:
+    from exomem import vault
+
+    root, index = _built(tmp_path)
+    _write(root, SOURCE,
+           f"---\ntype: insight\nexomem_id: {SOURCE_ID}\n---\n\n"
+           f"## Claim\n- category: config\n- id: successor\n- relations: supersedes: [[{target}]]\n\n"
+           "The measured interval is 45 seconds.\n")
+    _publish(index)
+    builds = []
+    original = vault.WikilinkResolver._build
+
+    def build(resolver):
+        builds.append(True)
+        return original(resolver)
+
+    monkeypatch.setattr(vault.WikilinkResolver, "_build", build)
+    packet = _target_packet(root)
+    assert {unit["ref"].split("#")[-1] for unit in packet["units"]} == {"rich-1", "successor"}
+    assert all(unit["lifecycle"] == "active" for unit in packet["units"])
+    assert not builds, "qualified incoming supersession must not walk Markdown during compilation"
+
+
+def _sibling_items(root: Path, target: str) -> tuple:
+    _write(root, TARGET, (root / TARGET).read_text() + (
+        "\n## Claim\n- category: config\n- id: successor\n"
+        f"- relations: supersedes: [[{target}]]\n\nThe measured interval is 45 seconds.\n"
+    ))
+    state = semantic_index.current_parent_index_state(root, TARGET)
+    page = find._CACHE.get(root / TARGET, root)
+    return working_set._unit_items(None, [
+        find._semantic_unit_hit(page, state.document.resolve_fragment(anchor).unit,
+                                bm25_rank=1, bm25_score=1.0)
+        for anchor in ("rich-1", "successor")
+    ])
+
+
+def test_local_supersession_needs_no_resident_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import working_set_currency
+
+    root, _index = _built(tmp_path)
+    items = _sibling_items(root, "#rich-1")
+
+    def unavailable(*_args):
+        raise AssertionError("local anchor currency does not need page resolution")
+
+    monkeypatch.setattr(find, "recall_resolver_snapshot_at_checkpoint", unavailable)
+    annotated = working_set_currency.annotate(items, status_basis=lifecycle_statuses.Basis(root))
+    assert [item.lifecycle for item in annotated] == ["superseded", "active"]
+
+
+@pytest.mark.parametrize("state", ["missing", "moving"])
+def test_currency_cannot_publish_without_current_qualified_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str,
+) -> None:
+    from exomem import vault
+
+    root, index = _built(tmp_path)
+    items = _sibling_items(root, f"{TARGET}#rich-1")
+    _publish(index)
+    if state == "missing":
+        monkeypatch.setattr(find, "recall_resolver_snapshot_at_checkpoint", lambda *_args: None)
+    else:
+        original = vault.normalize_wikilink
+
+        def move(*args, **kwargs):
+            result = original(*args, **kwargs)
+            freshness.mark_external_pending(root)
+            return result
+
+        monkeypatch.setattr(vault, "normalize_wikilink", move)
+    recent = [{"path": TARGET, "title": "Frag target", "type": "insight", "status": "active"}]
+    packet = working_set.build_packet(
+        items=items, anchors=(), roles=(), current_state=(), ambiguity=(), missing=(),
+        max_chars=4000, generation={"continuity": "applied", "source": "fixture"},
+        status="resolved", recent_context=recent, status_basis=lifecycle_statuses.Basis(root),
+    )
+    assert packet["abstained"] and packet["abstention"]["reason"] == "unavailable"
+    assert not packet["units"] and not packet["pointers"] and not packet["current_state"]
+    assert packet["generation"]["continuity"] == "applied" and packet["recent_context"] == recent
+
+
+def test_withheld_namesake_does_not_change_same_page_currency(tmp_path: Path) -> None:
+    from test_governance_egress import _external
+    from test_working_set_currency_security import _govern
+
+    from exomem.governance.principal import request_scope
+
+    root, index = _built(tmp_path)
+    items = _sibling_items(root, "frag-target#rich-1")
+    namesake = _write(root, "Knowledge Base/Notes/Patterns/frag-target.md",
+                      "---\ntype: pattern\n---\n\nWithheld namesake.\n")
+    _govern(root)
+    lexstore.ensure_fresh(root)
+    _publish(index)
+
+    def packet():
+        with request_scope(_external()):
+            return working_set.build_packet(
+                items=items, anchors=(), roles=(), current_state=(), ambiguity=(), missing=(),
+                max_chars=4000, generation={}, status="resolved", status_basis=lifecycle_statuses.Basis(root),
+            )
+
+    with_namesake = packet()
+    old = next(unit for unit in with_namesake["units"] if unit["ref"].endswith("#rich-1"))
+    assert old["lifecycle"] == "superseded" and old["history"]
+    namesake.unlink()
+    lexstore.ensure_fresh(root)
+    _publish(index)
+    assert packet() == with_namesake

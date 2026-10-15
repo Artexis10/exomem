@@ -16,7 +16,7 @@ tell that reader the other page exists.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,10 @@ _DEADLINE_CUE = re.compile(
     re.IGNORECASE,
 )
 _VAULT_REF_PREFIX = "exomem://vault/"
+
+
+class CurrencyUnavailable(RuntimeError):
+    """Qualified supersession cannot be resolved from current resident evidence."""
 
 
 def own_time(context: str | None) -> str:
@@ -84,7 +88,9 @@ def _page_names(path: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _target_fragment(target: str, path: str, *, root=None, resolver=None, visible=None) -> str:
+def _target_fragment(
+    target: str, path: str, *, resolve_page: Callable[[str], str] | None = None,
+) -> str:
     """The unit anchor `target` names ON `path`, or empty when it names another page."""
     text = target.strip()
     if text.startswith("[[") and text.endswith("]]"):
@@ -94,12 +100,8 @@ def _target_fragment(target: str, path: str, *, root=None, resolver=None, visibl
     if not separator or not fragment.strip():
         return ""
     page = unquote(page.strip().removeprefix(_VAULT_REF_PREFIX))
-    if page and root is not None:
-        try:
-            canonical, _ = vault.normalize_wikilink(page, root, strict=True, resolver=resolver, visible=visible)
-        except ValueError:
-            return ""
-        if canonical != path.removesuffix(".md"):
+    if page and resolve_page is not None:
+        if resolve_page(page) != path.removesuffix(".md"):
             return ""
     elif page and page.casefold() not in _page_names(path):
         return ""
@@ -108,19 +110,41 @@ def _target_fragment(target: str, path: str, *, root=None, resolver=None, visibl
 
 
 def annotate(
-    items: Sequence[LaneItem], *, status_basis: lifecycle_statuses.Basis | None = None
+    items: Sequence[LaneItem], *, status_basis: lifecycle_statuses.Basis | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> tuple[LaneItem, ...]:
     """Mark as superseded each unit a same-page `supersedes` relation names.
 
-    Units only; pages, records and pointers pass through untouched. Pure and
-    deterministic: the same items give the same marks.
+    Units only; pages, records and pointers pass through untouched. Local
+    anchors use selected units; qualified names require current resident evidence.
     """
+    from . import find, freshness
+
     status_basis = status_basis or lifecycle_statuses.Basis(None)
     resolver = None
-    visible = None
-    if status_basis.root is not None and any(item.provenance.get("supersedes_targets") for item in items):
-        resolver = vault.WikilinkResolver(status_basis.root)
-        visible = vault.writer_link_visibility(status_basis.root)
+    checkpoint = None
+
+    def resolve_page(page: str) -> str:
+        nonlocal resolver, checkpoint, visible
+        root = status_basis.root
+        if checkpoint is None:
+            checkpoint = freshness.live_recall_checkpoint(root, "vault")
+            if checkpoint is None:
+                raise CurrencyUnavailable("current page resolution is unavailable")
+            resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
+            if resolver is None:
+                raise CurrencyUnavailable("current page resolution is unavailable")
+            if visible is None:
+                visible = vault.writer_link_visibility(root)
+        # The borrowed maps are immutable to this reader; publication invalidates their proof.
+        if not freshness.recall_checkpoint_is_current(root, "vault", checkpoint):
+            raise CurrencyUnavailable("current page resolution changed")
+        try:
+            canonical, _ = vault.normalize_wikilink(page, root, strict=True, resolver=resolver, visible=visible)
+        except ValueError:
+            return ""
+        return canonical
+
     by_page: dict[str, list[int]] = {}
     for index, item in enumerate(items):
         if item.level == "unit" and item.path:
@@ -137,15 +161,16 @@ def annotate(
         )
         for index in indices:
             for target in items[index].provenance.get("supersedes_targets") or ():
-                fragment = _target_fragment(str(target), path, root=status_basis.root, resolver=resolver, visible=visible)
+                fragment = _target_fragment(
+                    str(target), path,
+                    resolve_page=resolve_page if status_basis.root is not None else None,
+                )
                 if not fragment:
                     continue
                 resolved = structure.resolve_fragment(fragment)
                 if resolved.index is not None and indices[resolved.index] != index:
                     superseded.add(indices[resolved.index])
-    if not superseded:
-        return tuple(items)
-    return tuple(
+    annotated = tuple(
         replace(item, lifecycle=SUPERSEDED)
         if index in superseded
         and (ordering := status_basis.ordering(item.lifecycle, path=item.path or None)) is not None
@@ -153,3 +178,6 @@ def annotate(
         else item
         for index, item in enumerate(items)
     )
+    if checkpoint is not None and not freshness.recall_checkpoint_is_current(status_basis.root, "vault", checkpoint):
+        raise CurrencyUnavailable("current page resolution changed")
+    return annotated
