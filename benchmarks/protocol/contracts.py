@@ -779,6 +779,7 @@ _PINNED_GIT_FLAGS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
         frozenset(
             {
                 "--full-history",
+                "--no-walk=unsorted",
                 "--no-renames",
                 "--name-status",
                 "--follow",
