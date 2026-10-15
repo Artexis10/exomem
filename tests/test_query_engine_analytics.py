@@ -154,9 +154,10 @@ def test_analytics_explain_preview_and_dry_run_report_profile_and_bounds_without
     assert admitted["admitted"] is True and "groups" not in admitted and admitted["bounds"] == ANALYTICS
 
 
-def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference(store):
+def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference(store, monkeypatch):
     """A large exact reduction no rollup answers that is refused, sampled, partial or wrong under
     the analytics profile, or admitted past the interactive visit bound."""
+    _install_analytics_timeout_observer(monkeypatch)
     create(store)
     records = list(folded(iter_exercises(LARGE)))
     seed(store, [exercise(record) for record in records])
@@ -177,6 +178,52 @@ def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference
     assert result["plan"]["strategy"] == "base" and len(result["groups"]) == len(daily) <= 200
     assert by_bucket(result) == daily and result["flagged_rows"] == len(flagged)
     assert elapsed < 2.0, elapsed
+
+
+def _install_analytics_timeout_observer(monkeypatch):
+    import sys
+    import threading
+
+    import pytest_timeout
+
+    from exomem.query_engine import reductions
+
+    original = pytest_timeout.dump_stacks
+    main_ident = threading.main_thread().ident
+    test_code = test_analytics_exact_reduction_over_a_large_collection_matches_the_reference.__code__
+    reduce_code = reductions._from_rows.__code__
+
+    def observed(terminal):
+        # The locked plugin exits without unwinding; reuse its failure dump without another timer.
+        try:
+            _report_analytics_outer_timeout(terminal, sys._current_frames().get(main_ident),
+                                            test_code, reduce_code)
+        except Exception:  # noqa: BLE001 - diagnostics cannot replace the original timeout dump.
+            pass
+        original(terminal)
+
+    monkeypatch.setattr(pytest_timeout, "dump_stacks", observed)
+
+
+def _report_analytics_outer_timeout(terminal, frame, test_code, reduce_code):
+    """Report elapsed clocks and a row count, never row content or query text."""
+    now = time.monotonic()
+    numbers = {"window": "outer-timeout-snapshot", "elapsed_since_reduce_start_s": None,
+               "deadline_delta_ms": None, "visited": None}
+    while frame is not None:
+        if frame.f_code is test_code:
+            started = frame.f_locals.get("started")
+            if type(started) in (int, float):
+                numbers["elapsed_since_reduce_start_s"] = now - started
+        elif frame.f_code is reduce_code:
+            visited = frame.f_locals.get("visited")
+            numbers["visited"] = visited if type(visited) is int else None
+            deadline = getattr(frame.f_locals.get("session"), "_deadline", None)
+            if type(deadline) in (int, float):
+                # Positive means overdue; negative means time remains on the native deadline.
+                numbers["deadline_delta_ms"] = (now - deadline) * 1000
+        frame = frame.f_back
+    terminal.write("analytics_outer_failure " + json.dumps(numbers, sort_keys=True) + "\n")
 
 
 def _report_analytics_failure(error, started, process_started, thread_started):

@@ -155,6 +155,19 @@ class SummaryRelease:
 
 
 @dataclass(frozen=True, slots=True)
+class _SummaryPolicyRelease:
+    """One operation's policy decisions, before a reporting caller counts rows."""
+
+    manifest: CanonicalSubject
+    decision: Decision
+    row_prefix: str
+    held: tuple[tuple[CanonicalSubject, Decision], ...]
+    container: str
+    uniform_rows_complete: bool | None
+    derived_rows: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _ReleaseSelection:
     """Inspection inputs belonging only to this operation's read snapshot."""
 
@@ -799,6 +812,10 @@ class OperationAuthorization:
         head = self.summary_manifest(cid)
         if head is None:
             return None
+        return self._materialize_summary_release(cid, self._summary_policy_release(cid, head), memo)
+
+    def _summary_policy_release(self, cid, head):
+        """Share row variation, held decisions and representative admission with reporting."""
         manifest, decision = head
         if decision.level < 6:
             self.refuse()
@@ -814,14 +831,14 @@ class OperationAuthorization:
             for subject in subjects(self.conn, cid, self.logical_vault_id,
                                     identity=f"exomem://collection-held/{cid}/{held_id}"):
                 held.append((subject, self.decision(subject)))
-        rows = self.conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]
         container = tokens.container_hash(cid, generation, audit_head)
-        visible = hashlib.sha256(b"exomem.collection-summary-visible.v1\0" + manifest.basis.fingerprint.encode())
         prefix = f"exomem://{item_type}/{cid}/"
         varies = (self._summary_rows_vary(cid, prefix)
                   or any(identity.startswith(prefix) for identity in self.grants)
                   or any(cid in tombstone.casefold() for tombstone in self.tombstones))
         derived = self.conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
+        derived_rows = None
+        uniform_rows_complete = None
         if derived:
             # A derived collection's rows are outside the store and carry no row metadata, so its
             # release is collection-uniform: one representative row decides every logged row.
@@ -829,20 +846,30 @@ class OperationAuthorization:
                 raise collections.CollectionError(
                     RELEASE_LIMIT, "a derived collection's rows are released whole or not at all",
                     {"max_row_decisions": 0})
-            rows = self.conn.execute("SELECT COALESCE(MAX(row_count_after),0) FROM import_members "
-                                     "WHERE collection_id=? AND seq=(SELECT MAX(seq) FROM import_members "
-                                     "WHERE collection_id=?)", (cid, cid)).fetchone()[0]
+            derived_rows = self.conn.execute("SELECT COALESCE(MAX(row_count_after),0) FROM import_members "
+                                             "WHERE collection_id=? AND seq=(SELECT MAX(seq) FROM import_members "
+                                             "WHERE collection_id=?)", (cid, cid)).fetchone()[0]
             row = replace(manifest.basis, identity=prefix + "derived", version=1, payload_hash="", domain="row",
                           subject=replace(manifest.basis.subject, refs=(prefix + "derived",), tags=(),
                                           types=(item_type.lower(),), classes=()))
-            released = rows if self.decision(replace(manifest, row_id=0, basis=row)).level >= 6 else 0
+            admitted = self.decision(replace(manifest, row_id=0, basis=row)).level >= 6
+            uniform_rows_complete = admitted or derived_rows == 0
         elif not varies:
-            released = 0
-            if rows:
-                key = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",
-                                        (cid,)).fetchone()[0]
-                sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + key)))
-                released = rows if self.decision(sample).level >= 6 else 0
+            first = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",
+                                      (cid,)).fetchone()
+            uniform_rows_complete = first is None
+            if first is not None:
+                sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
+                uniform_rows_complete = self.decision(sample).level >= 6
+        return _SummaryPolicyRelease(manifest, decision, prefix, tuple(held), container,
+                                     uniform_rows_complete, derived_rows)
+
+    def _materialize_summary_release(self, cid, selection, memo):
+        rows = (selection.derived_rows if selection.derived_rows is not None else
+                self.conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0])
+        visible = hashlib.sha256(b"exomem.collection-summary-visible.v1\0" + selection.manifest.basis.fingerprint.encode())
+        if selection.uniform_rows_complete is not None:
+            released = rows if selection.uniform_rows_complete else 0
         else:
             released = visited = 0
             with closing(iter_subjects(self.conn, cid, self.logical_vault_id, identity=None, view_path=None,
@@ -859,11 +886,24 @@ class OperationAuthorization:
                         released += 1
                         visible.update(f"{subject.row_id}:{subject.basis.version}\n".encode())
         if released == rows:
-            visible.update(container.encode())
-        release = SummaryRelease(manifest, decision, prefix, rows, released, tuple(held), "")
-        release = replace(release, snapshot=container if release.complete else visible.hexdigest())
+            visible.update(selection.container.encode())
+        release = SummaryRelease(selection.manifest, selection.decision, selection.row_prefix,
+                                 rows, released, selection.held, "")
+        release = replace(release, snapshot=selection.container if release.complete else visible.hexdigest())
         self.summary_memo = {memo: release}
         return release
+
+    def _summary_complete(self, cid, head):
+        """Admission needs complete access, not a count of every unchanged row."""
+        memo = (cid, self.conn.total_changes)
+        if memo in self.summary_memo:
+            return self.summary_memo[memo].complete
+        selection = self._summary_policy_release(cid, head)
+        if selection.uniform_rows_complete is None:
+            # Varying policy retains the same bounded stream and typed refusals as reporting.
+            return self._materialize_summary_release(cid, selection, memo).complete
+        return (selection.uniform_rows_complete
+                and all(decision.level >= 6 for _subject, decision in selection.held))
 
     def _summary_rows_vary(self, cid: str, prefix: str) -> bool:
         """Whether a configured scope can select some summary rows and not others.
@@ -938,7 +978,7 @@ class OperationAuthorization:
         try:
             head = self.summary_manifest(cid)
             if head is not None:
-                if head[1].level < 6 or (complete and not self.summary_release(cid).complete):
+                if head[1].level < 6 or (complete and not self._summary_complete(cid, head)):
                     self.refuse()
                 return ()
         except collections.CollectionError as error:
