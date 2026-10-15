@@ -17,6 +17,7 @@ from pathlib import Path
 from .held_fs import (
     Capabilities,
     Chunks,
+    FileVersion,
     HeldDirectory,
     HeldFile,
     HeldFilesystem,
@@ -284,6 +285,11 @@ class PosixHeldFile(HeldFile):
         )
         if current != self.identity:
             raise OSError(errno.ESTALE, "held name identity changed")
+
+    def version(self) -> FileVersion:
+        self.check()
+        info = _fstat(self.descriptor)
+        return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def close(self) -> None:
         if not self.closed:

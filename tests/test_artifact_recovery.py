@@ -351,10 +351,33 @@ def test_scene_frame_uses_bounded_parent_copy_and_keeps_the_same_binding(
         return read_bytes(path)
 
     monkeypatch.setattr(Path, "read_bytes", no_whole_media)
-    assert companions.classify(vault, frame, artifact_copy=copied) == expected
+    proofs = {}
+    with companions.byte_proof_scope(proofs, allow_capture=True):
+        assert companions.classify(vault, frame, artifact_copy=copied) == expected
+
+    def no_copy(*args, **kwargs):
+        pytest.fail("the final classification copied a scene parent")
+
+    monkeypatch.setattr(reserved_paths, "copy_generic_file", no_copy)
+    with companions.byte_proof_scope(proofs, allow_capture=False):
+        assert companions.classify(vault, frame, artifact_copy=copied) == expected
+    with companions.byte_proof_scope({}, allow_capture=False):
+        with pytest.raises(companions.CompanionClassificationError):
+            companions.classify(vault, frame, artifact_copy=copied)
+    import yaml
+
+    from exomem import vault as vault_module
+
+    companion_path = vault / (frame + ".md")
+    metadata, body, _ = vault_module.parse_frontmatter(companion_path.read_text(), strict=True)
+    metadata["governance_companion"]["semantics"]["tags"] = ["restricted"]
+    companion_path.write_text("---\n" + yaml.safe_dump(metadata) + "---\n" + body)
+    with companions.byte_proof_scope(proofs, allow_capture=False):
+        assert companions.classify(vault, frame, artifact_copy=copied).tags == ("restricted",)
     (vault / parent).write_bytes(b"changed parent")
-    with pytest.raises(companions.CompanionClassificationError):
-        companions.classify(vault, frame, artifact_copy=copied)
+    with companions.byte_proof_scope(proofs, allow_capture=False):
+        with pytest.raises(companions.CompanionClassificationError):
+            companions.classify(vault, frame, artifact_copy=copied)
 
 
 def test_retained_copy_budget_stops_growth_and_cleans_partial_destination(
@@ -470,26 +493,44 @@ def test_authority_changed_during_staging_refuses_before_headers(
     assert (vault / stored["path"]).read_bytes() == b"%PDF-test"
 
 
-def test_application_logs_remove_artifact_authority(vault, caplog):
+@pytest.mark.parametrize("encoded", ["value", "key", "both"])
+def test_application_logs_remove_encoded_artifact_authority(vault, monkeypatch, caplog, encoded):
     import logging
+    from urllib.parse import unquote
+
+    from starlette.requests import Request
+    from uvicorn.protocols.utils import get_path_with_query_string
 
     from exomem import artifact_recovery, upload_tokens
     from exomem.governance.principal import owner_principal
 
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "private-authority")
+    descriptor = {"path": "sample.bin", "sha256": "0" * 64, "size": 0,
+                  "file_name": "sample.bin", "mime_type": "application/octet-stream",
+                  "mime_type_source": "stored"}
     token, _ = upload_tokens.mint_artifact(
         "private-authority",
         owner_principal(),
-        {"path": "sample.bin"},
+        descriptor,
         deployment=artifact_recovery.deployment(vault),
         delivery=upload_tokens.ARTIFACT_HTTPS,
     )
+    key = "%67%72ant" if encoded in {"key", "both"} else "grant"
+    value = "%76%34" + token[2:] if encoded in {"value", "both"} else token
+    query = f"context=#&{key}={value}"
+    scope = {"type": "http", "path": "/download", "query_string": query.encode()}
+    accepted = Request(scope).query_params["grant"]
+    assert artifact_recovery.claim(vault, accepted, delivery=upload_tokens.ARTIFACT_HTTPS)[0] == descriptor
     artifact_recovery.install_log_redaction()
     with caplog.at_level(logging.WARNING):
-        logging.getLogger("uvicorn.access").warning("GET %s", "/download?grant=" + token)
+        logging.getLogger("uvicorn.access").warning(
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1", "GET",
+            get_path_with_query_string(scope), "1.1", 200,
+        )
         logging.getLogger("fastmcp.server.server").warning(
             "Resource %s", artifact_recovery.RESOURCE_PREFIX + token
         )
-    assert token not in caplog.text
+    assert token not in unquote(caplog.text)
     assert "artifact-capability-removed" in caplog.text
 
 
@@ -699,3 +740,224 @@ def test_original_selector_refuses_caller_host_locations_and_missing_signer(
         with pytest.raises(ValueError, match="private signing authority is unavailable"):
             commands.op_transfer_artifact(vault, operation="download", artifact="missing.pdf")
     assert external.read_bytes() == b"external bytes"
+
+
+@pytest.mark.parametrize("delivery", ["https", "native_resource"])
+def test_in_place_rewrite_during_final_origin_check_releases_no_stale_original(
+    vault, monkeypatch, delivery
+):
+    import asyncio
+
+    from fastmcp import Client
+    from mcp.shared.exceptions import MCPError
+    from starlette.concurrency import run_in_threadpool
+    from test_upload_endpoint import _client
+
+    from exomem import artifact_recovery, auth_sessions, commands, server_transfer
+    from exomem.governance.principal import owner_principal, request_scope
+
+    http = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="transport-secret",
+                   EXOMEM_JWT_SIGNING_KEY="private-authority", EXOMEM_BASE_URL="https://archive.example")
+    stored = http.post("/upload", files={"file": ("sample.pdf", b"%PDF-first", "application/pdf")},
+                       data={"scope": "Archive", "category": "Records"},
+                       headers={"authorization": "Bearer transport-secret"}).json()
+    with request_scope(owner_principal(surface="mcp")):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=stored["path"])
+    original = vault / stored["path"]
+    current = artifact_recovery.require_current
+    checked = 0
+    changed = False
+
+    def observed_current(*args, **kwargs):
+        nonlocal checked
+        result = current(*args, **kwargs)
+        checked += 1
+        return result
+
+    async def origin(_who):
+        nonlocal changed
+        if checked == 2 and not changed:
+            info = original.stat()
+            with original.open("r+b") as file:
+                file.write(b"%PDF-other")
+            os.utime(original, ns=(info.st_atime_ns, info.st_mtime_ns))
+            changed = True
+        await asyncio.sleep(0)
+        return True
+
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", run_in_threadpool)
+    monkeypatch.setattr(artifact_recovery, "require_current", observed_current)
+    monkeypatch.setattr(auth_sessions, "origin_session_active", origin)
+    if delivery == "https":
+        response = http.get(handoff["deliveries"][delivery]["url"])
+        assert response.status_code == 404
+        assert b"%PDF-first" not in response.content
+    else:
+        async def consume():
+            async with Client(http.app.state.fastmcp_server) as client:
+                with pytest.raises(MCPError, match="original recovery is unavailable"):
+                    await client.read_resource(handoff["deliveries"][delivery]["uri"])
+        asyncio.run(consume())
+    assert changed
+    assert original.read_bytes() == b"%PDF-other"
+
+
+def test_cancelled_stage_entry_returns_spool_and_slot_without_garbage_collection(
+    vault, monkeypatch, tmp_path
+):
+    import asyncio
+    import threading
+
+    from exomem import artifact_recovery, commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    who = owner_principal(surface="mcp")
+    with request_scope(who):
+        stored = commands.op_preserve_evidence(vault, scope="Archive", category="Records",
+            filename="sample.bin", content="original")
+    started = threading.Event()
+    resume = threading.Event()
+    finished = threading.Event()
+    copy = reserved_paths.copy_generic_file
+    paths = []
+    # A single slot proves that cancellation returns capacity without waiting for GC.
+    monkeypatch.setattr(artifact_recovery, "_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    def blocked_copy(*args, **kwargs):
+        result = copy(*args, **kwargs)
+        paths.append(result.private_path)
+        started.set()
+        assert resume.wait(timeout=5)
+        return result
+
+    private_directory = reserved_paths.private_copy_directory
+    from contextlib import contextmanager
+
+    @contextmanager
+    def observed_directory():
+        try:
+            with private_directory() as private:
+                yield private
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(reserved_paths, "copy_generic_file", blocked_copy)
+    monkeypatch.setattr(reserved_paths, "private_copy_directory", observed_directory)
+
+    async def cancel_during_enter():
+        async def enter():
+            async with artifact_recovery.staged(vault, stored["path"], who):
+                pytest.fail("cancelled entry reached the consumer")
+        task = asyncio.create_task(enter())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            resume.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+        assert paths and all(not path.parent.exists() for path in paths)
+        assert await asyncio.to_thread(artifact_recovery._SLOTS.acquire, timeout=5)
+        artifact_recovery._SLOTS.release()
+
+    asyncio.run(cancel_during_enter())
+
+
+def test_scene_parent_proof_is_reused_off_loop_and_rechecked_before_headers(
+    vault, monkeypatch
+):
+    import asyncio
+    import threading
+
+    from starlette.concurrency import run_in_threadpool
+    from test_upload_endpoint import _client
+
+    from exomem import artifact_recovery, auth_sessions, commands, server_transfer
+    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.preserve import _render_sidecar
+
+    http = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="transport-secret",
+                   EXOMEM_JWT_SIGNING_KEY="private-authority", EXOMEM_BASE_URL="https://archive.example")
+    parent = "Knowledge Base/Evidence/Archive/movie.mp4"
+    frame = parent + ".frames/scene-000-t1250ms.jpg"
+    (vault / frame).parent.mkdir(parents=True)
+    block = b"p" * (1024 * 1024)
+    digest = hashlib.sha256()
+    with (vault / parent).open("wb") as source:
+        for _ in range(64):
+            source.write(block)
+            digest.update(block)
+    original = b"frame original"
+    (vault / frame).write_bytes(original)
+    (vault / (frame + ".md")).write_text(_render_sidecar(
+        artifact_name=Path(frame).name, scope="Archive", category="Frames", date_iso="2026-10-01",
+        media_type="image", evidence_file=frame, parent_media=parent, frame_ts=1.25,
+        binary_sha256=hashlib.sha256(original).hexdigest(), binary_size=len(original),
+        governance_artifact_path=frame, governance_artifact_sha256=hashlib.sha256(original).hexdigest(),
+        governance_artifact_size=len(original), governance_parent_path=parent,
+        governance_parent_sha256=digest.hexdigest(), governance_frame_timestamp_ms=1250,
+    ))
+    governance = vault / "Knowledge Base/_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes/restricted.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntags: [restricted]\n"
+    )
+    (governance / "rules/restricted.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        "scope_ids: [01ARZ3NDEKTSV4RRFFQ69G5FAV]\naudience: external\nceiling: 1\n"
+    )
+    with request_scope(RequestPrincipal("external", surface="mcp", issuer_family="test-issuer")):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=frame)
+    copy = reserved_paths.copy_generic_file
+    parent_copies = []
+    loop_thread = threading.get_ident()
+
+    def observed_copy(root, path, *args, **kwargs):
+        assert threading.get_ident() != loop_thread, "media copying blocked the event loop"
+        if path == parent:
+            parent_copies.append(path)
+        return copy(root, path, *args, **kwargs)
+
+    read = reserved_paths.read_generic_bytes
+
+    def no_whole_original(root, path, **kwargs):
+        assert path not in {frame, parent}, "classification read whole media bytes"
+        return read(root, path, **kwargs)
+
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", run_in_threadpool)
+    monkeypatch.setattr(reserved_paths, "copy_generic_file", observed_copy)
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", no_whole_original)
+    downloaded = http.get(handoff["deliveries"]["https"]["url"])
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == original
+    assert parent_copies == [parent]
+    parent_copies.clear()
+    checked = 0
+    current = artifact_recovery.require_current
+    changed = False
+
+    def observed_current(*args, **kwargs):
+        nonlocal checked
+        result = current(*args, **kwargs)
+        checked += 1
+        return result
+
+    async def origin(_who):
+        nonlocal changed
+        if checked == 2 and not changed:
+            info = (vault / parent).stat()
+            with (vault / parent).open("r+b") as source:
+                source.write(b"q")
+            os.utime(vault / parent, ns=(info.st_atime_ns, info.st_mtime_ns))
+            changed = True
+        await asyncio.sleep(0)
+        return True
+
+    monkeypatch.setattr(artifact_recovery, "require_current", observed_current)
+    monkeypatch.setattr(auth_sessions, "origin_session_active", origin)
+    assert http.get(handoff["deliveries"]["https"]["url"]).status_code == 404
+    assert changed
+    assert parent_copies == [parent]

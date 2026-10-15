@@ -396,54 +396,51 @@ class _OriginalDownloadResponse(Response):
 
     async def __call__(self, scope, receive, send):
         started = False
-        manager = None
         try:
             descriptor, who, _ = artifact_recovery.claim(
                 self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
             if not await auth_sessions.origin_session_active(who):
                 raise artifact_recovery.RecoveryUnavailable
-            manager = artifact_recovery.stage(self.vault_root, descriptor["path"], who, expected=descriptor)
-            copied, _ = await run_in_threadpool(manager.__enter__)
-            response = FileResponse(copied.private_path, filename=descriptor["file_name"],
-                media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS,
-                stat_result=copied.private_path.stat())
-            # FileResponse owns RFC-compliant filename quoting; replace the generic error disposition.
-            del response.headers["content-disposition"]
-            response.headers["content-disposition"] = "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe="")
+            async with artifact_recovery.staged(
+                self.vault_root, descriptor["path"], who, expected=descriptor
+            ) as (copied, _, proofs):
+                response = FileResponse(copied.private_path, filename=descriptor["file_name"],
+                    media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS,
+                    stat_result=copied.private_path.stat())
+                # FileResponse owns RFC-compliant filename quoting; replace the generic error disposition.
+                del response.headers["content-disposition"]
+                response.headers["content-disposition"] = "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe="")
 
-            async def checked_send(message):
-                nonlocal started
-                if message["type"] == "http.response.start":
-                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
-                    if not await auth_sessions.origin_session_active(who):
-                        raise artifact_recovery.RecoveryUnavailable
-                    revision = await run_in_threadpool(artifact_recovery.require_current, self.vault_root, copied, who)
-                    # Expiry can pass during rehashing a large original.
-                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
-                    if not await auth_sessions.origin_session_active(who):
-                        raise artifact_recovery.RecoveryUnavailable
-                    artifact_recovery.require_revision(self.vault_root, who, copied, revision)
-                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
-                    headers = dict(message.get("headers", []))
-                    for key, value in _RECOVERY_HEADERS.items():
-                        if key != "content-disposition":
-                            headers[key.encode()] = value.encode()
-                    headers[b"content-disposition"] = response.headers["content-disposition"].encode("latin-1")
-                    message = {**message, "headers": list(headers.items())}
-                    started = True
-                await send(message)
+                async def checked_send(message):
+                    nonlocal started
+                    if message["type"] == "http.response.start":
+                        artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                        if not await auth_sessions.origin_session_active(who):
+                            raise artifact_recovery.RecoveryUnavailable
+                        revision = await run_in_threadpool(artifact_recovery.require_current, self.vault_root, copied, who, byte_proofs=proofs)
+                        # Expiry can pass during rehashing a large original.
+                        artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                        if not await auth_sessions.origin_session_active(who):
+                            raise artifact_recovery.RecoveryUnavailable
+                        artifact_recovery.require_revision(self.vault_root, who, copied, revision, byte_proofs=proofs)
+                        artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                        headers = dict(message.get("headers", []))
+                        for key, value in _RECOVERY_HEADERS.items():
+                            if key != "content-disposition":
+                                headers[key.encode()] = value.encode()
+                        headers[b"content-disposition"] = response.headers["content-disposition"].encode("latin-1")
+                        message = {**message, "headers": list(headers.items())}
+                        started = True
+                    await send(message)
 
-            # A pathsend extension may consume the file after ASGI returns; cleanup must await the actual stream.
-            extensions = {key: value for key, value in scope.get("extensions", {}).items() if key != "http.response.pathsend"}
-            await response({**scope, "extensions": extensions}, receive, checked_send)
+                # A pathsend extension may consume the file after ASGI returns; cleanup must await the actual stream.
+                extensions = {key: value for key, value in scope.get("extensions", {}).items() if key != "http.response.pathsend"}
+                await response({**scope, "extensions": extensions}, receive, checked_send)
         except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError):
             if started:
                 raise
             await JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "original recovery is unavailable"},
                 status_code=404, headers=_RECOVERY_HEADERS)(scope, receive, send)
-        finally:
-            if manager is not None:
-                manager.__exit__(None, None, None)
 
 
 def register_transfer_routes(

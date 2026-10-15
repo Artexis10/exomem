@@ -19,6 +19,7 @@ from ctypes import (
     byref,
     c_byte,
     c_long,
+    c_longlong,
     c_ubyte,
     c_uint32,
     c_ulong,
@@ -35,6 +36,7 @@ from pathlib import Path
 from .held_fs import (
     Capabilities,
     Chunks,
+    FileVersion,
     HeldDirectory,
     HeldFile,
     HeldFilesystem,
@@ -78,6 +80,7 @@ FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 FILE_LINK_INFORMATION = 11
 FILE_DISPOSITION_INFORMATION = 4
 FILE_BOTH_DIRECTORY_INFORMATION = 3
+FILE_BASIC_INFO_CLASS = 0
 FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
 FILE_ID_INFO_CLASS = 18
 INVALID_HANDLE_VALUE = c_void_p(-1).value
@@ -109,6 +112,16 @@ class FILE_ATTRIBUTE_TAG_INFO(Structure):
 
 class FILE_ID_INFO(Structure):
     _fields_ = [("VolumeSerialNumber", c_ulonglong), ("FileId", c_byte * 16)]
+
+
+class FILE_BASIC_INFO(Structure):
+    _fields_ = [
+        ("CreationTime", c_longlong),
+        ("LastAccessTime", c_longlong),
+        ("LastWriteTime", c_longlong),
+        ("ChangeTime", c_longlong),
+        ("FileAttributes", c_ulong),
+    ]
 
 
 class BY_HANDLE_FILE_INFORMATION(Structure):
@@ -562,6 +575,16 @@ class WindowsHeldFile(HeldFile):
             raise OSError(errno.ESTALE, "held file changed")
         if not _same_object(_identity(_native(self.parent_descriptor)), self.parent_identity):
             raise OSError(errno.ESTALE, "held parent changed")
+
+    def version(self) -> FileVersion:
+        self.check()
+        assert GetFileInformationByHandleEx is not None
+        info = FILE_BASIC_INFO()
+        if not GetFileInformationByHandleEx(_native(self.descriptor), FILE_BASIC_INFO_CLASS, byref(info), sizeof(info)):
+            raise OSError("FileBasicInfo is unavailable")
+        # ChangeTime detects ordinary writes; a hostile host can explicitly alter these timestamps.
+        return FileVersion(self.identity, os.fstat(self.descriptor).st_size,
+                           int(info.LastWriteTime) * 100, int(info.ChangeTime) * 100)
 
     def close(self) -> None:
         if not self.closed:

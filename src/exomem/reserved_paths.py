@@ -193,6 +193,7 @@ class GenericFileCopy:
     sha256: str
     size: int
     private_identity: held_fs.StableIdentity
+    source_version: held_fs.FileVersion
     deadline: float | None = None
     max_bytes: int | None = None
 
@@ -1322,11 +1323,6 @@ def _generic_copy_source(vault_root: Path, value: object):
                             raise ReservedPathLeafError("IO_REFUSED")
 
 
-def _source_version(info: os.stat_result) -> tuple[int, int, int]:
-    return info.st_size, info.st_mtime_ns, info.st_ctime_ns
-
-
-
 @contextmanager
 def private_copy_directory():
     """Own a temporary spool with the existing Windows DACL or POSIX mode owner."""
@@ -1350,20 +1346,20 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
     try:
         _copy_deadline(deadline)
         with _generic_copy_source(vault_root, value) as (filesystem, parent, leaf, file):
-            before = os.fstat(file.descriptor)
-            if max_bytes is not None and before.st_size > max_bytes:
+            before = file.version()
+            if max_bytes is not None and before.size > max_bytes:
                 raise ReservedPathLeafError("IO_REFUSED")
             with held_fs.acquire(private_path.parent).require() as destination:
                 with destination.parent(".").require() as target:
-                    filesystem.copy(file, target, private_path.name, max_bytes=before.st_size if max_bytes is None else min(before.st_size, max_bytes), deadline=deadline).require()
+                    filesystem.copy(file, target, private_path.name, max_bytes=before.size if max_bytes is None else min(before.size, max_bytes), deadline=deadline).require()
                     with destination.file(target, private_path.name).require() as copied:
                         digest, size = _digest_descriptor(copied, deadline=deadline, max_bytes=max_bytes)
                         private_identity = copied.identity
-            after = os.fstat(file.descriptor)
-            if _source_version(before) != _source_version(after) or size != after.st_size:
+            after = file.version()
+            if before != after or size != after.size:
                 raise ReservedPathLeafError("IO_REFUSED")
             return GenericFileCopy(private_path, Path(vault_root), str(value), file.identity,
-                                   after, digest, size, private_identity, deadline, max_bytes)
+                                   os.fstat(file.descriptor), digest, size, private_identity, after, deadline, max_bytes)
     except (OSError, held_fs.HeldFsError) as error:
         raise ReservedPathLeafError("IO_REFUSED") from error
 
@@ -1372,11 +1368,11 @@ def require_current_generic_copy(copied: GenericFileCopy) -> None:
     """Rehash retained source and private bytes before authorizing their first byte."""
     try:
         with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
-            before = os.fstat(source.descriptor)
-            if source.identity != copied.identity or _source_version(before) != _source_version(copied.source_stat):
+            before = source.version()
+            if before != copied.source_version:
                 raise ReservedPathLeafError("IO_REFUSED")
             digest, size = _digest_descriptor(source, deadline=copied.deadline, max_bytes=copied.max_bytes)
-            if digest != copied.sha256 or size != copied.size or _source_version(before) != _source_version(os.fstat(source.descriptor)):
+            if digest != copied.sha256 or size != copied.size or before != source.version():
                 raise ReservedPathLeafError("IO_REFUSED")
         with held_fs.acquire(copied.private_path.parent).require() as filesystem:
             with filesystem.parent(".").require() as parent:
@@ -1386,6 +1382,19 @@ def require_current_generic_copy(copied: GenericFileCopy) -> None:
                     digest, size = _digest_descriptor(file, deadline=copied.deadline, max_bytes=copied.max_bytes)
                     if digest != copied.sha256 or size != copied.size:
                         raise ReservedPathLeafError("IO_REFUSED")
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.FileVersion:
+    """Check retained canonical identity and change time without reading its bytes."""
+    try:
+        _copy_deadline(copied.deadline)
+        with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
+            current = source.version()
+            if current != copied.source_version:
+                raise ReservedPathLeafError("IO_REFUSED")
+            return current
     except (OSError, held_fs.HeldFsError) as error:
         raise ReservedPathLeafError("IO_REFUSED") from error
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -25,6 +27,19 @@ _DATASET_FORMATS = {".csv": "csv", ".tsv": "tsv", ".json": "json"}
 _FRAME_PATH_RE = re.compile(
     r"^(?P<parent>.+)\.frames/(?P<leaf>scene-\d{3,}-t(?P<millis>\d+)ms\.jpg)$"
 )
+_BYTE_PROOFS: ContextVar[tuple[dict[str, reserved_paths.GenericFileCopy], bool] | None] = ContextVar(
+    "companion_byte_proofs", default=None
+)
+
+
+@contextmanager
+def byte_proof_scope(proofs: dict[str, reserved_paths.GenericFileCopy], *, allow_capture: bool):
+    """Reuse request-owned parent bytes while recomputing classification and authority."""
+    token = _BYTE_PROOFS.set((proofs, allow_capture))
+    try:
+        yield
+    finally:
+        _BYTE_PROOFS.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +356,18 @@ def _classify_scene_frame(
     )
     parent_path = match.group("parent")
     if isinstance(artifact, reserved_paths.GenericFileCopy):
+        scope = _BYTE_PROOFS.get()
+        parent = scope[0].get(parent_path) if scope is not None else None
+        if parent is not None:
+            try:
+                if parent.vault_root != vault_root or parent.relative_path != parent_path:
+                    raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+                reserved_paths.require_generic_copy_source_version(parent)
+            except reserved_paths.ReservedPathLeafError as error:
+                raise CompanionClassificationError("artifact_unsafe") from error
+            return _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match)
+        if scope is not None and not scope[1]:
+            raise CompanionClassificationError("artifact_unsafe")
         with reserved_paths.private_copy_directory() as temporary:
             try:
                 parent = reserved_paths.copy_generic_file(
@@ -349,6 +376,8 @@ def _classify_scene_frame(
                     deadline=artifact.deadline,
                 )
                 reserved_paths.require_current_generic_copy(parent)
+                if scope is not None:
+                    scope[0][parent_path] = parent
                 return _bind_frame_parent(result, artifact_path, artifact, companion, descriptor, parent_path, parent, match)
             except reserved_paths.ReservedPathLeafError as error:
                 raise CompanionClassificationError("artifact_unsafe") from error

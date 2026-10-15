@@ -618,7 +618,6 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
             from . import auth_sessions, upload_tokens
             from .governance.principal import effective_principal
 
-            manager = None
             try:
                 if grant != "authorized":
                     raise artifact_recovery.RecoveryUnavailable
@@ -627,24 +626,22 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                 caller = effective_principal()
                 if caller != who or descriptor["size"] > artifact_recovery.native_max_bytes():
                     raise artifact_recovery.RecoveryUnavailable
-                manager = artifact_recovery.stage(runtime.vault_root, descriptor["path"], who, expected=descriptor)
-                copied, _ = await run_in_threadpool(manager.__enter__)
-                # Only the bounded private copy reaches base64 serialization, never a large canonical original.
-                content = await run_in_threadpool(copied.private_path.read_bytes)
-                if not await auth_sessions.origin_session_active(who):
-                    raise artifact_recovery.RecoveryUnavailable
-                revision = await run_in_threadpool(artifact_recovery.require_current, runtime.vault_root, copied, who)
-                artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
-                if not await auth_sessions.origin_session_active(who):
-                    raise artifact_recovery.RecoveryUnavailable
-                artifact_recovery.require_revision(runtime.vault_root, who, copied, revision)
-                artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
-                return ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
+                async with artifact_recovery.staged(
+                    runtime.vault_root, descriptor["path"], who, expected=descriptor
+                ) as (copied, _, proofs):
+                    # Only the bounded private copy reaches base64 serialization, never a large canonical original.
+                    content = await run_in_threadpool(copied.private_path.read_bytes)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    revision = await run_in_threadpool(artifact_recovery.require_current, runtime.vault_root, copied, who, byte_proofs=proofs)
+                    artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    artifact_recovery.require_revision(runtime.vault_root, who, copied, revision, byte_proofs=proofs)
+                    artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
+                    return ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
             except artifact_recovery.RecoveryUnavailable:
                 raise ResourceError("original recovery is unavailable") from None
-            finally:
-                if manager is not None:
-                    manager.__exit__(None, None, None)
 
         expose_tier2 = register_rest_facade(
             mcp,

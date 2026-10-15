@@ -122,6 +122,18 @@ call can consume.
   Native admission carries the verified grant beside a sanitized dispatch URI,
   so framework resource spans do not retain capability bytes. Application log
   filters remove signed capabilities from framework errors and access records.
+  Access filtering parses the reserved grant query field, including encoded keys
+  and values, before formatting the request target.
+
+The final release checks the canonical file version before and after the live
+disclosure decision. POSIX change time and Windows `ChangeTime` detect ordinary
+in-place updates, including writes that restore the modification time.
+These witnesses do not resist a hostile host that can forge file metadata.
+Scene frames reuse only request-owned parent byte proof; their metadata and
+disclosure decisions remain live. The final pass refuses missing or changed
+parent proof instead of copying or hashing the parent on the event loop.
+If task cancellation interrupts stage entry, the worker retains cleanup ownership
+until entry finishes within the existing copy budget.
 
 ## Risks / Trade-offs
 

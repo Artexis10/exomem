@@ -10,13 +10,13 @@ import re
 import shutil
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from . import request_budget, reserved_paths, upload_tokens, vault
-from .governance import connector_boundary, egress, policy
+from .governance import companions, connector_boundary, egress, policy
 from .governance.principal import effective_principal, request_scope
 
 RESOURCE_PREFIX = "exomem://original/"
@@ -38,6 +38,17 @@ class RecoveryUnavailable(ValueError):
 
 class _CapabilityRedaction(logging.Filter):
     def filter(self, record):
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, target, version, status = record.args
+            if isinstance(target, str):
+                try:
+                    # ASGI query strings retain '#' as query data rather than a browser fragment.
+                    parsed = urlsplit(target, allow_fragments=False)
+                    if any(key == "grant" for key, _ in parse_qsl(parsed.query, keep_blank_values=True)):
+                        target = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "grant=artifact-capability-removed", ""))
+                except ValueError:
+                    target = "artifact-request-target-removed"
+                record.args = (client, method, target, version, status)
         record.msg = _CAPABILITY.sub("artifact-capability-removed", record.getMessage())
         record.args = ()
         return True
@@ -146,9 +157,7 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
     try:
         companion, _ = _companion(root, copied.relative_path)
         snapshot = reserved_paths.read_generic_bytes(root, companion)
-        identity = reserved_paths.inspect_generic_file(root, copied.relative_path)
-        if identity != copied.identity:
-            raise RecoveryUnavailable
+        source_version = reserved_paths.require_generic_copy_source_version(copied)
         compiled = policy.load(root)
         return (
             compiled.fingerprint,
@@ -157,6 +166,7 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
             connector_boundary.cache_identity(root, who, compiled),
             snapshot.identity,
             hashlib.sha256(snapshot.data).hexdigest(),
+            source_version,
         )
     except (
         reserved_paths.ReservedPathLeafError,
@@ -168,39 +178,47 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
         raise RecoveryUnavailable from error
 
 
-def _release(root: Path, copied: reserved_paths.GenericFileCopy, who) -> tuple:
+def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict,
+             allow_capture: bool) -> tuple:
     def fresh():
+        for proof in byte_proofs.values():
+            reserved_paths.require_generic_copy_source_version(proof)
         before = _admission_revision(root, who, copied)
-        with request_scope(who):
+        with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
             allowed = egress.release_allows_download(
                 root, copied.relative_path, principal=who, artifact_copy=copied
             )
         after = _admission_revision(root, who, copied)
+        for proof in byte_proofs.values():
+            reserved_paths.require_generic_copy_source_version(proof)
         if not allowed or before != after:
             raise RecoveryUnavailable
         return after
 
     # Nested resolution scopes share a memo. An empty context forces this final pass to read live host authority.
-    return Context().run(fresh)
+    try:
+        return Context().run(fresh)
+    except reserved_paths.ReservedPathLeafError as error:
+        raise RecoveryUnavailable from error
 
 
 def require_revision(
-    root: Path, who, copied: reserved_paths.GenericFileCopy, expected: tuple
+    root: Path, who, copied: reserved_paths.GenericFileCopy, expected: tuple, *, byte_proofs: dict
 ) -> None:
     current = Context().run(_admission_revision, root, who, copied)
     if current != expected:
         raise RecoveryUnavailable
     # Run full release after the asynchronous origin check: grant expiry and purpose are live authority too.
-    if _release(root, copied, who) != expected:
+    if _release(root, copied, who, byte_proofs=byte_proofs, allow_capture=False) != expected:
         raise RecoveryUnavailable
 
 
-def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who) -> tuple:
+def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict | None = None) -> tuple:
     try:
         reserved_paths.require_current_generic_copy(copied)
     except (reserved_paths.ReservedPathLeafError, OSError) as error:
         raise RecoveryUnavailable from error
-    return _release(root, copied, who)
+    return _release(root, copied, who, byte_proofs={} if byte_proofs is None else byte_proofs, allow_capture=True)
 
 
 @contextmanager
@@ -211,6 +229,7 @@ def stage(
     *,
     expected_sha256: str | None = None,
     expected: dict | None = None,
+    byte_proofs: dict | None = None,
 ):
     """Own private storage for one request, including refusal and cancellation cleanup."""
     if not who.resolved or not _SLOTS.acquire(blocking=False):
@@ -242,7 +261,7 @@ def stage(
                     and descriptor != expected
                 ):
                     raise RecoveryUnavailable
-                require_current(root, copied, who)
+                require_current(root, copied, who, byte_proofs=byte_proofs)
                 yield copied, descriptor
             except (
                 reserved_paths.ReservedPathLeafError,
@@ -254,6 +273,39 @@ def stage(
                 raise RecoveryUnavailable from error
     finally:
         _SLOTS.release()
+
+
+@asynccontextmanager
+async def staged(root: Path, selected: str, who, **kwargs):
+    """Hand off entered storage once; an abandoned worker owns its eventual cleanup."""
+    from starlette.concurrency import run_in_threadpool
+
+    proofs: dict[str, reserved_paths.GenericFileCopy] = {}
+    manager = stage(root, selected, who, byte_proofs=proofs, **kwargs)
+    ownership = threading.Lock()
+    entered = False
+    abandoned = False
+
+    def enter():
+        nonlocal entered
+        result = manager.__enter__()
+        with ownership:
+            cleanup = abandoned
+            entered = not cleanup
+        if cleanup:
+            manager.__exit__(None, None, None)
+        return result
+
+    try:
+        copied, descriptor = await run_in_threadpool(enter)
+        yield copied, descriptor, proofs
+    finally:
+        with ownership:
+            abandoned = True
+            cleanup = entered
+            entered = False
+        if cleanup:
+            manager.__exit__(None, None, None)
 
 
 def claim(root: Path, capability: str, *, delivery: str):
@@ -315,7 +367,8 @@ def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) ->
         and not url.query
         and not url.fragment
     )
-    with stage(root, selected, who, expected_sha256=expected_sha256) as (copied, descriptor):
+    proofs: dict[str, reserved_paths.GenericFileCopy] = {}
+    with stage(root, selected, who, expected_sha256=expected_sha256, byte_proofs=proofs) as (copied, descriptor):
         deliveries = {}
         if https:
             token, expires = upload_tokens.mint_artifact(
@@ -346,7 +399,7 @@ def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) ->
             raise ValueError(
                 "ORIGINAL_RECOVERY_UNAVAILABLE: configure HTTPS for originals above the native response budget"
             )
-        require_current(root, copied, who)
+        require_current(root, copied, who, byte_proofs=proofs)
         return {
             "handoff_status": "handoff_prepared",
             "committed": False,
