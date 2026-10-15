@@ -415,6 +415,37 @@ def test_requested_operator_abort_failure_cannot_be_a_known_finding(monkeypatch)
     assert ctx.report.stages["operator_restore_abort"]["status"] == "failed"
 
 
+def test_operator_image_build_reads_the_node_roles_x86_pin(monkeypatch, tmp_path) -> None:
+    """Changing node-role pin fields must not break the x86 operator image build."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    from cloud_rehearsal import operator_restore_abort
+
+    class ImageBuildReached(Exception):
+        pass
+
+    def command(args, **_kwargs):
+        if args[:2] == ["docker", "build"]:
+            raise ImageBuildReached
+        return SimpleNamespace(stdout="")
+
+    ctx = SimpleNamespace(
+        stack=SimpleNamespace(workdir=tmp_path, run_id="operator-pin"),
+        report=SimpleNamespace(stages={"operator_restore_abort": {}}),
+    )
+    monkeypatch.setattr(operator_restore_abort, "run", command)
+    monkeypatch.setattr(operator_restore_abort, "observed_volume_mount", lambda *_args: "mock")
+    monkeypatch.setattr(operator_restore_abort, "_labels", lambda *_args, **_kwargs: [])
+    with pytest.raises(ImageBuildReached):
+        operator_restore_abort._start_operator(ctx, "snapshot", "/ignored")
+    defaults = yaml.safe_load((operator_restore_abort.images.REPO_ROOT / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+    assert ctx.report.stages["operator_restore_abort"]["operator_k3s"] == {
+        "version": defaults["k3s_version"], "sha256": defaults["k3s_binaries"]["x86_64"]["sha256"],
+    }
+
+
 def test_operator_configuration_keeps_certificate_verification(tmp_path: Path) -> None:
     """The runner's bridge route must not replace the disposable CA with insecure TLS."""
     import yaml
