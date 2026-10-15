@@ -25,6 +25,8 @@ _INITIAL_FORMAT = 1
 _FORMAT_BYTES = 256
 _ORIGIN = dt.datetime(1, 1, 1, tzinfo=dt.UTC)
 _MICROSECONDS_PER_DAY = 86400 * 1000000
+_COORDINATE_LIMIT = dt.date.max.toordinal() * _MICROSECONDS_PER_DAY
+_UNIX_COORDINATE = (dt.date(1970, 1, 1).toordinal() - 1) * _MICROSECONDS_PER_DAY
 _DEFAULT_INSTANT = InstantSpelling("T", "", 0, "Z")
 
 
@@ -36,12 +38,24 @@ class TemporalView(NamedTuple):
     spelling: InstantSpelling | None
     text_bytes: int
 
+    def instant_order(self) -> int:
+        """Return an instant's exact microseconds since the Unix epoch."""
+        return self.coordinate - _UNIX_COORDINATE
+
+    def instant_day(self, minutes: int) -> dt.date:
+        """Apply a supplied offset, preserving datetime's boundary overflow."""
+        shifted = self.coordinate + minutes * 60 * 1000000
+        if not 0 <= shifted < _COORDINATE_LIMIT:
+            raise OverflowError("date value out of range")
+        return dt.date.fromordinal(shifted // _MICROSECONDS_PER_DAY + 1)
+
 
 class _ReconstructionFormat(NamedTuple):
     spelling: InstantSpelling
     zone: dt.tzinfo
     quantum: int
     text_bytes: int
+    shift: int
 
 
 def _coordinate(instant: dt.datetime) -> int:
@@ -49,14 +63,16 @@ def _coordinate(instant: dt.datetime) -> int:
     return delta.days * _MICROSECONDS_PER_DAY + delta.seconds * 1000000 + delta.microseconds
 
 
-def _local_instant(coordinate: int, spelling: InstantSpelling, compiled=None) -> dt.datetime:
-    instant = _ORIGIN + dt.timedelta(microseconds=coordinate)
-    zone = compiled.zone if compiled is not None else dt.timezone(dt.timedelta(minutes=offset_minutes(spelling.offset)))
-    local = instant.astimezone(zone)
-    quantum = compiled.quantum if compiled is not None else 10 ** max(0, 6 - spelling.fraction_digits)
-    if local.microsecond % quantum:
+def _local_instant(coordinate: int, spelling: InstantSpelling, compiled=None, *, day_only=False) -> dt.date | dt.datetime:
+    compiled = _compiled_spelling(spelling) if compiled is None else compiled
+    local_coordinate = coordinate + compiled.shift
+    if not 0 <= coordinate < _COORDINATE_LIMIT or not 0 <= local_coordinate < _COORDINATE_LIMIT:
+        raise OverflowError("date value out of range")
+    if local_coordinate % compiled.quantum:
         raise TypedStorageError("native instant precision cannot represent its coordinate")
-    return local
+    if day_only:
+        return dt.date.fromordinal(local_coordinate // _MICROSECONDS_PER_DAY + 1)
+    return (_ORIGIN + dt.timedelta(microseconds=coordinate)).astimezone(compiled.zone)
 
 
 def _text_length(spelling: InstantSpelling) -> int:
@@ -89,10 +105,15 @@ def _format(raw: object) -> InstantSpelling:
         raise TypedStorageError("native instant format is invalid") from error
 
 
+def _compiled_spelling(spelling: InstantSpelling) -> _ReconstructionFormat:
+    minutes = offset_minutes(spelling.offset)
+    return _ReconstructionFormat(spelling, dt.timezone(dt.timedelta(minutes=minutes)),
+                                 10 ** max(0, 6 - spelling.fraction_digits), _text_length(spelling),
+                                 minutes * 60 * 1000000)
+
+
 def _compile_format(raw: object) -> _ReconstructionFormat:
-    spelling = _format(raw)
-    return _ReconstructionFormat(spelling, dt.timezone(dt.timedelta(minutes=offset_minutes(spelling.offset))),
-                                 10 ** max(0, 6 - spelling.fraction_digits), _text_length(spelling))
+    return _compiled_spelling(_format(raw))
 
 
 def _unpack(cell: object) -> tuple[int, int]:
@@ -143,7 +164,8 @@ def encode(value: object, kind: str, metadata: FieldMetadata) -> int | bytes | s
     return _FRAME.pack(_VERSION, coordinate - epoch, metadata.intern(asdict(spelling)))
 
 
-def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int | None) -> TemporalView | str | None:
+def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int | None,
+            day_only: bool = False) -> TemporalView | str | None:
     """Share frame, format, range and precision validation before rendering text."""
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise TypedStorageError("native temporal decoding requires a byte budget")
@@ -175,7 +197,8 @@ def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int 
         spelling, length = compiled.spelling, compiled.text_bytes
         if max_bytes is not None and length > max_bytes:
             raise TypedStorageError("native instant exceeds the decoding budget")
-        return TemporalView(epoch + delta, _local_instant(epoch + delta, spelling, compiled), spelling, length)
+        return TemporalView(epoch + delta, _local_instant(epoch + delta, spelling, compiled, day_only=day_only),
+                            spelling, length)
     except (ValueError, TypeError, OverflowError, collections.CollectionError) as error:
         raise TypedStorageError("native temporal reconstruction is invalid") from error
 

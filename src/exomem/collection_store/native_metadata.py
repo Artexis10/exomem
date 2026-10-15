@@ -120,6 +120,9 @@ def read_format(conn, collection_id: str, generation: int, ordinal: int, format_
 
 def snapshot_fields(conn, collection_id: str, generation: int, ordinals, *, database: str):
     """Memoize successful reads only for one executing scan's immutable namespace."""
+    from .native_temporal import _compile_format
+    from .typed_storage import TypedStorageError
+
     epochs, formats = {}, {}
     retained = 0
 
@@ -138,8 +141,6 @@ def snapshot_fields(conn, collection_id: str, generation: int, ordinals, *, data
             return epochs[self.ordinal]
 
         def _entry(self, format_id, max_bytes):
-            from .typed_storage import TypedStorageError
-
             nonlocal retained
             if type(max_bytes) is not int or max_bytes < 0:
                 raise TypedStorageError("native reconstruction requires a decoding budget")
@@ -165,8 +166,6 @@ def snapshot_fields(conn, collection_id: str, generation: int, ordinals, *, data
             return _parse_format(self._entry(format_id, max_bytes)[0])
 
         def temporal_format(self, format_id, *, max_bytes):
-            from .native_temporal import _compile_format
-
             entry = self._entry(format_id, max_bytes)
             if entry[2] is None:
                 entry[2] = _compile_format(_parse_format(entry[0]))

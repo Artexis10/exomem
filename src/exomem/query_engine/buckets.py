@@ -124,7 +124,8 @@ class Basis:
             spelling = raw.spelling
             if spelling is None:
                 return None
-            instant, written_day = raw.local, raw.local.date()
+            instant = raw.local
+            written_day = instant if type(instant) is dt.date else instant.date()
             utc_spelling = spelling.offset == "Z"
             own = 0 if utc_spelling else offset_minutes(spelling.offset)
         elif type(raw) is str:
@@ -145,9 +146,11 @@ class Basis:
             minutes = own
         if minutes is None:
             return None
-        order = instant_order(instant) if ordered else None
+        order = (raw.instant_order() if native else instant_order(instant)) if ordered else None
         if minutes == own:
             return written_day, order
+        if native:
+            return raw.instant_day(minutes), order
         shift = _SHIFTS.get(minutes)
         if shift is None:
             shift = _SHIFTS[minutes] = dt.timedelta(minutes=minutes)

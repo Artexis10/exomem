@@ -91,26 +91,47 @@ def test_first_metadata_is_atomic_and_a_later_snapshot_sees_it(database):
 
 
 @pytest.mark.parametrize("offset_field", [None, "offset"])
-def test_temporal_views_keep_local_day_and_recency_when_source_offsets_are_unknown_or_overridden(database, offset_field):
+@pytest.mark.parametrize("day_only", [False, True])
+def test_temporal_views_keep_local_day_and_recency_when_source_offsets_are_unknown_or_overridden(database, offset_field, day_only):
     """Skipping lexical reconstruction must preserve source-local buckets, flags and exact recency."""
     conn, _ = database
     field = native_metadata.FieldMetadata(conn, CID, 1, 0)
     examples = ("2024-01-01T23:30:00Z", "2024-01-02t00:30:00,1200+02:00",
-                "2024-01-01T23:30:00-00:00", "20240101T233000Z", "2024-01-01T23:30:00")
+                "2024-01-01T23:30:00-00:00", "20240101T233000Z", "2024-01-01T23:30:00",
+                "1960-01-01T23:30:00.123456-02:00")
     conn.execute("BEGIN")
     cells = [native_temporal.encode(source, "datetime", field) for source in examples]
     conn.commit()
     snapshot = native_metadata.snapshot_fields(conn, CID, 1, (0,), database="main")[0]
     basis = Basis("when", "instant", offset_field)
     for source, cell in zip(examples, cells, strict=True):
-        view = native_temporal.inspect(cell, "datetime", snapshot, max_bytes=100)
+        view = native_temporal.inspect(cell, "datetime", snapshot, max_bytes=100, day_only=day_only)
         for supplied in (None, "+05:30", "-03:00", "-00:00", "invalid"):
             offsets = {} if supplied is None else {"offset": supplied}
             for ordered in (True, False):
                 assert basis.locate({"when": view, **offsets}, ordered=ordered) == basis.locate(
                     {"when": source, **offsets}, ordered=ordered)
         with pytest.raises(TypedStorageError, match="budget"):
-            native_temporal.inspect(cell, "datetime", snapshot, max_bytes=len(source.encode()) - 1)
+            native_temporal.inspect(cell, "datetime", snapshot, max_bytes=len(source.encode()) - 1, day_only=day_only)
+
+
+@pytest.mark.parametrize(("source", "offset"), (
+    ("0001-01-01T00:00:00Z", "-01:00"), ("9999-12-31T23:59:59Z", "+01:00"),
+))
+def test_native_time_basis_preserves_source_override_overflow(database, source, offset):
+    """A day-only scan must not turn an overflowing supplied offset into a valid bucket."""
+    conn, _ = database
+    field = native_metadata.FieldMetadata(conn, CID, 1, 0)
+    conn.execute("BEGIN")
+    cell = native_temporal.encode(source, "datetime", field)
+    conn.commit()
+    basis = Basis("when", "instant", "offset")
+    with pytest.raises(OverflowError):
+        basis.locate({"when": source, "offset": offset})
+    for day_only in (False, True):
+        view = native_temporal.inspect(cell, "datetime", field, max_bytes=100, day_only=day_only)
+        with pytest.raises(OverflowError):
+            basis.locate({"when": view, "offset": offset})
 
 
 def test_enum_ids_preserve_equality_equivalent_source_types_and_signed_zero(database):
@@ -164,7 +185,8 @@ def test_bad_frames_unknown_formats_and_large_reconstruction_refuse_with_storage
 @pytest.mark.parametrize(("original", "corrupt_delta"), (
     ("2024-01-01T00:00:00Z", 1),
     ("9999-12-31T23:59:59+01:00", 3600 * 1000000),
-), ids=("precision", "local-range"))
+    ("0001-01-01T01:00:00+01:00", -60 * 1000000),
+), ids=("precision", "local-range", "utc-range"))
 def test_unrepresentable_temporal_cells_refuse_decode_and_comparison_after_reopen(database, original, corrupt_delta):
     conn, path = database
     conn.execute("BEGIN")
@@ -179,3 +201,5 @@ def test_unrepresentable_temporal_cells_refuse_decode_and_comparison_after_reope
             native_temporal.decode(cell, "datetime", metadata, max_bytes=100)
         with pytest.raises(TypedStorageError):
             native_temporal.operand(cell, "datetime", metadata, max_bytes=100)
+        with pytest.raises(TypedStorageError):
+            native_temporal.inspect(cell, "datetime", metadata, max_bytes=100, day_only=True)
