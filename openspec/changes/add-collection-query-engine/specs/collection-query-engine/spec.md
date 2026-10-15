@@ -505,6 +505,25 @@ The descriptor SHALL reference generation-scoped append-only epoch and reconstru
 
 A frozen field codec SHALL preserve values admitted by legal later schema revisions. Values outside that codec's representable domain SHALL use one reserved, versioned JSON escape frame with bounded decoding. Malformed metadata, failed encoding and exceeded budgets SHALL remain errors rather than escape conditions. Selected reads SHALL enforce admission inside escaped containers. Comparison semantics SHALL follow the logical query kind, independently of the payload codec. Existing projected type-change restrictions SHALL remain unchanged.
 
+Each native payload SHALL retain its canonical values byte extent, measured before compaction and protected with the payload. Full reconstruction SHALL use that extent and verify exact consumption. Selected reads SHALL use their caller's existing budget without requiring the full row to fit. This encoding SHALL NOT impose the import source-row limit on existing Records.
+
+Native generated comparison operands SHALL bind a fixed function version, immutable payload generation and physical file role. Integer-to-number widening SHALL preserve the existing generated expressions. Metadata reads SHALL use the executing snapshot without a cache that survives rollback or connection rebinding. Missing metadata SHALL refuse the affected comparison. Numeric operands SHALL preserve exact ordering across ordinary and overflow bands. Scoped temporary relations SHALL retain only released operands and row identity/version.
+
+#### Scenario: Late metadata survives rollback and reopening
+- **GIVEN** a published native index with no present timestamp and a query generation different from its payload generation
+- **WHEN** the first timestamp commits, another format rolls back, and a different format reuses that identifier
+- **THEN** indexed and unindexed comparison agree after reopening, including when the derived file has another attachment alias
+
+#### Scenario: Widening and changed shapes retain exact comparisons
+- **WHEN** an indexed integer widens to number, or a new index addresses a legally revised nested field
+- **THEN** fractional and exact large values compare correctly, while older incompatible shapes retain missing-path semantics
+
+#### Scenario: A small field remains readable inside a large record
+- **WHEN** a valid record exceeds the import source-row limit through individually accepted values and migrates to native storage
+- **THEN** reopening, an unrelated update and a legal revision preserve its full values, history, hashes and measured extent
+- **AND** a small admitted selection remains readable while an oversized selection retains the existing query refusal
+- **AND** a compact amplification frame cannot expand beyond its independently measured extent
+
 #### Scenario: A legal field revision preserves frozen payloads
 - **WHEN** an unprojected optional string field containing null and missing values becomes numeric and gains its first index
 - **AND** writes add signed zero and an integer above signed-64 range before index publication

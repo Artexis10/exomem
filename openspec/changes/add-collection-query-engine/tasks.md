@@ -122,6 +122,8 @@ The source candidate passes 893 storage/query checks against released main and 1
 
   Preserve legal schema evolution through a reserved JSON escape frame for values outside a frozen field codec. Bind query semantics to the logical projection kind. Include a populated field revision followed by fractional/signed-zero/large-integer writes, index publication and reopen without replacing the payload descriptor.
 
+  Retain the measured canonical values byte extent in each native payload. Verify a previously accepted large record through migration, reopen, update and revision; small selected fields must retain their existing query budgets. Reject reconstruction that exceeds or disagrees with the recorded extent, and count that INTEGER in capacity results.
+
 ## 3. Q3 — Grouped analysis and declared joins
 
 - [ ] 3.1 Red: add reference tests for four group keys, multiple named aggregates, empty reductions, distinct-count, null/missing groups, source-local day/ISO-week/month buckets, HAVING and group pagination; verify 1,001 pre-HAVING groups refuse instead of returning a partial reduction.
