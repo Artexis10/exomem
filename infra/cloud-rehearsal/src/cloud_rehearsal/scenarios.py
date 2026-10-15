@@ -133,6 +133,7 @@ class Context:
     resolver: Resolver
     report: Report
     cli_image: str | None = None
+    operator_restore_abort: bool = False
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -1157,11 +1158,19 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
         snapshot_logs(ctx)
         detail = "" if record.status == PASSED else f" -- {record.failure.get('message', '')[:300]}"  # type: ignore[union-attr]
         print(f"[rehearsal] step {number} {name}: {record.status.upper()} in {record.seconds}s{detail}", flush=True)
+        if number == 2 and ctx.operator_restore_abort:
+            from .operator_restore_abort import run_abort
+
+            with stage(ctx.report, "operator_restore_abort"):
+                await run_abort(ctx)
         if number == 2 and ctx.cli_image:
             from .native_import import import_folder
 
             with stage(ctx.report, "cloud_import"):
                 ctx.report.stages["cloud_import"]["evidence"] = await import_folder(ctx, ctx.cli_image)
+    if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
+        with stage(ctx.report, "operator_restore_abort"):
+            raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:
