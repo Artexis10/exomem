@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import add, commands, link, memory_refs, note, preserve
+from exomem import add, call_spans, commands, link, memory_refs, note, preserve
 from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 7, 9)
@@ -512,9 +512,27 @@ def test_read_and_edit_accept_canonical_reference(vault: Path) -> None:
         status="draft",
         today=TODAY,
     )
-    fetched = commands.op_get(vault, path=created.ref)
+    token = call_spans.MCP_CALL_TOKEN.set("reference-read-diagnostics")
+    try:
+        fetched = commands.op_get(vault, path=created.ref)
+        spans = {
+            span["name"]: span
+            for span in call_spans.pop_call_spans("reference-read-diagnostics")
+        }
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(token)
     assert fetched["path"] == created.path
     assert fetched["ref"] == created.ref
+    assert {
+        "read.resolve_identifier", "read.prepare", "read.page",
+        "read.reference", "read.release", "memory_refs.identity_census",
+    } <= spans.keys()
+    assert spans["memory_refs.identity_census"]["fields"]["pages"] >= 1
+    assert all(
+        isinstance(value, int)
+        for span in spans.values()
+        for value in span.get("fields", {}).values()
+    )
 
     edited = commands.op_edit(
         vault,

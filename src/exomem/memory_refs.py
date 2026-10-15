@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from . import reserved_paths
+from . import call_spans, reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
@@ -882,8 +882,12 @@ def paths_for_ids_read_only(
     # So the work is a function of the batch alone: how many well-formed ids
     # were asked for, never which of them exist or who may see them. The cost
     # is one walk per call for a deliberate, on-demand read.
+    with call_spans.span("memory_refs.identity_census", {}) as measured:
+        pages = _scan_pages(vault_root)
+        if measured is not None:
+            measured["pages"] = len(pages)
     by_id: dict[str, set[str]] = {}
-    for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
+    for path, exomem_id, _raw, _hash, status in pages:
         if status == "valid" and exomem_id is not None:
             by_id.setdefault(exomem_id, set()).add(path)
 
