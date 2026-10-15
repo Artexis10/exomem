@@ -120,7 +120,11 @@ The source candidate passes 893 storage/query checks against released main and 1
 
   Implement schema 11 and generation-bound typed-v2 history independently of query generations, with frozen identity codecs and append-only reconstruction metadata. Verify native store and derived workflows, including opaque identities, absent-then-present timestamps, retained versions/sources, query-only rebuilds, interrupted catch-up and failed publication. Keep this task open until native capacity, import throughput and memory evidence meet its existing targets.
 
+  Keep general oversized-record migration open while its streaming construction and parser seam remains unsupported. Prove the durable pending diagnostic and unchanged ready service without treating that boundary as a Record validation cap.
+
   Preserve legal schema evolution through a reserved JSON escape frame for values outside a frozen field codec. Bind query semantics to the logical projection kind. Include a populated field revision followed by fractional/signed-zero/large-integer writes, index publication and reopen without replacing the payload descriptor.
+
+  Keep native physical tables incrementally readable with expression indexes and shared compiler-owned read aliases. Verify both continuation directions use bounded disjoint seeks without a temporary sort. Verify large JSON, escaped and residual containers preserve small admitted selections, including scoped TEMP preparation. Dense reductions must preserve the unchanged analytics deadline, exact source results and byte budgets through the shared temporal codec.
 
   Retain the measured canonical values byte extent in each native payload. Verify a previously accepted large record through migration, reopen, update and revision; small selected fields must retain their existing query budgets. Reject reconstruction that exceeds or disagrees with the recorded extent, and count that INTEGER in capacity results.
 

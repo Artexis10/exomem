@@ -1,3 +1,4 @@
+.uvbin/
 .venv/
 .venv-*/
 __pycache__/

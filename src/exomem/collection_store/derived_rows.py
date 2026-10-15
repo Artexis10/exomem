@@ -42,7 +42,16 @@ from typing import Any
 
 from .. import structured_collections as collections
 from ..reserved_paths import _SQLITE_SUFFIXES  # the SQLite file family, defined once there
-from . import index_migrations, rollups, summary, typed_storage
+from . import (
+    index_migrations,
+    native_identity,
+    native_metadata,
+    native_rows,
+    rollups,
+    summary,
+    typed_storage,
+)
+from .native_projections import NativeProjectionPlan
 from .query_indexes import ProjectionPlan
 
 FILENAME = "collections-derived.sqlite"
@@ -53,7 +62,7 @@ SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
 #: Rows one rebuild step applies in one transaction, so requests are served between steps.
 REBUILD_STEP_ROWS = 2000
 #: This file's own layout; a file of another one is discarded, and its rows rebuild from the log.
-LAYOUT = 2
+LAYOUT = 3
 
 _DDL = (
     "CREATE TABLE IF NOT EXISTS derived_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
@@ -192,7 +201,9 @@ class Target:
     def reads(self, schema: str) -> typed_storage.Layout:
         """The layout a reader joins: the one rows table stands for ``items`` and the current table."""
         table = f"{schema}.{self.table}"
-        return replace(self.layout, items=table, current=table)
+        context = {"database": schema} if self.layout.encoding == typed_storage.TYPED_V2 else {}
+        items = self.projection.read_relation(schema) if context else table
+        return replace(self.layout, items=items, current=table, **context)
 
 
 def target(conn: sqlite3.Connection, collection_id: str) -> Target | None:
@@ -213,6 +224,8 @@ def _rows_ddl(goal: Target) -> tuple[str, ...]:
     engine compiles them. A tag column takes no NOT NULL, which an added column needs a
     default for; ``typed_storage.decode_value`` refuses a NULL tag.
     """
+    if isinstance(goal.projection, NativeProjectionPlan):
+        return goal.projection.create_ddl()
     added = [column for n in range(len(goal.layout.fields)) for column in (f"t{n} INTEGER", f"v{n} ANY", f"k{n} ANY")]
     # The store's items columns a reader filters or reads, computed so they cost no bytes per row.
     added += ["r TEXT", f"collection_id TEXT GENERATED ALWAYS AS ('{goal.collection_id}') VIRTUAL",
@@ -320,6 +333,10 @@ class Store:
         for attempt in (0, 1):
             conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
             try:
+                from .native_operands import FileRole, register_native_operands
+
+                register_native_operands(conn, databases={FileRole.DERIVED: "main"})
+                conn.execute("PRAGMA recursive_triggers=ON")
                 conn.execute("PRAGMA journal_mode=WAL")
                 # Every state this file can lose by a power cut is one reconcile repairs.
                 conn.execute("PRAGMA synchronous=NORMAL")
@@ -328,6 +345,7 @@ class Store:
                     raise sqlite3.DatabaseError("the derived file has another layout")
                 for statement in _DDL:
                     conn.execute(statement)
+                native_metadata.install(conn, canonical=False)
                 conn.execute(f"PRAGMA user_version={LAYOUT}")
                 return conn
             except sqlite3.DatabaseError:
@@ -542,11 +560,11 @@ def open_store(writer) -> Store:
 # The apply function: one batch of rows into the derived layout
 
 
-def _decoder(goal: Target):
-    width = 3 * len(goal.layout.fields) + 1
+def _decoder(goal: Target, conn):
+    width = len(goal.layout.value_columns) + 1
 
     def decode(columns) -> dict[str, Any]:
-        return typed_storage.decode_row(goal.layout, columns[:width])
+        return typed_storage.decode_row(goal.layout, columns[:width], connection=conn)
 
     return decode
 
@@ -554,13 +572,14 @@ def _decoder(goal: Target):
 def _members(goal: Target):
     """Read a mirror bucket's indexed members from the collection's own rows."""
     columns = ",".join(f"d.{column}" for column in (*goal.layout.value_columns, "r"))
-    decode = _decoder(goal)
-
     def members(conn, rollup_id, bucket, groups):
+        decode = _decoder(goal, conn)
         for row_id, key, *values in conn.execute(
                 f"SELECT d.row_id,d.item_key,{columns} FROM rollup_members m JOIN {goal.table} d "  # noqa: S608
                 "ON d.row_id=m.row_id WHERE m.rollup_id=? AND m.bucket=? AND m.groups=?",
                 (rollup_id, bucket, groups)).fetchall():
+            if goal.layout.encoding == typed_storage.TYPED_V2:
+                key = native_identity.decode(key, goal.layout.identity)
             yield row_id, key, decode(values)
 
     return members
@@ -579,35 +598,44 @@ def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]
     if not items:
         return []
     layout, table = goal.layout, goal.table
+    native = isinstance(goal.projection, NativeProjectionPlan)
     columns = (*layout.value_columns, "r")
     found: dict[str, tuple[int, int, tuple]] = {}
     keys = list(dict.fromkeys(key for _, key, _ in items))
     for offset in range(0, len(keys), 500):
         chunk = keys[offset:offset + 500]
+        stored_keys = [native_identity.encode(key, layout.identity) for key in chunk] if native else chunk
         for key, row_id, version, *encoded in conn.execute(
                 f"SELECT item_key,row_id,row_version,{','.join(columns)} FROM {table} "  # noqa: S608
-                f"WHERE item_key IN ({','.join('?' for _ in chunk)})", chunk):
+                f"WHERE item_key IN ({','.join('?' for _ in chunk)})", stored_keys):
+            if native:
+                key = native_identity.decode(key, layout.identity)
             found[key] = (row_id, version, tuple(encoded))
-    insert = (f"INSERT INTO {table}(item_key,row_version,keys_json,{','.join(columns)}) "  # noqa: S608
-              f"VALUES (?,?,?,{','.join('?' for _ in columns)})")
-    update = (f"UPDATE {table} SET row_version=?,keys_json=?,"  # noqa: S608
+    projection_column = "" if native else ",keys_json"
+    projection_parameter = "" if native else ",?"
+    projection_update = "" if native else "keys_json=?,"
+    insert = (f"INSERT INTO {table}(item_key,row_version{projection_column},{','.join(columns)}) "  # noqa: S608
+              f"VALUES (?,?{projection_parameter},{','.join('?' for _ in columns)})")
+    update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
-    decode, upkeep = _decoder(goal), rollups.Upkeep(conn, members=_members(goal))
+    decode, upkeep = _decoder(goal, conn), rollups.Upkeep(conn, members=_members(goal))
     flagged: dict[int, int] = {}
     touched: set[tuple[int, str, str]] = set()
     outcomes = []
     for index, key, values in items:
-        encoded = typed_storage.encode_row(layout, values)
+        encoded = typed_storage.encode_row(layout, values, connection=conn)
         before = found.get(key)
-        if before is not None and before[2] == encoded:
+        same = before is not None and (native_rows.encoded_equal(before[2], encoded) if native else before[2] == encoded)
+        if same:
             outcomes.append({"index": index, "item_key": key, "outcome": "unchanged"})
             continue
-        projected = goal.projection.encode(values)
+        projected = () if native else (goal.projection.encode(values),)
+        stored_key = native_identity.encode(key, layout.identity) if native else key
         if before is None:
-            row_id, version, previous = conn.execute(insert, (key, 1, projected, *encoded)).lastrowid, 1, None
+            row_id, version, previous = conn.execute(insert, (stored_key, 1, *projected, *encoded)).lastrowid, 1, None
         else:
             row_id, version, previous = before[0], before[1] + 1, decode(before[2])
-            conn.execute(update, (version, projected, *encoded, row_id))
+            conn.execute(update, (version, *projected, *encoded, row_id))
         found[key] = (row_id, version, encoded)
         for rollup_id, rollup in goal.rollups:
             change, places = upkeep.move(rollup_id, rollup, row_id, key, values, previous)
@@ -736,6 +764,10 @@ def snapshot(store_path: Path, destination: Path) -> dict[str, Any] | None:
     staged.unlink(missing_ok=True)
     with closing(sqlite3.connect(f"{found.resolve().as_uri()}?mode=ro", uri=True)) as source, \
             closing(sqlite3.connect(staged)) as copy:
+        from .native_operands import FileRole, register_native_operands
+
+        for conn in (source, copy):
+            register_native_operands(conn, databases={FileRole.DERIVED: "main"})
         source.backup(copy)
         intact = copy.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     if not intact:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from ..collection_store.query_indexes import ProjectionPlan
 from ..query_compat import match
 from . import ir
+from .ordered_seeks import Seek
 from .runtime import QueryError
 from .scalars import LINK_TAG, STRING_TAG, ScalarValueError, parse_instant, scalar_key
 
@@ -25,6 +26,7 @@ class CompiledRows:
     usable_index: str | None
     page_bound: bool
     as_of: str
+    seeks: tuple[Seek, ...] | None = None
 
 
 def text_predicate(op: str, payload: str, value: str) -> bool:
@@ -105,6 +107,17 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
     the caller's admitted projector, not executable JSON paths. page_bound is
     only a structural interval proof; callers still charge and seal execution.
     """
+    from ..collection_store.native_projections import NativeProjectionPlan
+
+    if isinstance(projection, NativeProjectionPlan):
+        from .native_sql import compile_rows as compile_native
+
+        return compile_native(query, projection, as_of=as_of, after=after)
+    instant = _validate_shape(query, projection, as_of, after)
+    return _compile_legacy(query, projection, instant=instant, after=after)
+
+
+def _validate_shape(query, projection, as_of, after):
     if (query.source.domain != "collections" or query.source.ref != projection.collection_id
             or query.joins or query.aggregate is not None or query.having is not None
             or query.graph is not None or query.text is not None):
@@ -114,6 +127,10 @@ def compile_rows(query: ir.Query, projection: ProjectionPlan, *, as_of: str,
         raise QueryError("QUERY_VALUE_INVALID", "query as_of differs from its frozen instant")
     if query.page.after is not None and after is None:
         raise QueryError("QUERY_VALUE_INVALID", "an authenticated continuation is required")
+    return instant
+
+
+def _compile_legacy(query, projection, *, instant, after):
     params: list[object] = []
     dependencies = dict.fromkeys(field.path for field in query.select.fields)
     scalars = {scalar.field: scalar for scalar in projection.scalars}
