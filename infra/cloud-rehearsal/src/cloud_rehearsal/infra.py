@@ -19,11 +19,12 @@ assumed, and each recorded in the report:
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import secrets
 import shutil
+import socket
+import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -171,6 +172,25 @@ def _write_secret(stack: Stack, filename: str, value: str) -> Path:
     return path
 
 
+def _write_storage_certificate(certificates: Path, leaf: tls.LeafCertificate) -> None:
+    (certificates / "cert.pem").write_text(leaf.cert_pem, encoding="utf-8")
+    key = certificates / "key.pem"
+    key.write_text(leaf.key_pem, encoding="utf-8")
+    key.chmod(0o600)
+
+
+def _wait_storage_tls(address: str, ca_path: Path, *, server_hostname: str) -> None:
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.verify_flags |= ssl.VERIFY_X509_STRICT
+
+    def probe() -> bool:
+        with socket.create_connection((address, S3_PORT), timeout=2) as raw:
+            with context.wrap_socket(raw, server_hostname=server_hostname):
+                return True
+
+    wait_for(probe, timeout=30, description=f"the S3 double to serve TLS for {server_hostname}")
+
+
 def _start_object_store(stack: Stack) -> ObjectStore:
     name = f"exo-rehearsal-s3-{stack.run_id}"
     access_key = f"rehearsal{secrets.token_hex(4)}"
@@ -183,26 +203,18 @@ def _start_object_store(stack: Stack) -> ObjectStore:
     network = stack.sealed_network or stack.network
     options: list[str] = ["--publish", f"127.0.0.1::{S3_PORT}"]
     arguments = ["--port", f":{S3_PORT}", "posix", "/data"]
+    bootstrap = None
     if stack.sealed_network:
-        observed = json.loads(run(["docker", "network", "inspect", network]).stdout)[0]
-        subnet = ipaddress.ip_network(observed["IPAM"]["Config"][0]["Subnet"])
-        occupied = {observed["IPAM"]["Config"][0]["Gateway"]}
-        occupied.update(ipaddress.ip_interface(c["IPv4Address"]).ip.compressed for c in observed["Containers"].values())
-        address = next(ip.compressed for ip in subnet.hosts() if ip.compressed not in occupied)
-        stack.pki = tls.make_pki(stack.workdir, (tls.SUBSTRATE_HOST, tls.MCP_HOST, address, "127.0.0.1"))
-        leaf = stack.pki.leaves[address]
         certificates = stack.workdir / "storage-tls"
         certificates.mkdir(mode=0o700)
-        (certificates / "cert.pem").write_text(leaf.cert_pem)
-        key = certificates / "key.pem"
-        key.write_text(leaf.key_pem)
-        key.chmod(0o600)
+        bootstrap = tls.make_pki(certificates / "bootstrap", ("127.0.0.1",))
+        _write_storage_certificate(certificates, bootstrap.leaves["127.0.0.1"])
         versions = data / "versions"
         buckets = data / "buckets"
         versions.mkdir()
         buckets.mkdir()
         (buckets / BACKUP_BUCKET).mkdir()
-        options = ["--ip", address, "--user", f"{os.getuid()}:{os.getgid()}",
+        options = ["--user", f"{os.getuid()}:{os.getgid()}",
                    "--mount", f"type=bind,source={certificates},target=/certificates,readonly"]
         arguments = ["--port", f":{S3_PORT}", "--cert", "/certificates/cert.pem", "--key", "/certificates/key.pem",
                      "posix", "--versioning-dir", "/data/versions", "/data/buckets"]
@@ -216,19 +228,29 @@ def _start_object_store(stack: Stack) -> ObjectStore:
         ]
     )
     stack.containers.append(name)
-    store = ObjectStore(
+    address = _container_ip(name, network)
+    if bootstrap is not None:
+        # A completed handshake means Versity's listener and HUP handler are ready.
+        _wait_storage_tls(address, bootstrap.ca_path, server_hostname="127.0.0.1")
+        pki = tls.make_pki(stack.workdir, (tls.SUBSTRATE_HOST, tls.MCP_HOST, address, "127.0.0.1"))
+        _write_storage_certificate(certificates, pki.leaves[address])
+        # Pinned Versity reloads the complete keypair on HUP, without a restart.
+        run(["docker", "kill", "--signal", "HUP", name])
+        _wait_storage_tls(address, pki.ca_path, server_hostname=address)
+        stack.pki = pki
+    else:
+        wait_for(
+            lambda: run(["docker", "exec", name, "true"], check=False).returncode == 0,
+            timeout=30, description="the S3 double to start",
+        )
+    return ObjectStore(
         container=name,
-        ip=_container_ip(name, network),
+        ip=address,
         host_port=None if stack.sealed_network else _host_port(name, f"{S3_PORT}/tcp"),
         access_key=access_key,
         secret_key=secret_key,
         ca_path=stack.pki.ca_path if stack.pki else None,
     )
-    wait_for(
-        lambda: run(["docker", "exec", name, "true"], check=False).returncode == 0,
-        timeout=30, description="the S3 double to start",
-    )
-    return store
 
 
 SERVER_ARGS = (
