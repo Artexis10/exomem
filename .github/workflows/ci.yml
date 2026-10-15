@@ -132,14 +132,14 @@ jobs:
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
   harness-tests:
-    name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
+    name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -182,11 +182,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+        # Contiguous chunks keep most cached fixture consumers on one runner.
+        # Six chunks retain 1.5x predicted headroom within the 900-second cap.
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
-          --splits=4
+          --splits=6
           --group=${{ matrix.shard }}
-          --splitting-algorithm=least_duration
+          --splitting-algorithm=duration_based_chunks
           --durations-path=.test_durations.json
           --session-timeout=900
           --durations=50
