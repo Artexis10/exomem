@@ -10,6 +10,7 @@ import ctypes
 import errno
 import os
 import secrets
+import time
 from collections.abc import Callable, Iterator
 from ctypes import (
     POINTER,
@@ -943,7 +944,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_error(error))
 
     def copy(
-        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str
+        self, source: HeldFile, destination_parent: HeldDirectory, destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         temporary = f".exomem-held-{secrets.token_hex(16)}"
         temporary_file: WindowsHeldFile | None = None
@@ -983,7 +985,17 @@ class WindowsHeldFilesystem(HeldFilesystem):
             temporary_file = created.require()
             temporary_identity = temporary_file.identity
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
-            while chunk := os.read(checked.descriptor, 65536):
+            copied_size = 0
+            while True:
+                # Bounds apply between syscalls; an in-progress filesystem syscall cannot be interrupted here.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise OSError(errno.ETIMEDOUT, "copy deadline expired")
+                chunk = os.read(checked.descriptor, 65536)
+                if not chunk:
+                    break
+                copied_size += len(chunk)
+                if max_bytes is not None and copied_size > max_bytes:
+                    raise OSError(errno.EFBIG, "copy byte budget exceeded")
                 view = memoryview(chunk)
                 written = 0
                 while written < len(view):
@@ -1009,7 +1021,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             temporary_file.close()
             temporary_file = None
             return HeldResult(value=None)
-        except OSError as error:
+        except BaseException as error:
             if temporary_file is not None:
                 try:
                     if temporary_file.access == "mutate":
@@ -1026,6 +1038,8 @@ class WindowsHeldFilesystem(HeldFilesystem):
                                 _delete_descriptor(file.descriptor)
                             except OSError:
                                 pass
+            if not isinstance(error, OSError):
+                raise
             return HeldResult(error=_error(error))
 
     def enumerate(self, parent: HeldDirectory) -> HeldResult[tuple[SagaRecord, ...]]:

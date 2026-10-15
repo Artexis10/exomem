@@ -2076,6 +2076,14 @@ def op_bootstrap(
                     "when": "the client cannot supply file handles",
                 },
             },
+            "original_recovery": {
+                "tool": "transfer_artifact",
+                "when": "recover a stored original through a desktop/personal endpoint",
+                "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
+                "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
+                "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
+                "cloud": "outbound delivery is unavailable",
+            },
         },
         "performance_profiles": {
             "diagnostics": {
@@ -8244,17 +8252,28 @@ def op_preserve_artifacts(
 
 
 def op_transfer_artifact(
-    vault_root: Path, operation: str = "upload", lane: str = "evidence"
+    vault_root: Path, operation: str = "upload", lane: str = "evidence",
+    artifact: str | None = None, expected_sha256: str | None = None,
 ) -> dict:
     """Prepare binary transfer when client file handles are unavailable.
 
-    Returns a short-lived token/URL; stores nothing.
+    Returns a short-lived handoff; issuance does not prove consumption.
+    For a stored original, download with artifact and optional expected_sha256.
+    Use the bounded native MCP resource where supported, or open the HTTPS link.
+    Note reads and exports remain separate.
 
     Args:
+        artifact: Vault-relative stored original or its custody page for download.
+        expected_sha256: Optional assertion of the original version to recover.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
-    _ = vault_root
+    if artifact is not None or expected_sha256 is not None:
+        if operation != "download" or not artifact:
+            raise ValueError("INVALID_MODE: original recovery needs download and artifact")
+        from . import artifact_recovery
+
+        return artifact_recovery.prepare(vault_root, artifact, expected_sha256=expected_sha256)
     if operation not in ("upload", "download"):
         raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
     if lane not in upload_tokens.UPLOAD_LANES:

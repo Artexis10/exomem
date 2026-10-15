@@ -7,10 +7,12 @@ substitute for the held-handle operation that consumes the target.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Iterable, Iterator, Mapping
@@ -177,6 +179,22 @@ class GenericFileSnapshot:
     data: bytes
     identity: held_fs.StableIdentity
     mtime: float
+
+
+@dataclass(frozen=True, slots=True)
+class GenericFileCopy:
+    """A private disk copy bound to the retained canonical source and its bytes."""
+
+    private_path: Path
+    vault_root: Path
+    relative_path: str
+    identity: held_fs.StableIdentity
+    source_stat: os.stat_result
+    sha256: str
+    size: int
+    private_identity: held_fs.StableIdentity
+    deadline: float | None = None
+    max_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1258,6 +1276,118 @@ def _read_generic_bytes_held(
                     raise ReservedPathLeafError("IO_REFUSED") from error
                 _require_current_generic_directory(filesystem, parent)
                 return GenericFileSnapshot(read_result.require(), file.identity, mtime)
+
+
+
+def _copy_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ReservedPathLeafError("IO_REFUSED")
+
+
+def _digest_descriptor(file, *, deadline: float | None, max_bytes: int | None) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    os.lseek(file.descriptor, 0, os.SEEK_SET)
+    while True:
+        _copy_deadline(deadline)
+        chunk = os.read(file.descriptor, 65536)
+        if not chunk:
+            return digest.hexdigest(), size
+        size += len(chunk)
+        if max_bytes is not None and size > max_bytes:
+            raise ReservedPathLeafError("IO_REFUSED")
+        digest.update(chunk)
+
+
+@contextmanager
+def _generic_copy_source(vault_root: Path, value: object):
+    # Private-identity inventory needs only a short acquisition scope, including Windows short-name checks.
+    with _generic_identity_catalogue_scope(vault_root, value) as identities:
+        pass
+    parent_path, leaf = _leaf_spelling(value)
+    with held_fs.acquire(Path(vault_root)).require() as filesystem:
+        with filesystem.parent(parent_path).require() as parent:
+            _refuse_private_identity(parent.identity, identities)
+            with filesystem.file(parent, leaf).require() as file:
+                _require_current_generic_directory(filesystem, parent)
+                if identities.descriptor_for(file.identity) is not None or file.identity.link_count != 1:
+                    raise ReservedPathLeafError("RESERVED_PATH")
+                yield filesystem, parent, leaf, file
+                _require_current_generic_directory(filesystem, parent)
+                with _generic_identity_catalogue_scope(vault_root, value) as current_identities:
+                    _refuse_private_identity(parent.identity, current_identities)
+                    _refuse_private_identity(file.identity, current_identities)
+                    with filesystem.file(parent, leaf).require() as current:
+                        if current.identity != file.identity:
+                            raise ReservedPathLeafError("IO_REFUSED")
+
+
+def _source_version(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+
+@contextmanager
+def private_copy_directory():
+    """Own a temporary spool with the existing Windows DACL or POSIX mode owner."""
+    import tempfile
+
+    from .mutation_lock import prepare_windows_private_state_root
+
+    with tempfile.TemporaryDirectory(prefix="exomem-recovery-") as temporary:
+        private = Path(temporary) / "private"
+        if os.name == "nt":
+            prepare_windows_private_state_root(private)
+        else:
+            private.mkdir(mode=0o700)
+        yield private
+
+
+def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
+                      max_bytes: int | None = None, deadline: float | None = None) -> GenericFileCopy:
+    """Copy through retained no-follow owners; the caller owns private storage cleanup."""
+    private_path = Path(private_path)
+    try:
+        _copy_deadline(deadline)
+        with _generic_copy_source(vault_root, value) as (filesystem, parent, leaf, file):
+            before = os.fstat(file.descriptor)
+            if max_bytes is not None and before.st_size > max_bytes:
+                raise ReservedPathLeafError("IO_REFUSED")
+            with held_fs.acquire(private_path.parent).require() as destination:
+                with destination.parent(".").require() as target:
+                    filesystem.copy(file, target, private_path.name, max_bytes=before.st_size if max_bytes is None else min(before.st_size, max_bytes), deadline=deadline).require()
+                    with destination.file(target, private_path.name).require() as copied:
+                        digest, size = _digest_descriptor(copied, deadline=deadline, max_bytes=max_bytes)
+                        private_identity = copied.identity
+            after = os.fstat(file.descriptor)
+            if _source_version(before) != _source_version(after) or size != after.st_size:
+                raise ReservedPathLeafError("IO_REFUSED")
+            return GenericFileCopy(private_path, Path(vault_root), str(value), file.identity,
+                                   after, digest, size, private_identity, deadline, max_bytes)
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+def require_current_generic_copy(copied: GenericFileCopy) -> None:
+    """Rehash retained source and private bytes before authorizing their first byte."""
+    try:
+        with _generic_copy_source(copied.vault_root, copied.relative_path) as (_, _, _, source):
+            before = os.fstat(source.descriptor)
+            if source.identity != copied.identity or _source_version(before) != _source_version(copied.source_stat):
+                raise ReservedPathLeafError("IO_REFUSED")
+            digest, size = _digest_descriptor(source, deadline=copied.deadline, max_bytes=copied.max_bytes)
+            if digest != copied.sha256 or size != copied.size or _source_version(before) != _source_version(os.fstat(source.descriptor)):
+                raise ReservedPathLeafError("IO_REFUSED")
+        with held_fs.acquire(copied.private_path.parent).require() as filesystem:
+            with filesystem.parent(".").require() as parent:
+                with filesystem.file(parent, copied.private_path.name).require() as file:
+                    if file.identity != copied.private_identity or file.identity.link_count != 1:
+                        raise ReservedPathLeafError("IO_REFUSED")
+                    digest, size = _digest_descriptor(file, deadline=copied.deadline, max_bytes=copied.max_bytes)
+                    if digest != copied.sha256 or size != copied.size:
+                        raise ReservedPathLeafError("IO_REFUSED")
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
 
 
 def inspect_generic_file(

@@ -232,6 +232,7 @@ class HeldFilesystem:
         source: HeldFile,
         destination_parent: HeldDirectory,
         destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         raise NotImplementedError
 

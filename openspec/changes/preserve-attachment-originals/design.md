@@ -102,6 +102,14 @@ call can consume.
   Recheck canonical identity and bytes, session, policy and full release before
   headers. Hold no global writer boundary during copying or delivery. Clean the
   private copy in `finally` on success, refusal, disconnect and cancellation.
+  The existing copy owner accepts optional byte and deadline bounds. It checks
+  them between chunks on POSIX and Windows; an active OS syscall can finish
+  after its deadline. Recovery copies at most the observed source size, reuses
+  the request budget, and admits temporary bytes against available disk space.
+  Two concurrent spools bound process disk use. Native responses default to
+  4 MiB before base64; `EXOMEM_RECOVERY_NATIVE_MAX_BYTES` owns that payload budget.
+  Older custody pages may lack stored MIME. The descriptor identifies filename
+  inference or the generic fallback explicitly instead of claiming stored MIME.
 - **D12. Keep native identity and delegated browser authority distinct.** Native
   resource reads match the caller's audience, client and origin session before
   restoring the signed issuing authorization context. Browser possession delegates
@@ -111,6 +119,9 @@ call can consume.
   retain expiry and current revocation checks on every request; already sent
   bytes cannot be recalled. Responses use attachment disposition, `no-store`,
   `no-referrer` and `nosniff`; deployed logs must omit the capability query.
+  Native admission carries the verified grant beside a sanitized dispatch URI,
+  so framework resource spans do not retain capability bytes. Application log
+  filters remove signed capabilities from framework errors and access records.
 
 ## Risks / Trade-offs
 

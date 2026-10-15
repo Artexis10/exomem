@@ -19,9 +19,10 @@ from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import (
+    artifact_recovery,
     auth_sessions,
     cf_access,
     local_ingress,
@@ -376,6 +377,75 @@ def download_principal(
     return principal_module.most_restrictive_principal(surface="transfer")
 
 
+
+_RECOVERY_HEADERS = {
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "content-disposition": "attachment",
+}
+
+
+class _OriginalDownloadResponse(Response):
+    """Starlette sends only a private verified spool; this response owns its lifetime."""
+
+    def __init__(self, vault_root: Path, capability: str):
+        super().__init__(headers=_RECOVERY_HEADERS)
+        self.vault_root = vault_root
+        self.capability = capability
+
+    async def __call__(self, scope, receive, send):
+        started = False
+        manager = None
+        try:
+            descriptor, who, _ = artifact_recovery.claim(
+                self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+            if not await auth_sessions.origin_session_active(who):
+                raise artifact_recovery.RecoveryUnavailable
+            manager = artifact_recovery.stage(self.vault_root, descriptor["path"], who, expected=descriptor)
+            copied, _ = await run_in_threadpool(manager.__enter__)
+            response = FileResponse(copied.private_path, filename=descriptor["file_name"],
+                media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS,
+                stat_result=copied.private_path.stat())
+            # FileResponse owns RFC-compliant filename quoting; replace the generic error disposition.
+            del response.headers["content-disposition"]
+            response.headers["content-disposition"] = "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe="")
+
+            async def checked_send(message):
+                nonlocal started
+                if message["type"] == "http.response.start":
+                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    revision = await run_in_threadpool(artifact_recovery.require_current, self.vault_root, copied, who)
+                    # Expiry can pass during rehashing a large original.
+                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    artifact_recovery.require_revision(self.vault_root, who, copied, revision)
+                    artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
+                    headers = dict(message.get("headers", []))
+                    for key, value in _RECOVERY_HEADERS.items():
+                        if key != "content-disposition":
+                            headers[key.encode()] = value.encode()
+                    headers[b"content-disposition"] = response.headers["content-disposition"].encode("latin-1")
+                    message = {**message, "headers": list(headers.items())}
+                    started = True
+                await send(message)
+
+            # A pathsend extension may consume the file after ASGI returns; cleanup must await the actual stream.
+            extensions = {key: value for key, value in scope.get("extensions", {}).items() if key != "http.response.pathsend"}
+            await response({**scope, "extensions": extensions}, receive, checked_send)
+        except (artifact_recovery.RecoveryUnavailable, reserved_paths.ReservedPathLeafError):
+            if started:
+                raise
+            await JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "original recovery is unavailable"},
+                status_code=404, headers=_RECOVERY_HEADERS)(scope, receive, send)
+        finally:
+            if manager is not None:
+                manager.__exit__(None, None, None)
+
+
 def register_transfer_routes(
     mcp_app: FastMCP,
     *,
@@ -384,6 +454,7 @@ def register_transfer_routes(
 ) -> TransferConfig:
     """Register /upload and /download routes and return their config."""
     config = load_transfer_config()
+    artifact_recovery.install_log_redaction()
 
     def _upload_lane(request: Request) -> str:
         """The lane a request's upload capability is bound to.
@@ -924,6 +995,19 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
 
     @mcp_app.custom_route("/download", methods=["GET"])
     async def _download(request: Request):
+        if "grant" in request.query_params:
+            grants = request.query_params.getlist("grant")
+            if len(grants) != 1 or "path" in request.query_params:
+                return JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "original recovery is unavailable"},
+                    status_code=404, headers=_RECOVERY_HEADERS)
+            return _OriginalDownloadResponse(vault_root, grants[0])
+        response = await _download_legacy(request)
+        for key, value in _RECOVERY_HEADERS.items():
+            if key != "content-disposition" or key not in response.headers:
+                response.headers[key] = value
+        return response
+
+    async def _download_legacy(request: Request):
         if not config.enabled:
             return JSONResponse(
                 {
