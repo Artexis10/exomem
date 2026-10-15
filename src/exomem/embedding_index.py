@@ -1964,8 +1964,9 @@ class EmbeddingIndex:
                 return [[] for _ in queries]
             for start in range(0, len(queries), SEARCH_MANY_BLOCK):
                 with call_spans.span("embeddings.disk_score.fetch"):
+                    # Physical order avoids a table lookup per secondary-index row.
                     cursor = conn.execute(
-                        "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                        "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY rowid"
                     )
                 while True:
                     with call_spans.span("embeddings.disk_score.fetch"):
