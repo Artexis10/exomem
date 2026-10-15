@@ -606,7 +606,14 @@ def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_versio
         history.append(version)
         identities.append(identity)
     _, _, upsert, insert_version = _declarations(layout)
-    conn.executemany(upsert, current)
+    if layout.encoding == TYPED_V2:
+        from .native_operands import FileRole, operand_snapshot
+
+        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
+        with operand_snapshot(raw, layout, role=FileRole.STORE):
+            conn.executemany(upsert, current)
+    else:
+        conn.executemany(upsert, current)
     # History must precede its identity: triggers refuse payloads attached to existing identities.
     conn.executemany(insert_version, history)
     conn.executemany(tables.INSERT_IDENTITY, identities)
