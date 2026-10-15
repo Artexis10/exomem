@@ -38,9 +38,9 @@ from test_collection_store_writer import manifest_path
 from test_collection_store_writer import store as store
 from test_governance_egress import _external
 
-from exomem import __version__, archive_members, commands
+from exomem import __version__, archive_members, commands, records
 from exomem import structured_collections as collections
-from exomem.collection_store import capability, connection, importer, typed_storage
+from exomem.collection_store import capability, connection, importer, tokens, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import owner_principal, request_scope
@@ -227,6 +227,45 @@ def sha256(document):
 
 def file_sha256(store, path):
     return hashlib.sha256((store.root / path).read_bytes()).hexdigest()
+
+
+def test_logged_import_reuses_validation_without_losing_superseded_values_or_refusals(store, monkeypatch):
+    """A later round-trip refusal must neither replace a valid duplicate nor alter the member digest."""
+    fields = ("  natural_key: [exercise_id]\n  fields:\n"
+              "    exercise_id: {type: string, required: true}\n    distance_m: {type: number}\n")
+    text = manifest_text(fields=fields).replace("lifecycle: active\n", "lifecycle: active\nview_mode: summary\n")
+    setup(store, b"", text=text)
+    source_rows = [{"exercise_id": "same", "distance_m": 1},
+                   {"exercise_id": "same", "distance_m": 2},
+                   {"exercise_id": "same", "distance_m": 1e100},
+                   {"exercise_id": "other", "distance_m": 3}]
+    source, _ = preserve_export(store, "duplicates", {"rows/first.json": {"rows": source_rows}})
+    mapping = {"rows": "rows[]", "fields": {name: name for name in ("exercise_id", "distance_m")},
+               "on_invalid": "skip"}
+    job = agent(store, mode="start", source_ref=source, format="json-document", members="rows/*", mapping=mapping)
+    validate, checked = records._bulk_row_values, []
+
+    def counted(*args):
+        checked.append(args[1])
+        return validate(*args)
+
+    monkeypatch.setattr(records, "_bulk_row_values", counted)
+    done = finish(store, job)
+    assert done["state"] == "complete"
+    assert {name: done["rows"][name] for name in ("imported", "duplicates", "rejected")} == {
+        "imported": 2, "duplicates": 1, "rejected": 1}
+    assert [(row["row"], row["code"]) for row in done["rejections"]] == [(2, "UNREPRESENTABLE_RECORD_VALUE")]
+    parsed = collections.parse_manifest_bytes(store.root,
+        store.root / "Knowledge Base/Records/Workouts/_collection.md", text.encode())
+    assert dict(typed_storage.collection_values(store.connection, CID)) == {
+        collections.derived_item_key(parsed, item): item for item in (source_rows[1], source_rows[3])}
+    expected = hashlib.sha256(b"").hexdigest()
+    for item in (source_rows[0], source_rows[1], source_rows[3]):
+        key = collections.derived_item_key(parsed, item)
+        payload = tokens.payload_hash(1, key, item, "")
+        expected = hashlib.sha256(f"{expected}\0{key}\0{payload}".encode()).hexdigest()
+    assert store.connection.execute("SELECT accepted,rejected,rows_digest FROM import_members").fetchall() == [(3, 1, expected)]
+    assert len(checked) == len(source_rows), "diagnostic: each original mapped row validates once"
 
 
 def test_guarded_scalar_aliases_keep_exact_values_ordinals_and_numeric_counts_after_restart(store, monkeypatch):

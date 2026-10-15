@@ -1908,7 +1908,10 @@ class CollectionWriter:
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
                     source_rel, guard = resolved
-                    values = records._bulk_row_values(manifest, raw["item"], source_rel)
+                    values = (_import.prepared_row(index, manifest, reference, resolved, raw["item"])
+                              if _import is not None else None)
+                    if values is None:
+                        values = records._bulk_row_values(manifest, raw["item"], source_rel)
                 except collections.CollectionError as error:
                     outcomes.append(records._bulk_error_row(index, error))
                     continue

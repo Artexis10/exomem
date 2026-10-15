@@ -1236,6 +1236,87 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
 
 
+@pytest.mark.parametrize("change,before,after,refusal", [
+    ("boolean", {"distance_m": 1}, {"distance_m": True}, "SCHEMA_FIELD_TYPE"),
+    ("integer", {"distance_m": False}, {"distance_m": 0}, None),
+    ("float", {"distance_m": 1}, {"distance_m": 1.0}, None),
+    ("signed-zero", {"distance_m": 0.0}, {"distance_m": -0.0}, None),
+    ("unicode", {"meta": {"text": "e\u0301"}}, {"meta": {"text": "é"}}, None),
+    ("nested", {"meta": {"counts": [1]}}, {"meta": {"counts": [True]}}, "SCHEMA_FIELD_TYPE"),
+    ("tuple", {"samples": []}, {"samples": []}, None),
+    ("mapping-key", {"meta": {"1": "value"}}, {"meta": {"1": "value"}}, None),
+])
+def test_changed_mapped_content_uses_the_ordinary_validator_at_handoff(store, monkeypatch, change, before, after, refusal):
+    """Prepared success or refusal cannot survive a change to the exact mapped value's JSON shape."""
+    fields = WORKOUT_FIELDS + ("    meta:\n      type: object\n      properties:\n"
+                              "        counts: {type: array, items: {type: integer}}\n"
+                              "    samples: {type: array, items: {type: integer}}\n")
+    setup(store, ndjson([{"id": "row", **before}]), fields=fields)
+    module = importer()
+    collapse, validate, checked = module._collapse, records._bulk_row_values, []
+
+    def mutate(rows, *args, **kwargs):
+        item = rows[0][1]
+        if change == "tuple":
+            item["samples"] = ()
+        elif change == "mapping-key":
+            item["meta"] = {1: "value"}
+        result = collapse(rows, *args, **kwargs)
+        if change == "nested":
+            item["meta"]["counts"][0] = True
+        else:
+            item.update(after)
+        return result
+
+    def counted(*args):
+        checked.append(1)
+        return validate(*args)
+
+    monkeypatch.setattr(module, "_collapse", mutate)
+    monkeypatch.setattr(records, "_bulk_row_values", counted)
+    mapping = {"fields": {"exercise_id": "id", **{name: name for name in before}}, "on_invalid": "skip"}
+    job = start(store, owner_principal(surface="mcp"), mapping=mapping)
+    run(store)
+    done = status(store, job, owner_principal(surface="mcp"))
+    assert done["state"] == "complete"
+    values = [item for _, item in typed_storage.collection_values(store.connection, CID)]
+    if refusal:
+        assert values == [] and [(row["row"], row["code"]) for row in done["rejections"]] == [(0, refusal)]
+    else:
+        assert records._canonical_json(values) == records._canonical_json([{"exercise_id": "row", **after}])
+        assert done["rows"]["imported"] == 1 and done["rows"]["rejected"] == 0
+    assert len(checked) == 2, "diagnostic: a reuse miss invokes the ordinary validator"
+
+
+def test_same_schema_version_manifest_change_uses_the_ordinary_validator_at_handoff(store, monkeypatch):
+    """A changed declaration must invalidate preparation even when its schema version stays the same."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    setup(store, ndjson([{"id": "row", "distance_m": 1}]))
+    validate, bulk, checked = records._bulk_row_values, CollectionWriter.bulk_upsert_records, []
+
+    def revise(self, collection, **kwargs):
+        guard = self.inspect_collection(CID)["lifecycle_guards"]
+        self.revise_collection(CID, manifest_text=manifest_text().replace("title: Workouts", "title: Revised"),
+                               why="revise", **guard)
+        kwargs["expected_container_hash"] = self.inspect_collection(CID)["snapshot"]
+        return bulk(self, collection, **kwargs)
+
+    def counted(*args):
+        checked.append(args[0].manifest_version.hash)
+        return validate(*args)
+
+    monkeypatch.setattr(CollectionWriter, "bulk_upsert_records", revise)
+    monkeypatch.setattr(records, "_bulk_row_values", counted)
+    job = start(store, owner_principal(surface="mcp"), mapping={
+        "fields": {"exercise_id": "id", "distance_m": "distance_m"}, "on_invalid": "skip"})
+    run(store)
+    done = status(store, job, owner_principal(surface="mcp"))
+    assert (done["state"], done["reason"], done["rows"]["imported"]) == ("partial", "authority_lost", 0)
+    assert typed_storage.collection_values(store.connection, CID) == []
+    assert len(checked) == 2 and checked[0] != checked[1], "diagnostic: both declarations validate the row"
+
+
 def test_an_identical_start_replays_a_live_job_and_restarts_a_cancelled_one(store, monkeypatch):
     """A retried start that binds a second job duplicates work; replaying a cancelled one dead-ends."""
     setup(store)

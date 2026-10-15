@@ -2259,33 +2259,58 @@ def _stamp() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
 
 
+def _preparation_token(value: Any) -> bytes | None:
+    # This closed JSON value domain proves exact preparation identity without coercing input shapes.
+    def supported(value):
+        if type(value) is dict:
+            return all(type(key) is str and supported(item) for key, item in value.items())
+        if type(value) is list:
+            return all(supported(item) for item in value)
+        return value is None or type(value) in (bool, int, float, str)
+
+    try:
+        if supported(value):
+            return hashlib.sha256(records._canonical_json(records._encode_held_value(value))).digest()
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        pass  # Unsupported encodings miss reuse; the ordinary validator decides whether to refuse.
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRow:
+    key: str | None
+    stored: dict[str, Any] | None
+    refusal: tuple[str, str, dict[str, Any]] | None
+    token: bytes | None
+
+
 def _collapse(
     rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str, *, logged: bool = False
-) -> tuple[list[tuple[Row, dict[str, Any]]], int, list[tuple[str | None, Any]]]:
+) -> tuple[list[tuple[Row, dict[str, Any]]], int, list[_PreparedRow]]:
     """Keep each natural key's last occurrence in a batch, by the writer's own identity rule.
 
     A row the writer would refuse has no identity here, so it neither supersedes
     nor is superseded: the last valid occurrence wins. When the collection has a
     natural key, or the job ``logged`` its members, it also returns each row's
-    natural key and stored values as the writer derives them, ``(None, None)`` for
-    a row the writer would refuse.
+    natural key and stored values as the writer derives them, or its refusal data.
     """
     if not (manifest.schema.natural_key or logged):
         return rows, 0, []
-    prepared: list[tuple[str | None, Any]] = []
+    prepared: list[_PreparedRow] = []
     for _, values in rows:
+        token = _preparation_token(values)
         try:
             stored = records._bulk_row_values(manifest, values, source_ref)
-            prepared.append((collections.derived_item_key(manifest, stored), stored))
-        except collections.CollectionError:
-            prepared.append((None, None))
+            prepared.append(_PreparedRow(collections.derived_item_key(manifest, stored), stored, None, token))
+        except collections.CollectionError as error:
+            prepared.append(_PreparedRow(None, None, (error.code, error.reason, error.details), token))
     if not manifest.schema.natural_key:
         return rows, 0, prepared
-    last = {key: index for index, (key, _) in enumerate(prepared) if key is not None}
+    last = {row.key: index for index, row in enumerate(prepared) if row.key is not None}
     kept = [
         row
-        for index, (row, (key, _)) in enumerate(zip(rows, prepared, strict=True))
-        if key is None or last[key] == index
+        for index, (row, preparation) in enumerate(zip(rows, prepared, strict=True))
+        if preparation.key is None or last[preparation.key] == index
     ]
     return kept, len(rows) - len(kept), prepared
 
@@ -2315,7 +2340,7 @@ def _record(
     superseded: int = 0,
     result: Mapping[str, Any] | None = None,
     fail: tuple[Row, str, str] | None = None,
-    prepared: list[tuple[str | None, Any]] = (),
+    prepared: list[_PreparedRow] = (),
     version: int = 0,
 ) -> None:
     """Advance the checkpoint, counters and rejections inside the batch transaction.
@@ -2390,7 +2415,7 @@ def _logged(
     batch: Batch,
     kept: list[tuple[Row, dict[str, Any]]],
     result: Mapping[str, Any] | None,
-    prepared: list[tuple[str | None, Any]],
+    prepared: list[_PreparedRow],
     version: int,
 ) -> list[tuple[Row, str | None, str | None]]:
     """This batch's rows in source order as ``(row, item key, payload hash)``, both None if rejected.
@@ -2402,7 +2427,8 @@ def _logged(
     outcomes = {outcome["index"]: outcome for outcome in (result or {}).get("rows", ())}
     written = {id(row): index for index, (row, _) in enumerate(kept)}
     entries = [(row, None, None) for row, _, _ in batch.rejections]
-    for (row, _), (key, stored) in zip(batch.rows, prepared, strict=True):
+    for (row, _), preparation in zip(batch.rows, prepared, strict=True):
+        key, stored = preparation.key, preparation.stored
         index = written.get(id(row))
         if index is not None:
             if outcomes[index]["outcome"] == "rejected":
@@ -2557,8 +2583,10 @@ class _Settlement:
         plan: Plan,
         proof: Source,
         guards: list[vault.PathGuard] = (),
-        prepared: list[tuple[str | None, Any]] = (),
+        prepared: list[_PreparedRow] = (),
         version: int = 0,
+        *,
+        manifest,
     ) -> None:
         self.job, self.batch, self.kept, self.superseded, self.plan = (
             job,
@@ -2570,6 +2598,26 @@ class _Settlement:
         self.source = (proof.ref, proof.guard)
         self.guards = guards
         self.prepared, self.version = prepared, version
+        self._manifest = (manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash)
+        self._source = self.source
+        positions = {id(row): index for index, (row, _) in enumerate(batch.rows)}
+        self._kept_prepared = tuple(((row.ordinal, row.start, row.end), prepared[positions[id(row)]])
+                                   for row, _ in kept) if prepared else ()
+
+    def prepared_row(self, index, manifest, reference, source, item):
+        """Reuse only the same declaration, source proof, kept position and exact mapped content."""
+        if ((manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash) != self._manifest
+                or reference != self._source[0] or source != self._source
+                or not 0 <= index < len(self._kept_prepared)):
+            return None
+        position, prepared = self._kept_prepared[index]
+        row = self.kept[index][0]
+        if (position != (row.ordinal, row.start, row.end) or prepared.token is None
+                or prepared.token != _preparation_token(item)):
+            return None
+        if prepared.refusal is not None:
+            raise collections.CollectionError(*prepared.refusal)
+        return prepared.stored
 
     def __call__(self, writer, result: Mapping[str, Any]) -> None:
         _authorize(writer, self.job, prove=False)
@@ -2786,7 +2834,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
             source=proof.ref,
             on_reject="skip" if plan.on_invalid == "skip" else "abort",
             request_id=f"import:{job.id}:{sequence}",
-            _import=_Settlement(job, batch, kept, superseded, plan, proof, guards, prepared, version),
+            _import=_Settlement(job, batch, kept, superseded, plan, proof, guards, prepared, version, manifest=manifest),
         )
         return "batch"
     except _Lost:
@@ -2800,7 +2848,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
 def _derived_items(
     batch: Batch,
     kept: list[tuple[Row, dict[str, Any]]],
-    prepared: list[tuple[str | None, Any]],
+    prepared: list[_PreparedRow],
     manifest,
     source_ref: str,
     shas: list[str],
@@ -2812,14 +2860,11 @@ def _derived_items(
     """
     position = {id(row): ordinal for ordinal, (row, _) in enumerate(batch.rows)}
     items, refused = [], []
-    for index, (row, values) in enumerate(kept):
-        key, stored = prepared[position[id(row)]]
+    for index, (row, _) in enumerate(kept):
+        preparation = prepared[position[id(row)]]
+        key, stored = preparation.key, preparation.stored
         if stored is None:
-            try:
-                records._bulk_row_values(manifest, values, source_ref)
-                code = "IMPORT_ROW_REJECTED"
-            except collections.CollectionError as error:
-                code = error.code
+            code = preparation.refusal[0] if preparation.refusal is not None else "IMPORT_ROW_REJECTED"
             refused.append({"index": index, "outcome": "rejected", "code": code})
             continue
         if key is None:
