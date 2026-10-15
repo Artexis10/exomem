@@ -4528,10 +4528,12 @@ def post_commit_batch_fanout(
                 index_sync.record_failed_refresh(vault_root, replaced)
             # Component and outcome are closed values. Keep paths and report
             # codes out of logs because codes are only length-bounded.
-            component_outcomes = ",".join(
-                f"{item.component}:{item.outcome}"
-                for item in getattr(report, "components", ())
-            ) or "none"
+            component_outcomes = (
+                ",".join(
+                    f"{item.component}:{item.outcome}" for item in getattr(report, "components", ())
+                )
+                or "none"
+            )
             logging.getLogger(__name__).warning(
                 "index upsert incomplete after batch_atomic_write; "
                 "durable full-index refresh recorded; components=%s",
