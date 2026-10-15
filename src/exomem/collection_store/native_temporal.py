@@ -14,7 +14,7 @@ from ..query_engine.scalars import (
     parse_instant,
     validate_instant_spelling,
 )
-from .native_metadata import FieldMetadata
+from .native_metadata import MEMO_ENTRIES, FieldMetadata
 from .typed_storage import TypedStorageError
 
 # Closed temporal wire: version byte, signed-64 delta, positive signed-64 format ID.
@@ -79,11 +79,11 @@ def _text_length(spelling: InstantSpelling) -> int:
     return 19 + len(spelling.offset) + (1 + spelling.fraction_digits if spelling.fraction_digits else 0)
 
 
-def _render(coordinate: int, spelling: InstantSpelling, max_bytes: int) -> str:
+def _render(coordinate: int, spelling: InstantSpelling, max_bytes: int, compiled=None) -> str:
     length = _text_length(spelling)
     if length > max_bytes:
         raise TypedStorageError("native instant exceeds the decoding budget")
-    local = _local_instant(coordinate, spelling)
+    local = _local_instant(coordinate, spelling, compiled)
     text = f"{local.date().isoformat()}{spelling.separator}{local.hour:02}:{local.minute:02}:{local.second:02}"
     if spelling.fraction_digits:
         fraction = f"{local.microsecond:06}"
@@ -154,12 +154,13 @@ def encode(value: object, kind: str, metadata: FieldMetadata) -> int | bytes | s
         epoch = metadata.ensure_epoch(0 if coordinate is None else coordinate)
         if metadata.intern(asdict(spelling or _DEFAULT_INSTANT)) != _INITIAL_FORMAT:
             raise TypedStorageError("native instant metadata has no initial format")
-    default = _format(metadata.format(_INITIAL_FORMAT, max_bytes=_FORMAT_BYTES))
+    default = metadata.temporal_format(_INITIAL_FORMAT, max_bytes=_FORMAT_BYTES)
     if coordinate is None:
         return original
-    if _render(coordinate, spelling, len(original.encode("utf-8"))) != original:
+    initial = spelling == default.spelling
+    if _render(coordinate, spelling, len(original.encode("utf-8")), default if initial else None) != original:
         return original
-    if spelling == default:
+    if initial:
         return coordinate - epoch
     return _FRAME.pack(_VERSION, coordinate - epoch, metadata.intern(asdict(spelling)))
 
@@ -201,6 +202,46 @@ def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int 
                             spelling, length)
     except (ValueError, TypeError, OverflowError, collections.CollectionError) as error:
         raise TypedStorageError("native temporal reconstruction is invalid") from error
+
+
+def instant_days(metadata: FieldMetadata):
+    """Return one scan's day-only instant inspector; it inlines plain-integer cells and compact frames.
+
+    A cell takes the inline path only when ``inspect`` already accepted its format in this scan, and it returns
+    exactly what ``inspect`` returns. Any other cell, or any failed check, goes to ``inspect`` itself.
+    """
+    epoch = initial = None
+    formats = {}  # accepted frame format IDs, all above the initial format
+    frame_size, unpack, day = _FRAME.size, _FRAME.unpack, dt.date.fromordinal
+
+    def read(cell: object, max_bytes: int) -> TemporalView | str | None:
+        nonlocal epoch, initial
+        if type(cell) is int:
+            delta, compiled = cell, initial
+        elif type(cell) is bytes and len(cell) == frame_size:
+            version, delta, format_id = unpack(cell)
+            compiled = formats.get(format_id) if version == _VERSION else None
+        else:
+            compiled = None
+        if compiled is not None:
+            coordinate = epoch + delta
+            local = coordinate + compiled.shift
+            if (0 <= coordinate < _COORDINATE_LIMIT and 0 <= local < _COORDINATE_LIMIT
+                    and not local % compiled.quantum and compiled.text_bytes <= max_bytes):
+                return TemporalView(coordinate, day(local // _MICROSECONDS_PER_DAY + 1), compiled.spelling,
+                                    compiled.text_bytes)
+        view = inspect(cell, "datetime", metadata, max_bytes=max_bytes, day_only=True)
+        if type(view) is TemporalView and len(formats) < MEMO_ENTRIES:
+            # Accepted in this snapshot, so the append-only epoch and this format stay readable.
+            epoch, format_id = metadata.epoch(), _unpack(cell)[1]
+            compiled = metadata.temporal_format(format_id, max_bytes=_FORMAT_BYTES)
+            if format_id == _INITIAL_FORMAT:
+                initial = compiled
+            else:
+                formats[format_id] = compiled
+        return view
+
+    return read
 
 
 def decode(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int) -> str | None:

@@ -39,6 +39,7 @@ from . import (
     derived_rows,
     governance,
     index_migrations,
+    native_metadata,
     rollups,
     schema,
     summary,
@@ -1683,7 +1684,7 @@ class CollectionWriter:
                           "published_sha256=pending_sha256 WHERE path=?", (path,))
 
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
-                    *, ordinal=0, queue_log=True):
+                    *, ordinal=0, queue_log=True, scope=None):
         if before is None and manifest.view_mode == "items":
             self._require_items_capacity(manifest.collection_id)
         if _renders_rows(manifest):
@@ -1725,7 +1726,7 @@ class CollectionWriter:
                 index_migrations.AccountedWriter(self.connection, self._execute),
                 typed_storage.require_layout(self.connection, manifest.collection_id),
                 row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
-                txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key,
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key, scope=scope,
             )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
@@ -1921,9 +1922,10 @@ class CollectionWriter:
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans])
+            scope = native_metadata.WriteScope(self.connection)
             for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
                 self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
-                                 ordinal=ordinal, queue_log=False)
+                                 ordinal=ordinal, queue_log=False, scope=scope)
             if is_log:
                 self._pending_log(manifest, txn)
             elif manifest.view_mode == summary.SUMMARY:

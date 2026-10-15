@@ -619,11 +619,12 @@ def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]
     update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
     decode, upkeep = _decoder(goal, conn), rollups.Upkeep(conn, members=_members(goal))
+    scope = native_metadata.WriteScope(conn) if native else None
     flagged: dict[int, int] = {}
     touched: set[tuple[int, str, str]] = set()
     outcomes = []
     for index, key, values in items:
-        encoded = typed_storage.encode_row(layout, values, connection=conn)
+        encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
         before = found.get(key)
         same = before is not None and (native_rows.encoded_equal(before[2], encoded) if native else before[2] == encoded)
         if same:

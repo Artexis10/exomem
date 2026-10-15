@@ -191,14 +191,17 @@ def decode_value(tag: int, value: Any, key: Any) -> Any:
     raise TypedStorageError("stored typed value does not match its discriminator")
 
 
-def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None) -> tuple[Any, ...]:
-    """Column parameters in ``value_columns`` order, then the residual object."""
+def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None, scope=None) -> tuple[Any, ...]:
+    """Column parameters in ``value_columns`` order, then the residual object.
+
+    ``scope`` is the caller's ``native_metadata.WriteScope`` for the open transaction, if it encodes many rows.
+    """
     if layout.encoding == TYPED_V2:
         from . import native_rows
 
         if connection is None:
             raise TypedStorageError("native row encoding requires its metadata connection")
-        return native_rows.encode_row(connection, layout, values)
+        return native_rows.encode_row(connection, layout, values, scope=scope)
     columns = []
     for name in layout.fields:
         columns.extend(encode_value(values.get(name, _ABSENT)))
@@ -573,9 +576,9 @@ def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded
 
 
 def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values: Mapping[str, Any],
-                  body: str, payload_hash: str, txn_id: int, schema_version: int, item_key=None) -> None:
+                  body: str, payload_hash: str, txn_id: int, schema_version: int, item_key=None, scope=None) -> None:
     """Write typed current/version payloads and their identity in the caller's transaction."""
-    encoded = encode_row(layout, values, connection=conn)
+    encoded = encode_row(layout, values, connection=conn, scope=scope)
     _upsert_current(conn, layout, row_id, row_version, encoded, item_key=item_key)
     _, _, _, insert_version = _declarations(layout)
     conn.execute(insert_version, {"row_id": row_id, "row_version": row_version, "body": body,

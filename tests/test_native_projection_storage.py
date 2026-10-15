@@ -1,6 +1,7 @@
 """Native indexed operands survive storage transactions and physical file aliases."""
 
 import sqlite3
+import struct
 from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
@@ -262,3 +263,72 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         with pytest.raises(TypedStorageError, match="budget"):
             native_rows.selected_current_values(conn, current, 1, {"when": True, "later": True},
                                                  max_bytes=256 * 1024, check=lambda: None)
+
+
+def test_a_warm_dense_scan_returns_and_refuses_exactly_what_the_shared_decoders_do(tmp_path):
+    """A scan's inline paths for repeated instants, numbers and text must not drift from the shared decoders,
+    including on damaged cells those decoders refuse."""
+    fields = {"when": FieldSpec("datetime"), "amount": FieldSpec("number"), "label": FieldSpec("string")}
+    sources = [
+        {"when": "2024-01-01T23:30:00Z", "amount": 7, "label": "plain"},
+        {"when": "2024-01-02T00:30:00+02:00", "amount": -0.0},
+        {"when": "2024-01-02T00:30:00.120+02:00", "amount": 2**80, "label": '雪\n"'},
+        {"when": "2024-01-01T23:30:00", "amount": 5000.0, "label": 7},
+        {"when": "2024-01-03T01:00:00Z", "amount": 1.5, "label": "again"},
+        {"when": "2024-01-02T00:30:00+02:00", "amount": -(2**63), "label": None},
+        {"amount": 3},
+    ]
+    with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
+        native_metadata.install(conn, canonical=False)
+        layout = native_layout.build(CID, 7, fields, identity="uuid16")
+        plan = build_projection_plan(CID, {name: {"type": spec.type} for name, spec in fields.items()},
+                                     (), generation=13, payload_layout=layout)
+        for sql in plan.ddl:
+            conn.execute(sql)
+        conn.execute("BEGIN")
+        for row_id, values in enumerate(sources, 1):
+            conn.execute("INSERT INTO items VALUES(?,?,1)", (row_id, CID))
+            write(conn, plan, row_id, values)
+        conn.commit()
+        current = replace(layout, current=plan.table_name)
+        stored = f"SELECT {','.join((*current.value_columns, 'r'))} FROM {plan.table_name} WHERE row_id=?"
+
+        def scan():
+            columns, decode = native_rows.prepare_dense_selection(conn, current, dict.fromkeys(fields, True), max_bytes=4096,
+                                                                  check=lambda: None, semantic_fields={"when"})
+            return decode, f"SELECT {columns} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id WHERE i.row_id=?"
+
+        def shared(row_id):
+            return native_rows.decode_row(conn, current, conn.execute(stored, (row_id,)).fetchone())
+
+        def exact(values, *names):
+            # Equality alone merges 1 with 1.0 and 0.0 with -0.0.
+            return {name: (type(value), repr(value)) for name, value in values.items() if name in names}
+
+        def refusal(decode, argument):
+            with pytest.raises(TypedStorageError) as refused:
+                decode(argument)
+            return str(refused.value)
+
+        # One warm scan reuses each accepted format; a cold scan per row decodes its instant through inspect.
+        warm, query = scan()
+        for row_id in range(1, len(sources) + 1):
+            row = conn.execute(query, (row_id,)).fetchone()
+            actual = warm(row)
+            assert exact(actual, "when") == exact(scan()[0](row), "when")
+            assert exact(actual, "amount", "label") == exact(shared(row_id), "amount", "label")
+
+        when, amount = current.fields.index("when"), current.fields.index("amount")
+        original = conn.execute(f"SELECT v{when},v{amount} FROM {plan.table_name} WHERE row_id=2").fetchone()
+        _, delta, format_id = struct.unpack(">Bqq", original[0])
+        damaged = ((struct.pack(">Bqq", 1, delta + 1, format_id), original[1]),  # sub-second in a whole-second format
+                   (struct.pack(">Bqq", 1, delta, 99), original[1]),  # a format that no row defines
+                   (struct.pack(">Bqq", 1, delta, 1), original[1]),  # the initial format inside a frame
+                   (2**62, original[1]),  # an integer instant past the calendar
+                   (original[0], float("inf")))  # a number outside the numeric band
+        for cells in damaged:
+            conn.execute(f"UPDATE {plan.table_name} SET v{when}=?,v{amount}=? WHERE row_id=2", cells)
+            row = conn.execute(query, (2,)).fetchone()
+            assert refusal(warm, row) == refusal(scan()[0], row)
+        assert refusal(warm, row) == refusal(shared, 2)

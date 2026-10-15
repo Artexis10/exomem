@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import struct
 from collections.abc import Mapping
 from io import BytesIO
@@ -11,7 +12,7 @@ from io import BytesIO
 from ..query_engine.scalars import ScalarValueError
 from . import native_enum, native_numbers, native_temporal
 from .native_layout import MASK_BITS, Codec, NativeLayout
-from .native_metadata import FieldMetadata, snapshot_fields
+from .native_metadata import FieldMetadata, WriteScope, snapshot_fields
 from .typed_storage import _ABSENT, TypedStorageError, canonical_json
 
 # Closed escape wire: reserved prefix plus canonical JSON, disjoint from scalar frames.
@@ -125,7 +126,8 @@ def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_byte
     raise TypedStorageError("native cell does not match its frozen codec")
 
 
-def encode_row(connection, layout: NativeLayout, values: Mapping) -> tuple:
+def encode_row(connection, layout: NativeLayout, values: Mapping, *, scope: WriteScope | None = None) -> tuple:
+    """Encode one row; a writer transaction encoding many rows passes its own scope to share metadata reads."""
     # Measure validated source values before compaction; frames cannot authorize their own expansion.
     extent = len(canonical_json(values).encode("utf-8"))
     masks = [0] * len(layout.mask_columns)
@@ -136,7 +138,8 @@ def encode_row(connection, layout: NativeLayout, values: Mapping) -> tuple:
             masks[ordinal // MASK_BITS] |= 1 << (ordinal % MASK_BITS)
             cells.append(None)
         else:
-            metadata = FieldMetadata(connection, layout.collection_id, layout.generation, ordinal)
+            metadata = (FieldMetadata(connection, layout.collection_id, layout.generation, ordinal) if scope is None
+                        else scope.field(connection, layout.collection_id, layout.generation, ordinal))
             cells.append(encode_cell(codec, value, metadata))
     known = set(layout.fields)
     residual = {name: value for name, value in values.items() if name not in known}
@@ -224,6 +227,22 @@ def _selected_masks(layout, masks, values):
     return result
 
 
+def _selected_size(value) -> int:
+    """Canonical JSON bytes of one selected value, a TemporalView counting its full spelling."""
+    if isinstance(value, native_temporal.TemporalView):
+        return value.text_bytes + 2
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is int:
+        return len(str(value))
+    if type(value) is str:
+        # The canonical serializer uses this same non-ASCII JSON string encoder.
+        return len(json.encoder.encode_basestring(value).encode("utf-8"))
+    return len(canonical_json(value).encode("utf-8"))
+
+
 def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_bytes: int, check,
                             semantic_fields=frozenset()):
     """Share one bounded physical decoder across an admitted scalar scan."""
@@ -243,57 +262,76 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
                  for ordinal, _ in selected)]
     metadata = snapshot_fields(connection, layout.collection_id, layout.generation,
                                (ordinal for ordinal, _ in selected), database=layout.database)
-    widths = tuple(1 << min(MASK_BITS, len(layout.fields) - ordinal * MASK_BITS) for ordinal in masks)
-    slots = tuple((name, layout.codecs[ordinal], metadata[ordinal], selection[name],
-                   masks.index(ordinal // MASK_BITS), 1 << (ordinal % MASK_BITS),
-                   len(canonical_json(name).encode("utf-8")) + 1, name in semantic_fields)
-                  for ordinal, name in selected)
+    # Row positions: four identity and extent columns, the selected masks, then one cell per selected field.
+    cells_at = 4 + len(masks)
+    mask_bounds = tuple((4 + index, 1 << min(MASK_BITS, len(layout.fields) - ordinal * MASK_BITS))
+                        for index, ordinal in enumerate(masks))
+    slots = []
+    for index, (ordinal, name) in enumerate(selected):
+        codec, semantic = layout.codecs[ordinal], name in semantic_fields
+        days = native_temporal.instant_days(metadata[ordinal]) if semantic and codec is Codec.DATETIME else None
+        slots.append((name, 4 + masks.index(ordinal // MASK_BITS), 1 << (ordinal % MASK_BITS),
+                      len(canonical_json(name).encode("utf-8")) + 1, cells_at + index,
+                      codec is Codec.NUMBER, codec is Codec.TEXT, days, (codec, metadata[ordinal], selection[name], semantic)))
+    low, high, view_type, prefix = native_numbers.LOW, native_numbers.HIGH, native_temporal.TemporalView, ESCAPE_PREFIX
+    string_json = json.encoder.encode_basestring
+    single_mask = mask_bounds[0][1] if len(mask_bounds) == 1 else 0
 
     def decode(row):
-        if row[1] != row[2] or type(row[3]) is not int or row[3] < 2:
+        extent = row[3]
+        if row[1] != row[2] or type(extent) is not int or extent < 2:
             raise TypedStorageError("native current row is missing, stale or has no measured extent")
-        mask_values = row[4:4 + len(masks)]
-        if any(type(mask) is not int or not 0 <= mask < width for mask, width in zip(mask_values, widths, strict=True)):
-            raise TypedStorageError("invalid native missing mask")
-        if row[3] > max_bytes:
+        if single_mask:
+            mask = row[4]
+            if type(mask) is not int or not 0 <= mask < single_mask:
+                raise TypedStorageError("invalid native missing mask")
+        else:
+            for at, width in mask_bounds:
+                mask = row[at]
+                if type(mask) is not int or not 0 <= mask < width:
+                    raise TypedStorageError("invalid native missing mask")
+        if extent > max_bytes:
             return None
-        result, remaining = {}, row[3] - 2
-        for index, (name, codec, field_metadata, tree, mask_at, missing_bit, name_bytes, semantic) in enumerate(slots):
-            cell = row[4 + len(masks) + index]
-            if mask_values[mask_at] & missing_bit:
+        result, remaining, separator = {}, extent - 2, 0
+        for name, mask_at, missing_bit, name_bytes, at, number, text, days, shared in slots:
+            cell = row[at]
+            if row[mask_at] & missing_bit:
                 if cell is not None:
                     raise TypedStorageError("missing native field has a payload")
                 continue
-            escaped = type(cell) is bytes and cell.startswith(ESCAPE_PREFIX)
-            if cell is None:
-                value = None
-            elif semantic and not escaped:
-                value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
-                                                field_metadata, max_bytes=row[3], day_only=True)
-            elif not escaped:
-                # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
-                value = decode_cell(codec, cell, field_metadata, max_bytes=row[3])
+            # The inline sizes below are _selected_size's int, str and TemporalView rules.
+            if number and type(cell) is int and low <= cell <= high:
+                # native_numbers.decode returns an in-band INTEGER cell itself, so skip its dispatch.
+                value, size = cell, len(str(cell))
+            elif text and type(cell) is str and cell.isascii() and len(cell) <= extent:
+                # decode_cell returns an in-budget TEXT cell itself; ASCII text and its JSON count one byte a character.
+                value, size = cell, len(string_json(cell))
+            elif days is not None and (type(cell) is int or type(cell) is bytes and not cell.startswith(prefix)):
+                value = days(cell, extent)
+                size = value.text_bytes + 2 if type(value) is view_type else _selected_size(value)
             else:
-                if len(cell) - len(ESCAPE_PREFIX) > row[3]:
-                    raise TypedStorageError("native JSON exceeds its measured values extent")
-                value = selected_cell(codec, cell, field_metadata, tree, max_bytes=max_bytes, check=check)
-            if isinstance(value, native_temporal.TemporalView):
-                size = value.text_bytes + 2
-            elif value is None:
-                size = 4
-            elif type(value) is bool:
-                size = 4 if value else 5
-            elif type(value) is int:
-                size = len(str(value))
-            elif type(value) is str:
-                # The canonical serializer uses this same non-ASCII JSON string encoder.
-                size = len(json.encoder.encode_basestring(value).encode("utf-8"))
-            else:
-                size = len(canonical_json(value).encode("utf-8"))
-            remaining -= name_bytes + size + bool(result)
+                codec, field_metadata, tree, semantic = shared
+                escaped = type(cell) is bytes and cell.startswith(prefix)
+                if cell is None:
+                    value = None
+                elif semantic and not escaped:
+                    value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
+                                                    field_metadata, max_bytes=extent, day_only=True)
+                elif number and type(cell) is float and math.isfinite(cell) and low <= cell <= high:
+                    value = cell
+                elif not escaped:
+                    # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
+                    value = decode_cell(codec, cell, field_metadata, max_bytes=extent)
+                else:
+                    if len(cell) - len(prefix) > extent:
+                        raise TypedStorageError("native JSON exceeds its measured values extent")
+                    value = selected_cell(codec, cell, field_metadata, tree, max_bytes=max_bytes, check=check)
+                size = _selected_size(value)
+            remaining -= name_bytes + size + separator
             if remaining < 0:
                 raise TypedStorageError("native values exceed the decoding budget")
             result[name] = value
+            separator = 1
         return result
 
     return ",".join(columns), decode
