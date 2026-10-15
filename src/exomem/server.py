@@ -394,6 +394,7 @@ def _record_ledger_row(
             caller_principal_hash=mcp_retry_scope(),
             principal_kind=principal_kind,
             client_name=identity.get("client_name"),
+            app_id=identity.get("app_id"),
             client_version=identity.get("client_version"),
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
