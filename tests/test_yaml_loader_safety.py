@@ -16,7 +16,7 @@ from exomem import vault
 
 @pytest.mark.parametrize("value", [
     "ordinary text", "null", "true", "2026-10-02", "1.25", "a: b",
-    "text\twith tab", "line\nnext", "你好",
+    "text\twith tab", "line\nnext", "line\u2028next", "line\u2029next", "你好",
     "!!python/object/apply:builtins.str [unsafe]",
 ])
 def test_scalar_rendering_preserves_authored_string_with_either_safe_parser(value):

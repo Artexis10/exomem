@@ -50,11 +50,12 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
         "Knowledge Base/Evidence/Rental/letters/2026-05-25-notice.txt.md"
     )
     page = _read(vault / result.sidecar_path)
-    assert "type: source" in page
-    assert "ingested_into: []" in page
-    assert "original_filename: 2026-05-25-notice.txt" in page
-    assert f"binary_sha256: {result.hash}" in page
-    assert f"binary_size: {result.size}" in page
+    frontmatter = vault_module.parse_frontmatter(page, strict=True)[0]
+    assert frontmatter["type"] == "source"
+    assert frontmatter["ingested_into"] == []
+    assert frontmatter["original_filename"] == "2026-05-25-notice.txt"
+    assert frontmatter["binary_sha256"] == result.hash
+    assert frontmatter["binary_size"] == result.size
     # Not an empty page: `schema.validate_source` treats an empty body as an
     # invalid source, and a page that says nothing about the artifact is worse
     # than useless next to it.
@@ -62,9 +63,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert _ARTIFACT_SENTINEL in page
     # The artifact's own bytes are pointed at, never copied into the page.
     assert "withdraw the notice" not in page
-    descriptor = vault_module.parse_frontmatter(page, strict=True)[0][
-        "governance_companion"
-    ]
+    descriptor = frontmatter["governance_companion"]
     assert descriptor == {
         "version": 1,
         "state": "classified",

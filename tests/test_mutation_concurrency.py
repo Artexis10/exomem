@@ -107,8 +107,11 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert not thread.is_alive()
         pending = set(range(20))
         results: dict[int, dict] = {}
-        deadline = time.monotonic() + 45.0
+        retry_started = time.monotonic()
+        deadline = retry_started + 45.0
+        wave = 0
         while pending:
+            wave += 1
             assert time.monotonic() < deadline, "concurrent retry waves did not make progress"
             with ThreadPoolExecutor(max_workers=20) as retry_pool:
                 futures = {
@@ -123,6 +126,22 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
                     except OpError as error:
                         assert error.code == "MUTATION_BUSY"
                         assert error.details.get("committed") is False
+                    except TimeoutError:
+                        # Observe the failed wait before executor shutdown joins its workers.
+                        try:
+                            print(
+                                "capture retry timeout",
+                                {"wave": wave, "elapsed_s": time.monotonic() - retry_started,
+                                 "returned": sorted(results), "wave_input": sorted(pending),
+                                 "futures": {n: {"done": f.done(), "running": f.running(),
+                                                 "cancelled": f.cancelled()}
+                                             for n, f in futures.items()}},
+                                file=sys.stderr, flush=True,
+                            )
+                            faulthandler.dump_traceback(all_threads=True)
+                        except Exception:  # noqa: BLE001 -- diagnostics preserve the original timeout
+                            pass
+                        raise
             pending.difference_update(results)
 
     paths = [result["path"] for result in results.values()]

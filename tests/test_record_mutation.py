@@ -106,7 +106,7 @@ def test_log_append_is_exact_splice_and_replay_is_idempotent(tmp_path: Path) -> 
 
 
 def test_item_update_requires_both_guards_and_preserves_bom_and_body(tmp_path: Path) -> None:
-    from exomem import records
+    from exomem import records, vault
 
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     _activity_log(tmp_path)
@@ -139,7 +139,7 @@ def test_item_update_requires_both_guards_and_preserves_bom_and_body(tmp_path: P
     after = path.read_bytes()
     assert after.startswith(b"\xef\xbb\xbf")
     assert after.endswith(b"BOM-bearing item body remains readable.\n")
-    assert b"status: completed" in after
+    assert vault.parse_frontmatter(after.decode("utf-8-sig"), strict=True)[0]["status"] == "completed"
     assert result["affected_paths"] == [record.source.path]
     assert before != after
 

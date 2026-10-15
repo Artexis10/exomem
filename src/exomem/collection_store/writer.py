@@ -28,6 +28,7 @@ from .. import (
     planning,
     record_formats,
     records,
+    state_paths,
     vault,
     writer_lease,
 )
@@ -1994,9 +1995,11 @@ class CollectionWriter:
                 _import(self, result)
         writer_lease.mark_active_mutation_committed()
         advisory = None
-        for key, values, _, path, before, _ in plans:
-            advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
-                                                  values=values, previous=json.loads(before["values_json"]) if before else None)
+        # Reuse placement within this synchronous batch; each carrier still reads live state.
+        with state_paths.resolution_scope():
+            for key, values, _, path, before, _ in plans:
+                advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
+                                                      values=values, previous=json.loads(before["values_json"]) if before else None)
         return {"due_state": advisory, **result} if advisory else result
 
     def _item_carriers(self, result, manifest, *, path, key, values, previous=None):

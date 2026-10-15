@@ -1575,10 +1575,8 @@ def render_sidecar_extraction(
     content = _set_frontmatter_field(content, "processing_next_action", "null")
     if attempts is not None:
         content = _set_frontmatter_field(content, "processing_attempts", str(attempts))
-    current_verification = re.search(r"(?m)^speaker_verification:\s*(\S+)\s*$", content)
-    if speaker_verification and not (
-        current_verification and current_verification.group(1) == "human-verified"
-    ):
+    current_verification = parse_frontmatter(before)[0].get("speaker_verification")
+    if speaker_verification and current_verification != "human-verified":
         content = _set_frontmatter_field(
             content, "speaker_verification", yaml_scalar(speaker_verification)
         )
