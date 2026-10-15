@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import textwrap
@@ -52,8 +53,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
-from infra.cellctl.src.cellctl.control_test_contract import control_test_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -481,7 +480,8 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
             # -- its stub, and one seed cell row the privilege probes act on,
             # live in this test-setup SQL only, never in the fixture files.
             # Substrate migration 0017 defines status; the real gateway grants require it.
-            schema_fixture, grants_fixture = control_test_sql(ROOT / "infra/cellctl/tests/fixtures")
+            loader = runpy.run_path(str(ROOT / "infra/cellctl/src/cellctl/control_test_contract.py"))
+            schema_fixture, grants_fixture = loader["control_test_sql"](ROOT / "infra/cellctl/tests/fixtures")
             migration_sql = work / "c1-migration.sql"
             migration_sql.write_text(
                 "-- Test-setup-only stub and seed row; never part of the fixture files.\n"
