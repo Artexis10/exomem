@@ -1035,6 +1035,32 @@ def test_service_scoring_preserves_eligible_scores_without_resident_matrix(tmp_p
     assert idx.cache_status()['loaded'] is False
 
 
+def test_service_scoring_preserves_admission_and_nan_ranking_across_physical_blocks(tmp_path, monkeypatch):
+    """Physical blocks must retain eligible winners when insertion and path order differ."""
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    for path, rows in [
+        ('z.md', [[1, 0], [.5, 0]]),
+        ('denied.md', [[2, 0]]),
+        ('b.md', [[1, 0]]),
+        ('c.md', [[np.nan, 0]]),
+        ('a.md', [[.75, 0]]),
+    ]:
+        idx.upsert_file(path, [f'{path}-{n}' for n in range(len(rows))], _mat(*rows), 1.0)
+    monkeypatch.setenv('EXOMEM_CLOUD_CELL', '1')
+    monkeypatch.setenv('EXOMEM_CLOUD_RESOURCE_POLICY', 'service-v1')
+    monkeypatch.setattr(embeddings.EmbeddingIndex, 'DISK_BLOCK_ROWS', 2)
+    for k in (1, 4, 9):
+        hits = idx.search(_pad([1, 0]), k, allowed_paths={'a.md', 'b.md', 'c.md', 'z.md'})
+        assert len(hits) == min(k, 5)
+        assert all(path != 'denied.md' for path, _chunk, _text, _score in hits)
+        assert [score for *_row, score in hits[:4]] == pytest.approx([1, 1, .75, .5][:k])
+        assert all(text == f'{path}-{chunk}' for path, chunk, text, _score in hits)
+        if k > 5:
+            assert hits[-1][:2] == ('c.md', 0)
+            assert np.isnan(hits[-1][3])
+    assert idx.cache_status()['loaded'] is False
+
+
 def test_failed_service_scan_retains_partial_decode_counts_and_releases_snapshot(tmp_path, monkeypatch):
     """A malformed vector must leave partial ledger counts and permit a repaired read."""
     from exomem import call_ledger, call_spans
