@@ -41,6 +41,30 @@ def _delta() -> dict[str, object]:
     }
 
 
+def test_presentation_metadata_survives_save_without_changing_relation_meaning(
+    tmp_path: Path,
+) -> None:
+    proposal = _proposal()
+    definition = proposal["extensions"]["vault.applies_to"]
+    definition["presentation_role"] = "future_renderer_role"
+    saved = relation_registry.save_registry(tmp_path, proposal)
+    loaded = relation_registry.load_registry(tmp_path).definition("vault.applies_to")
+    assert loaded.presentation_role == "future_renderer_role"
+    assert loaded.family == relation_registry.core_registry().definition("relates_to").family
+    assert loaded.description == "A reviewed relation."
+
+    changed = relation_registry.merge_extension_delta(proposal, {
+        "upsert": {"vault.applies_to": {"presentation_role": "conflict"}},
+    })
+    relation_registry.save_registry(tmp_path, changed, expected_hash=saved["content_hash"])
+    reloaded = relation_registry.load_registry(tmp_path).definition("vault.applies_to")
+    assert reloaded.presentation_role == "conflict"
+    assert reloaded.key == loaded.key
+    assert reloaded.family == loaded.family
+    assert reloaded.description == loaded.description
+    assert reloaded.aliases == loaded.aliases
+
+
 @pytest.fixture(autouse=True)
 def owner_library_scope():
     from exomem.governance.principal import library_scope

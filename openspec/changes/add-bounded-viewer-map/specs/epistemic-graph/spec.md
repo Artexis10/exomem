@@ -13,6 +13,20 @@ The system SHALL expose a read-only global page map through the canonical and pr
 - **WHEN** drawn edges come from two admitted instances that assign different meanings to one spelling
 - **THEN** the response retains both instance and definition identities without merging their meanings
 
+### Requirement: Map presentation retains source metadata
+Returned pages SHALL expose their stored type, origin date and updated date, with null for missing values.
+Drawn vocabulary SHALL expose an optional registry-owned presentation role independently of the definition key, family, description and display label.
+The role SHALL NOT alter relation meaning, admission, ranking or disclosure. Unknown roles SHALL remain valid metadata for a neutral renderer fallback.
+The registry SHALL preserve presentation metadata through normal load, save and generic entry conversion.
+
+#### Scenario: A renderer sees a new role
+- **WHEN** a registry defines a presentation role that the renderer does not implement
+- **THEN** the map preserves that role and its source identity without guessing from a relation name
+
+#### Scenario: Presentation changes without semantic changes
+- **WHEN** an owner changes only a relation's presentation role
+- **THEN** the registry preserves its key, meaning fields and aliases
+
 ### Requirement: Global map reports exact and partial coverage separately
 The map SHALL include admitted isolated pages and rank by admitted incoming cross-page edges with a deterministic key tie-break. A complete inspection SHALL report exact eligible totals. A stopped inspection SHALL return partial state, nullable exact totals, observed counts and provisional ranking. Output caps SHALL report actual drawn counts and truncation separately. Unavailable graph evidence SHALL NOT appear as an empty vault.
 

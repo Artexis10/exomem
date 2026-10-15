@@ -312,18 +312,20 @@ def op_viewer_map(
             if expired("drawing"):
                 break
             row = conn.execute(
-                "SELECT path, title, source_hash, exomem_id FROM graph_nodes "
+                "SELECT path, title, source_hash, exomem_id, page_type, origin_date, updated_date "
+                "FROM graph_nodes "
                 "WHERE node_key = ? AND kind = 'file'", (key,),
             ).fetchone()
             if row is None:
                 continue
-            path, title, source_hash, identity = row
+            path, title, source_hash, identity, page_type, origin_date, updated_date = row
             result["nodes"].append({
                 "node_key": key, "kind": "file", "path": path,
                 "title": str(graph._served(path, title) or "")[:240],
                 "source_hash": source_hash,
                 "incoming_edges": degrees[key] if edge_coverage else None,
                 "memory_ref": memory_refs.memory_ref(identity) if identity else None,
+                "page_type": page_type, "origin_date": origin_date, "updated_date": updated_date,
             })
         chosen_paths = [str(node["path"]) for node in result["nodes"]]
         chosen_keys = {str(node["node_key"]) for node in result["nodes"]}
@@ -349,6 +351,7 @@ def op_viewer_map(
             vocabulary[(str(identity["instance"]), definition.key)] = {
                 **identity, "description": definition.description[:1000],
                 "family": definition.family, "direction": definition.direction,
+                "presentation_role": definition.presentation_role,
             }
 
         # The draw query excludes endpoints outside the selected page set, including unit parents.

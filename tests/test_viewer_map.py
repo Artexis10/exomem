@@ -106,6 +106,25 @@ def test_output_caps_preserve_exact_totals_and_stable_keys(tmp_path: Path) -> No
     assert capped_edges["truncation"] == [{"stage": "output_edges", "reason": "drawing_limit", "limit": 1}]
 
 
+def test_map_returns_stored_note_metadata_and_source_presentation_role(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    _write(root, f"{NOTES}/source.md", "---\ntype: insight\n"
+           "created: '2026-09-01'\nupdated: '2026-10-01'\n---\n# Source\n\n"
+           f"## Claim\n- relations: contradicts: [[{NOTES}/target]]\n\nA conflict.\n")
+    _write(root, f"{NOTES}/target.md", "---\ntype: insight\n---\n# Target\n")
+    _build(root)
+    with library_scope():
+        result = commands.op_viewer_map(root)
+    source = next(node for node in result["nodes"] if node["path"] == f"{NOTES}/source.md")
+    assert (source["page_type"], source["origin_date"], source["updated_date"]) == (
+        "insight", "2026-09-01", "2026-10-01",
+    )
+    meaning = next(row for row in result["vocabulary"] if row["definition_key"] == "contradicts")
+    assert meaning["presentation_role"] == "conflict"
+    assert meaning["family"] == "contradiction"
+    assert meaning["description"] == "Conflicts with"
+
+
 def test_real_mcp_rest_cli_return_the_admitted_page_map(
     vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:

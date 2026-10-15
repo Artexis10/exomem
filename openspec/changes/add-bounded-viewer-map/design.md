@@ -30,6 +30,8 @@ A missing resident resolver produces partial edge coverage, unknown exact totals
 Admit file rows, edge authors and endpoints before reducing. Collapse semantic-unit endpoints to their page identities.
 Rank by admitted incoming cross-page edges, then graph key. Keep isolated admitted pages.
 Vocabulary uses instance and definition identity for drawn items only. It must not merge meanings by label.
+Optional presentation roles come from registry data, never relation-name matching. They do not implement the separate display-label contract.
+Unknown roles retain their identity and use neutral presentation. Stored page types and dates need no source-file reads.
 Apply the final graph disclosure guard before reporting drawn counts.
 
 ### Separate scan completeness from output truncation
