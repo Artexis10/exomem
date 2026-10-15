@@ -268,6 +268,8 @@ jobs:
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
+          tests/test_artifact_recovery.py::test_retained_copy_rechecks_bytes_even_with_unchanged_mtime
+          tests/test_artifact_recovery.py::test_in_place_rewrite_during_final_origin_check_releases_no_stale_original
           "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
           tests/test_collection_store_replica.py::test_first_and_successive_publish_are_reopenable_business_snapshots
           tests/test_collection_store_replica.py::test_matching_installed_copy_retires_the_still_owned_redundant_stage
