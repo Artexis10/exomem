@@ -253,7 +253,11 @@
   5. image upgrade and recall;
   6. backup present in B2;
   7. token refresh after 15 minutes.
-- [ ] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends. Moved from 3.6, where it was deferred; the P3 rehearsal's step 11 restores into a scratch namespace with cellctl's renderers as a stand-in.
+- [x] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends.
+  Evidence: [#1409](https://github.com/Artexis10/exomem/pull/1409) delivered [the export procedure](../../../docs/runbooks/cloud-operator-export.md); #1418 added break-glass access.
+  The procedure binds the tenant, snapshot and recipient set, streams only the vault to age, and verifies recipient decryption before scratch cleanup.
+  The runbook records a successful 2026-09-28 export using the earlier admin identity.
+  Task 6.12 retains current-release acceptance through the current operator identity; this closes the delivered procedure only.
 
 ### Launch and resilience roadmap
 
@@ -281,7 +285,7 @@ A deployed-image B2 backup and scratch restore matched both vault and host state
 That proof does not close in-place restore, historical rollback, connector sign-in or token refresh.
 Existing per-cell pins do not prove that the fleet default selects the qualified release.
 The Neon cutover and project deletion are closed; do not repeat them.
-Tasks 6.0–6.4 stay unchecked until their exact closure evidence is reconciled.
+Tasks 6.0–6.3 stay unchecked until their exact closure evidence is reconciled.
 
 - [x] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.

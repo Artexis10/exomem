@@ -37,6 +37,7 @@ import os
 import re
 import sqlite3
 import textwrap
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -47,7 +48,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from .. import activation_result, find_corpus, memory_refs, reserved_paths, vault
+from .. import activation_result, call_spans, find_corpus, memory_refs, reserved_paths, vault
 from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
@@ -3339,6 +3340,7 @@ def guard_working_set(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    intent_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Apply release decisions to a working-memory packet (design D7).
 
@@ -3382,6 +3384,24 @@ def guard_working_set(
         purpose=purpose,
         record="all",
     )
+    if intent_resolution is not None:
+        witness = intent_resolution.pop("_witness", {})
+        # Reuse this guard's authority. Private losses must not change task markers.
+        intent_ctx = _packet_release(
+            vault_root, witness, release, policy=policy,
+            release_gate_active=release_gate_active, who=who, purpose=purpose,
+            record="all",
+        )
+        _paths, _names, interpretations, invalid = _working_set_paths(witness)
+        if invalid or any(
+            not any((vault_root / reading).is_file() for reading in readings)
+            for readings in interpretations.values()
+        ) or (intent_ctx is not None and any(
+            _guarded_anchor(item, intent_ctx.frozen, intent_ctx.decisions,
+                            intent_ctx.invalid_refs) is None
+            for item in witness.get("anchors", ())
+        )):
+            intent_resolution["status"] = "unavailable"
     if ctx is None:
         return guarded
     decisions, withheld = ctx.decisions, ctx.withheld
@@ -6260,6 +6280,7 @@ class _ArtifactReferenceGate:
         self.literal_aliases: set[str] = set()
         self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
         self._indexed = False
+        self._index_entered = False
 
     def _ensure_index(self) -> None:
         # Structured results need no artifact census unless they carry free text.
@@ -6276,6 +6297,7 @@ class _ArtifactReferenceGate:
             rows.append(rel)
 
     def _index(self) -> None:
+        self._index_entered = True
         kb_prefix = f"{kb_dirname()}/"
         try:
             paths = sorted(path for path in self.vault_root.rglob("*") if path.is_file())
@@ -6498,8 +6520,33 @@ def gate_artifact_references(
     scan_all: bool = False,
 ) -> Any:
     """Recursively gate nested prompt/resource payloads with one verdict cache."""
-    gate = _ArtifactReferenceGate(Path(vault_root), principal=principal, purpose=purpose)
-    return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
+    started = cpu_started = None
+    gate = None
+    if call_spans.MCP_CALL_TOKEN.get() is not None:
+        try:
+            started = time.perf_counter()
+            cpu_started = time.thread_time_ns()
+        except Exception:  # noqa: BLE001 - observation cannot refuse disclosure
+            pass
+    try:
+        gate = _ArtifactReferenceGate(Path(vault_root), principal=principal, purpose=purpose)
+        return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
+    finally:
+        if started is not None:
+            # These fields measure the fixed artifact-gate API, never returned text or authority.
+            fields = {"index_calls": int(gate is not None and gate._index_entered), "thread_cpu_calls": 0}
+            if cpu_started is not None:
+                try:
+                    fields["thread_cpu_us"] = (time.thread_time_ns() - cpu_started) // 1000
+                    fields["thread_cpu_calls"] = 1
+                except Exception:  # noqa: BLE001 - an unavailable clock remains unmeasured
+                    pass
+            try:
+                call_spans.record_span(
+                    "egress.artifact_gate", (time.perf_counter() - started) * 1000.0, fields
+                )
+            except Exception:  # noqa: BLE001 - observation must preserve the original outcome
+                pass
 
 
 def release_walk_filter(
@@ -7283,7 +7330,8 @@ def filter_withheld_entries(
         inspection_evidence = operation.validate_inspection_projection(payload, writer.handle)
     metadata_references = dict(inspection_evidence.references) if inspection_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
-    tombstones = operation.tombstones if operation is not None else lifecycle.tombstoned_paths(vault_root)
+    # File-mode decisions check live tombstones below; they never consume a captured set.
+    tombstones = operation.tombstones if operation is not None else None
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or (not policy.empty and not who.resolved)
 

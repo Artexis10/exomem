@@ -55,6 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--steps", default=None, help="comma-separated step numbers to run (default: all)")
     run_parser.add_argument("--cloud-import", action="store_true", help="also run the native CLI import journey after provisioning")
+    run_parser.add_argument("--operator-restore-abort", action="store_true", help="interrupt the shipped in-place restore after provisioning and prove recovery (partial proof; never gates a node)")
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
@@ -105,6 +106,7 @@ async def _run(args: argparse.Namespace) -> int:
         "gateway_image_source": "Dockerfile.exomem-gateway" if args.gateway_build == "dockerfile" else "host-assembled final stage",
         "local_storage_coexistence": args.local_storage_coexistence,
         "native_cloud_import": args.cloud_import,
+        "operator_restore_abort": args.operator_restore_abort,
     }
     if args.cell_image:
         report.valid = False
@@ -132,23 +134,32 @@ async def _run(args: argparse.Namespace) -> int:
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
         with stage(report, "infrastructure"):
-            stack = infra.create_stack(run_id, workdir, tls_storage=args.cloud_import)
+            stack = infra.create_stack(run_id, workdir, tls_storage=args.cloud_import or args.operator_restore_abort)
             report.adaptations.extend(stack.adaptations)
         pki = stack.pki or tls.make_pki(workdir)
-        if args.cloud_import:
-            with stage(report, "import_tls"):
+        if args.cloud_import or args.operator_restore_abort:
+            with stage(report, "import_tls" if args.cloud_import else "restore_tls"):
                 source_v1 = v1
                 v1, v2, broken = (build.trust_rehearsal_ca(tag, pki.ca_path, workdir) for tag in (v1, v2, broken))
                 report.overlays.append("Cloud images: the disposable CA is the sole added trust root")
-                report.overlays.append("Native CLI container: legacy resource profile")
-                from .native_import import enable_versioning, image_payload
+                from .native_import import image_payload
 
                 baseline_payload = image_payload(source_v1)
                 trusted_payload = image_payload(v1)
                 if baseline_payload != trusted_payload:
                     raise RuntimeError("the CA layer changed product or model bytes")
-                report.stages["import_tls"]["product_and_model"] = trusted_payload
-                enable_versioning(stack.object_store)
+                report.stages["import_tls" if args.cloud_import else "restore_tls"]["product_and_model"] = trusted_payload
+                if args.cloud_import:
+                    from .native_import import enable_versioning
+
+                    report.overlays.append("Native CLI container: legacy resource profile")
+                    enable_versioning(stack.object_store)
+        if args.operator_restore_abort:
+            from .operator_restore_abort import build_writer_image
+
+            with stage(report, "restore_writer_image"):
+                v1 = build_writer_image(stack, v1)
+                report.overlays.append("Cloud v1 image: restic delegates normally except this run's active in-place writer fixture")
         with stage(report, "images_into_k3s"):
             built = build.BuiltImages(
                 cell_v1=build.load_into_k3s(stack.k3s.container, v1),
@@ -188,6 +199,7 @@ async def _run(args: argparse.Namespace) -> int:
                     public_base_url=substrate.PUBLIC_BASE_URL, mcp_path=substrate.MCP_PATH,
                     trusted_ingress_source_value=control.secrets.ingress_source_value,
                     local_storage_coexistence=args.local_storage_coexistence,
+                    operator_restore_abort=args.operator_restore_abort,
                 ),
                 cellctl_secrets=platform.cellctl_secrets(
                     stack, cell_token_key=control.secrets.cell_token_key,
@@ -205,7 +217,8 @@ async def _run(args: argparse.Namespace) -> int:
             platform.wait_rollout(stack, platform.EDGE_NAMESPACE, "rehearsal-traefik")
             _wait_json(resolver, f"https://{tls.MCP_HOST}/.well-known/oauth-protected-resource{substrate.MCP_PATH}", "the gateway through ingress")
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report,
-                      cli_image=v1 if args.cloud_import else None)
+                      cli_image=v1 if args.cloud_import else None,
+                      operator_restore_abort=args.operator_restore_abort)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
             await ctx.admin_release({"cellImage": built.cell_v1})

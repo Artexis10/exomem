@@ -1577,7 +1577,7 @@ def test_resume_awaits_the_same_slow_replacement_under_the_cold_start_budget(tmp
         manager.records.begin(target, worker_pid=0)
         manager.records.phase("failed", worker_pid=0)
         result = await manager.upgrade(None, resume=True)
-        assert result["ok"] is True
+        assert result["ok"] is True, result
         assert result["handoff"]["standby"] == "unsupported"
         assert manager.records.pending() is None
         assert manager.records.active() == target

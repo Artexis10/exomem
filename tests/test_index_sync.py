@@ -631,6 +631,45 @@ def test_batch_atomic_write_hides_internal_epoch_paths_without_fanout(tmp_path: 
     assert graph_sync.read_checkpoint(tmp_path) is not None
 
 
+def test_incomplete_batch_log_names_components_without_paths_or_codes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private_path = "sample/private.md"
+    report = index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(private_path,),
+        eligible_paths=(private_path,),
+        components=(
+            index_sync.IndexComponentOutcome("epistemic_graph", "failed", private_path),
+            index_sync.IndexComponentOutcome("embeddings", "deferred", "deferred_durable"),
+        ),
+    )
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_args, **_kwargs: report)
+    monkeypatch.setattr(
+        "exomem.file_watcher.register_self_write",
+        lambda *_args, **_kwargs: (True, False),
+    )
+    monkeypatch.setattr(index_sync, "full_upsert_succeeded", lambda *_args: False)
+    monkeypatch.setattr(index_sync, "record_failed_refresh", lambda *_args: None)
+    caplog.set_level("WARNING", logger="exomem.vault")
+
+    complete = vault_module.post_commit_batch_fanout(
+        tmp_path, [tmp_path / private_path], None, None
+    )
+
+    assert complete is False
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "index upsert incomplete after batch_atomic_write" in record.getMessage()
+    )
+    assert "components=epistemic_graph:failed,embeddings:deferred" in warning
+    assert private_path not in warning
+    assert "deferred_durable" not in warning
+
+
 def test_graph_lock_error_reaches_index_sync_as_degraded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

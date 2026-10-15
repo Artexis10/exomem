@@ -109,6 +109,44 @@ The report remains partial and cannot gate the node.
 The twelve P3 steps and their release criteria stay unchanged.
 Production storage, browser CORS, large uploads and multiple nodes need their own acceptance evidence.
 
+## Interrupted operator restore
+
+`--operator-restore-abort` adds one stage after provisioning. It also works with only steps 1 and 2 selected.
+The twelve default steps stay unchanged, and selecting this option always keeps `gates_node` false.
+Dispatch `Cloud rehearsal` with mode `operator-restore-abort` for the bounded CI proof.
+
+From the repository root, run the same stage:
+
+```sh
+uv run --frozen --project infra/cloud-rehearsal exomem-cloud-rehearsal run --steps 1,2 --operator-restore-abort --harness-check --report operator-restore-abort-report.json
+```
+
+The stage takes snapshot S0 through the controller, then makes a governed write and a stable host sentinel.
+It runs the shipped `cloud_restore.sh run restore` entry in one disposable operator container.
+That container uses real K3s and the shipped break-glass binding, with only the disposable cluster's admin configuration.
+It mounts the exact disposable PVC directory read-only for one kernel event observer.
+The observer watches both partial directory inodes before TERM, with no recursive watches or recorded filenames.
+It records writer closure, partial file and root removal, and original root return in order.
+Overflow makes the proof incomplete.
+The configuration retains certificate verification and the cluster CA while using the K3s bridge address.
+The object store uses HTTPS, and the cell image trusts the run CA.
+
+A test layer preserves real restic for every command except this run's interrupted in-place restore.
+After both original roots move, that restore creates distinct partial roots and stays an active writer until deletion.
+The stage proves this state before sending TERM to the actual Bash child process.
+The shipped recovery must stop the writer, restore both roots, resume the cell and resume controller reconciliation.
+The interrupted operator run must exit nonzero even when recovery succeeds.
+
+The report records helper source hashes, writer evidence, post-S0 data, ownership, readiness and resource absence before global teardown.
+It checks recall of the post-S0 write and a new governed write with recall after recovery.
+It also checks the stable host sentinel and owner-only modes, without comparing changing databases or caches.
+The observer flushes its final state to stdout before exit; Docker retains that record after discarding the private tmpfs.
+The diagnostics artifact includes `operator-restore-abort.log` and `operator-restore-abort-witness.json`.
+A requested stage failure exits 2, including with `--harness-check`.
+
+Ordinary governed writes do not initialize signed standalone custody, so signed custody recovery remains unproved.
+This stage does not qualify production storage, the systemd launcher, natural restic failures or other signal paths.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:
