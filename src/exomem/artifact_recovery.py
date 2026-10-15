@@ -12,6 +12,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
@@ -20,7 +21,17 @@ from .governance import companions, connector_boundary, egress, policy
 from .governance.principal import effective_principal, request_scope
 
 RESOURCE_PREFIX = "exomem://original/"
-_NATIVE_GRANT: ContextVar[str | None] = ContextVar("exomem_native_original_grant", default=None)
+
+
+@dataclass(slots=True, repr=False)
+class _NativeGrantState:
+    """Middleware-owned custody and completion for one native resource request."""
+
+    grant: str | None
+    completed: bool = False
+
+
+_NATIVE_GRANT: ContextVar[_NativeGrantState | None] = ContextVar("exomem_native_original_grant", default=None)
 # Two simultaneous private spools bound process disk use; oversized files use a configurable byte budget.
 _SLOTS = threading.BoundedSemaphore(2)
 # This matches only the fixed signed protocol syntax, never a user's vocabulary or intent.
@@ -336,18 +347,27 @@ def native_principal(root: Path, uri: str, caller):
 @contextmanager
 def native_grant_scope(grant: str | None):
     """Carry authority beside a sanitized resource URI so framework spans never see it."""
-    token = _NATIVE_GRANT.set(grant)
+    state = _NativeGrantState(grant)
+    token = _NATIVE_GRANT.set(state)
     try:
-        yield
+        yield state
     finally:
         _NATIVE_GRANT.reset(token)
 
 
 def current_native_grant() -> str:
-    grant = _NATIVE_GRANT.get()
-    if grant is None:
+    state = _NATIVE_GRANT.get()
+    if state is None or state.grant is None:
         raise RecoveryUnavailable
-    return grant
+    return state.grant
+
+
+def complete_native_grant(grant: str) -> None:
+    """Record the leaf's final live session, release, version and expiry fence."""
+    state = _NATIVE_GRANT.get()
+    if state is None or state.grant is None or state.grant != grant:
+        raise RecoveryUnavailable
+    state.completed = True
 
 
 def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:

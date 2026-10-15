@@ -781,11 +781,17 @@ class AuthorizationSessionMiddleware(Middleware):
                 raise AuthorizationContextUnavailable
             revision = connector_boundary.cache_identity(self.vault_root, who)
             unrestricted = connector_boundary.unrestricted(self.vault_root, who)
-            with principal_module.request_scope(who), artifact_recovery.native_grant_scope(grant):
+            with principal_module.request_scope(who), artifact_recovery.native_grant_scope(grant) as native:
                 result = await call_next(context)
             changed = connector_boundary.cache_identity(self.vault_root, who) != revision
             limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, who)
-            if not await auth_sessions.origin_session_active(who) or changed and limited:
+            if grant is not None:
+                # The native leaf owns the last await and its synchronous version/release fence.
+                if not native.completed:
+                    raise AuthorizationContextUnavailable
+            elif not await auth_sessions.origin_session_active(who):
+                raise AuthorizationContextUnavailable
+            if changed and limited:
                 raise AuthorizationContextUnavailable
             return result
         except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable, artifact_recovery.RecoveryUnavailable):

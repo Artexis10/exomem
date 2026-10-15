@@ -961,3 +961,190 @@ def test_scene_parent_proof_is_reused_off_loop_and_rechecked_before_headers(
     assert http.get(handoff["deliveries"]["https"]["url"]).status_code == 404
     assert changed
     assert parent_copies == [parent]
+
+
+def test_routed_native_read_cannot_return_stale_bytes_after_a_later_origin_await(
+    vault, monkeypatch
+):
+    import asyncio
+    import base64
+
+    from fastmcp import Client
+    from mcp.shared.exceptions import MCPError
+    from test_upload_endpoint import _client
+
+    from exomem import artifact_recovery, auth_sessions, commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    http = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="transport-secret",
+                   EXOMEM_JWT_SIGNING_KEY="private-authority", EXOMEM_BASE_URL="https://archive.example")
+    original = b"%PDF-first"
+    stored = http.post("/upload", files={"file": ("sample.pdf", original, "application/pdf")},
+                       data={"scope": "Archive", "category": "Records"},
+                       headers={"authorization": "Bearer transport-secret"}).json()
+    with request_scope(owner_principal(surface="mcp")):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=stored["path"])
+    source = vault / stored["path"]
+    revision = artifact_recovery.require_revision
+    origin_active = auth_sessions.origin_session_active
+    fenced = False
+    changed = False
+
+    def final_revision(*args, **kwargs):
+        nonlocal fenced
+        revision(*args, **kwargs)
+        fenced = True
+
+    async def origin(who):
+        nonlocal changed
+        if fenced:
+            info = source.stat()
+            with source.open("r+b") as file:
+                file.write(b"%PDF-other")
+            os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+            changed = True
+        await asyncio.sleep(0)
+        return await origin_active(who)
+
+    monkeypatch.setattr(artifact_recovery, "require_revision", final_revision)
+    monkeypatch.setattr(auth_sessions, "origin_session_active", origin)
+
+    async def consume():
+        async with Client(http.app.state.fastmcp_server) as client:
+            try:
+                result = await client.read_resource(handoff["deliveries"]["native_resource"]["uri"])
+            except MCPError:
+                assert changed, "an unchanged admitted original was refused"
+            else:
+                assert base64.b64decode(result[0].blob) == source.read_bytes()
+
+    asyncio.run(consume())
+    assert fenced
+
+
+def test_routed_native_read_requires_new_leaf_completion_for_each_request(vault, monkeypatch):
+    import asyncio
+    import base64
+
+    from fastmcp import Client
+    from mcp.shared.exceptions import MCPError
+    from test_upload_endpoint import _client
+
+    from exomem import artifact_recovery, commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    http = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="transport-secret",
+                   EXOMEM_JWT_SIGNING_KEY="private-authority", EXOMEM_BASE_URL="https://archive.example")
+    original = b"%PDF-original"
+    stored = http.post("/upload", files={"file": ("sample.pdf", original, "application/pdf")},
+                       data={"scope": "Archive", "category": "Records"},
+                       headers={"authorization": "Bearer transport-secret"}).json()
+    with request_scope(owner_principal(surface="mcp")):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=stored["path"])
+    uri = handoff["deliveries"]["native_resource"]["uri"]
+
+    async def consume():
+        async with Client(http.app.state.fastmcp_server) as client:
+            first = await client.read_resource(uri)
+            assert base64.b64decode(first[0].blob) == original
+            monkeypatch.setattr(artifact_recovery, "complete_native_grant", lambda grant: None)
+            with pytest.raises(MCPError, match="request authority changed"):
+                await client.read_resource(uri)
+
+    asyncio.run(consume())
+
+
+def test_real_origin_revocation_before_native_leaf_completion_releases_no_blob(
+    vault, monkeypatch, tmp_path
+):
+    import asyncio
+
+    from fastmcp import Client
+    from mcp.shared.exceptions import MCPError
+    from test_upload_endpoint import _client
+
+    from exomem import artifact_recovery, auth_sessions, commands, server_auth
+    from exomem.governance import principal
+
+    http = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="transport-secret",
+                   EXOMEM_JWT_SIGNING_KEY="private-authority", EXOMEM_BASE_URL="https://archive.example")
+    stored = http.post("/upload", files={"file": ("sample.pdf", b"%PDF-original", "application/pdf")},
+                       data={"scope": "Archive", "category": "Records"},
+                       headers={"authorization": "Bearer transport-secret"}).json()
+    authority = auth_sessions.SessionAuthority.local(directory=tmp_path / "sessions",
+        signing_root="private-authority", issuer="https://archive.example", audience="https://archive.example/mcp")
+    bearer, session = asyncio.run(authority.issue(client_id="reader", scopes=["read"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="sample-reader")))
+    who = principal.RequestPrincipal("external", surface="mcp", issuer_family="test-issuer",
+        client_binding=principal.ClientBinding(authority.issuer, session.client_id),
+        origin_session=principal.OriginSessionBinding(session.session_id, session.generation, session.audience))
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **kwargs: authority)
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: who)
+    with principal.request_scope(who):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=stored["path"])
+    assert asyncio.run(auth_sessions.origin_session_active(who))
+    current = artifact_recovery.require_current
+    checked = 0
+    revoked = False
+
+    def revoke_after_byte_verification(*args, **kwargs):
+        nonlocal checked, revoked
+        result = current(*args, **kwargs)
+        checked += 1
+        if checked == 2:
+            asyncio.run(authority.revoke_bearer(bearer, reason="test revocation"))
+            revoked = True
+        return result
+
+    monkeypatch.setattr(artifact_recovery, "require_current", revoke_after_byte_verification)
+
+    async def consume():
+        async with Client(http.app.state.fastmcp_server) as client:
+            with pytest.raises(MCPError, match="original recovery is unavailable"):
+                await client.read_resource(handoff["deliveries"]["native_resource"]["uri"])
+
+    asyncio.run(consume())
+    assert revoked
+    assert not asyncio.run(auth_sessions.origin_session_active(who))
+
+
+@pytest.mark.parametrize("surface", ["resource", "prompt"])
+def test_generic_mcp_content_keeps_its_final_origin_check(vault, monkeypatch, surface):
+    import asyncio
+
+    from fastmcp import Client
+    from mcp.shared.exceptions import MCPError
+    from test_upload_endpoint import _client
+
+    from exomem import auth_sessions
+
+    http = _client(vault, monkeypatch)
+    mcp = http.app.state.fastmcp_server
+    produced = False
+
+    async def produce():
+        nonlocal produced
+        produced = True
+        return "public content"
+
+    if surface == "resource":
+        mcp.resource("fixture://public")(produce)
+    else:
+        mcp.prompt(name="public_prompt")(produce)
+
+    async def origin(_who):
+        await asyncio.sleep(0)
+        return not produced
+
+    monkeypatch.setattr(auth_sessions, "origin_session_active", origin)
+
+    async def consume():
+        async with Client(mcp) as client:
+            with pytest.raises(MCPError):
+                if surface == "resource":
+                    await client.read_resource("fixture://public")
+                else:
+                    await client.get_prompt("public_prompt")
+
+    asyncio.run(consume())
+    assert produced

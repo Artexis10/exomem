@@ -639,7 +639,9 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
                         raise artifact_recovery.RecoveryUnavailable
                     artifact_recovery.require_revision(runtime.vault_root, who, copied, revision, byte_proofs=proofs)
                     artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
-                    return ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
+                    result = ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
+                artifact_recovery.complete_native_grant(grant)
+                return result
             except artifact_recovery.RecoveryUnavailable:
                 raise ResourceError("original recovery is unavailable") from None
 
