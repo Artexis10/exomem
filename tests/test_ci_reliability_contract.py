@@ -31,7 +31,7 @@ FULL_CI_JOBS = {
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
     ("core-tests", 12, "core"),
-    ("harness-tests", 4, "harness"),
+    ("harness-tests", 5, "harness"),
 )
 
 #: Session caps per tier; the headroom test derives the floor from the durations file.
