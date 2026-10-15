@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.117.3](https://github.com/Artexis10/exomem/compare/v0.117.2...v0.117.3) (2026-10-14)
+
+
+### Performance
+
+* **recall:** decide the carry release gate once per query, not per matched row ([#1753](https://github.com/Artexis10/exomem/issues/1753)) ([06dfca3](https://github.com/Artexis10/exomem/commit/06dfca35870278b296c91eeb7cf1f0834326f984))
+
 ## [0.117.2](https://github.com/Artexis10/exomem/compare/v0.117.1...v0.117.2) (2026-10-14)
 
 
