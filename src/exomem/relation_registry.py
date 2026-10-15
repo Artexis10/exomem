@@ -1268,7 +1268,10 @@ SPEC = vocabulary_registry.RegistrySpec(
     attributes=frozenset({*_ATTRIBUTE_FIELDS, "scope"}),
     # Relations keep their meaning fixed in place; a new meaning is a new key.
     immutable=frozenset(
-        {"parent", "description", *(f"attributes.{name}" for name in (*_MEANING_ATTRIBUTES, "scope"))}
+        {
+            "parent", "description",
+            *(f"attributes.{name}" for name in (*_MEANING_ATTRIBUTES, "scope")),
+        }
     ),
     replacement_required=True,
     family="relation-type/v1",
