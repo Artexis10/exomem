@@ -126,6 +126,44 @@ def _identity_conflict(row: CellRow, observation: ClusterObservation, storage: S
     return False
 
 
+def storage_receipt(
+    row: CellRow,
+    observation: ClusterObservation,
+    storage: StorageConfig,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    """Report a real bound claim; pod readiness and requested bytes are not capacity proof."""
+
+    values: dict[str, object] = {
+        "observed_storage_pvc_uid": None,
+        "observed_storage_pvc_version": None,
+        "observed_storage_capacity_bytes": None,
+        "observed_storage_generation": None,
+    }
+    capacity = observation.pvc_capacity_bytes
+    if (
+        observation.namespace_exists
+        and not _identity_conflict(row, observation, storage)
+        and observation.pvc_bound
+        and not observation.pvc_terminating
+        and observation.pvc_uid
+        and observation.pvc_resource_version
+        and capacity is not None
+        and capacity > 0
+    ):
+        target = row.size_gib if storage.is_local(observation.pv_storage_class) else row.storage_gib
+        values.update({
+            "observed_storage_pvc_uid": observation.pvc_uid,
+            "observed_storage_pvc_version": observation.pvc_resource_version,
+            "observed_storage_capacity_bytes": capacity,
+            "observed_storage_generation": row.generation if capacity >= target * GIB and not observation.pvc_resize_pending else None,
+        })
+    if all(getattr(row, key) == value for key, value in values.items()):
+        return {}
+    return {**values, "observed_storage_at": now}
+
+
 def decide(
     row: CellRow,
     rollout: RolloutRow,

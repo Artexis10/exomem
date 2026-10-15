@@ -16,7 +16,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncpg
@@ -72,7 +72,8 @@ def _free_port() -> int:
 class PostgresServer:
     host: str
     port: int
-    admin_dsn: str
+    # An external test server may require a password; pytest displays fixture representations.
+    admin_dsn: str = field(repr=False)
 
     def dsn(self, *, role: str | None = None, database: str = "postgres") -> str:
         user = role or "postgres"

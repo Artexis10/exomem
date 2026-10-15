@@ -1,4 +1,4 @@
--- Imported from Substrate 100485eeced0b94c9ab550bb65cb3bb2b60f0eb2:scripts/exomem-cloud-grants.sql
+-- Imported from the companion paid-storage change: scripts/exomem-cloud-grants.sql
 -- Idempotent least-privilege grants for the Exomem Cloud control plane
 -- (design D7). This script is the single implementation of:
 --
@@ -86,7 +86,7 @@ BEGIN
     );
   END IF;
 
-  -- 2. C1-C1d and C5 are the exceptions to the schema-wide grant above: revoke
+  -- 2. C1-C1d, C5 and C6 are the exceptions to the schema-wide grant above: revoke
   -- whatever it (and PUBLIC) just gave every role on these four tables, then
   -- apply the exact C1 privilege table below. A rerun of this whole script
   -- therefore always converges to the same state, never accumulating a
@@ -111,6 +111,14 @@ BEGIN
     GRANT INSERT (cell_id, tenant_id, storage_gib, rollout_priority, desired_state, desired_image)
       ON exomem_cloud_cells TO substrate_app;
     GRANT UPDATE (desired_state, desired_image) ON exomem_cloud_cells TO substrate_app;
+    -- Migration 0071 establishes desired-size changes and their capacity receipts.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = target_schema AND table_name = 'exomem_cloud_cells'
+        AND column_name = 'observed_storage_pvc_uid'
+    ) THEN
+      GRANT UPDATE (storage_gib) ON exomem_cloud_cells TO substrate_app;
+    END IF;
     -- Migration 0057 (item 5 / task 3.7): the cancellation-notice-sent claim
     -- column, now reflected in the design's C1 privilege table above. Guarded
     -- on the COLUMN's own existence, not just the table's: 0057 lands one
@@ -155,6 +163,25 @@ BEGIN
     ) THEN
       GRANT UPDATE (grown_storage_gib) ON exomem_cloud_cells TO exomem_cellctl;
     END IF;
+    -- Migration 0066: the disk use cellctl measures, an observed column group.
+    -- Guarded on the column's own existence, as 0057's and 0059's grants are.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = target_schema AND table_name = 'exomem_cloud_cells'
+        AND column_name = 'used_bytes'
+    ) THEN
+      GRANT UPDATE (used_bytes, filesystem_bytes, usage_observed_at) ON exomem_cloud_cells TO exomem_cellctl;
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = target_schema AND table_name = 'exomem_cloud_cells'
+        AND column_name = 'observed_storage_pvc_uid'
+    ) THEN
+      GRANT UPDATE (
+        observed_storage_pvc_uid, observed_storage_pvc_version, observed_storage_capacity_bytes,
+        observed_storage_generation, observed_storage_at
+      ) ON exomem_cloud_cells TO exomem_cellctl;
+    END IF;
     GRANT INSERT, UPDATE ON exomem_cloud_capacity TO exomem_cellctl;
     GRANT UPDATE (paused, error_code, held_cell_id, last_good_image, updated_at)
       ON exomem_cloud_rollout TO exomem_cellctl;
@@ -185,6 +212,29 @@ BEGIN
       GRANT SELECT ON exomem_cloud_imports TO exomem_cellctl;
       GRANT UPDATE (recipient, upload_id, part_urls, urls_expire_at, observed_state, error_code)
         ON exomem_cloud_imports TO exomem_cellctl;
+    END IF;
+  END IF;
+
+  -- C6 exists only after migration 0066. Like C5: revoke inherited table
+  -- grants, then apply the request/observation column split. The gateway
+  -- holds nothing on C6.
+  IF to_regclass('exomem_cloud_exports') IS NOT NULL THEN
+    REVOKE ALL ON exomem_cloud_exports FROM PUBLIC;
+    FOREACH cloud_role IN ARRAY ARRAY['substrate_app', 'exomem_cellctl', 'exomem_gateway'] LOOP
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = cloud_role) THEN
+        EXECUTE format('REVOKE ALL ON exomem_cloud_exports FROM %I', cloud_role);
+      END IF;
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'substrate_app') THEN
+      GRANT SELECT ON exomem_cloud_exports TO substrate_app;
+      GRANT INSERT (export_id, cell_id, requested_state, link_requested_at) ON exomem_cloud_exports TO substrate_app;
+      GRANT UPDATE (requested_state, link_requested_at) ON exomem_cloud_exports TO substrate_app;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'exomem_cellctl') THEN
+      GRANT SELECT ON exomem_cloud_exports TO exomem_cellctl;
+      GRANT UPDATE (observed_state, error_code, archive_bytes, archive_sha256, archive_version_id, upload_id,
+        ready_at, expires_at, download_url, download_url_expires_at, link_issued_at)
+        ON exomem_cloud_exports TO exomem_cellctl;
     END IF;
   END IF;
 
@@ -260,8 +310,23 @@ BEGIN
         cimd_host, client_platform
       ) ON exomem_oauth_clients TO exomem_gateway;
     END IF;
+    -- Migration 0062's stored client name: the gateway names the token's
+    -- client to the cell with it. Guarded on the column's own existence.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = target_schema AND table_name = 'exomem_oauth_clients'
+        AND column_name = 'client_name'
+    ) THEN
+      GRANT SELECT (client_name) ON exomem_oauth_clients TO exomem_gateway;
+    END IF;
     IF to_regclass('exomem_oauth_admitted_cimd_hosts') IS NOT NULL THEN
       GRANT SELECT (host, platform) ON exomem_oauth_admitted_cimd_hosts TO exomem_gateway;
+    END IF;
+    -- Migration 0062: the generic client arm that findCloudOAuthAccessToken
+    -- calls (exomem_oauth_generic_client_admitted, SECURITY INVOKER) reads
+    -- the lane's enabled flag.
+    IF to_regclass('exomem_oauth_generic_client_lane') IS NOT NULL THEN
+      GRANT SELECT (enabled) ON exomem_oauth_generic_client_lane TO exomem_gateway;
     END IF;
     IF to_regclass('exomem_oauth_account_blocks') IS NOT NULL THEN
       GRANT SELECT (tenant_id, owner_user_id) ON exomem_oauth_account_blocks TO exomem_gateway;
