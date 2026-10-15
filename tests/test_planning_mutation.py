@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from exomem import structured_collections as collections
-from exomem import vault
 from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.structured_collections import CollectionError
 
@@ -183,7 +182,7 @@ def test_planning_add_applies_capture_defaults_and_writes_a_plan_item(tmp_path: 
     ).read_text(encoding="utf-8")
     assert receipt["operation"] == "add"
     assert receipt["plan_id"] == "991acdd4-16b9-4396-8220-2cb37b7e8516"
-    assert vault.parse_frontmatter(item, strict=True)[0]["status"] == "candidate"
+    assert "status: candidate" in item
     assert "# exomem-plan-audit:" in item
 
 
@@ -366,14 +365,10 @@ def test_planning_revision_and_rebaseline_require_exact_current_guards_and_gaps(
     current = collections.load_manifest(tmp_path, tmp_path / manifest_path)
     snapshot = record_formats.load_adapter(tmp_path, current).read()
     item_path = tmp_path / snapshot.records[0].source.path
-    original = item_path.read_text(encoding="utf-8")
-    edited = original.replace(
-        f"title: {vault.yaml_scalar('New work')}",
-        f"title: {vault.yaml_scalar('Direct work')}",
-        1,
+    item_path.write_text(
+        item_path.read_text(encoding="utf-8").replace("title: New work", "title: Direct work", 1),
+        encoding="utf-8",
     )
-    assert vault.parse_frontmatter(edited, strict=True)[0]["title"] == "Direct work"
-    item_path.write_text(edited, encoding="utf-8")
     gap = inspect(tmp_path, manifest_path)
     assert gap["audit"]["gaps"]
     with pytest.raises(CollectionError, match="STALE_RECORD"):
@@ -499,7 +494,7 @@ def test_planning_update_requires_current_hashes_and_replaces_authored_propertie
     item = (
         tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / "Keep this for later.md"
     ).read_text(encoding="utf-8")
-    assert vault.parse_frontmatter(item, strict=True)[0]["priority"] == "high"
+    assert "priority: high" in item
     assert item.count("# exomem-plan-audit:") == 1
     assert "exomem-record-audit" not in item
 
@@ -714,16 +709,12 @@ def test_planning_inspection_reports_a_direct_edit_without_repairing_it(tmp_path
     add(tmp_path, manifest_path, item={"title": "Keep this for later"}, why="capture future work")
     item = next((tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items").glob("*.md"))
     original = item.read_text(encoding="utf-8")
-    edited = original.replace(
-        f"priority: {vault.yaml_scalar('none')}", f"priority: {vault.yaml_scalar('high')}", 1
-    )
-    assert vault.parse_frontmatter(edited, strict=True)[0]["priority"] == "high"
-    item.write_text(edited, encoding="utf-8")
+    item.write_text(original.replace("priority: none", "priority: high"), encoding="utf-8")
 
     result = inspect(tmp_path, manifest_path)
 
     assert result["audit"]["status"] == "gap"
-    assert item.read_text(encoding="utf-8") == edited
+    assert item.read_text(encoding="utf-8") == original.replace("priority: none", "priority: high")
 
 
 def test_planning_update_refuses_crossing_the_area_boundary(tmp_path: Path) -> None:

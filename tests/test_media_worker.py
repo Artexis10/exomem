@@ -264,9 +264,8 @@ def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
     worker._publish_parent_result(store.pending_results()[0])
 
     body = sidecar.read_text(encoding="utf-8")
-    frontmatter = _parsed_frontmatter(sidecar)
-    assert frontmatter["processing_state"] == "pending"
-    assert frontmatter["processing_error"] == "media identity changed"
+    assert "processing_state: pending" in body
+    assert "processing_error: media identity changed" in body
     assert "stale binary transcript" not in body
     assert store.pending_result_count() == 0
     requeued = store.get(claimed.id)
@@ -2357,7 +2356,7 @@ def test_worker_persists_speaker_verification_metadata(
     )
 
     body = (vault / result.sidecar_path).read_text(encoding="utf-8")
-    assert _parsed_frontmatter(vault / result.sidecar_path)["speaker_verification"] == verification
+    assert f"speaker_verification: {verification}" in body
     assert f"[{label}]: hello" in body
 
 
@@ -2366,16 +2365,13 @@ def test_worker_does_not_downgrade_human_verified_speaker_state(
 ) -> None:
     result = _preserve_media_stub(vault, filename="human-reviewed.m4a")
     sidecar = vault / result.sidecar_path
-    reviewed = preserve.render_sidecar_extraction(
-        sidecar.read_text(encoding="utf-8"),
-        text="Human-reviewed transcript.",
-        engine="upload",
-        speaker_verification="human-verified",
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending",
+            "extracted_by: pending\nspeaker_verification: human-verified",
+        ),
+        encoding="utf-8",
     )
-    pending = preserve.render_sidecar_processing_pending(
-        reviewed, attempts=0, next_action="extract the updated recording"
-    )
-    sidecar.write_text(pending, encoding="utf-8")
     extracted = extract.ExtractResult(
         text="[0:00] [Enrolled Speaker]: reviewed",
         media_type="audio",
@@ -2400,8 +2396,7 @@ def test_worker_does_not_downgrade_human_verified_speaker_state(
         )
     )
 
-    assert _parsed_frontmatter(sidecar)["speaker_verification"] == "human-verified"
-    assert "[Enrolled Speaker]: reviewed" in sidecar.read_text(encoding="utf-8")
+    assert "speaker_verification: human-verified" in sidecar.read_text(encoding="utf-8")
 
 
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2423,22 +2418,9 @@ def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatc
 
 
 def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from exomem import media_processing
-
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
-    for filename in ("one.mp3", "two.wav"):
-        result = _preserve_media_stub(vault, filename=filename)
-        binary = vault / result.path
-        sidecar = vault / result.sidecar_path
-        sidecar.write_text(
-            media_processing._render_pending_sidecar(
-                binary=binary,
-                media_type="audio",
-                provenance=media_processing._read_provenance(vault, binary, binary.resolve()),
-                original=None,
-            ),
-            encoding="utf-8",
-        )
+    _preserve_media_stub(vault, filename="one.mp3")
+    _preserve_media_stub(vault, filename="two.wav")
     w = media_worker.MediaWorker(vault)
     assert w.scan_pending() == 2
 

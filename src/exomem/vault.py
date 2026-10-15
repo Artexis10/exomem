@@ -6425,8 +6425,25 @@ def _format_yaml_line(key: str, value: Any) -> str:
 
 
 def yaml_scalar(value: Any) -> str:
-    """Render a string explicitly, without parsing it to choose its spelling."""
-    return json.dumps(str(value), ensure_ascii=False)
+    """Render a scalar, quoting if it contains YAML-special chars."""
+    s = str(value)
+    try:
+        # libyaml accepts tabs in plain scalars that the Python parser rejects.
+        # Keep the existing quoting for those strings and reuse the hot loader
+        # everywhere else, without retaining any rendered text.
+        loader = yaml.SafeLoader if "\t" in s else _YAML_SAFE_LOADER
+        parsed = yaml.load(s, Loader=loader)  # noqa: S506 - safe schema only
+    except (yaml.YAMLError, UnicodeError):
+        parsed = None
+    needs_quote = (
+        not isinstance(parsed, str)
+        or parsed != s
+        or any(c in s for c in [":", "#", "[", "]", "{", "}", ",", "\n", "\r"])
+        or s.strip() != s
+    )
+    if needs_quote:
+        return json.dumps(s, ensure_ascii=False)
+    return s
 
 
 # Backward-compatible private name for existing call sites.

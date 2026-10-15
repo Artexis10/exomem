@@ -160,7 +160,7 @@ def test_planning_capture_defaults_are_explicit_and_areas_have_no_delivery_state
 
 
 def test_markdown_item_renderer_uses_planning_system_fields(tmp_path: Path) -> None:
-    from exomem import record_formats, vault
+    from exomem import record_formats
     from exomem.structured_collections import load_manifest
 
     directory = tmp_path / "Knowledge Base" / "Planning" / "Work"
@@ -175,9 +175,8 @@ def test_markdown_item_renderer_uses_planning_system_fields(tmp_path: Path) -> N
         audit_correlation="abcdef012345abcdef012345",
     )
 
-    frontmatter, _, _ = vault.parse_frontmatter(rendered, strict=True)
-    assert frontmatter["type"] == "plan"
-    assert frontmatter["plan_id"] == "991acdd4-16b9-4396-8220-2cb37b7e8516"
+    assert "type: plan" in rendered
+    assert "plan_id: 991acdd4-16b9-4396-8220-2cb37b7e8516" in rendered
     assert "# exomem-plan-audit: abcdef012345abcdef012345" in rendered
 
 

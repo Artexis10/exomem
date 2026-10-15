@@ -20,6 +20,7 @@ import inspect
 import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -65,13 +66,15 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
-    parse_frontmatter,
     post_commit_batch_fanout,
 )
 from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
 
+_MEDIA_TYPE_RE = re.compile(r"(?m)^media_type:\s*(\S+)\s*$")
+_EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
+_PENDING_MARKER = "extracted_by: pending"
 _PARENT_MEDIA_MARKER = "\nparent_media:"
 _MAX_IDENTITY_HASH_BYTES = 8 * 1024 * 1024
 
@@ -1851,16 +1854,15 @@ class MediaWorker:
             if not self._is_automatic_media_sidecar(sidecar):
                 continue
             try:
-                head = sidecar.read_text(encoding="utf-8")
+                head = sidecar.read_text(encoding="utf-8")[:800]
             except OSError:
                 continue
-            frontmatter, _, _ = parse_frontmatter(head)
-            if frontmatter.get("extracted_by") != "pending":
+            if _PENDING_MARKER not in head:
                 continue
-            evidence_file = frontmatter.get("evidence_file")
-            if not isinstance(evidence_file, str) or not evidence_file:
+            ef = _EVIDENCE_FILE_RE.search(head)
+            if not ef:
                 continue
-            binary = self._vault_root / evidence_file
+            binary = self._vault_root / ef.group(1).strip()
             # Enqueue only the sidecar this binary actually owns. A stray copy —
             # a Syncthing `.sync-conflict-*.md`, a manual duplicate — still carries
             # `evidence_file:` pointing back here, and queueing it minted a SECOND
@@ -1869,9 +1871,8 @@ class MediaWorker:
             if not _is_canonical_sidecar(sidecar, binary):
                 skipped_strays += 1
                 continue
-            media_type = frontmatter.get("media_type")
-            if not isinstance(media_type, str):
-                media_type = extract.media_type_for(binary)
+            mt_match = _MEDIA_TYPE_RE.search(head)
+            media_type = mt_match.group(1) if mt_match else extract.media_type_for(binary)
             if not media_engines.stage_enabled(media_type):
                 continue  # the engine is off: the sidecar waits without a job
             if media_type and binary.exists():
@@ -1883,9 +1884,10 @@ class MediaWorker:
                 if existing is None or not existing.do_ocr:
                     self.enqueue(binary_path=binary, sidecar_path=sidecar, media_type=media_type)
                     n += 1
-                parent_media = frontmatter.get("parent_media")
-                if isinstance(parent_media, str) and parent_media:
-                    pending_parents[parent_media] = True
+                if _PARENT_MEDIA_MARKER in head:
+                    pm = re.search(r"(?m)^parent_media:\s*(.+?)\s*$", head)
+                    if pm:
+                        pending_parents[pm.group(1).strip()] = True
         # Deduped parent re-embeds AFTER the pending frame children above, so
         # semantic segmentation re-runs once their OCR completes (gate on only).
         if pending_parents and semantic_segments.semantic_segments_enabled():
