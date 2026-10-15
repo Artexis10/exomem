@@ -6878,6 +6878,16 @@ class ReaderView:
     def __call__(self, rel_path: str) -> bool:
         return self._pages(rel_path)
 
+    def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
+        """Project one actual clipped bundle before it spends a compiler slot."""
+        try:
+            return filter_withheld_entries(
+                self._root, bundle, principal=self._principal, purpose=self._purpose,
+                explicit_reference_markup=True,
+            )
+        except Exception as error:  # noqa: BLE001 - retain whole-request unavailability
+            raise ReaderViewUnavailable("the release plane could not project a pack unit") from error
+
     def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
         """`classify_units` for each unit, by everything but its `role`."""
         keys = [
@@ -7165,7 +7175,10 @@ def _directory_of(node: Mapping[str, Any]) -> str | None:
     return raw.strip().replace("\\", "/").rstrip("/")
 
 
-def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str]:
+def _entry_candidate_paths(
+    entry: Any, directory: str | None = None, *,
+    reference_markup: Callable[[str, str | None], list[str]] | None = None,
+) -> list[str]:
     """Every vault path this entry names, whether as a field or bare string.
 
     N1(a): `_bare_name` used to be consulted only for a list element that WAS
@@ -7179,6 +7192,8 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
 
     def _add(value: Any) -> None:
         if isinstance(value, str):
+            if reference_markup is not None:
+                found.extend(reference_markup(value, directory))
             value = _strip_identifier_prefix(value)
         full = _path_like(value)
         if full is not None:
@@ -7295,6 +7310,7 @@ def filter_withheld_entries(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
+    explicit_reference_markup: bool = False,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -7307,6 +7323,9 @@ def filter_withheld_entries(
     Same three-state contract as every other consumer: `empty` -> untouched;
     `blocked` or an unresolved-but-expected principal -> every path-bearing
     entry dropped; otherwise decide each named path.
+
+    The compiler can opt into explicit links in scalar metadata. Bare labels
+    stay literal; the default projection keeps its existing reference rules.
     """
     vault_root = Path(vault_root)
     writer = bound_writer(vault_root)
@@ -7384,6 +7403,40 @@ def filter_withheld_entries(
     resolved_items: dict[str, str | None] = {}
     # One listing per directory per call: (exact names, first name per casefold).
     listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
+    def _markup_targets(text: str) -> list[str]:
+        targets = []
+        for raw in _WIKILINK_ANYWHERE.findall(text):
+            target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
+            # Markdown's optional extension is identity syntax, not a literal tag.
+            if "/" not in target and _is_markdown_path(target):
+                target = target[:-3]
+            if target:
+                targets.append(target)
+        return targets
+
+    # Resolve the clipped bundle's explicit names once, through the existing index.
+    resolved_markup: dict[str, tuple[str, ...]] = {}
+    if explicit_reference_markup:
+        pending = [payload]
+        names: set[str] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Mapping):
+                pending.extend(value.values())
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                pending.extend(value)
+            elif isinstance(value, str):
+                names.update(target for target in _markup_targets(value) if _path_like(target) is None)
+        resolved_markup = _resolved_prose_names(vault_root, names)
+
+    def _reference_markup(text: str, directory: str | None) -> list[str]:
+        found = []
+        for target in _markup_targets(text):
+            if _path_like(target) is not None:
+                found.extend(_entry_candidate_paths(target, directory))
+            else:
+                found.extend(resolved_markup.get(target, ()))
+        return list(dict.fromkeys(found))
 
     def _resolve_vault_item(rel_path: str) -> str | None:
         """The real vault-relative path this reference names, or `None`.
@@ -7511,7 +7564,10 @@ def filter_withheld_entries(
                          if metadata_references.get((*location, key)) != value}
             elif metadata_references.get(location) == entry:
                 return []
-        return _entry_candidate_paths(entry, directory)
+        return _entry_candidate_paths(
+            entry, directory,
+            reference_markup=_reference_markup if explicit_reference_markup else None,
+        )
 
     def _kept_paths(entry: Any, directory: str | None = None, location=()) -> list[str] | None:
         candidates = _candidate_paths(entry, directory, location)
@@ -7554,7 +7610,10 @@ def filter_withheld_entries(
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         if isinstance(node, Mapping) and any(
             not content_permits(vault_root, path, who)
-            for path in _entry_candidate_paths(node, directory)
+            for path in _entry_candidate_paths(
+                node, directory,
+                reference_markup=_reference_markup if explicit_reference_markup else None,
+            )
         ):
             return None
         if (location == ("source_versions",) and inspection_evidence is not None
@@ -7599,6 +7658,10 @@ def filter_withheld_entries(
                 if _is_identifier_key(key) or isinstance(value, Mapping):
                     child_candidates = _kept_paths(value, here, child_location)
                     if child_candidates is None:
+                        continue
+                elif explicit_reference_markup and isinstance(value, str) and _WIKILINK_ANYWHERE.search(value):
+                    # Explicit link syntax is a reference; an unmarked tag/status stays literal.
+                    if _kept_paths(value, here, child_location) is None:
                         continue
                 if _artifact_scan_demand is not None and _artifact_text_key(key):
                     _artifact_scan_demand.required = True

@@ -457,9 +457,50 @@ def build_packet(
     conversation_inferred: bool = False,
     promoted_paths: frozenset[str] = frozenset(),
     status_basis: lifecycle_statuses.Basis | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
     status_basis = status_basis or lifecycle_statuses.Basis(None)
+    correction_status = None
+    if status_basis.root is not None and any(item.level == "unit" for item in items):
+        from . import find, unit_corrections
+
+        seeds = {item.ref: item for item in reversed(items) if item.level == "unit" and item.ref}
+        parent_reads = find.UnitParentReads()
+        visible = visible if visible is not None else unit_corrections.reader_view(status_basis.root)
+        tentative: dict[str, LaneItem] = {}
+
+        def admit_counterpart(candidate: dict[str, Any]) -> bool:
+            hit = parent_reads.exact(
+                status_basis.root, candidate["path"], candidate["unit_ref"],
+                candidate["fingerprint"], visible=visible,
+            )
+            if hit is None:
+                return False
+            seed = seeds[candidate["corrects"]]
+            item = _unit_items(None, [hit], parent_reads=parent_reads)[0]
+            item = replace(
+                item, role=seed.role, promoted=seed.promoted,
+                relevance_order=seed.relevance_order, request_anchors=seed.request_anchors,
+                provenance={**item.provenance, "corrects": seed.ref,
+                            "relation": candidate["relation"], "family": candidate["family"]},
+            )
+            if not _reader_admitted((item,), visible):
+                return False
+            tentative[item.ref] = item
+            return True
+
+        discovered = unit_corrections.discover(
+            status_basis.root, tuple(seeds), accept=admit_counterpart, keep=visible,
+        )
+        correction_status = discovered["status"]
+        # Only a stable, completed discovery may contribute candidates or lifecycle inputs.
+        incoming = {row["unit_ref"]: tentative[row["unit_ref"]] for row in discovered["units"]}
+        items = tuple(
+            replace(item, provenance={**item.provenance, **{
+                key: incoming[item.ref].provenance[key] for key in ("corrects", "relation", "family")
+            }}) if item.ref in incoming else item for item in items
+        ) + tuple(item for ref, item in incoming.items() if ref not in seeds)
     limit = clamp_budget(max_chars)
     promoted_share = limit // PROMOTED_SHARE_DIVISOR
     promoted_used = 0
@@ -669,26 +710,6 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
-            if status_basis.root is not None and item.level == "unit" and item.ref:
-                from . import unit_corrections
-
-                corrections = unit_corrections.counterparts(
-                    status_basis.root, item.ref, keep=unit_corrections.reader_view(status_basis.root),
-                )
-                item = replace(
-                    item, provenance={**item.provenance, "corrective_context": corrections},
-                    lifecycle=("superseded" if any(
-                        counterpart["family"] == "supersession" for counterpart in corrections["units"]
-                    ) else item.lifecycle),
-                )
-                unit = _served_unit(item)
-                cost = (
-                    working_set_conversation.prose_chars(unit, role_ids=role_ids, status_basis=status_basis)
-                    if conversation_inferred else served_chars("units", unit)
-                )
-                if used + cost > material_limit:
-                    _defer(item, "budget")
-                    continue
             ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
             if ordering is not None and ordering.historical:
                 unit["history"] = True
@@ -726,7 +747,8 @@ def build_packet(
         ],
         "ambiguity": listed_ambiguity,
         "budget": {"limit_chars": limit, "used_chars": used},
-        "generation": dict(generation),
+        "generation": {**generation, **({"correction_context": correction_status}
+                                      if correction_status is not None else {})},
         "abstained": status != "resolved",
     }
     if packet["abstained"]:
@@ -1478,6 +1500,7 @@ def _unit_items(
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
+                    "source_hash": str(getattr(hit, "source_hash", "") or ""),
                     **({"verdict": hit.verdict} if getattr(hit, "verdict", None) else {}),
                     **({"check_by": hit.check_by} if getattr(hit, "check_by", None) else {}),
                     "superseded_by": superseded_by,
@@ -2880,6 +2903,7 @@ def _carried_packet(
                 status="resolved" if items else "unresolved",
                 recent_context=recent_context,
                 status_basis=status_basis,
+                visible=visible,
             )
 
         packet = build()
@@ -3429,6 +3453,7 @@ def _follow_up_packet(
                     status="resolved",
                     recent_context=recent_context,
                     status_basis=status_basis,
+                    visible=visible,
                 )
     if packet is not None:
         return packet
@@ -4555,6 +4580,7 @@ def _compile_packet(
             recent_context=recent,
             promoted_paths=promoted_paths,
             status_basis=status_basis,
+            visible=visible,
         )
     return packet
 

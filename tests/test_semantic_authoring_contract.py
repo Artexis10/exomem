@@ -22,7 +22,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     8,
-    "sha256:3963eb40234a5132d09a71312a187e254784f16b0b48efd644b46ed59eabf069",
+    "sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -163,7 +163,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     rich = dict(contract["rich"])
     # The normative digest pins guidance prose; this check covers structural fields.
     assert rich.pop("correction_rule")
-    assert rich.pop("correction_detail")
+    assert rich.pop("correction_detail", "omitted in compact projection")
     assert rich == {
         "heading_syntax": "## <Governed Kind>",
         "kind_vocabulary": "governed",
@@ -684,9 +684,13 @@ def test_bootstrap_projection_first_positional_is_contract_and_profile_is_keywor
     assert projected != semantic_authoring.bootstrap_projection(original)
 
     # Profile stays keyword-only and defaults to full; compact drops only the
-    # rich example. Positional contract and keyword profile compose cleanly.
+    # rich example and explanatory correction detail. The actionable correction rule remains.
     full = semantic_authoring.bootstrap_projection(profile="full")
     compact = semantic_authoring.bootstrap_projection(profile="compact")
+    assert full["rich"]["correction_detail"]
+    assert "correction_detail" not in compact["rich"]
+    assert compact["rich"]["correction_rule"] == full["rich"]["correction_rule"]
+    assert "profile=full" in compact["rich"]["correction_rule"]
     assert set(full["portable_categories"]["examples"]) == {
         "role",
         "domain",

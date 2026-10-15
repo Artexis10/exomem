@@ -1745,6 +1745,14 @@ def _packet_lines(packet: dict) -> list[str]:
         label = "carried" if carried else "unit"
         if history:
             label = "carried history" if carried else "history"
+        if isinstance(provenance, dict):
+            # These are closed semantic-metadata rows, rendered without interpreting prose.
+            for key in ("verdict", "check_by"):
+                value = provenance.get(key)
+                if value:
+                    label += f" {key}={value}"
+            if provenance.get("corrects") and provenance.get("relation"):
+                label += f" {provenance['relation']} {provenance['corrects']}"
         if text:
             lines.append(_packet_line(label, text, ref))
     for pointer in packet.get("pointers") or ():

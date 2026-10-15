@@ -35,8 +35,9 @@ Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
-`proactive_capture`, affiliation relations require `link_acceptance`, a new Entity follows `proactive_capture`;
-merge or substantial curation requires confirmed `restructure_execution`.
+`proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
+accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
+confirmed `restructure_execution`.
 
 ## Planning
 
@@ -490,7 +491,7 @@ model, embedding, or due-state claim.
    `edit_memory` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, and central or recurring,
    and useful beyond this source, call `connect_memory(operation="create-entity")`.
-4. Draft the page following `page-types.md` § entity, propose, and write on confirm.
+4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
 5. For an existing entity, show a guarded diff and update through `edit_memory`.
 6. Refresh the entity index and top-level counts through the governed writer.
 
@@ -621,8 +622,7 @@ schema. A verified remote identity additionally requires
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
 collection or fields permits only `structural_suggestions`; collection changes
-need confirmed `restructure_execution`. A separately accepted relation remains
-`link_acceptance`.
+need confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.

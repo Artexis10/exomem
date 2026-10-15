@@ -1707,12 +1707,19 @@ Registered compiled pages retain observation support. Entity and legacy pages
 use their existing authorized edit owner; Records reuse shipped row corrections
 and retained history. No ordinary correction creates a dated child by default.
 
-The compiler preserves verdict, review date, provenance and temporal state.
+The compiler preserves verdict, the check_by deadline, provenance and temporal state.
 For each served unit it can inspect bounded admitted incoming corrective facts,
 including a counterpart absent from the initial retrieval window. Existing
 budgets and disclosure checks apply before context or counts reach the caller.
 A hidden counterpart cannot change visible lifecycle or disclose its existence.
 Missing publication remains unknown; historical revisions do not flood recall.
+
+Incoming discovery holds one exact live graph view and its resident resolver.
+It does not build a cold resolver, prove a cold graph, or wait for publication.
+One request deadline bounds discovery and SQL work; changed publication discards tentative contributions.
+Exact admitted counterparts enter ordinary unit selection, temporal labels, caps and prose budgets.
+They carry no nested plaintext adapter or independent lifecycle override.
+The native renderer shows authored verdicts and check_by deadlines with those ordinary units.
 
 Acceptance combines deterministic public journeys with ordinary agent initiation.
 Invented cases cover exact local and cross-page targets, repeated corrections,

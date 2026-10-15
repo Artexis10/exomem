@@ -2232,6 +2232,7 @@ class EpistemicGraphIndex:
         *,
         require_current_projection: bool = True,
         prove: bool | str | None = None,
+        live_only: bool = False,
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
@@ -2289,7 +2290,18 @@ class EpistemicGraphIndex:
         when nothing is remembered, ``SINGLE_FLIGHT`` refuses only while another
         reader's proof is running, and True waits for that proof. A refusal
         appends ``"unproven"`` to ``outcome_out``.
+
+        ``live_only`` is optional compiler enrichment: require this process's
+        exact checkpoint, refuse publication contention, and never prove or adopt.
+        Refusal omits optional counterparts with an explicit status; ordinary
+        recall keeps its existing path.
         """
+        # Optional compiler enrichment must never wait for publication or start cold proof.
+        if live_only and not require_current_projection:
+            raise ValueError("live_only requires the current graph projection")
+        live_checkpoint = freshness.live_recall_checkpoint(self.vault_root, "vault") if live_only else None
+        if live_only and live_checkpoint is None:
+            return None
         if prove is None:
             prove = self._prove_cold_snapshots
         if not graph_enabled():
@@ -2313,15 +2325,27 @@ class EpistemicGraphIndex:
         sampled_generation = freshness.recall_generation(self.vault_root, "vault")
         conn: sqlite3.Connection | None = None
         registry_key = _sidecar_registry_key(self.path)
-        _await_publication_hold(registry_key)
+        if live_only:
+            with _SIDECAR_READERS_CHANGED:
+                if registry_key in _SIDECAR_PUBLICATION_HOLDS:
+                    return None
+        else:
+            _await_publication_hold(registry_key)
         try:
             conn = self._connect_existing(
                 readonly=True,
                 factory=_TrackedSidecarConnection,
                 check_same_thread=False,
+                **({"timeout": 0.0} if live_only else {}),
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
+            if live_only:
+                with _SIDECAR_READERS_CHANGED:
+                    publishing = registry_key in _SIDECAR_PUBLICATION_HOLDS
+                if publishing:
+                    conn.close()
+                    return None
             graph_sync.limit_graph_metadata_read(conn)
             conn.execute("BEGIN")
             # This marker validation MUST remain the first read in the transaction.
@@ -2365,7 +2389,26 @@ class EpistemicGraphIndex:
             # do it (`seamless-managed-worker-handoff` D2).
             current = current and stored_projection is not None
         graph_sync_state, required_graph_sync = graph_sync.checkpoint_state(self.vault_root)
-        graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
+        if live_only:
+            acknowledgement = _graph_sync_acknowledgement(values)
+            acknowledgement_state = (
+                "valid" if acknowledgement is not None else "malformed"
+                if any(key in values for key in (
+                    "graph_sync_generation", "graph_sync_digest", "graph_sync_checkpoint"
+                )) else "absent"
+            )
+            # Reuse the epoch classifier with the marker already read; no second SQLite wait.
+            epoch = graph_sync._classify_epoch_states(
+                *graph_sync.floor_state(self.vault_root),
+                graph_sync_state, required_graph_sync, acknowledgement_state,
+                graph_sync.GraphBuildOutcome.covering(acknowledgement)
+                if acknowledgement is not None else None,
+            )
+            graph_sync_current = epoch.kind == "legacy" or (
+                epoch.kind == "coherent" and acknowledgement == epoch.checkpoint
+            )
+        else:
+            graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
         if graph_sync_state == "malformed":
             graph_sync_current = False
         elif required_graph_sync is not None:
@@ -2385,19 +2428,29 @@ class EpistemicGraphIndex:
         if current and require_current_projection and values.get(_READ_BARRIER_KEY) is not None:
             current = False
         if current and require_current_projection:
-            current_checkpoint = (
-                freshness.recall_checkpoint(self.vault_root, "vault")
-                if stored_checkpoint is not None
-                else None
-            )
-            current_identity = (
-                _incremental_projection_identity(self.vault_root)
-                if stored_checkpoint is not None
-                else _recall_projection_identity(
-                    self.vault_root,
-                    disk_freshness=_disk_vault_freshness(self.vault_root),
+            if live_only:
+                current_checkpoint = live_checkpoint
+                if stored_checkpoint is None or stored_checkpoint != live_checkpoint:
+                    conn.close()
+                    return None
+                current_identity = (
+                    live_checkpoint.triple, live_checkpoint.policy_version,
+                    live_checkpoint.access_policy_fingerprint,
                 )
-            )
+            else:
+                current_checkpoint = (
+                    freshness.recall_checkpoint(self.vault_root, "vault")
+                    if stored_checkpoint is not None
+                    else None
+                )
+                current_identity = (
+                    _incremental_projection_identity(self.vault_root)
+                    if stored_checkpoint is not None
+                    else _recall_projection_identity(
+                        self.vault_root,
+                        disk_freshness=_disk_vault_freshness(self.vault_root),
+                    )
+                )
             current = stored_projection == _availability_freshness_value(current_identity)
             # A checkpoint is an O(delta) proof only inside the exact process
             # lineage that published it.  A cold/direct reader, or a process
@@ -2410,7 +2463,7 @@ class EpistemicGraphIndex:
             exact_live_checkpoint = (
                 stored_checkpoint is not None
                 and current_checkpoint is not None
-                and freshness.recall_is_live(self.vault_root, "vault")
+                and (live_only or freshness.recall_is_live(self.vault_root, "vault"))
                 and stored_checkpoint == current_checkpoint
             )
             if current and not exact_live_checkpoint:
@@ -2479,7 +2532,7 @@ class EpistemicGraphIndex:
                                     _PROOFS_IN_FLIGHT.pop(registry_key, None)
                             mine.set()
                     break
-            if current and stored_checkpoint is not None:
+            if current and stored_checkpoint is not None and not live_only:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
                 # projecting. Say so to the registry, so the *next* bounded
@@ -2502,7 +2555,9 @@ class EpistemicGraphIndex:
         # public readers for the reason the head of this method gives.
         if not current or (
             require_current_projection and freshness.external_pending(self.vault_root)
-        ):
+        ) or (live_only and not freshness.recall_checkpoint_is_current(
+            self.vault_root, "vault", live_checkpoint
+        )):
             conn.close()
             return None
         return conn
@@ -11709,12 +11764,14 @@ class GraphView:
         }
 
     def neighbor_edges(
-        self, frontier: set[str], *, limit: int
+        self, frontier: set[str], *, limit: int,
+        accept: Callable[[dict[str, Any]], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Live edges touching `frontier`, interpreted before the inspection cap.
 
         SQL rows are transport; a candidate that is no fact in its page's
-        selected interpretation spends no inspection slot.
+        selected interpretation spends no inspection slot. Optional exact-unit
+        admission also precedes this cap, so withheld units cannot crowd it.
         """
         rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
         if self.keep is not None:
@@ -11747,7 +11804,7 @@ class GraphView:
         live: list[dict[str, Any]] = []
         for row in rows:
             served = self.edge(row)
-            if served is None:
+            if served is None or (accept is not None and not accept(served)):
                 continue
             live.append(served)
             if len(live) > limit:

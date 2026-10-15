@@ -2291,6 +2291,28 @@ class UnitParentReads:
     parents: dict[str, _UnitParent | None] = field(default_factory=dict)
     validated: dict[tuple[str, str, str, int], bool] = field(default_factory=dict)
 
+    def exact(
+        self, vault_root: Path, path: str, unit_ref: str, fingerprint: str,
+        *, visible: Callable[[str], bool] | None = None,
+    ) -> SemanticUnitHit | None:
+        """Hydrate an exact graph candidate; the caller admits its served projection."""
+        if visible is not None and not visible(path):
+            return None
+        if path not in self.parents:
+            self.parents[path] = _read_unit_parent(vault_root, path)
+        read = self.parents[path]
+        if read is None or read.page is None or read.state is None:
+            return None
+        resolution = read.state.document.resolve_unit(unit_ref, expected_fingerprint=fingerprint)
+        unit = resolution.unit
+        if unit is None:
+            return None
+        if read.prose is None:
+            read.prose = find_results.prose_units(vault_root, read.page, read.state.document.units)
+        if unit not in read.prose:
+            return None
+        return _semantic_unit_hit(read.page, unit, bm25_rank=None, bm25_score=None)
+
 
 def _read_unit_parent(vault_root: Path, parent_path: str) -> _UnitParent | None:
     """One parent as unit hydration reads it, before any row is checked.

@@ -170,6 +170,13 @@ It is paid for by a trim on both bootstrap limits of decision 2, item 9, never b
     - the `capture-durable-personal-baselines` envelope delta, whose affiliation scenario now reads as queue acceptance;
     - the `write-time-identity-candidates` requirement "The write that creates a candidate delivers it", from "The server SHALL never create an Entity" to "Detection SHALL never create an Entity".
 
+The authority text and structured map in task 1.1 form an independent correctness delivery.
+They restore the already approved O2/R3 distinction without enabling the deferred referent machinery.
+The f33 cases, answer keys, measures, thresholds, acknowledgement, model and spend holds remain intact.
+A later measurement must reconcile the immutable pre-O2 source with preregistration before generation.
+This delivery selects no new baseline and claims no baseline run or C>B result.
+Task 4.3 and programme closure remain open.
+
 ### 3. Specific relations (T2)
 
 **Evidence.**

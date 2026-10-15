@@ -879,9 +879,20 @@ def op_bootstrap(
     # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
     # a command the active surface cannot call, and a ceiling that vanished on a
     # reduced surface would be a ceiling nobody was told about.
+    from .governance.raw_protection import is_owner
+    from .vocabulary_authority import VocabularyAuthority
+
+    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
+    principal = principal_module.effective_principal()
+    # An unresolved caller or unavailable/v2 authority receives no affirmative v1 map.
+    promotion_classes = (
+        envelope_module.promotion_classes(owner=is_owner(principal))
+        if principal.resolved and authority_mode == "v1" else None
+    )
     engagement_policy["envelope"] = envelope_module.resolved(
         level=engagement_policy["level"],
         capture_gate=engagement_policy["contract"]["effective_capture"],
+        promotion_classes=promotion_classes,
     )
     active_descriptor = _active_bootstrap_descriptor()
     # Where the compact core points for the vocabulary workflow's full contract: it is
@@ -1082,7 +1093,8 @@ def op_bootstrap(
                 "semantic_decider": "active-agent-only",
                 "candidate": "structural_suggestions",
                 "mutation": "governed-curation-restructure_execution",
-                "relation_outside_curation": "link_acceptance",
+                **({"relation_outside_curation": promotion_classes["typed_edge"]}
+                   if promotion_classes is not None else {}),
             },
         }
     else:
@@ -1156,7 +1168,7 @@ def op_bootstrap(
             )
         ),
         "cadence": (
-            "At capture, review relevant pending vocabulary items with context. "
+            "At capture, review pending vocabulary items with context. "
             "Anchor a question on a source page/entity; "
             "relation_question uses both current endpoints. Record a typed decision before "
             "structural writes."
@@ -1247,16 +1259,12 @@ def op_bootstrap(
         "authority": {
             "contract_version": "v1",
             "scoped_delegation": False,
-            "rule": "Decision not permission; v1 writers retain confirmation.",
         },
     }
     if "schema_memory" in active_product_names:
         vocabulary_workflow_projection["page_status"] = vocabulary_operation(
             "schema_memory", {"subject": "statuses", "operation": "inspect"}
         )
-    from .vocabulary_authority import VocabularyAuthority
-
-    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
     if authority_mode != "v1":
         vocabulary_workflow_projection["authority"] = {
             "contract_version": authority_mode,

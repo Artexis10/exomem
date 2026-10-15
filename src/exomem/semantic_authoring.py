@@ -301,9 +301,11 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "when omitted."
         ),
         "correction_rule": (
-            "Inspect affected claims when evidence changes. Distinguish an attributed account "
-            "from an established fact. Update suitable existing units with guarded writers; "
-            "author justified verdicts and exact links, then verify current state."
+            "Inspect affected claims and evidence. Distinguish attributed accounts from "
+            "established facts. Correct suitable existing units with guarded writers, justified "
+            "verdicts and exact links; verify current state. Refutation alone changes neither "
+            "lifecycle nor rank. Writers retain prior interpretations; request bootstrap with "
+            "profile=full for history guidance."
         ),
         "correction_detail": (
             "Keep an anchored unit's identity when its wording changes. Preserve a false "
@@ -468,12 +470,16 @@ def bootstrap_projection(
     ``contract`` stays the first positional parameter so existing callers that
     pass a contract positionally keep working; ``profile`` is keyword-only so it
     can never be mistaken for a positionally-passed contract. Full returns every
-    example. Compact and diagnostics remove only the rich example while retaining
+    example and explanatory correction detail. Compact and diagnostics omit those
+    details while retaining the actionable correction rule, its full-authoring route, and
     the complete core keys, aliases, open rule, selection guidance, and compact
     (role and domain) examples.
     """
     projection = contract.as_dict()
     if profile != "full":
+        rich = dict(projection["rich"])
+        rich.pop("correction_detail")
+        projection["rich"] = rich
         portable = dict(projection["portable_categories"])
         examples = {
             key: value

@@ -8,6 +8,14 @@ Its sibling, a measurement lane that is never an implementation lane, runs every
 Task 4.1 freezes the cases before groups 2 and 3 are built; tasks 4.1 and 4.2 run before any part of this change merges.
 Tasks 9.1 and 9.2 cannot close the change until the shipped arm meets the D8 pass line or the owner rules.
 
+Task 1.1 is an independently approved correctness delivery for the existing O2/R3 authority contract.
+Its source and carrier repair may ship before the deferred f33 measurement.
+This exception does not close the programme, task 4.3, or any measurement gate.
+The cases, keys, measures, thresholds, acknowledgement, models and spend holds remain unchanged.
+A later f33 run must reconcile the immutable pre-O2 source against preregistration before generation.
+No new source baseline is selected, and no baseline run is claimed.
+The C>B referents gate remains required.
+
 ## 1. Authority text (D2)
 
 - [ ] 1.1 Rewrite the nine served texts that require confirmation for owner promotions or leave them unclassified: `commands.py:1313-1317`, `commands.py:1092` (`relation_outside_curation`), `prominence.py:202`, `prominence.py:384-385`, `prominence.py:419-420`, `envelope.py:124-129` (`CONFIRM_REQUIRED`), scaffold `SKILL.md:178`, `references/operations.md:38`, `references/engagement.md:63` and `workflow-skills/exomem-capture/SKILL.md:51`. Add one table in `envelope.py` that maps each promotion action to its class; serve `promotion_classes` from it and generate the promotion sentence of `CONFIRM_REQUIRED` from it, so the rule lives in one place. Pay for the map by trimming the confirm-first texts that it replaces, then regenerate the plugin and cloud copies. Check: a payload test reads structured fields, not phrases, and fails on the base: for an owner on a v1 vault, `relation_outside_curation` and `promotion_classes` give `proactive_capture` for an entity creation, a typed edge and a registry save, `link_acceptance` for queue acceptance, and `restructure_execution` for an edge removal and a promotion revert; for a resolved non-owner, a registry save maps to `structural_suggestions`; a v2-activated fixture serves the v2 rule and no map. A phrase test also fails on the base while any of the nine old texts is served or shipped. The task records its measured bytes, an estimated 230 for the map, against both limits of D2 item 9: the compact core ceiling of 15,000 bytes (361 bytes spendable at `maximal`, and the 512-byte warning band at the default level) and the 63,300-byte compact reference bound of `tests/test_relation_bootstrap_contract.py:143-157`. Its net change on each limit is zero or negative, `tests/test_bootstrap_compact_budget.py` and that reference test pass with neither limit raised, and the no-leak, skill-contract and plugin-sync tests pass.
