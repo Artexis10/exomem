@@ -12,6 +12,34 @@ import pytest
 
 from cloud_rehearsal import build, platform, report, substrate, tls
 from cloud_rehearsal.mcp_client import _HiddenInputs
+from cloud_rehearsal.shell import wait_for
+
+
+def test_wait_for_propagates_error_when_retries_are_disabled() -> None:
+    calls = 0
+
+    def probe() -> None:
+        nonlocal calls
+        calls += 1
+        raise ValueError("ambiguous result")
+
+    with pytest.raises(ValueError, match="ambiguous result"):
+        wait_for(probe, timeout=1, interval=0, description="a write", retry_exceptions=())
+    assert calls == 1
+
+
+def test_wait_for_retries_transient_error_by_default() -> None:
+    calls = 0
+
+    def probe() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("warming")
+        return True
+
+    assert wait_for(probe, timeout=1, interval=0, description="a read") is True
+    assert calls == 2
 
 
 @pytest.mark.parametrize("enveloped", [False, True])

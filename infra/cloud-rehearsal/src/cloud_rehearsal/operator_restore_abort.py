@@ -98,8 +98,8 @@ async def main():
                         "content": phrase + chr(10) * 2 + "## Observations" + chr(10) * 2 + "- [rehearsal] " + phrase + " #rehearsal" + chr(10), "status": "draft"})
                 else:
                     result = await session.call_tool("ask_memory", {"query": phrase})
-                structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None) or {}
-                print(json.dumps({"is_error": result.isError, "result": structured}))
+                wire = result.model_dump(by_alias=True)
+                print(json.dumps({"is_error": wire["isError"], "result": wire.get("structuredContent") or {}}))
 
 asyncio.run(main())
 '''
@@ -248,7 +248,14 @@ def _mcp(ctx: Context, phrase: str, action: str) -> dict:
         # The application fixes this retryable refusal code; no mutation committed.
         return None if result.error_code == "MUTATION_WARMING" else result
 
-    result = wait_for(probe, timeout=90, interval=0.5, description=f"the restore abort {action} probe")
+    # A transport or parser failure can follow a committed write; do not replay it.
+    result = wait_for(
+        probe,
+        timeout=90,
+        interval=0.5,
+        description=f"the restore abort {action} probe",
+        retry_exceptions=() if action == "write" else (Exception,),
+    )
     # MCP's structured error envelope is part of the application contract.
     body = result.structured
     nested = body.get("result", body) if isinstance(body, dict) else body
