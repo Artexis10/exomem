@@ -555,7 +555,85 @@ Refresh is a bounded, best-effort follow-up to promotion, not part of service ad
 
 Where a host exposes pre-turn/post-turn hooks or equivalent middleware, enforce a bounded activation/decomposition checkpoint and pending continuation. Where only MCP tools and instructions are available, offer the same complete workflow through bootstrap/skill guidance and report initiation as best effort. A capable tool schema alone proves neither ordinary-agent use nor interception of tool-free turns. Keep a capability matrix separating tool parity, lifecycle enforcement, recovery and observed no-nudge behaviour.
 
-The server states the activation step itself in its MCP `initialize` instructions, on the local and the hosted server alike: before a substantive turn, call `activate_context` once with the user's message verbatim, resolve an `ambiguous` packet by calling again with `anchor`, and treat retrieved text as evidence. A host without lifecycle hooks sees only those instructions and the tool descriptions, so without them activation there depended on the user installing a skill or writing a reminder, and the first live trial served packets to hook-driven clients only. The instructions are not part of the tool-surface fingerprint, so changing them does not force a client re-registration. They remain a request, not an interception: initiation on such hosts is still reported as best effort, and observed no-nudge behaviour per client is still owed.
+The server states the initial activation step in its MCP `initialize` instructions: call `activate_context` with the user's message verbatim before a substantive turn. Resolve an `ambiguous` packet with an attributed `anchor` choice and treat retrieved text as evidence. The same operation will support the bounded task refresh below; initial activation does not prohibit later refresh. Instructions remain a request on hosts without hooks. Installed instructions alone do not prove lifecycle enforcement or observed no-nudge behaviour.
+
+#### Same-turn task refresh
+
+Extend the existing operation with `trigger="user_turn"|"task_refresh"` and optional descriptive `initiator` attribution. Existing calls default to `user_turn`. Every call keeps `turn` as the original human request. An agent supplies its current task through bounded `conversation.focus` and already-inspected references through `conversation.refs`. The packet distinguishes human intent, agent focus, and retrieved evidence. Neither a declared initiator nor a source pointer grants authority or creates independent corroboration.
+
+Reuse the same compiler, maintained indexes, disclosure checks, and character, candidate and latency budgets. This adds no second retrieval engine. In task-refresh mode, resolve the human request and agent focus separately. Use the focus for task anchor resolution and role selection. Report unresolved human intent in `intent_resolution`; it must not suppress otherwise resolved, unrelated task context. Ambiguous task focus still abstains. Agent focus cannot silently settle whom the human meant; an explicit anchor choice remains attributed to the agent.
+
+Share one request's audience view, index snapshot and evidence work across both resolution views, then assemble material once. Do not concatenate two full activations. Prefer a bounded categorical `intent_resolution` status. Any candidates in that field cross the same audience filter, final egress and packet accounting as existing candidates.
+
+Hooks expose checkpoints after substantive external evidence, before an action or final response, and after continuation restoration where the host supports those events. The active agent decides whether a refresh would change its work. Hooks must not infer semantic need from tool names, word lists or response text. Tool-only clients can request the same refresh, while reporting initiation as best effort. Refresh exposes relevant context; deeper recall and source inspection remain existing tools when the packet leaves a material question open.
+
+Deduplicate each checkpoint by human-turn identity, task revision and inspected source versions within bounded existing client state. Use compiler generation only where the caller already receives it. Restricted callers do not gain vault-wide generation or freshness counters for deduplication. Store neither conversation text nor its hashes for this bookkeeping.
+
+A refresh result cannot schedule another refresh. Memory reads and subsequent activation stay inside the checkpoint's existing work budget. Another checkpoint requires distinct external evidence, a source correction or a real task transition; rephrased summaries alone do not qualify. Access changes invalidate reused packets even when the task is unchanged. Report exhausted or unavailable refresh explicitly and let the agent continue or abstain under the action's existing contract.
+
+On continuation restoration, read relevant episode open items and existing Planning references, then reconcile newer correction and closure evidence. Recent-context summaries are pointers, not complete obligation restoration or completion proof. Reuse the existing episode and Planning carriers without adding an obligation store or inventing commitments. Expand a named evidence gap through an exact read, relationship context or search as appropriate; do not run every retrieval mode automatically.
+
+Late evidence can support a correction through existing governed writers. Preserve the superseded interpretation and its source history. Refresh grants no new capture, relationship, supersession, Planning or side-effect authority. A checkpoint failure must not become a general release or user-action gate. This contract is a programme milestone, not a prerequisite for an already selected patch release.
+
+#### Native checkpoint accounting
+
+The first controller covers native correlation scopes, rather than claiming verified human origin.
+Codex 0.162.1 and Claude Code 2.1.296 command hooks expose correlation identifiers but omit input origin.
+Their capability reports separate correlation, origin, native leaf interception, completion receipts and restoration.
+Tool-only clients and dispatch without native leaf envelopes remain best effort.
+The older continuation contract retains its own version pins.
+
+Reuse the retrieve hook, continuation state locks and maintained installer.
+The installer generates operation metadata from `product_commands_for("mcp")` and `Command.read_only`.
+It records the producing package version and source hashes, plus the compiler's character bounds.
+Explicit configured MCP bindings enable accounting; an unmatched binding remains uncovered.
+Missing, invalid or demonstrably stale metadata reports unavailable classification and never gates an entire server.
+Local metadata alone does not prove the version of a remote server.
+
+Only associated, statically read-only operations consume the first controller's limits.
+Mixed invocations remain uncovered because their classification belongs to the maintained product dispatcher.
+Every recognized memory response, including a mixed-tool response, is excluded from external-evidence invitations.
+Canonical writes and imports remain ungated by this controller.
+False classification would interrupt useful work, so no approximate mixed-operation classifier is justified.
+Mixed-read coverage and observed later-response usefulness remain open acceptance work.
+
+The controller issues an opaque scope identifier for the native client, profile, session, actor and correlation.
+A local JSON declaration names that scope, an unsigned task revision, a closed boundary kind and inspected source versions.
+Boundary kinds are external evidence, source correction, task transition and continuation restoration.
+At most twelve source entries carry a reference, optional version and declared version basis.
+Bookkeeping stores neither prompts, focus, summaries, response text nor conversation hashes.
+Canonical task/source tuples deduplicate declarations; missing versions report partial deduplication.
+Caller-declared task transitions do not prove their semantic truth or create authority.
+
+An idempotent end clears association and never resets scope totals or refunds reservations.
+Pre-tool events reserve one operation and the effective compiler character allowance atomically.
+The default scope allowance is eight associated operations and three default activation allowances; installation can configure both.
+Post-tool receipts record bounded identifiers, outcome and returned activation characters when available.
+Failures, interruption and missing receipts retain reservations; late receipts cannot reopen ended association.
+Compaction and restoration clear association while preserving the scope's totals.
+A genuine new native correlation creates a new scope without asserting that its author was human.
+
+Use the existing private directories, locks, atomic writer and 64 KiB state ceiling.
+Recognize and prune the additive refresh state through the continuation controller's existing lifecycle.
+Reject oversized declarations explicitly rather than truncating identity fields.
+Lock failure, unavailable state or unsupported events degrade accounting instead of refusing ordinary work.
+Exhaustion denies only covered calls inside an active association and explains how to end that association.
+After end, ordinary inspection still reaches its dispatcher.
+These units measure reserved operations and activation characters, not CPU, elapsed time, tokens or complete packet bytes.
+
+The source batch follows the compiler batch so hook implementation does not delay the independently ready compiler correction.
+Its decisive isolated proof uses deployed hook copies and native direct and nested envelopes.
+An exhausted refresh must not reach the simulated dispatcher; an ordinary read after end must reach it.
+The same workflow covers concurrent reservations, repeated declaration and end, missing receipts, memory-only chains and continuation restoration.
+Installed hook configuration and real host use remain separate acceptance claims.
+
+#### Reuse installed instructions
+
+Clients with a current installed skill or hook contract reuse it. Use the existing session handshake and capability fingerprint for bounded live policy, availability and version information. A mismatch requests the affected contract section or one compact fallback; it does not repeatedly inject full diagnostics or all instructions. Clients with only MCP tools retain instruction-bearing bootstrap fallback. Permission checks remain live at the governed operation and never rely solely on a cached instruction bundle.
+
+The session profile, digest comparison, targeted sections and same-call compact fallback already exist. This milestone integrates client use and verifies the altered lifecycle, rather than introducing another bootstrap subsystem.
+
+Update the generated adapters, schema fingerprint, skill and hook guidance together when implementing refresh. Preserve old-call behaviour and report unsupported trigger fields rather than changing an agent focus into a fabricated human turn. Prove the workflow at actual host events, including a later task that needs a relationship or constraint absent from the initial packet. Reuse unchanged instruction and dependency evidence; test the new integration boundaries.
 
 Recording an episode follows the same split: hooks trigger, agents author. A host with a Stop hook asks the agent to record a recap after a prominence-set number of substantive turns since the last successful record, within a cooldown, with the session's episode key in the ask. Only a successful `episode_memory` record resets that count; an unrelated committed note or a failed record does not. The server instructions carry one sentence asking the agent to record once at a decision or stopping point. A tool-only client has no hook, so after about eight activations from one MCP caller without a record, the activation packet carries a one-sentence `episode_due` advisory, at most once per thirty minutes; it is silent when proactive capture is off, is never offered on the REST or CLI doors the hooks use, and is not offered to a Claude Code or Codex MCP client when this vault's host-local activation log shows that client's hook served it within the same window, because its Stop hook is already asking; with only the MCP server, such a client still gets the advisory. Every one of these is a request. The agent decides whether anything durable happened, and nothing records on its behalf.
 
