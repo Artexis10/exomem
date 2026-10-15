@@ -42,7 +42,7 @@ _ROUTE_KINDS = {
     "entity": {"create-entity"},
     "relation_only": {"accept-relation"},
     "existing_page": {"edit", "supersede"},
-    "semantic_unit": {"edit", "supersede"},
+    "semantic_unit": {"edit", "supersede", curation.OBSERVE_UNIT_STEP_KIND},
     # The Records leaf is this route's alone, and this route owns nothing else.
     "records": curation.RECORDS_STEP_KINDS,
 }

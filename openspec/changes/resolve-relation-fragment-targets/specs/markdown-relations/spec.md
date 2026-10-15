@@ -22,6 +22,18 @@ The existing semantic-block metadata syntax (`- relations: kind: [[Target]]`) SH
 - **WHEN** a relation target carries no `#fragment`
 - **THEN** the resulting edge is identical to the one produced before unit-level destinations existed
 
+#### Scenario: Two distinct units share one parent
+- **WHEN** a unit authors a registered relation to another exact unit on the same page
+- **THEN** both local `#anchor` and explicit `Page#anchor` resolve to the same target identity
+- **AND** qualification applies the existing authority, registry, scope and lifecycle rules without rejecting equal parent paths
+- **AND** a relation to the source unit itself remains a self-target
+
+#### Scenario: A correction target is unavailable or stale
+- **WHEN** exact correction preparation cannot resolve one current unit with its expected fingerprint
+- **THEN** the correction remains pending or refuses through the existing typed result
+- **AND** graph page fallback does not substitute for exact claim identity
+- **AND** incomplete selected definitions do not establish that the unit is absent
+
 #### Scenario: A page-level reader sees a unit destination as its page
 - **WHEN** the only relation into a page is a relation whose target addresses one of that page's units
 - **THEN** the unit-relation lift, the sensed model, hydration, vocabulary projection and the isolation sweep treat the page as the destination

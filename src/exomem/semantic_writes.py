@@ -1050,6 +1050,7 @@ class ExistingPreflight:
     census_token: tuple | None = None
     source_closure_plan: source_closure.SourceClosurePlan | None = None
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
+    unit_target_guards: tuple[vault.PathGuard, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1377,6 +1378,7 @@ def _existing_transition_token(
 ) -> str:
     payload: dict[str, Any] = {
         "version": 1,
+        "history_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
         "transition_id": str(uuid.uuid4()),
         "operation": operation,
         "path": path,
@@ -1512,7 +1514,7 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or set(value) not in (required, required | {"stamp"}):
+    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at"})):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -1537,6 +1539,14 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
+    if "history_at" not in value:
+        moment = temporal.parse(value.get("stamp"))
+        value["history_at"] = (moment.instant if moment is not None and moment.instant is not None
+                               else dt.datetime(1970, 1, 1, tzinfo=dt.UTC)).isoformat()
+    try:
+        dt.datetime.fromisoformat(value["history_at"].replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise SemanticWriteError("LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid") from error
     return value
 
 
@@ -2229,6 +2239,7 @@ def _commit_existing_locked(
     root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliaries: tuple[vault.PlannedWrite, ...],
     derived_auxiliaries: tuple[tuple[str, vault.PlannedWrite], ...],
     result: semantic_contract.SemanticContractResult,
@@ -2247,6 +2258,16 @@ def _commit_existing_locked(
             root, primary_path=preflight.path, current_source=preflight.before_source,
             proposed_source=preflight.after_source, primary_guard=preflight.primary_guard,
         )
+    from . import compiled_history
+
+    history_write = compiled_history.plan_entry(
+        root, preflight=preflight, token=_decode_existing_transition_token(preflight.transition_token),
+        reason=history_reason,
+    )
+    if history_write is not None:
+        auxiliaries = (*auxiliaries, history_write)
+        derived_auxiliaries = (*derived_auxiliaries, ("compiled-history", history_write))
+
     if preflight.committed_replay:
         if preflight.applicability != "full":
             return ExistingCommit(
@@ -2426,15 +2447,18 @@ def _commit_existing_locked(
         publication_entered = True
 
     try:
-        written = vault.batch_atomic_write(
-            writes,
-            vault_root=root,
-            required_guards=(*required_guards, *origin_guards),
-            index_reports=reports,
-            semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
-            _vocabulary_auxiliaries=manifest,
-            _validate_prepared_bindings=validate_bindings,
-        )
+        from . import reserved_paths
+
+        with reserved_paths._subsystem_authority_scope("compiled_history"):
+            written = vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(*required_guards, *origin_guards, *preflight.unit_target_guards),
+                index_reports=reports,
+                semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
+                _vocabulary_auxiliaries=manifest,
+                _validate_prepared_bindings=validate_bindings,
+            )
     except vault.PathGuardError:
         _recheck_origin_guards(root, origin_guards)
         raise
@@ -2487,7 +2511,7 @@ def _revalidate_existing_preflight(
         relation_review_hash = preflight.transition_hash
         relation_review_reason = preflight.requested_decision.reason
     with _write_phase("revalidate"):
-        return preflight_existing(
+        refreshed = preflight_existing(
             vault_root,
             path=preflight.path,
             after_source=preflight.after_source,
@@ -2499,6 +2523,7 @@ def _revalidate_existing_preflight(
             relation_review_reason=relation_review_reason,
             status_basis=status_basis,
         )
+        return replace(refreshed, unit_target_guards=preflight.unit_target_guards)
 
 
 def _prepare_markdown_catalog_publication(
@@ -2821,6 +2846,7 @@ def commit_existing(
     vault_root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
@@ -2839,6 +2865,7 @@ def commit_existing(
             preflight=preflight,
             auxiliary_writes=auxiliary_writes,
             derived_auxiliary_writes=derived_auxiliary_writes,
+            history_reason=history_reason,
             timings=timings,
             status_basis=status_basis,
         )
@@ -2875,6 +2902,7 @@ def _commit_existing(
     vault_root: Path,
     *,
     preflight: ExistingPreflight,
+    history_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
     derived_auxiliary_writes: tuple[tuple[str, vault.PlannedWrite], ...] = (),
     timings: MutationTimings | None = None,
@@ -3022,6 +3050,7 @@ def _commit_existing(
                     committed = _commit_existing_locked(
                         root,
                         preflight=preflight,
+                        history_reason=history_reason,
                         auxiliaries=auxiliaries,
                         derived_auxiliaries=derived_auxiliaries,
                         result=result,

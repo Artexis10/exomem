@@ -377,6 +377,8 @@ def _pack_unit(
         {
             "unit_ref": unit.unit_ref,
             "fingerprint": unit.fingerprint,
+            "verdict": unit.verdict,
+            "check_by": unit.check_by,
             "form": unit.form,
             "category_raw": unit.category_raw,
             "category_key": unit.category_key,
@@ -889,6 +891,13 @@ def assemble_pack(
                 return
 
             packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+            from . import unit_corrections
+
+            if unit.unit_ref:
+                packed["corrective_context"] = unit_corrections.counterparts(
+                    vault_root, unit.unit_ref, keep=unit_corrections.reader_view(vault_root),
+                    deadline=deadline,
+                )
             block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
             candidate_unit_map = {
                 **semantic_unit_map,

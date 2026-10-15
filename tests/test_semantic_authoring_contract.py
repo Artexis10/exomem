@@ -69,7 +69,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 7
+    assert contract["version"] == 8
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -637,6 +637,8 @@ def test_rich_contract_matches_canonical_writer_metadata_order_and_parser() -> N
         "tags",
         "context",
         "relations",
+        "verdict",
+        "check_by",
     )
 
     document = semantic_units.parse_semantic_units(rendered, path="synthetic.md")

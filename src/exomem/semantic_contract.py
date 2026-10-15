@@ -456,6 +456,11 @@ class RelationFact:
     reviewer_accepted: bool
     target_status: str
     registry_instance: str = "core"
+    logical_source_ref: str | None = None
+    logical_target_ref: str | None = None
+    target_unit_status: str | None = None
+    target_unit_fingerprint: str | None = None
+    target_kind: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authored_projects", tuple(sorted(set(self.authored_projects))))
@@ -487,6 +492,11 @@ class RelationFact:
             "reviewer_accepted": self.reviewer_accepted,
             "target_status": self.target_status,
             "registry_instance": self.registry_instance,
+            "logical_source_ref": self.logical_source_ref,
+            "logical_target_ref": self.logical_target_ref,
+            "target_unit_status": self.target_unit_status,
+            "target_unit_fingerprint": self.target_unit_fingerprint,
+            "target_kind": self.target_kind,
         }
 
 
@@ -3680,8 +3690,14 @@ def _resolve_target(
     raw_target: str,
     resolver: vault.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
+    *,
+    source_path: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
-    _, authored_anchor, alias = _target_parts(raw_target)
+    page_part, authored_anchor, alias = _target_parts(raw_target)
+    if not page_part and authored_anchor and source_path:
+        if visible is not None and not visible(source_path):
+            return "unresolved", None, authored_anchor, alias
+        return "resolved", f"{source_path}#{authored_anchor}", authored_anchor, alias
     try:
         normalized, _ = vault.normalize_wikilink(
             raw_target, root, resolver=resolver, strict=True, visible=visible
@@ -3866,10 +3882,27 @@ def _derive_relation_facts(
             writer_view[1]
             if writer_view is not None and state.path == writer_view[0]
             else None,
+            source_path=state.path,
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
+        source_ref = raw["element_identity"] if raw["origin"] == "semantic_relation" else None
+        source_ref = source_ref or state.document.parent_ref
+        target_ref = target_state.document.parent_ref if target_state is not None else None
+        target_unit_status = None
+        target_unit_fingerprint = None
+        if target_anchor and target_state is not None:
+            unit_resolution = target_state.document.resolve_fragment(target_anchor)
+            target_unit_status = (
+                "unavailable" if target_state.definitions_unavailable
+                and unit_resolution.status == "missing" else unit_resolution.status
+            )
+            target_ref = None
+            if unit_resolution.unit is not None:
+                target_ref = unit_resolution.unit.unit_ref
+                target_unit_fingerprint = unit_resolution.unit.fingerprint
+                target_kind = unit_resolution.unit.kind
         resolution = _registry_resolution(
             selected_registry,
             raw["raw_relation"],
@@ -3916,6 +3949,11 @@ def _derive_relation_facts(
                 identity=_fact_identity(identity_payload),
                 logical_source_path=logical_source,
                 logical_target_path=logical_target,
+                logical_source_ref=target_ref if raw["reverse"] else source_ref,
+                logical_target_ref=source_ref if raw["reverse"] else target_ref,
+                target_unit_status=target_unit_status,
+                target_unit_fingerprint=target_unit_fingerprint,
+                target_kind=target_kind,
                 raw_target=str(raw["raw_target"]),
                 resolved_target_path=resolved_target,
                 target_anchor=target_anchor,
@@ -4001,7 +4039,9 @@ def _structural_relation_reasons(
             reasons.append("ineligible_target")
         if fact.logical_target_path not in target_paths and not mutual_supersession:
             reasons.append("ineligible_target")
-        if fact.logical_source_path == fact.logical_target_path:
+        source_endpoint = fact.logical_source_ref or fact.logical_source_path
+        target_endpoint = fact.logical_target_ref or fact.logical_target_path
+        if source_endpoint == target_endpoint:
             reasons.append("self_target")
     if definition is None:
         reasons.append("unregistered_relation")
@@ -4015,7 +4055,7 @@ def _structural_relation_reasons(
             page_type=fact.authored_page_type,
             source_kind=fact.source_kind,
             target_kind=(
-                "file"
+                fact.target_kind or "file"
                 if fact.target_status == "resolved" and resolved_base in corpus.pages
                 else "unresolved"
             ),

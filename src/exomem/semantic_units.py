@@ -238,6 +238,46 @@ class SemanticUnitResolution:
 
 
 @dataclass(frozen=True, slots=True)
+class _ExactUnitMatch:
+    """Identity-only result shared by full and selected unit documents."""
+
+    status: str
+    index: int | None = None
+    expected_fingerprint: str | None = None
+    actual_fingerprint: str | None = None
+
+
+def _resolve_exact_unit(
+    *,
+    parent_ref: str | None,
+    requested: str,
+    identities: tuple[tuple[str | None, str | None, str | None], ...],
+    expected_fingerprint: str | None = None,
+) -> _ExactUnitMatch:
+    matches = [index for index, (reference, _, _) in enumerate(identities)
+               if reference == requested]
+    if len(matches) > 1:
+        return _ExactUnitMatch("ambiguous")
+    if matches:
+        index = matches[0]
+        fingerprint = identities[index][2]
+        if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+            return _ExactUnitMatch("stale", expected_fingerprint=expected_fingerprint,
+                                   actual_fingerprint=fingerprint)
+        return _ExactUnitMatch("found", index, expected_fingerprint, fingerprint)
+    duplicate_anchors = [
+        anchor for _, anchor, _ in identities
+        if parent_ref and anchor and _anchored_unit_ref(parent_ref, anchor) == requested
+    ]
+    if len(duplicate_anchors) > 1:
+        return _ExactUnitMatch("ambiguous")
+    requested_parent, separator, fragment = requested.rpartition("#")
+    if separator and requested_parent == parent_ref and _UNIT_IDENTITY_RE.fullmatch(fragment):
+        return _ExactUnitMatch("stale", expected_fingerprint=fragment.removeprefix("unit-"))
+    return _ExactUnitMatch("missing")
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticUnitDocument:
     """Source-ordered normalized units and deterministic parser findings."""
 
@@ -317,7 +357,9 @@ class SemanticUnitDocument:
         """
         if not self.parent_ref:
             return SemanticUnitResolution(status="missing", unit_ref="")
-        return self.resolve_unit(_anchored_unit_ref(self.parent_ref, fragment.removeprefix("^")))
+        return self.resolve_unit(_anchored_unit_ref(
+            self.parent_ref, fragment.removeprefix("#").removeprefix("^")
+        ))
 
     def resolve_unit(
         self,
@@ -326,51 +368,21 @@ class SemanticUnitDocument:
         expected_fingerprint: str | None = None,
     ) -> SemanticUnitResolution:
         """Resolve only an exact current reference, never text/span similarity."""
-        requested = str(unit_ref or "")
-        matches = [unit for unit in self.units if unit.unit_ref == requested]
-        if len(matches) > 1:
-            return SemanticUnitResolution(status="ambiguous", unit_ref=requested)
-        if matches:
-            unit = matches[0]
-            if (
-                expected_fingerprint is not None
-                and unit.fingerprint != expected_fingerprint
-            ):
-                return SemanticUnitResolution(
-                    status="stale",
-                    unit_ref=requested,
-                    expected_fingerprint=expected_fingerprint,
-                    actual_fingerprint=unit.fingerprint,
-                )
-            return SemanticUnitResolution(
-                status="found",
-                unit_ref=requested,
-                unit=unit,
-                expected_fingerprint=expected_fingerprint,
-                actual_fingerprint=unit.fingerprint,
-            )
-
-        ambiguous = [
-            unit
-            for unit in self.units
-            if self.parent_ref
-            and unit.anchor
-            and _anchored_unit_ref(self.parent_ref, unit.anchor) == requested
-        ]
-        if len(ambiguous) > 1:
-            return SemanticUnitResolution(status="ambiguous", unit_ref=requested)
-        parent_ref, separator, fragment = requested.rpartition("#")
-        if (
-            separator
-            and parent_ref == self.parent_ref
-            and re.fullmatch(r"unit-([0-9a-f]{64})", fragment)
-        ):
-            return SemanticUnitResolution(
-                status="stale",
-                unit_ref=requested,
-                expected_fingerprint=fragment.removeprefix("unit-"),
-            )
-        return SemanticUnitResolution(status="missing", unit_ref=requested)
+        match = _resolve_exact_unit(
+            parent_ref=self.parent_ref,
+            requested=str(unit_ref or ""),
+            identities=tuple(
+                (unit.unit_ref, unit.anchor, unit.fingerprint) for unit in self.units
+            ),
+            expected_fingerprint=expected_fingerprint,
+        )
+        return SemanticUnitResolution(
+            status=match.status,
+            unit_ref=str(unit_ref or ""),
+            unit=self.units[match.index] if match.index is not None else None,
+            expected_fingerprint=match.expected_fingerprint,
+            actual_fingerprint=match.actual_fingerprint,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -506,6 +518,30 @@ class SelectedStructure:
     @property
     def rich_units(self) -> tuple[UnitStructure, ...]:
         return tuple(unit for unit in self.units if unit.form == "rich")
+
+    def resolve_fragment(self, fragment: str) -> _ExactUnitMatch:
+        if not self.parent_ref:
+            return _ExactUnitMatch("missing" if self.complete else "unavailable")
+        return self.resolve_unit(_anchored_unit_ref(
+            self.parent_ref, fragment.removeprefix("#").removeprefix("^")
+        ))
+
+    def resolve_unit(
+        self, unit_ref: str, *, expected_fingerprint: str | None = None,
+    ) -> _ExactUnitMatch:
+        match = _resolve_exact_unit(
+            parent_ref=self.parent_ref,
+            requested=str(unit_ref or ""),
+            identities=tuple(
+                (unit.unit_ref, unit.anchor, unit.fingerprint) for unit in self.units
+            ),
+            expected_fingerprint=expected_fingerprint,
+        )
+        if not self.complete and (match.status == "missing" or (
+            match.status == "stale" and match.actual_fingerprint is None
+        )):
+            return replace(match, status="unavailable")
+        return match
 
     def unit(self, key: str) -> UnitStructure | None:
         return next((unit for unit in self.units if unit.occurrence_key == key), None)

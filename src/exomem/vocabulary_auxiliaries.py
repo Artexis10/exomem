@@ -18,6 +18,7 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         "operation-log",
         # The snapshot of the bytes a registry save replaced (`registry_history`).
         "registry-history",
+        "compiled-history",  # The semantic writer retains its exact prior Markdown.
     }
 )
 _SEAL = object()

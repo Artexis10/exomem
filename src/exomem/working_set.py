@@ -669,6 +669,26 @@ def build_packet(
             if used + cost > material_limit or not text:
                 _defer(item, "budget")
                 continue
+            if status_basis.root is not None and item.level == "unit" and item.ref:
+                from . import unit_corrections
+
+                corrections = unit_corrections.counterparts(
+                    status_basis.root, item.ref, keep=unit_corrections.reader_view(status_basis.root),
+                )
+                item = replace(
+                    item, provenance={**item.provenance, "corrective_context": corrections},
+                    lifecycle=("superseded" if any(
+                        counterpart["family"] == "supersession" for counterpart in corrections["units"]
+                    ) else item.lifecycle),
+                )
+                unit = _served_unit(item)
+                cost = (
+                    working_set_conversation.prose_chars(unit, role_ids=role_ids, status_basis=status_basis)
+                    if conversation_inferred else served_chars("units", unit)
+                )
+                if used + cost > material_limit:
+                    _defer(item, "budget")
+                    continue
             ordering = status_basis.ordering(item.lifecycle, path=item.path or None)
             if ordering is not None and ordering.historical:
                 unit["history"] = True
@@ -1361,6 +1381,7 @@ def _units_lane(
     # One row past the limit, then sliced. Reading exactly `UNIT_LANE_LIMIT` rows
     # cannot distinguish "there was more" from "that was all", so the marker would
     # over-report on a corpus that happens to hold exactly the limit.
+    parent_reads = parent_reads or find_module.UnitParentReads()
     snapshot = freshness_snapshot or find_module.FreshnessSnapshot(Path(vault_root))
     plan = structured_filters.compile_filter(
         None,
@@ -1396,7 +1417,7 @@ def _units_lane(
     )
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    return LaneResult(_unit_items(role, hits), truncated)
+    return LaneResult(_unit_items(role, hits, parent_reads=parent_reads), truncated)
 
 
 def _restricted(visible: Callable[[str], bool] | None) -> bool:
@@ -1420,7 +1441,7 @@ def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> 
 
 
 def _unit_items(
-    role: context_roles.ContextRole | None, hits: Sequence[Any]
+    role: context_roles.ContextRole | None, hits: Sequence[Any], *, parent_reads: Any = None,
 ) -> tuple[LaneItem, ...]:
     out: list[LaneItem] = []
     for hit in hits:
@@ -1429,7 +1450,12 @@ def _unit_items(
         lifecycle = (
             "superseded" if superseded_by else str(getattr(hit, "parent_status", None) or "active")
         )
-        supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
+        held = parent_reads.parents.get(parent) if parent_reads is not None else None
+        definitions = held.state.definitions if held is not None and held.state is not None else None
+        selected_registry = definitions.snapshots["relations"].typed if definitions is not None else None
+        supersedes = working_set_currency.relation_targets(
+            getattr(hit, "relations", None), registry=selected_registry,
+        )
         out.append(
             LaneItem(
                 role=role.id if role is not None else "",
@@ -1448,6 +1474,8 @@ def _unit_items(
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
+                    **({"verdict": hit.verdict} if getattr(hit, "verdict", None) else {}),
+                    **({"check_by": hit.check_by} if getattr(hit, "check_by", None) else {}),
                     "superseded_by": superseded_by,
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),

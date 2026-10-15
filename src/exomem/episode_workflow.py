@@ -72,7 +72,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 #: Routes whose home is one existing page, and the arg each owned leaf kind
 #: names that page by.
 _BOUND_ROUTES = frozenset({"existing_page", "semantic_unit"})
-_LEAF_TARGET = {"edit": "path", "supersede": "old_path"}
+_LEAF_TARGET = {"edit": "path", "supersede": "old_path", curation.OBSERVE_UNIT_STEP_KIND: "path"}
 DESTINATION_STALE = "EPISODE_DESTINATION_STALE"
 _UNAVAILABLE = (
     "EPISODE_DESTINATION_UNAVAILABLE",

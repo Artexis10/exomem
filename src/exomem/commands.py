@@ -7171,6 +7171,8 @@ def op_read_memory(
     include_raw: bool = False,
     unit_ref: str | None = None,
     purpose: str | None = None,
+    history_limit: int | None = None,
+    history_continuation: str | None = None,
 ) -> dict:
     """Read a page or exact semantic unit selected by recall or known ref.
 
@@ -7184,8 +7186,10 @@ def op_read_memory(
         include_history: Edit/supersession history.
         links: Inbound/outbound wikilinks.
         include_raw: Raw Markdown.
-        unit_ref: Exact recall unit ref; excludes page-only expansion flags.
+        unit_ref: Exact recall unit ref; history can include retained revisions.
         purpose: Declared purpose; governs visibility.
+        history_limit: Retained revisions per page, from 1 to 50.
+        history_continuation: Position from the previous revision_history envelope.
     """
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
@@ -7202,12 +7206,14 @@ def op_read_memory(
                 links=links,
                 include_raw=include_raw,
                 unit_ref=unit_ref,
+                history_limit=history_limit,
+                history_continuation=history_continuation,
             )
     if unit_ref is not None:
-        if frontmatter_only or include_history or links or include_raw:
+        if frontmatter_only or links or include_raw:
             raise ValueError(
                 "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
-                "frontmatter_only, include_history, links, or include_raw"
+                "frontmatter_only, links, or include_raw"
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
@@ -7277,8 +7283,15 @@ def op_read_memory(
                 out["evidence_version"] = provenance_module.evidence_version(page.content)
             except ValueError:
                 pass
+        if include_history:
+            from . import compiled_history
+
+            out["revision_history"] = compiled_history.read(
+                vault_root, path=page.path, unit_ref=unit_ref, limit=history_limit,
+                continuation=history_continuation,
+            )
         return out
-    return op_get(
+    result = op_get(
         vault_root,
         path=path,
         frontmatter_only=frontmatter_only,
@@ -7286,6 +7299,13 @@ def op_read_memory(
         links=links,
         include_raw=include_raw,
     )
+    if include_history and "content_hash" in result:
+        from . import compiled_history
+
+        result["revision_history"] = compiled_history.read(
+            vault_root, path=result["path"], limit=history_limit, continuation=history_continuation,
+        )
+    return result
 
 
 def op_browse_memory(
@@ -7581,6 +7601,8 @@ def op_observe_memory(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    reason: str | None = None,
+    target_fingerprints: dict[str, str] | None = None,
 ) -> dict:
     """Validate or mutate one semantic unit on a compiled memory page.
 
@@ -7608,6 +7630,9 @@ def op_observe_memory(
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
         relation_review_reason: Audit reason for reviewed-none.
+        reason: Optional rationale retained with the prior interpretation.
+        target_fingerprints: Exact corrective target refs and current fingerprints.
+            Omit for ordinary page or heading relations; episode unit leaves echo them.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -7665,6 +7690,8 @@ def op_observe_memory(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            reason=reason,
+            target_fingerprints=target_fingerprints,
         )
         if result.get("mutated"):
             query_log.log_write_call(
@@ -7945,6 +7972,7 @@ _EpisodeProposalArgument = Annotated[
                                             "supersede",
                                             "append-record",
                                             "update-record",
+                                            "observe-unit",
                                         ]
                                     },
                                     "args": {"type": "object"},

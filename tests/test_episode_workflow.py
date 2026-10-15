@@ -174,6 +174,7 @@ def test_the_advertised_leaf_kinds_exclude_destructive_steps() -> None:
         "supersede",
         "append-record",
         "update-record",
+        "observe-unit",
     }
 
 

@@ -1001,6 +1001,7 @@ def commit_edit(
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,
+                history_reason=why,
                 auxiliary_writes=tuple(writes),
                 derived_auxiliary_writes=tuple(derived_auxiliary_writes),
                 timings=timings,

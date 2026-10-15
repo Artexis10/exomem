@@ -25,7 +25,6 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, NamedTuple
-from urllib.parse import quote
 
 from . import (
     access,
@@ -10236,7 +10235,7 @@ def _structural_edges_for_page(
             source_path=rel, source_anchor=anchor, metadata=base,
         ))
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, visible)
+            destination = _relation_target(vault_root, relation.target, resolver, visible, source_path=rel)
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
@@ -10262,7 +10261,7 @@ def _structural_edges_for_page(
     core_labels = core.keys | frozenset(core.aliases)
     canonical_lines: set[int] = set()
     for relation in notes.relations:
-        destination = _relation_target(vault_root, relation.target, resolver, visible, note=True)
+        destination = _relation_target(vault_root, relation.target, resolver, visible, source_path=rel)
         if destination is None:
             continue
         if relation.canonical:
@@ -10294,17 +10293,19 @@ def _relation_target(
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None,
     *,
-    note: bool = False,
+    source_path: str,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
-    A note row with no page part keeps resolving its whole target, as the note
-    grammar always has; a unit relation's same-page fragment names no page.
+    A local fragment uses its already-known source parent. Page names still
+    resolve through the ordinary audience-aware vault resolver.
     """
     target, fragment = _split_target_fragment(raw_target)
+    if not target and fragment:
+        target = source_path
     try:
         canonical, warning = vault_module.normalize_wikilink(
-            (target or raw_target) if note else target, vault_root, resolver=resolver,
+            target, vault_root, resolver=resolver,
             strict=False, visible=visible,
         )
     except Exception:  # noqa: BLE001 - malformed links are ignored
@@ -10441,7 +10442,7 @@ def _edges_for_page(
     for unit in document.rich_units:
         block_key = _unit_candidate_key(rel, unit)
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, None)
+            destination = _relation_target(vault_root, relation.target, resolver, None, source_path=rel)
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
@@ -10457,7 +10458,7 @@ def _edges_for_page(
             ))
     canonical_lines: set[int] = set()
     for relation in document.note_relations:
-        destination = _relation_target(vault_root, relation.target, resolver, None, note=True)
+        destination = _relation_target(vault_root, relation.target, resolver, None, source_path=rel)
         if destination is None:
             continue
         if relation.canonical:
@@ -10584,15 +10585,14 @@ def _links_from_string(value: str) -> list[str]:
 def _split_target_fragment(raw: str) -> tuple[str, str]:
     """`[[Page#unit|alias]]` as (`Page`, `unit`).
 
-    A same-page `#unit` names no other page, so it carries no fragment here: the
-    relation graph has never given it a destination of its own.
+    Local fragments retain their identity; the caller supplies the source parent.
     """
     text = str(raw).strip()
     if text.startswith("[[") and text.endswith("]]"):
         text = text[2:-2]
     page, _separator, fragment = text.split("|", 1)[0].partition("#")
     page = page.strip()
-    return page, fragment.strip() if page else ""
+    return page, fragment.strip()
 
 
 def _relation_destination(
@@ -11530,6 +11530,11 @@ class GraphView:
                 "resolver_source_kind": source_kind,
                 "metadata": metadata,
             }
+        definition = self.registry_for(str(row.get("source_path") or "")).definition(
+            str(row.get("relation_type") or "")
+        )
+        if definition is not None:
+            row = {**row, "metadata": {**metadata, "relation_family": definition.family}}
         if metadata.get("target_fragment"):
             row = self._land(row)
         return row
@@ -11546,16 +11551,13 @@ class GraphView:
         outcome = str(metadata.get("fragment_resolution") or "")
         dst_key = page_key
         if target_path and target is not None and target.structure.parent_ref:
-            fragment = str(metadata["target_fragment"]).removeprefix("^")
-            requested = f"{target.structure.parent_ref}#{quote(fragment, safe='')}"
-            matches = [unit for unit in target.structure.units if unit.unit_ref == requested]
-            if len(matches) == 1:
-                dst_key = _candidate_key(target_path, matches[0].occurrence_key, matches[0].form)
+            resolution = target.structure.resolve_fragment(str(metadata["target_fragment"]))
+            if resolution.index is not None:
+                unit = target.structure.units[resolution.index]
+                dst_key = _candidate_key(target_path, unit.occurrence_key, unit.form)
                 outcome = "unit"
-            elif matches:
-                outcome = "ambiguous"
-            elif outcome == "unit" or not target.structure.complete:
-                outcome = "missing" if target.structure.complete else "unavailable"
+            elif resolution.status in {"ambiguous", "unavailable"} or outcome == "unit":
+                outcome = resolution.status
         elif outcome == "unit":
             outcome = "unavailable"
         metadata["fragment_resolution"] = outcome

@@ -22,7 +22,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
-from . import lifecycle_statuses
+from . import lifecycle_statuses, relation_registry, semantic_units, vault
 
 if TYPE_CHECKING:  # pragma: no cover
     from .working_set import LaneItem
@@ -59,11 +59,15 @@ def own_time(context: str | None) -> str:
     return ""
 
 
-def relation_targets(relations: Sequence[Mapping[str, Any]] | None) -> tuple[str, ...]:
+def relation_targets(relations: Sequence[Mapping[str, Any]] | None, *,
+                     registry: relation_registry.RelationRegistry | None = None) -> tuple[str, ...]:
     """The raw targets of a unit's authored `supersedes` relations."""
     out = []
+    registry = registry or relation_registry.core_registry()
     for relation in relations or ():
-        if str(relation.get("kind") or "").casefold() == "supersedes":
+        definition = registry.resolve(str(relation.get("kind") or "")).definition
+        # `supersession` is a closed family implemented by the relation schema.
+        if definition is not None and definition.family == "supersession":
             target = str(relation.get("target") or "").strip()
             if target:
                 out.append(target)
@@ -80,7 +84,7 @@ def _page_names(path: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _target_fragment(target: str, path: str) -> str:
+def _target_fragment(target: str, path: str, *, root=None, resolver=None, visible=None) -> str:
     """The unit anchor `target` names ON `path`, or empty when it names another page."""
     text = target.strip()
     if text.startswith("[[") and text.endswith("]]"):
@@ -90,14 +94,17 @@ def _target_fragment(target: str, path: str) -> str:
     if not separator or not fragment.strip():
         return ""
     page = unquote(page.strip().removeprefix(_VAULT_REF_PREFIX))
-    if page and page.casefold() not in _page_names(path):
+    if page and root is not None:
+        try:
+            canonical, _ = vault.normalize_wikilink(page, root, strict=True, resolver=resolver, visible=visible)
+        except ValueError:
+            return ""
+        if canonical != path.removesuffix(".md"):
+            return ""
+    elif page and page.casefold() not in _page_names(path):
         return ""
-    return fragment.strip().casefold()
+    return fragment.strip()
 
-
-def _unit_fragment(item: LaneItem) -> str:
-    _page, separator, fragment = item.ref.rpartition("#")
-    return fragment.casefold() if separator else ""
 
 
 def annotate(
@@ -109,23 +116,33 @@ def annotate(
     deterministic: the same items give the same marks.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(None)
+    resolver = None
+    visible = None
+    if status_basis.root is not None and any(item.provenance.get("supersedes_targets") for item in items):
+        resolver = vault.WikilinkResolver(status_basis.root)
+        visible = vault.writer_link_visibility(status_basis.root)
     by_page: dict[str, list[int]] = {}
     for index, item in enumerate(items):
         if item.level == "unit" and item.path:
             by_page.setdefault(item.path, []).append(index)
     superseded: set[int] = set()
     for path, indices in by_page.items():
-        by_fragment: dict[str, list[int]] = {}
+        parent_ref = items[indices[0]].ref.rpartition("#")[0]
+        # Currency shares the exact identity resolver; it never folds unit anchors.
+        structure = semantic_units.SelectedStructure(
+            tuple(semantic_units.UnitStructure(
+                form="rich", kind="", category="", anchor=unquote(items[index].ref.rpartition("#")[2]),
+                line=0, end_line=0, source_hash="", unit_ref=items[index].ref,
+            ) for index in indices), (), parent_ref=parent_ref,
+        )
         for index in indices:
-            fragment = _unit_fragment(items[index])
-            if fragment:
-                by_fragment.setdefault(fragment, []).append(index)
-        for index in indices:
-            own = _unit_fragment(items[index])
             for target in items[index].provenance.get("supersedes_targets") or ():
-                fragment = _target_fragment(str(target), path)
-                if fragment and fragment != own:
-                    superseded.update(by_fragment.get(fragment, ()))
+                fragment = _target_fragment(str(target), path, root=status_basis.root, resolver=resolver, visible=visible)
+                if not fragment:
+                    continue
+                resolved = structure.resolve_fragment(fragment)
+                if resolved.index is not None and indices[resolved.index] != index:
+                    superseded.add(indices[resolved.index])
     if not superseded:
         return tuple(items)
     return tuple(
