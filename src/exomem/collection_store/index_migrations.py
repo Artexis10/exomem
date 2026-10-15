@@ -7,6 +7,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import lru_cache
 
 from .. import vault
 from ..query_engine.indexes import (
@@ -60,6 +61,8 @@ def _hash(plan):
     return hashlib.sha256(_encoded(plan).encode()).hexdigest()
 
 
+# Cache only immutable descriptors; callers still read current mapping state.
+@lru_cache(maxsize=64)
 def _plan(cid, generation, encoded):
     raw = json.loads(encoded)
     if set(raw) != {"version", "fields", "paths", "indexes"} or raw["version"] != 1:
