@@ -2299,7 +2299,9 @@ class EpistemicGraphIndex:
         # Optional compiler enrichment must never wait for publication or start cold proof.
         if live_only and not require_current_projection:
             raise ValueError("live_only requires the current graph projection")
-        live_checkpoint = freshness.live_recall_checkpoint(self.vault_root, "vault") if live_only else None
+        live_checkpoint = (
+            freshness.live_recall_checkpoint(self.vault_root, "vault") if live_only else None
+        )
         if live_only and live_checkpoint is None:
             return None
         if prove is None:
@@ -10290,7 +10292,9 @@ def _structural_edges_for_page(
             source_path=rel, source_anchor=anchor, metadata=base,
         ))
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, visible, source_path=rel)
+            destination = _relation_target(
+                vault_root, relation.target, resolver, visible, source_path=rel
+            )
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
@@ -10316,7 +10320,9 @@ def _structural_edges_for_page(
     core_labels = core.keys | frozenset(core.aliases)
     canonical_lines: set[int] = set()
     for relation in notes.relations:
-        destination = _relation_target(vault_root, relation.target, resolver, visible, source_path=rel)
+        destination = _relation_target(
+            vault_root, relation.target, resolver, visible, source_path=rel
+        )
         if destination is None:
             continue
         if relation.canonical:
@@ -10497,7 +10503,9 @@ def _edges_for_page(
     for unit in document.rich_units:
         block_key = _unit_candidate_key(rel, unit)
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, None, source_path=rel)
+            destination = _relation_target(
+                vault_root, relation.target, resolver, None, source_path=rel
+            )
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination

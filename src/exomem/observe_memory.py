@@ -420,25 +420,37 @@ def observe_memory(
         from .unit_corrections import CORRECTIVE_FAMILIES
 
         if not isinstance(target_fingerprints, dict):
-            raise ObserveMemoryError("INVALID_UNIT_TARGETS", "target_fingerprints must be an object")
+            raise ObserveMemoryError(
+                "INVALID_UNIT_TARGETS", "target_fingerprints must be an object"
+            )
         guards = []
         targets = {}
-        for fact in semantic_contract.writer_authored_facts(preflight.after, preflight.after_corpus):
+        for fact in semantic_contract.writer_authored_facts(
+            preflight.after, preflight.after_corpus
+        ):
             if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
                 continue
             if fact.family not in CORRECTIVE_FAMILIES:
                 continue
             if fact.target_unit_status != "found" or fact.logical_target_ref is None:
-                raise ObserveMemoryError("EXACT_UNIT_TARGET_REQUIRED", "a corrective target must name one current unit")
+                raise ObserveMemoryError(
+                    "EXACT_UNIT_TARGET_REQUIRED", "a corrective target must name one current unit"
+                )
             targets[fact.logical_target_ref] = fact.target_unit_fingerprint
             state = preflight.after_corpus.pages[fact.logical_target_path]
             source, guard = vault.read_guarded_text(vault_root, Path(vault_root) / state.path)
-            if vault.content_hash(source.replace("\r\n", "\n").replace("\r", "\n")) != preflight.before_corpus.pages[state.path].source_hash:
-                raise ObserveMemoryError("STALE_UNIT_TARGET", "a corrective target changed; read it again")
+            if vault.content_hash(
+                source.replace("\r\n", "\n").replace("\r", "\n")
+            ) != preflight.before_corpus.pages[state.path].source_hash:
+                raise ObserveMemoryError(
+                    "STALE_UNIT_TARGET", "a corrective target changed; read it again"
+                )
             if state.path != preflight.path:
                 guards.append(guard)
         if targets != target_fingerprints:
-            raise ObserveMemoryError("STALE_UNIT_TARGET", "exact corrective target fingerprints do not match")
+            raise ObserveMemoryError(
+                "STALE_UNIT_TARGET", "exact corrective target fingerprints do not match"
+            )
         preflight = replace(preflight, unit_target_guards=tuple(guards))
 
     if op == "validate":
