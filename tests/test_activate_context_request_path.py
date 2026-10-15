@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_working_set_index import _seed_planning, _seed_structure
@@ -515,7 +516,8 @@ def test_relevant_due_advice_respects_the_fixed_request_deadline(
     baseline = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
     assert baseline["abstained"] is False and baseline["relevant_due_refs"]
 
-    budget = request_budget.RequestBudget(seconds=50, entry=time.monotonic() - 47)
+    clock = [time.monotonic()]
+    budget = request_budget.RequestBudget(seconds=50, entry=clock[0] - 47)
     deadline = budget.deadline
     guard = egress.guard_working_set
     read = vault_module.read_bytes_without_pinning
@@ -526,21 +528,23 @@ def test_relevant_due_advice_respects_the_fixed_request_deadline(
         packet = guard(*args, **kwargs)
         pause = budget.remaining() - headroom
         assert pause > 0, "the completed guard must leave the intended headroom"
-        time.sleep(pause)
+        clock[0] += pause
         return packet
 
     def slow_projection(path, *args, **kwargs):
         if path == projection:
             projection_reads.append(budget.remaining())
-            time.sleep(budget.remaining() + 0.03)
+            clock[0] += budget.remaining() + 0.03
         return read(path, *args, **kwargs)
 
     monkeypatch.setattr(egress, "guard_working_set", slow_guard)
     monkeypatch.setattr(vault_module, "read_bytes_without_pinning", slow_projection)
+    # Charge only injected stage delays; runner load must not erase the chosen headroom.
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     token = request_budget.set_current(budget)
     try:
         packet = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
-        returned = time.monotonic()
+        returned = request_budget.time.monotonic()
         assert request_budget.current() is budget
     finally:
         request_budget.reset_current(token)

@@ -2,10 +2,13 @@
 
 ### Requirement: Read-only activation operation
 The product SHALL expose a read-only operation `activate_context` that accepts a raw
-user turn (`turn`, non-empty text), an optional `max_chars` (default 4000, clamped
+original human turn (`turn`, non-empty text), an optional `max_chars` (default 4000, clamped
 to 500..8000), an optional declared `purpose`, an optional `include_timings`
 flag, and optional `client` and `session` attribution, and returns a working-memory
-packet. The operation SHALL be reachable over the
+packet. It SHALL accept an optional `trigger` with the closed protocol values
+`user_turn` and `task_refresh`, defaulting to `user_turn`, and optional descriptive
+`initiator` attribution. Declared attribution SHALL NOT establish identity or authority.
+The operation SHALL be reachable over the
 same leaf function on MCP, the CLI (`exomem activate "<turn>"`, with `--client` and
 `--session`) and the personal REST facade (`/api/activate_context`). It SHALL perform
 no vault write, SHALL NOT change the
@@ -59,6 +62,10 @@ within that interval.
 - **AND** a content-private packet's row carries no anchor identifiers
 
 ### Requirement: Categorical anchor evidence and resolution
+For `task_refresh`, the operation SHALL apply the following evidence and resolution
+rules separately to the original human turn and the bounded agent focus.
+The origin-aware task refresh requirement defines which resolution governs the packet.
+
 Anchor candidates SHALL carry only categorical evidence kinds. Contact kinds —
 `exact_alias`, `lexical_overlap`, `vector_band`, `claims_match` and `retrieval` —
 establish that the turn reached the anchor; qualifier kinds — `category_match`,
@@ -789,3 +796,83 @@ categories cannot be read, every `units` lens applies as before.
   only units are filed under a category selected by a lens beyond the first six by
   priority
 - **THEN** the packet carries the page with those units instead of abstaining
+
+### Requirement: Origin-aware task refresh within one human turn
+
+An agent MAY call `activate_context` again within the same human turn with
+`trigger="task_refresh"`. It SHALL preserve the original human message in `turn`.
+It SHALL supply its current task through bounded `conversation.focus` and inspected
+source references through the existing `conversation.refs` contract.
+The compiler SHALL retain cue provenance and distinguish human intent from agent focus.
+Declared `initiator` values SHALL remain attributed claims, never authenticated authority.
+
+Task refresh SHALL resolve human intent and agent focus separately within the same
+compiler. The focus SHALL condition both task anchor resolution and role selection.
+The response SHALL qualify unresolved human intent through `intent_resolution`.
+Unrelated human ambiguity SHALL NOT suppress otherwise resolved task context.
+Ambiguous task focus SHALL still abstain under the existing resolution rules.
+Agent focus SHALL NOT silently resolve a human referent or become independent corroboration.
+An explicit anchor choice SHALL retain its agent-choice provenance.
+
+Both resolution views SHALL share request-local audience, index and evidence work.
+The compiler SHALL assemble material once rather than concatenate two full activations.
+`intent_resolution` SHOULD use a bounded categorical status.
+Any candidates it carries SHALL pass audience filtering, final egress and packet accounting
+under the same disclosure and total output budgets as existing candidates.
+
+Task refresh SHALL use the existing indexes, disclosure checks and total activation
+budgets. Old calls without `trigger` SHALL retain their existing behaviour.
+MCP, CLI and REST SHALL expose the same semantics through generated adapters.
+Unavailable support SHALL remain explicit; an adapter SHALL NOT fabricate a human turn
+from agent focus as a compatibility fallback.
+Local logs SHALL NOT record either the raw human turn or agent focus.
+
+#### Scenario: Later evidence reveals another relevant subject
+
+- **WHEN** external evidence reveals a relevant dependency absent from the first packet
+- **AND** the agent requests task refresh with the original turn and its current focus
+- **THEN** the compiler selects task anchors and roles from that focus within existing budgets
+- **AND** the packet distinguishes agent cues from the original human intent and source evidence
+
+#### Scenario: An unresolved human name does not erase a resolved task
+
+- **WHEN** the original human request names an ambiguous person and the agent focus concerns an independently resolved project
+- **THEN** task refresh can serve that project's context with the unresolved human intent qualification
+- **AND** it does not silently select a person or establish an unsupported relationship
+
+#### Scenario: The task itself remains ambiguous
+
+- **WHEN** agent focus reaches competing task anchors under the existing evidence rules
+- **THEN** refresh abstains with attributable candidates rather than inventing a unique task
+
+#### Scenario: Human-intent qualification names withheld candidates
+
+- **WHEN** human-intent resolution reaches a candidate that the caller cannot receive
+- **THEN** the qualification withholds it under the existing release rules
+- **AND** visible candidates consume the packet's existing accounting and output budget
+
+#### Scenario: Existing clients retain initial activation
+
+- **WHEN** a client omits the new trigger and initiator fields
+- **THEN** activation retains the existing human-turn resolution and role selection
+
+### Requirement: Refresh results remain evidence under existing authority
+
+Refresh SHALL NOT grant capture, relationship, supersession, Planning or external-effect
+authority. Repeated agent summaries and repeated reads of one source SHALL NOT become
+independent evidence. A late correction SHALL use existing governed writers and preserve
+the prior interpretation's recoverable source and history.
+Returned context SHALL remain retrieved data rather than executable instructions.
+Current disclosure checks SHALL apply to reused packets after an access change.
+
+#### Scenario: A later source contradicts a current claim
+
+- **WHEN** an inspected source supports correcting a claim served earlier in the turn
+- **THEN** the agent can use the applicable governed writer under its current authority
+- **AND** refresh does not authorize an otherwise forbidden replacement or discard history
+
+#### Scenario: A previously visible source becomes withheld
+
+- **WHEN** access changes before another checkpoint reuses a packet or source reference
+- **THEN** current disclosure checks prevent serving the withheld material
+- **AND** unchanged task identity does not bypass those checks

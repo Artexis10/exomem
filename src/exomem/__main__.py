@@ -3118,6 +3118,21 @@ def _install_hook_main(argv: list[str]) -> int:
         help="profile-local hook state home (with --activation-mode; default: client/config directory)",
     )
     parser.add_argument(
+        "--refresh-mcp-binding",
+        action="append",
+        help="explicit memory MCP server name or native tool prefix for checkpoint accounting",
+    )
+    parser.add_argument(
+        "--refresh-max-operations",
+        type=int,
+        help="associated static-read allowance per native correlation (default: 8)",
+    )
+    parser.add_argument(
+        "--refresh-max-activation-chars",
+        type=int,
+        help="cumulative reserved compiler characters (default: three compiler defaults)",
+    )
+    parser.add_argument(
         "--hook-dir",
         help="Where to write the hook scripts (default: ~/.claude/hooks or ~/.codex/hooks).",
     )
@@ -3151,6 +3166,12 @@ def _install_hook_main(argv: list[str]) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
+    if (
+        args.refresh_mcp_binding
+        or args.refresh_max_operations is not None
+        or args.refresh_max_activation_chars is not None
+    ) and (args.check or args.uninstall or args.client == "all"):
+        parser.error("checkpoint selection requires a single-client installation")
 
     from . import install_hook as hook_module
 
@@ -3266,6 +3287,9 @@ def _install_hook_main(argv: list[str]) -> int:
             client=args.client or "claude",
             activation_mode=args.activation_mode,
             hook_home=Path(args.hook_home) if args.hook_home else None,
+            refresh_bindings=tuple(args.refresh_mcp_binding) if args.refresh_mcp_binding else None,
+            refresh_max_operations=args.refresh_max_operations,
+            refresh_max_activation_chars=args.refresh_max_activation_chars,
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as e:
         print(f"exomem install-hook: {e}", file=sys.stderr)
@@ -3298,6 +3322,10 @@ def _install_hook_main(argv: list[str]) -> int:
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
 def _activate_main(argv: list[str]) -> int:
+    from . import commands as commands_module
+
+    activation = next(command for command in commands_module.PRODUCT_COMMANDS if command.name == "activate_context")
+    trigger = next(parameter for parameter in activation.params if parameter.name == "trigger")
     parser = argparse.ArgumentParser(
         prog="exomem activate",
         description=(
@@ -3306,6 +3334,8 @@ def _activate_main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument("turn", help="the user's turn, verbatim")
+    parser.add_argument("--trigger", choices=trigger.choices, default=None, help=trigger.help)
+    parser.add_argument("--initiator", default=None, help="declared attribution; grants no authority")
     parser.add_argument(
         "--max-chars",
         type=int,
@@ -3367,6 +3397,10 @@ def _activate_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     core = ["activate_context", args.turn]
+    if args.trigger:
+        core += ["--trigger", args.trigger]
+    if args.initiator:
+        core += ["--initiator", args.initiator]
     if args.max_chars is not None:
         core += ["--max-chars", str(args.max_chars)]
     if args.purpose:

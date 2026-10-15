@@ -2,8 +2,10 @@
 
 import json
 import pickle
+import runpy
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 from test_collection_store_governance import inspection_token, redeem
@@ -184,6 +186,77 @@ def test_failure_closes_connection_and_releases_reader_slot(store, monkeypatch, 
             assert first.connection is not second.connection
             with pytest.raises(runtime.QueryError, match="QUERY_BUSY"), runtime.read_session(store.root, store.handle.path):
                 pass
+
+
+@pytest.mark.query_deadline
+def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(store, monkeypatch, tmp_path):
+    """Authorization setup expiry must identify its input without altering a query or its cleanup."""
+    from exomem.query_engine import route
+
+    observe_query_timeouts = runpy.run_path(str(
+        Path(__file__).parents[1] / "scripts" / "_recipient_query_observer.py"
+    ))["observe_query_timeouts"]
+    create(store)
+    store.append_record(CID, item={"title": "Private fixture title"}, item_key=KEY, why="fixture")
+    query = {"version": 1, "mode": "execute", "as_of": "2026-10-04T00:00:00+00:00", "select": ["title"]}
+    log = tmp_path / "query-timeout.jsonl"
+    with observe_query_timeouts(log):
+        before = route.run(store, CID, query, facade_profile="records")
+    assert before["rows"] == [{"title": "Private fixture title"}]
+    assert not log.exists()
+
+    real_clock = runtime.time.monotonic
+    real_load = governance.policy.load
+    real_reader = connection.open_query_reader
+    real_check = runtime.ReadSession.check
+    offset, readers, errors = [0.0], [], []
+
+    def load(*args, **kwargs):
+        result = real_load(*args, **kwargs)
+        if runtime._CURRENT_SESSION.get() is not None:
+            offset[0] += 0.201  # Expire the unchanged interactive deadline without sleeping.
+        return result
+
+    def reader(*args, **kwargs):
+        opened = real_reader(*args, **kwargs)
+        readers.append(opened)
+        return opened
+
+    def check(session):
+        try:
+            return real_check(session)
+        except runtime.QueryError as error:
+            errors.append(error)
+            raise
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.time, "monotonic", lambda: real_clock() + offset[0])
+        patch.setattr(governance.policy, "load", load)
+        patch.setattr(connection, "open_query_reader", reader)
+        patch.setattr(runtime.ReadSession, "check", check)
+        with observe_query_timeouts(log):
+            with pytest.raises(runtime.QueryError, match="QUERY_TIMEOUT") as failure:
+                route.run(store, CID, query, facade_profile="records")
+        assert failure.value is errors[0]
+        assert governance.policy.load is load
+        assert connection.open_query_reader is reader
+        assert runtime.ReadSession.check is check
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    assert record["timeout_ms"] == 200
+    assert record["phases"]["authorization.input.policy_load@read_session.setup"]["calls"] == 1
+    assert record["phases"]["authorization.policy.v4_active"]["calls"] == 2
+    assert record["phases"]["authorization.policy.activation_store_probe"]["calls"] == 2
+    assert "read_session.body" not in record["phases"]
+    assert "Private fixture title" not in log.read_text()
+    for opened in readers:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            opened.execute("SELECT 1")
+    with runtime.read_session(store.root, store.handle.path):
+        with runtime.read_session(store.root, store.handle.path):
+            pass  # Both reader slots remain available after the observed refusal.
+    assert route.run(store, CID, query, facade_profile="records") == before
 
 
 def test_cost_rejection_precedes_value_evaluation(store):
