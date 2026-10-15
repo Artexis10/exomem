@@ -315,14 +315,29 @@ def maintain(conn, collection_id: str, row_id: int, key: str, values: Mapping, *
     A building rollup takes only rows its backfill already covered; the
     backfill reads later rows' current values when it reaches them.
     """
-    for rollup_id, name, state, encoded, last in conn.execute(
+    _maintain(conn, collection_id, [(row_id, key, values, previous)])
+
+
+def maintain_new_items(conn, collection_id: str, rows) -> None:
+    """Fold new rows in their application order, reading and flushing each bucket once."""
+    _maintain(conn, collection_id, ((row_id, key, values, None) for row_id, key, values in rows))
+
+
+def _maintain(conn, collection_id, rows) -> None:
+    definitions = [(rollup_id, decode(name, encoded), state, last) for rollup_id, name, state, encoded, last in conn.execute(
             "SELECT rollup_id,name,state,definition_json,last_row_id FROM rollup_definitions "
-            "WHERE collection_id=?", (collection_id,)).fetchall():
-        if state == "building" and row_id > last:
-            continue
-        flagged = _apply(conn, rollup_id, decode(name, encoded), row_id, key, values, previous)
-        if flagged:
-            conn.execute("UPDATE rollup_definitions SET flagged=flagged+? WHERE rollup_id=?", (flagged, rollup_id))
+            "WHERE collection_id=?", (collection_id,)).fetchall()]
+    upkeep, flagged = Upkeep(conn), {}
+    for row_id, key, values, previous in rows:
+        for rollup_id, rollup, state, last in definitions:
+            if state == "building" and row_id > last:
+                continue
+            delta = upkeep.move(rollup_id, rollup, row_id, key, values, previous)[0]
+            flagged[rollup_id] = flagged.get(rollup_id, 0) + delta
+    upkeep.flush()
+    for rollup_id, delta in flagged.items():
+        if delta:
+            conn.execute("UPDATE rollup_definitions SET flagged=flagged+? WHERE rollup_id=?", (delta, rollup_id))
 
 
 def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:

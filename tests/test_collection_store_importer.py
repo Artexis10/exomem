@@ -498,25 +498,29 @@ def test_a_pause_deferred_by_an_unclassified_error_logs_its_traceback_once(
     assert len(traced) == 1 and traced[0].exc_info[0] is RuntimeError
 
 
-def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkeypatch):
+@pytest.mark.parametrize("summary", [False, True])
+def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkeypatch, summary):
     """Checking release only before a batch commits rows read after revocation."""
+    from exomem.collection_store import tables
     from exomem.collection_store.writer import CollectionWriter
 
-    setup(store)
+    setup(store, text=summarized(manifest_text()) if summary else None)
     small(monkeypatch)
     job = start(store)
     run(store, max_batches=1)
     committed, txns = count(store.connection), import_txns(store.connection)
-    write_item = CollectionWriter._write_item
+    execute = CollectionWriter._execute
 
-    def revoke_mid_batch(self, *args, **kwargs):
-        write_scope(store.root, paths="Evidence/**")
-        write_rule(store.root, ceiling=0)
-        return write_item(self, *args, **kwargs)
+    def revoke_mid_batch(self, statement, *args, **kwargs):
+        result = execute(self, statement, *args, **kwargs)
+        if statement is tables.INSERT_SOURCE:
+            write_scope(store.root, paths="Evidence/**")
+            write_rule(store.root, ceiling=0)
+        return result
 
-    monkeypatch.setattr(CollectionWriter, "_write_item", revoke_mid_batch)
+    monkeypatch.setattr(CollectionWriter, "_execute", revoke_mid_batch)
     run(store, max_batches=1)
-    monkeypatch.setattr(CollectionWriter, "_write_item", write_item)
+    monkeypatch.setattr(CollectionWriter, "_execute", execute)
     assert (count(store.connection), import_txns(store.connection)) == (committed, txns)
     release(store)
     result = status(store, job)
@@ -1130,28 +1134,29 @@ class _Crash(BaseException):
     """Process death mid-batch: no handler in the process sees it."""
 
 
-def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypatch):
+@pytest.mark.parametrize("summary", [False, True])
+def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypatch, summary):
     """A checkpoint advanced outside the batch transaction skips or repeats rows after a crash."""
+    from exomem.collection_store import tables
     from exomem.collection_store.writer import CollectionWriter
 
-    setup(store)
+    setup(store, text=summarized(manifest_text()) if summary else None)
     small(monkeypatch)
     job = start(store)
     run(store, max_batches=1)
     committed, txns = count(store.connection), import_txns(store.connection)
-    write_item = CollectionWriter._write_item
-    writes = []
+    execute = CollectionWriter._execute
 
-    def crash(self, *args, **kwargs):
-        writes.append(1)
-        if len(writes) == 5:
+    def crash(self, statement, *args, **kwargs):
+        result = execute(self, statement, *args, **kwargs)
+        if statement is tables.INSERT_EFFECT:
             raise _Crash
-        return write_item(self, *args, **kwargs)
+        return result
 
-    monkeypatch.setattr(CollectionWriter, "_write_item", crash)
+    monkeypatch.setattr(CollectionWriter, "_execute", crash)
     with pytest.raises(_Crash):
         run(store, max_batches=1)
-    monkeypatch.setattr(CollectionWriter, "_write_item", write_item)
+    monkeypatch.setattr(CollectionWriter, "_execute", execute)
     assert (count(store.connection), import_txns(store.connection)) == (committed, txns)
     assert status(store, job)["next_position"]["row"] == 40
     run(store)
