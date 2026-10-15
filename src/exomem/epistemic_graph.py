@@ -2331,12 +2331,15 @@ class EpistemicGraphIndex:
         registry_key = _sidecar_registry_key(self.path)
         _await_publication_hold(registry_key)
         try:
+            # Bounded readers decline contention instead of SQLite's default wait.
+            connection_options: dict[str, Any] = (
+                {"timeout": 0.0} if not allow_cold_projection else {}
+            )
             conn = self._connect_existing(
                 readonly=True,
                 factory=_TrackedSidecarConnection,
                 check_same_thread=False,
-                # Bounded readers decline contention instead of spending SQLite's default wait.
-                **({"timeout": 0.0} if not allow_cold_projection else {}),
+                **connection_options,
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
@@ -11888,9 +11891,8 @@ class GraphView:
                     self.vault_root, page, state,
                     source_hash=source_hash or vault_module.content_hash(raw),
                     resolver=self._shared_resolver(), visible=self.keep,
-                    **(
-                        {"check": self._check, "landing": self._snapshot_landing} if bounded else {}
-                    ),
+                    check=self._check if bounded else None,
+                    landing=self._snapshot_landing if bounded else None,
                 )
                 evidence = {}
                 rows = []

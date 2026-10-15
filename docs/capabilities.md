@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 32
-- Tier 1 commands: 28
+- Product commands: 33
+- Tier 1 commands: 29
 - Tier 2 commands: 4
-- Registry-generated MCP commands: 32
-- REST commands: 31
-- CLI commands: 31
+- Registry-generated MCP commands: 33
+- REST commands: 32
+- CLI commands: 32
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -44,6 +44,7 @@ See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
 | activate_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation | Compile authorized stored context for the user's current turn. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose | Read a page or exact semantic unit selected by recall or known ref. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault folders; read-only. |
+| viewer_map | 1 | MCP, REST, CLI | read | no | - | viewer_map | max_nodes, max_edges, purpose | Return a bounded global map of admitted current graph pages. Read-only. |
 | remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Remember a durable conclusion as compiled governed knowledge. |
 | edit_memory | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, operation*, validate_only, identity_decision, response_detail | Edit an existing memory page with an auditable reason. |
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, verdict, check_by, id, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Validate or mutate one semantic unit on a compiled memory page. |
