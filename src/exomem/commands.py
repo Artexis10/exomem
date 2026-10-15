@@ -6512,7 +6512,11 @@ def op_activate_context(
         # rebuild) pause at their next unit while this runs, instead of taking the
         # GIL back after every SQLite call the request makes (5-15x per stage,
         # measured). Activation is read-only and never waits on bulk work.
-        with state_paths_module.resolution_scope(), foreground_priority.foreground():
+        with (
+            state_paths_module.resolution_scope(),
+            foreground_priority.foreground(),
+            working_set_runtime_module.defer_index_refreshes(),
+        ):
             if readiness_module.runtime_managed() and request_budget_module.current() is None:
                 bound_token = request_budget_module.set_current(
                     request_budget_module.RequestBudget(

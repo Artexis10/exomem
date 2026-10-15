@@ -473,6 +473,8 @@ The semantic writer keeps prior Markdown in the correction's atomic transition.
 Add `unit_ref` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
 Entity and legacy corrections use their existing authorized edit owner.
 Records corrections use `record_memory(action="update")` and its retained row history.
+For observed-state corrections, follow the independent Records discovery route in
+`references/planning-records.md`; Note recall alone does not search structured items.
 A surface without the required edit owner reports that limit; it does not invent another home.
 
 ### Updating one unit with `observe_memory`

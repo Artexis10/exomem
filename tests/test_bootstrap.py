@@ -416,9 +416,8 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
     assert compact == semantic_authoring.bootstrap_projection(profile="compact")
     assert diagnostics == semantic_authoring.bootstrap_projection(profile="diagnostics")
 
-    # Full carries every example; compact/diagnostics intentionally omit ONLY the
-    # rich example while keeping the complete core keys, aliases, open rule,
-    # selection guidance, and both compact (role and domain) examples.
+    # Compact profiles retain the actionable contract while omitting the rich
+    # example and explanatory correction detail available through full bootstrap.
     full_examples = full["portable_categories"]["examples"]
     compact_examples = compact["portable_categories"]["examples"]
     assert set(full_examples) == {"role", "domain", "breadth", "rich"}
@@ -432,9 +431,10 @@ def test_bootstrap_profiles_project_profile_aware_semantic_authoring_contract(
     )
     assert len(full["portable_categories"]["core_keys"]) == 16
 
-    # The compact projection differs from full only by the dropped rich example.
+    # Restoring both explanatory sections reconstructs the full contract.
     reconstructed = json.loads(json.dumps(compact))
     reconstructed["portable_categories"]["examples"]["rich"] = full_examples["rich"]
+    reconstructed["rich"]["correction_detail"] = full["rich"]["correction_detail"]
     assert reconstructed == full
 
     for projection in (full, compact, diagnostics):

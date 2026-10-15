@@ -43,6 +43,45 @@ def history_dir(parent_ref: str) -> str:
     return f"{history_root()}/{hashlib.sha256(parent_ref.encode()).hexdigest()}"
 
 
+def validate_new_write(write: Any, *, path: str) -> None:
+    """Keep the bound history exception create-only at every planned admission."""
+    guard = getattr(write, "guard", None)
+    if (
+        not write.create_only or not isinstance(guard, vault.PathGuard)
+        or guard.leaf_policy != "absent" or guard.target != path
+    ):
+        raise ValueError("VOCABULARY_AUXILIARY_GUARD_INVALID")
+
+
+def validate_new_entry(
+    root: Path, *, path: str, raw: bytes, primary_path: str,
+    before_source: str, after_source: str,
+) -> None:
+    """Bind a new history leaf to the exact logical images used by its producer."""
+    try:
+        entry = json.loads(raw)
+        # The semantic writer retains logical Markdown; its primary guard binds raw bytes.
+        before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
+        after_source = after_source.replace("\r\n", "\n").replace("\r", "\n")
+        parent_ref = semantic_index.build_parent_index_state(
+            root, primary_path, source=before_source
+        ).document.parent_ref
+        moment = dt.datetime.fromisoformat(entry["at"].replace("Z", "+00:00"))
+        name = registry_history.version_id(moment, entry["transition_id"]) + ".json"
+        if (
+            type(entry["version"]) is not int or entry["version"] != ENTRY_VERSION
+            or parent_ref is None or entry["parent_ref"] != parent_ref
+            or path != f"{history_dir(parent_ref)}/{name}"
+            or entry["path"] != primary_path
+            or entry["prior"]["source"] != before_source
+            or entry["before_hash"] != vault.content_hash(before_source)
+            or entry["after_hash"] != vault.content_hash(after_source)
+        ):
+            raise ValueError("compiled history does not match its primary")
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        raise ValueError("VOCABULARY_AUXILIARY_CHANGED") from error
+
+
 def plan_entry(
     root: Path, *, preflight: Any, token: dict, reason: str | None
 ) -> vault.PlannedWrite | None:
@@ -147,7 +186,9 @@ def _admitted_entry(root: Path, text: str | None, *, path: str, parent_ref: str)
         if retained_ref != parent_ref:
             return None
         # Current-page admission cannot authorize bytes removed from that page.
-        registry_history._require_snapshot_admission(root, historical_path, source.encode("utf-8"))
+        registry_history._require_snapshot_admission(
+            root, historical_path, source.encode("utf-8"), markdown=True,
+        )
         metadata = provenance.parse_origin(source, managed=True, strict=True)
         if metadata.payload is not None:
             for binding in metadata.payload["inputs"].values():

@@ -359,6 +359,16 @@ override the live registry.
 - **THEN** writer validation sees it immediately, activation reports any refresh lag
   honestly, and the refreshed catalogue can resolve the new key without a restart
 
+#### Scenario: Activation does not invalidate its own catalogue evidence
+- **WHEN** a managed activation uses a warm catalogue and requests its background refresh
+- **THEN** it dispatches that refresh after the final evidence checks, preserving an otherwise valid packet and its honest lag marker
+- **AND** it neither waits for the worker nor repeats compilation
+
+#### Scenario: An independent publisher still invalidates moving evidence
+- **WHEN** another publisher changes the catalogue during activation compilation
+- **THEN** the existing evidence checks still reject a packet that combines incompatible generations
+- **AND** the unavailable result preserves withheld-versus-absent privacy
+
 ### Requirement: Competing senses decided by the turn's own words
 Resolution SHALL let the turn's own words decide between same-kind senses in two cases
 beyond the resolved-anchor ambiguity rule. First, a bare shared name: when no anchor
