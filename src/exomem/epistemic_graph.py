@@ -10272,7 +10272,9 @@ def _structural_edges_for_page(
             source_path=rel, source_anchor=anchor, metadata=base,
         ))
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, visible, check=check, landing=landing)
+            destination = _relation_target(
+                vault_root, relation.target, resolver, visible, check=check, landing=landing,
+            )
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
@@ -10298,7 +10300,9 @@ def _structural_edges_for_page(
     core_labels = core.keys | frozenset(core.aliases)
     canonical_lines: set[int] = set()
     for relation in notes.relations:
-        destination = _relation_target(vault_root, relation.target, resolver, visible, note=True, check=check, landing=landing)
+        destination = _relation_target(
+            vault_root, relation.target, resolver, visible, note=True, check=check, landing=landing,
+        )
         if destination is None:
             continue
         if relation.canonical:
@@ -10444,7 +10448,8 @@ def _page_level_edges(
             )
         )
     for observation in _body_wikilink_observations(
-        vault_root, body, skip_lines=canonical_lines, resolver=resolver, visible=visible, check=check,
+        vault_root, body, skip_lines=canonical_lines,
+        resolver=resolver, visible=visible, check=check,
     ):
         edges.append(
             page_edge(
@@ -11350,7 +11355,8 @@ class GraphView:
         self.source_limit = source_limit
         self.summary_limit = summary_limit
         self.preparation_limit = preparation_limit
-        # One request-local cost verdict per admitted page; interruptions never mean unchanged edges.
+        # One request-local cost verdict per admitted page.
+        # Interruptions never mean unchanged edges.
         self._preflight: dict[str, bool] = {}
         self.interrupted: dict[str, str] = {}
         self._resolver = resolver
@@ -11416,7 +11422,8 @@ class GraphView:
                 summary = _json(metadata).get(STRUCTURAL_METADATA) or {}
                 self._check()
                 structure = summary.get("structure") or {}
-                # Parser facts bound possible edge/interpretation objects, independent of hidden candidates.
+                # Parser facts bound possible edge/interpretation objects,
+                # independent of hidden candidates.
                 items = int(summary.get("body_wikilinks", 0)) + sum(
                     int(count) for count in (summary.get("frontmatter_link_counts") or {}).values()
                 ) + sum(len(structure.get(field, ())) for field in ("rich", "compact", "notes"))
@@ -11443,7 +11450,10 @@ class GraphView:
         """Apply the same source-cost rule to every admitted author before link visibility."""
         if self.source_limit is None:
             return
-        wanted = [str(path) for path in paths if path not in self._preflight and self.allowed(str(path))]
+        wanted = [
+            str(path) for path in paths
+            if path not in self._preflight and self.allowed(str(path))
+        ]
         if wanted:
             summaries = self._bounded_summaries(wanted)
             for path in wanted:
@@ -11469,7 +11479,9 @@ class GraphView:
                 if summary is not None:
                     runtime_resources._yaml_expanded_cost(
                         str(summary.get("frontmatter_yaml") or ""),
-                        maximum=self.preparation_limit or runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES,
+                        maximum=(
+                            self.preparation_limit or runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES
+                        ),
                         check=self._check,
                     )
             parent = self.parents.parent(rel_path)
@@ -11775,7 +11787,10 @@ class GraphView:
                 for candidate in candidates:
                     self._check()
                     seen_count += bool(self.keep(candidate))
-                changed = seen_count < len(candidates) if self.reads_placeholders else 0 < seen_count < len(candidates)
+                changed = (
+                    seen_count < len(candidates)
+                    if self.reads_placeholders else 0 < seen_count < len(candidates)
+                )
             self._changes[raw_target] = changed
         return changed
 
@@ -11810,7 +11825,9 @@ class GraphView:
                 raise
             self._interrupt(rel_path, "deadline")
             return []
-        except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
+        except (
+            runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy,
+        ):
             if self.source_limit is None:
                 raise
             self._interrupt(rel_path, "preparation_work_limit")
@@ -11852,7 +11869,10 @@ class GraphView:
         try:
             with preparation as prepared:
                 self._check()
-                raw = prepared.source if prepared is not None else vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                raw = (
+                    prepared.source if prepared is not None
+                    else vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                )
                 page = find_module._parse_page(
                     path, path.stat().st_mtime, self.vault_root,
                     content=raw.encode("utf-8"), resolved_relative=rel_path,
@@ -11868,14 +11888,18 @@ class GraphView:
                     self.vault_root, page, state,
                     source_hash=source_hash or vault_module.content_hash(raw),
                     resolver=self._shared_resolver(), visible=self.keep,
-                    **({"check": self._check, "landing": self._snapshot_landing} if bounded else {}),
+                    **(
+                        {"check": self._check, "landing": self._snapshot_landing} if bounded else {}
+                    ),
                 )
                 evidence = {}
                 rows = []
                 for edge in edges:
                     self._check()
                     if edge.origin in _RESOLVED_LINK_ORIGINS:
-                        evidence[edge.edge_key] = json.loads(json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True))
+                        evidence[edge.edge_key] = json.loads(json.dumps(
+                            edge.review_evidence or {}, ensure_ascii=False, sort_keys=True,
+                        ))
                     rows.append(json.loads(json.dumps(edge.as_dict(), sort_keys=True)))
                 if prepared is not None:
                     prepared.guard.recheck(self.vault_root)
@@ -11889,14 +11913,18 @@ class GraphView:
             return []
         except (OSError, UnicodeDecodeError) as error:
             if bounded:
-                raise vault_module.PathGuardError("PATH_GUARD_CONTENT", "graph source changed") from error
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CONTENT", "graph source changed",
+                ) from error
             return []
         except ValueError:
             if bounded:
                 self._interrupt(rel_path, "selected_interpretation_unavailable")
             return []
 
-    def _snapshot_landing(self, canonical: str, warning: str | None, fragment: str) -> tuple[str, str, dict[str, str]]:
+    def _snapshot_landing(
+        self, canonical: str, warning: str | None, fragment: str,
+    ) -> tuple[str, str, dict[str, str]]:
         """Use the validated target summary instead of parsing target source text."""
         self._check()
         page_key = _file_key(_with_md(canonical))
@@ -11904,7 +11932,9 @@ class GraphView:
             return page_key, page_key, {}
         row = self._land({"dst_key": page_key, "metadata": {
             "target_fragment": fragment,
-            "fragment_resolution": "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit",
+            "fragment_resolution": (
+                "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
+            ),
         }})
         return str(row["dst_key"]), page_key, dict(row["metadata"])
 
