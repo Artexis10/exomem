@@ -183,7 +183,9 @@ def _event_key(
     if row.get("outcome") != "ok" or action is None:
         return None, None
     items = row["item_count"] if type(row["item_count"]) is int else None
-    return (canonical_app_id(row.get("app_id")), client_family(row.get("client_name")), action), items
+    return (
+        canonical_app_id(row.get("app_id")), client_family(row.get("client_name")), action
+    ), items
 
 
 def _action(command: Any, access: object) -> str | None:
@@ -208,7 +210,9 @@ class _Listing:
         """Full, and a row this old can join no listed event."""
         return len(self.events) == EVENT_LIMIT and at < self.events[-1]["_newest"] - MERGE_WINDOW
 
-    def add(self, at: dt.datetime, key: tuple[str | None, str | None, str], items: int | None) -> bool:
+    def add(
+        self, at: dt.datetime, key: tuple[str | None, str | None, str], items: int | None
+    ) -> bool:
         """Join the newest event of the key or list a new one; False when the full
         list has no room for it."""
         event = self._newest_by_key.get(key)

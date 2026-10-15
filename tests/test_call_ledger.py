@@ -1422,7 +1422,9 @@ def test_a_gateway_actor_is_independent_of_the_handshake_and_absent_without_head
     _fake_mcp_client(monkeypatch, name=actor, version="1")
     assert command_surface.mcp_caller_identity()["app_id"] is None
 
-    monkeypatch.setattr(dependencies, "get_http_headers", lambda: {cloud_cell.GATEWAY_APP_ID_HEADER: actor})
+    monkeypatch.setattr(
+        dependencies, "get_http_headers", lambda: {cloud_cell.GATEWAY_APP_ID_HEADER: actor}
+    )
     assert command_surface.mcp_caller_identity()["app_id"] == actor
 
     def unavailable():

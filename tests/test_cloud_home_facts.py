@@ -330,7 +330,9 @@ def test_on_a_cloud_cell_the_registry_context_decides_which_level_applies(
     (True, "claimed-client", None),
     (True, "", None),
 ])
-def test_only_a_canonical_cloud_gateway_actor_can_match_a_home_app(monkeypatch, cloud, declared, expected):
+def test_only_a_canonical_cloud_gateway_actor_can_match_a_home_app(
+    monkeypatch, cloud, declared, expected
+):
     """Malformed IDs and local callers must never attribute activity to a Home app."""
     seen = _probe(monkeypatch, cloud=cloud, headers={cloud_cell.GATEWAY_APP_ID_HEADER: declared})
 

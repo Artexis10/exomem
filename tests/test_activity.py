@@ -87,8 +87,20 @@ def test_calls_of_one_client_and_action_within_a_minute_are_one_event(vault, led
     events = _activity(vault)["events"]
 
     assert events == [
-        {"app_id": None, "client": "claude-ai", "action": "recalled", "items": 4, "at": _iso(_at(1.7))},
-        {"app_id": None, "client": "claude-ai", "action": "recalled", "items": 5, "at": _iso(_at(0.5))},
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 4,
+            "at": _iso(_at(1.7)),
+        },
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 5,
+            "at": _iso(_at(0.5)),
+        },
     ]
 
 
@@ -126,7 +138,13 @@ def test_a_save_of_unreported_size_makes_its_event_count_unknown(vault, ledger):
     ledger("triage_memory", _at(0.5), access="write", arguments={"ref": "item"})
 
     assert _activity(vault)["events"] == [
-        {"app_id": None, "client": "claude-ai", "action": "saved", "items": None, "at": _iso(_at(0.5))},
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "saved",
+            "items": None,
+            "at": _iso(_at(0.5)),
+        },
     ]
 
 
@@ -146,7 +164,13 @@ def test_version_1_rows_are_not_activity_and_since_starts_after_them(vault, ledg
     payload = _activity(vault)
 
     assert payload["events"] == [
-        {"app_id": None, "client": "claude-ai", "action": "recalled", "items": 2, "at": _iso(_at(5))},
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 2,
+            "at": _iso(_at(5)),
+        },
     ]
     assert payload["since"] == _iso(_at(5))
 
@@ -377,8 +401,20 @@ def test_older_schema_2_rows_keep_their_count_without_matching_a_home_app(vault,
     ledger("ask_memory", _at(0.5), access="read", released=3, app_id=actor)
 
     assert _activity(vault)["events"] == [
-        {"app_id": actor, "client": "claude-ai", "action": "recalled", "items": 3, "at": _iso(_at(0.5))},
-        {"app_id": None, "client": "claude-ai", "action": "recalled", "items": 2, "at": _iso(_at(0))},
+        {
+            "app_id": actor,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 3,
+            "at": _iso(_at(0.5)),
+        },
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 2,
+            "at": _iso(_at(0)),
+        },
     ]
     assert call_ledger.verify(path) == []
 
@@ -392,5 +428,11 @@ def test_an_intact_row_with_a_malformed_actor_stays_unattributed(vault, ledger, 
     path.write_bytes(call_ledger.canonical_json(row) + b"\n")
 
     assert _activity(vault)["events"] == [
-        {"app_id": None, "client": "claude-ai", "action": "recalled", "items": 2, "at": _iso(_at(0))},
+        {
+            "app_id": None,
+            "client": "claude-ai",
+            "action": "recalled",
+            "items": 2,
+            "at": _iso(_at(0)),
+        },
     ]
