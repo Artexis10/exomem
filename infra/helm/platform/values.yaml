@@ -8,13 +8,19 @@ platformJobs:
 
 scheduler:
   contractVersion: 1
-  contractSha256: 5c28d3a7ad14a88d30be1264dc223e4fd82dbfc055812dbd442c8acbeb5684ad
+  contractSha256: 248ae1f35c490799fe847a41529c68f136a91e30f8f65359e5cfbe78320a1646
   secretName: exomem-hosted-scheduler
   secretKey: secret
   jobs:
     exomem-access-delivery:
       servesCloud: true
     exomem-reconcile:
+      servesCloud: true
+    exomem-health-control:
+      enabled: false
+      servesCloud: true
+    exomem-health-email:
+      enabled: false
       servesCloud: true
 
 observability:
@@ -372,8 +378,22 @@ topolvm:
       node-role.kubernetes.io/control-plane: "true"
   storageClasses: []
 
+# Source defaults leave provisioning and rollout with the platform owner.
+memoryHealth:
+  enabled: false
+  cellId: ""
+  databaseSecretName: ""
+  databaseSecretKey: url
+  bearerSecretName: ""
+  bearerSecretKey: bearer
+  page: ""
+  bodyTemplate: ""
+  timeoutMs: 15000
+  activeDeadlineSeconds: 30
+
 cloudIngress:
   enabled: false
+  functionalHealthEnabled: false
   hostname: ""
   acmeEmail: ""
   cloudflareApiTokenSecretName: exomem-cloudflare-dns-token

@@ -97,6 +97,66 @@ def test_scheduler_alerts_transition_at_180_seconds_and_two_failures() -> None:
     )
 
 
+def test_disabling_an_alerting_job_resolves_once_and_reenables_with_a_fresh_baseline() -> None:
+    module = _load()
+    disabled = module.initial_state("exomem-health-control", 60)
+    enabled = module.initial_state("exomem-reconcile", 300)
+    alerts, _ = module.evaluate_alerts(
+        [disabled, enabled],
+        module.initial_alert_state(),
+        observed_at=1_000,
+        missed_run_seconds=900,
+        failure_threshold=2,
+    )
+    alerts, transitions = module.evaluate_alerts(
+        [disabled, enabled],
+        alerts,
+        observed_at=1_960,
+        missed_run_seconds=900,
+        failure_threshold=2,
+    )
+    assert transitions == [{"job": disabled["job"], "alert": "missed-run", "active": True}]
+    assert f'job="{disabled["job"]}"' not in module.render_metrics([enabled], alerts)
+    assert f'job="{enabled["job"]}"' in module.render_metrics([enabled], alerts)
+    invalid = {**enabled, "cadence_seconds": 0}
+    with pytest.raises(ValueError):
+        module.evaluate_alerts(
+            [invalid], alerts, observed_at=1_961, missed_run_seconds=900, failure_threshold=2
+        )
+    alerts, transitions = module.evaluate_alerts(
+        [enabled],
+        alerts,
+        observed_at=1_961,
+        missed_run_seconds=900,
+        failure_threshold=2,
+    )
+    assert transitions == [{"job": disabled["job"], "alert": "missed-run", "active": False}]
+    assert alerts["baselines"] == {enabled["job"]: 1_000}
+    assert alerts["active"] == {
+        f"{enabled['job']}:missed-run": False,
+        f"{enabled['job']}:consecutive-failures": False,
+    }
+    assert alerts["transitions_total"] == 2
+    alerts, transitions = module.evaluate_alerts(
+        [enabled],
+        alerts,
+        observed_at=1_962,
+        missed_run_seconds=900,
+        failure_threshold=2,
+    )
+    assert transitions == []
+    alerts, transitions = module.evaluate_alerts(
+        [disabled, enabled],
+        alerts,
+        observed_at=2_000,
+        missed_run_seconds=900,
+        failure_threshold=2,
+    )
+    assert transitions == []
+    assert alerts["baselines"] == {enabled["job"]: 1_000, disabled["job"]: 2_000}
+    assert alerts["transitions_total"] == 2
+
+
 def _request_environment(monkeypatch: pytest.MonkeyPatch, *, job: str, cadence: int) -> None:
     monkeypatch.setenv("JOB_NAME", job)
     monkeypatch.setenv("TARGET_URL", "https://example.invalid/api/cron/" + job)
@@ -380,6 +440,5 @@ def test_chart_classifies_every_scheduler_job_by_cloud_service() -> None:
 
     job_policies = values["scheduler"]["jobs"]
     assert set(job_policies) == {job["name"] for job in contract["jobs"]}
-    assert {
-        name for name, policy in job_policies.items() if policy["servesCloud"]
-    } == {"exomem-access-delivery", "exomem-reconcile"}
+    for job in contract["jobs"]:
+        assert job_policies[job["name"]]["servesCloud"] is True

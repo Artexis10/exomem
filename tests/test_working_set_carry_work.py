@@ -177,3 +177,89 @@ def test_warm_governed_carry_reuses_membership_without_parsing_the_corpus(
     if audience == "external":
         assert all(path != hidden for group in warm_groups for path, _ in group)
     assert parses == 0, "warm governed carry reparsed unchanged corpus metadata"
+
+
+def _grow_paused(vault: Path, total: int) -> None:
+    """Pages up to `total` under a status label the vault defines, each holding
+    every everyday word so the carry's term query matches all of them."""
+    folder = vault / "Knowledge Base" / "Notes" / "Pending"
+    for index in range(total):
+        path = folder / f"paused-{index:04d}.md"
+        if not path.exists():
+            _write(
+                path,
+                f"---\ntype: note\nstatus: paused\n---\n\n# Paused {index:04d}\n\n"
+                + " ".join(EVERYDAY) + "\n",
+            )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+
+
+def test_warm_governed_carry_reads_the_policy_once_however_many_vault_defined_pages_match(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page whose status label the vault defines is classified through its own
+    registry, behind a release decision. That decision must come from one read of
+    the governance policy per carry, not one per matched page and turn word."""
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import find, lifecycle_statuses, state_paths
+    from exomem.governance import egress, policy
+    from exomem.governance.principal import owner_principal, request_scope
+
+    overlay = lifecycle_statuses.registry_path(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text("schema_version: 1\nentries:\n  paused:\n    attributes: {class: pending}\n")
+    _write(
+        vault / NAMED_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n\n# Kelvane Harbor Review\n\n"
+        "The kelvane harbor review raised the ceiling. " + " ".join(EVERYDAY) + "\n",
+    )
+    write_scope(vault, paths="Notes/Private/**", name="Private")
+    write_rule(vault, ceiling=0)
+    _grow_filler(vault, SMALL_CORPUS)
+    who = owner_principal()
+    signatures = 0
+    signature = policy._signature
+
+    def counted_signature(*args, **kwargs):
+        nonlocal signatures
+        signatures += 1
+        return signature(*args, **kwargs)
+
+    monkeypatch.setattr(policy, "_signature", counted_signature)
+
+    def warm_carry_signatures() -> int:
+        nonlocal signatures
+        checkpoint = find.FreshnessSnapshot(vault).recall_checkpoint("kb")
+
+        def carry():
+            with request_scope(who), state_paths.resolution_scope():
+                basis = lifecycle_statuses.Basis(vault)
+                visible = egress.reader_view(vault)
+                admitted = visible if visible is not None else egress.release_walk_filter(vault)
+                context = lexstore.RequestQueryContext(
+                    vault, admitted, basis, restricted=visible is not None
+                )
+                return working_set_runtime.carry_named_groups(
+                    vault, TURN, visible=visible, status_basis=basis, query_context=context,
+                    freshness=checkpoint.triple, recall_checkpoint=checkpoint,
+                )
+
+        carry()
+        signatures = 0
+        groups, state = carry()
+        assert state == "available"
+        assert any(path == NAMED_PAGE for group in groups for path, _ in group)
+        return signatures
+
+    _grow_paused(vault, 8)
+    few = warm_carry_signatures()
+    _grow_paused(vault, 32)
+    many = warm_carry_signatures()
+
+    assert few > 0, "the carry no longer loads the policy; re-target this guard"
+    assert many <= few, (
+        f"a warm carry read the policy {few} times with 8 matching vault-defined pages and "
+        f"{many} times with 32: it decides release once per matched page"
+    )

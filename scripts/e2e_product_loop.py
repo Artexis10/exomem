@@ -443,6 +443,44 @@ def _operator_reconcile_data(stdout: str) -> dict[str, Any]:
     return data
 
 
+def _operator_graph_snapshot(vault: Path) -> dict[str, Any]:
+    """Read bounded lineage metadata, never page content or checkpoint paths.
+
+    These sequential reads are observations, not an atomic publication view.
+    Acknowledgement and the terminated server's process-local state are unobserved.
+    Observation failure must not replace the workflow's original exception.
+    """
+    try:
+        from exomem import epistemic_graph, graph_sync
+
+        facts: dict[str, Any] = {"acknowledgement": "not_observed"}
+        # Managed readers initialize maintenance; use the fixed protocol's pure parsers and limits.
+        for name, path, parse, limit in (
+            ("floor", graph_sync.floor_path(vault),
+             graph_sync.GraphSyncGenerationFloor.parse, graph_sync._FLOOR_READ_LIMIT),
+            ("checkpoint", graph_sync.checkpoint_path(vault),
+             graph_sync.GraphSyncCheckpoint.parse, graph_sync._CHECKPOINT_READ_LIMIT),
+        ):
+            try:
+                with path.open("rb") as stream:
+                    raw = stream.read(limit + 1)
+            except FileNotFoundError:
+                facts[name] = {"parse_status": "absent", "generation": None}
+                continue
+            record = parse(raw) if len(raw) <= limit else None
+            facts[name] = {"parse_status": "valid" if record is not None else "malformed",
+                           "generation": record.generation if record is not None else None}
+            if record is not None and hasattr(record, "checkpoint_sha256"):
+                facts[name]["checkpoint_sha256"] = record.checkpoint_sha256
+        sidecar = epistemic_graph.sidecar_path(vault)
+        # SQLite defines these three companion suffixes.
+        facts["sidecar_exists"] = {suffix: Path(str(sidecar) + suffix).exists()
+                                   for suffix in ("", "-wal", "-shm")}
+        return facts
+    except Exception as error:  # noqa: BLE001 - diagnostics must not mask the failure
+        return {"observation": "unavailable", "error_type": type(error).__name__}
+
+
 def _run_operator_reconcile(
     executable: Path,
     env: dict[str, str],
@@ -1739,6 +1777,7 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     )
     from exomem import epistemic_graph, memory_refs
 
+    reconcile_snapshots = {"before_deletion": _operator_graph_snapshot(vault)}
     refs_sidecar = memory_refs.sidecar_path(vault)
     refs_sidecar.unlink(missing_ok=True)
     graph_sidecar = epistemic_graph.sidecar_path(vault)
@@ -1760,16 +1799,27 @@ def _installed_stdio(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    state["operator_reconcile"] = _run_operator_reconcile(
-        executable,
-        env,
-        work,
-        timeout=args.request_timeout,
-    )
-    if not refs_sidecar.exists() or not graph_sidecar.exists():
-        raise RuntimeError(
-            "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+    reconcile_snapshots["before_operator"] = _operator_graph_snapshot(vault)
+    try:
+        state["operator_reconcile"] = _run_operator_reconcile(
+            executable,
+            env,
+            work,
+            timeout=args.request_timeout,
         )
+        if not refs_sidecar.exists() or not graph_sidecar.exists():
+            raise RuntimeError(
+                "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+            )
+    except Exception:
+        reconcile_snapshots["after_failure"] = _operator_graph_snapshot(vault)
+        try:
+            diagnostic = home / "logs" / "operator-reconcile-state.json"
+            diagnostic.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic.write_text(json.dumps(reconcile_snapshots) + "\n", encoding="utf-8")
+        except OSError:  # The existing failure-log collector owns artifact publication.
+            pass
+        raise
     asyncio.run(
         _stdio_session(
             executable,
