@@ -104,7 +104,7 @@ def compile_rows(query, projection, *, as_of, after):
             function = "exomem_typed_identity_text" if field.tag is None else "exomem_typed_text"
             encoded = payload if field.tag is None else f"hex(CAST({payload} AS BLOB))"
             return f"({present} AND {function}({bind(node.op)},{encoded},{bind(node.value)}))"
-        if node.op in ("eq", "ne", "gt", "gte", "lt", "lte"):
+        if node.op in ("eq", "ne", "gt", "gte", "lt", "lte"):  # nosemgrep: ep-word-membership -- The query schema fixes these comparison operators.
             operator = {"eq": "=", "ne": "=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[node.op]
             expression = comparison(node.value, field, operator)
             if node.op == "ne":

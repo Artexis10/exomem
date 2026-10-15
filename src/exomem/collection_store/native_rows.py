@@ -269,7 +269,7 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
                 value = None
             elif semantic and not escaped:
                 value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
-                                                field_metadata, max_bytes=row[3])
+                                                field_metadata, max_bytes=row[3], day_only=True)
             elif not escaped:
                 # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
                 value = decode_cell(codec, cell, field_metadata, max_bytes=row[3])
