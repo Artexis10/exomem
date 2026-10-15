@@ -200,17 +200,23 @@ def _start_operator(ctx: Context, snapshot: str, volume_path: str) -> str:
          "--python-version", "3.12", "--python-platform", "x86_64-manylinux_2_28",
          "--no-cache", INOTIFY_PACKAGE], timeout=900)
     shutil.copy(Path(__file__).with_name("restore_abort_observer.py"), context / "observer.py")
+    k3s = yaml.safe_load((images.REPO_ROOT / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+    ctx.report.stages["operator_restore_abort"]["operator_k3s"] = {
+        "version": k3s["k3s_version"], "sha256": k3s["k3s_sha256_amd64"],
+    }
     # Only install the break-glass OpenSSL CLI if the source image lacks it.
     # The remaining names are the fixed CLI dependencies of the shipped run.
-    # K3s's own static executable supplies kubectl, without an admin shim.
+    # The script needs K3s's full host launcher; the image's slim binary has a different argv contract.
+    # Reuse the node role's pin and Docker's checksum verification, without an admin shim.
     (context / "Dockerfile").write_text(
-        f"FROM {images.K3S} AS k3s\nFROM {build.CELL_REPOSITORY}:{stack.run_id}-restore-writer\nUSER 0:0\n"
+        f"FROM {build.CELL_REPOSITORY}:{stack.run_id}-restore-writer\nUSER 0:0\n"
         "RUN if ! command -v openssl >/dev/null; then apt-get update "
         "&& apt-get install -y --no-install-recommends openssl "
         "&& rm -rf /var/lib/apt/lists/*; fi; "
         "for tool in bash openssl python3 base64 sha256sum awk date seq od tr cut grep tail wc install cp; "
         "do command -v \"$tool\" >/dev/null || exit 1; done\n"
-        "COPY --from=k3s /bin/k3s /usr/local/bin/k3s\n"
+        f"ADD --checksum=sha256:{k3s['k3s_sha256_amd64']} --chmod=0755 "
+        f"{k3s['k3s_release_url_amd64']} /usr/local/bin/k3s\n"
         "COPY extra /opt/restore-observer\nCOPY observer.py /opt/restore-observer/observer.py\n"
     )
     tag = f"{build.CELL_REPOSITORY}:{stack.run_id}-restore-operator"
@@ -318,9 +324,18 @@ async def run_abort(ctx: Context) -> None:
         return json.loads(result.stdout) if result.returncode == 0 else {}
 
     operator = _start_operator(ctx, snapshot, volume_path)
+
+    def active_writer() -> dict | None:
+        state = json.loads(run(["docker", "inspect", operator]).stdout)[0]["State"]
+        if not state["Running"]:
+            evidence["operator_exit_code"] = state["ExitCode"]
+            raise StepFailure(f"the restore operator exited before partial writes (exit {state['ExitCode']}); see its retained log")
+        seen = witness()
+        return seen if seen.get("writes", 0) >= 2 else None
+
     try:
-        active = wait_for(lambda: (seen if (seen := witness()).get("writes", 0) >= 2 else None),
-                          timeout=1800, interval=1, description="the in-place restore to write partial roots")
+        active = wait_for(active_writer, timeout=1800, interval=1,
+                          description="the in-place restore to write partial roots", retry_exceptions=())
         pods = ctx.kube_json("get", "pods", "-n", namespace, "-l", f"{JOB_KIND_LABEL}={JOB_KIND_RESTORE}")["items"]
         if len(pods) != 1:
             raise StepFailure("the in-place restore did not have exactly one writer pod")
