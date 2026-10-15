@@ -148,7 +148,9 @@ def test_invalid_full_registry_change_never_reaches_canonical_batch(
 
 
 def test_stale_delta_merge_converges_without_a_second_registry_write(tmp_path: Path) -> None:
-    created = relation_registry.save_registry(tmp_path, _proposal())
+    proposal = _proposal()
+    proposal["extensions"]["vault.applies_to"]["presentation_role"] = "conflict"
+    created = relation_registry.save_registry(tmp_path, proposal)
     current = relation_registry.load_registry(tmp_path)
     delta = {
         "upsert": {
@@ -170,6 +172,7 @@ def test_stale_delta_merge_converges_without_a_second_registry_write(tmp_path: P
         )
 
     assert relation_registry.load_registry(tmp_path).extension_hash == first["content_hash"]
+    assert relation_registry.load_registry(tmp_path).definition("vault.applies_to").presentation_role == "conflict"
 
 
 def test_public_delta_save_replays_without_recommit(
