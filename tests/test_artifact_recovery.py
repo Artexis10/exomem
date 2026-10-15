@@ -159,6 +159,8 @@ def test_exact_grants_refuse_cross_delivery_expiry_and_path_override(vault, monk
     denied = client.get(url)
     assert denied.status_code == 404
     assert denied.headers["cache-control"] == "no-store"
+    assert "content-disposition" not in denied.headers
+    assert denied.headers["content-type"].startswith("application/json")
 
 
 def test_native_resource_is_consumed_over_mcp_and_rejects_a_foreign_client(

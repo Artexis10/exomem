@@ -382,7 +382,6 @@ _RECOVERY_HEADERS = {
     "cache-control": "no-store",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
-    "content-disposition": "attachment",
 }
 
 
@@ -407,7 +406,7 @@ class _OriginalDownloadResponse(Response):
                 response = FileResponse(copied.private_path, filename=descriptor["file_name"],
                     media_type=descriptor["mime_type"], headers=_RECOVERY_HEADERS,
                     stat_result=copied.private_path.stat())
-                # FileResponse owns RFC-compliant filename quoting; replace the generic error disposition.
+                # Only a verified original receives an attachment disposition.
                 del response.headers["content-disposition"]
                 response.headers["content-disposition"] = "attachment; filename*=utf-8''" + quote(descriptor["file_name"], safe="")
 
@@ -426,8 +425,7 @@ class _OriginalDownloadResponse(Response):
                         artifact_recovery.claim(self.vault_root, self.capability, delivery=upload_tokens.ARTIFACT_HTTPS)
                         headers = dict(message.get("headers", []))
                         for key, value in _RECOVERY_HEADERS.items():
-                            if key != "content-disposition":
-                                headers[key.encode()] = value.encode()
+                            headers[key.encode()] = value.encode()
                         headers[b"content-disposition"] = response.headers["content-disposition"].encode("latin-1")
                         message = {**message, "headers": list(headers.items())}
                         started = True
@@ -1000,8 +998,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             return _OriginalDownloadResponse(vault_root, grants[0])
         response = await _download_legacy(request)
         for key, value in _RECOVERY_HEADERS.items():
-            if key != "content-disposition" or key not in response.headers:
-                response.headers[key] = value
+            response.headers[key] = value
         return response
 
     async def _download_legacy(request: Request):
