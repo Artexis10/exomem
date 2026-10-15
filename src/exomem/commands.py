@@ -4270,9 +4270,11 @@ def op_get(
         NOT_FOUND (no such file); UNREADABLE (parse failure);
         SECRET_BLOCKED (opt-in raw content contains protected material).
     """
-    path = _resolve_memory_identifier(vault_root, path)
+    with call_spans_module.span("read.resolve_identifier"):
+        path = _resolve_memory_identifier(vault_root, path)
     try:
-        prepared = get_page_module.prepare_page_read(vault_root, path=path)
+        with call_spans_module.span("read.prepare"):
+            prepared = get_page_module.prepare_page_read(vault_root, path=path)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     _refuse_policy_tree_read(
@@ -4314,14 +4316,16 @@ def op_get(
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
-    snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
-    released = egress_module.annotate_page(
-        vault_root,
-        out,
-        snapshot_content=result.content,
-        stable_ref=snapshot_ref,
-        include_raw=include_raw,
-    )
+    with call_spans_module.span("read.reference"):
+        snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
+    with call_spans_module.span("read.release"):
+        released = egress_module.annotate_page(
+            vault_root,
+            out,
+            snapshot_content=result.content,
+            stable_ref=snapshot_ref,
+            include_raw=include_raw,
+        )
     if released is None:
         # `result.missing_path` — the EXACT value the genuinely-absent branch
         # raises (`get_page.py:181,194`), so the two are identical by
