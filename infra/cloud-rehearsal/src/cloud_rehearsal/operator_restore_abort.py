@@ -233,6 +233,8 @@ def _start_operator(ctx: Context, snapshot: str, volume_path: str) -> str:
         "--mount", f"type=bind,source={images.REPO_ROOT / 'infra/scripts'},target=/release/infra/scripts,readonly",
         "--mount", f"type=bind,source={images.REPO_ROOT / 'infra/cellctl/src'},target=/release/infra/cellctl/src,readonly",
         "--tmpfs", "/var/lib/exomem-restore:rw,mode=700,size=64m",
+        # The shipped procedure executes its generated break-glass shim under /dev/shm.
+        "--tmpfs", "/dev/shm:rw,exec,mode=700,size=64m",
         tag, "/opt/restore-observer/observer.py", stack.run_id,
         json.dumps([Path(path).name for path in BACKUP_PATHS]), ctx.a.cell_id, snapshot,
     ])
