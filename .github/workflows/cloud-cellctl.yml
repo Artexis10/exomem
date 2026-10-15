@@ -12,6 +12,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
+      - ".github/actions/substrate-test-contract/**"
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/cloud-cellctl.yml"
+      - ".github/actions/substrate-test-contract/**"
   # A manual run also replays the live K3s suite (live-k3s below).
   workflow_dispatch:
 
@@ -43,6 +45,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/substrate-test-contract
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -176,6 +179,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/substrate-test-contract
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
