@@ -2048,6 +2048,8 @@ def serve(
     attribution: working_set_heat.Attribution | None = None,
     conversation: working_set_conversation.Conversation | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    trigger: str = "user_turn",
+    intent_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile (or reuse) one unguarded packet. Never raises: it abstains instead.
 
@@ -2092,6 +2094,8 @@ def serve(
     def evidence_changed() -> dict | None:
         if evidence_token is None or index.token() == evidence_token:
             return None
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return working_set.abstained_packet(
             reason=UNAVAILABLE,
             max_chars=limit,
@@ -2225,6 +2229,7 @@ def serve(
         egress.restricted_release_filter(root, purpose=purpose) is None
         and not with_conversation
         and not index_stale
+        and trigger == "user_turn"
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
@@ -2234,6 +2239,8 @@ def serve(
         return copy.deepcopy(cached[0])
 
     def _abstain_unavailable() -> dict[str, Any]:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return working_set.abstained_packet(
             reason=UNAVAILABLE,
             max_chars=limit,
@@ -2269,6 +2276,8 @@ def serve(
             marks=marks,
             conversation=conversation if with_conversation else None,
             status_basis=status_basis,
+            trigger=trigger,
+            _intent_resolution=intent_resolution,
         )
     except working_set.BudgetExhausted as exc:
         # A deliberate budget skip, not a bug: `log.info`, no traceback. The

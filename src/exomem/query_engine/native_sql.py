@@ -93,13 +93,13 @@ def compile_rows(query, projection, *, as_of, after):
         field = columns(node.field)
         present = field.rank + "=0"
         payload = field.keys[-1]
-        if node.op in ("is_null", "is_missing", "is_not_null"):
+        if node.op in ("is_null", "is_missing", "is_not_null"):  # nosemgrep: ep-word-membership -- The query schema fixes these null operators.
             return f"({field.rank}={ {'is_null': 1, 'is_missing': 2, 'is_not_null': 0}[node.op]})"
         if node.op in ("exists", "missing"):
             empty = "p.item_key=X''" if field.tag is None else f"({field.tag} IN ({STRING_TAG},{LINK_TAG}) AND {payload}='')"
             exists = f"({present} AND NOT ({empty}))"
             return exists if node.op == "exists" else "(NOT " + exists + ")"
-        if node.op in ("contains", "icontains", "startswith"):
+        if node.op in ("contains", "icontains", "startswith"):  # nosemgrep: ep-word-membership -- The query schema fixes these text operators.
             residual = True
             function = "exomem_typed_identity_text" if field.tag is None else "exomem_typed_text"
             encoded = payload if field.tag is None else f"hex(CAST({payload} AS BLOB))"

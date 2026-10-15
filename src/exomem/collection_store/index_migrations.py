@@ -67,7 +67,7 @@ def _hash(plan):
 def _plan(cid, generation, encoded, *, connection=None, published=False):
     raw = json.loads(encoded)
     version = raw.get("version") if isinstance(raw, dict) else None
-    keys = {"version", "fields", "paths", "indexes"}
+    keys = {"version", "fields", "paths", "indexes"}  # nosemgrep: ep-word-set -- The persisted projection wire fixes these keys.
     if version == 2:
         keys.update(("payload_generation", "file_role"))
     if type(version) is not int or version not in (1, 2) or set(raw) != keys:

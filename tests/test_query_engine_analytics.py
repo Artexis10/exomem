@@ -65,30 +65,33 @@ def seed(store, items, *, cid=CID):
     stored = collections.parse_manifest_bytes(store.root, path, text.encode())
     layout = typed_storage.require_layout(conn, cid)
     txn = conn.execute("SELECT MAX(txn_id) FROM txns").fetchone()[0]
-    keyed = [(f"00000000-0000-4000-8000-{number:012x}", values) for number, values in enumerate(items)]
+    keyed = []
+    for number, values in enumerate(items):
+        key = f"00000000-0000-4000-8000-{number:012x}"
+        keyed.append((key, values, tokens.payload_hash(1, key, values, "")))
     folder = None if mode == "summary" else path.rsplit("/", 1)[0] + "/Items/"
     with store.handle.transaction() as tx:
         tx.executemany(
             "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json,encoding) "
             "VALUES (?,?,?,1,1,NULL,?,?,?,?,?,?)",
-            ((cid, key, collections.manifest_natural_key(stored, values), tokens.payload_hash(1, key, values, ""),
+            ((cid, key, collections.manifest_natural_key(stored, values), payload_hash,
               folder and f"{folder}{key}.md", txn, txn, governance.row_metadata(stored.schema, values, metadata), layout.encoding)
-             for key, values in keyed))
+             for key, values, payload_hash in keyed))
         ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
         _, _, upsert, insert_version = typed_storage._declarations(layout)
         # Core batches seed canonical fixtures without per-row dispatch or unbounded parameters.
         batch_size = 128
         for start in range(0, len(keyed), batch_size):
             current_rows, versions, identities = [], [], []
-            for key, values in keyed[start:start + batch_size]:
+            for key, values, payload_hash in keyed[start:start + batch_size]:
                 encoded = dict(zip((*layout.value_columns, "r"), typed_storage.encode_row(layout, values, connection=tx), strict=True))
                 current = {"row_id": ids[key], "row_version": 1, **encoded}
                 current_rows.append({**current, **({"item_key": native_identity.encode(key, layout.identity)}
                                     if layout.encoding == typed_storage.TYPED_V2 else {})})
                 versions.append({**current, "body": ""})
                 identities.append({"row_id": ids[key], "row_version": 1, "encoding": layout.encoding,
-                                   "payload_hash": tokens.payload_hash(1, key, values, ""), "txn_id": txn,
+                                   "payload_hash": payload_hash, "txn_id": txn,
                                    "schema_version": 1, "payload_generation": layout.generation})
             store.handle.execute(upsert, current_rows)
             store.handle.execute(insert_version, versions)
