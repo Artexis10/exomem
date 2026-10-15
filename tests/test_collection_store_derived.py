@@ -13,9 +13,12 @@ import contextlib
 import hashlib
 import io
 import json
+import runpy
 import sqlite3
 import zipfile
 from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_collection_store_import_exports import (
@@ -252,6 +255,71 @@ def derived(tmp_path, monkeypatch):
         yield build
     for writer in opened:
         writer.handle.close()
+
+
+@pytest.mark.query_deadline
+def test_timeout_observation_separates_derived_metadata_without_changing_the_refusal(derived, monkeypatch, tmp_path):
+    """A metadata admission timeout must retain its CPU and offsets without claiming SQL wait or changing results."""
+    from exomem.query_engine import route, runtime
+
+    writer, job = derived("metadata-timeout")
+    assert finish(writer, job)["state"] == "complete"
+    before = route.run(writer, DERIVED, ROWS, facade_profile="records")
+    assert len(before["rows"]) == 12
+    observe = runpy.run_path(str(
+        Path(__file__).parents[1] / "scripts" / "_recipient_query_observer.py"
+    ))["observe_query_timeouts"]
+    log = tmp_path / "metadata-timeout.jsonl"
+    real_assess, real_target = derived_rows.assess, derived_rows.target
+    real_time = runtime.time
+    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.monotonic, runtime.ReadSession.check
+    offset, errors = [0.0], []
+    clock = SimpleNamespace(monotonic=lambda: real_clock() + offset[0], perf_counter=real_time.perf_counter,
+                            thread_time=real_time.thread_time, process_time=real_time.process_time,
+                            time_ns=real_time.time_ns)
+
+    def assess(*args, **kwargs):
+        result = real_assess(*args, **kwargs)
+        if runtime._CURRENT_SESSION.get() is not None:
+            offset[0] += 0.201  # Expire the unchanged interactive deadline after metadata admission, without sleeping.
+        return result
+
+    def check(session):
+        try:
+            return real_check(session)
+        except runtime.QueryError as error:
+            errors.append(error)
+            raise
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "time", clock)
+        patch.setitem(observe.__wrapped__.__globals__, "time", clock)
+        patch.setattr(derived_rows, "assess", assess)
+        patch.setattr(runtime.ReadSession, "check", check)
+        with observe(log):
+            with pytest.raises(runtime.QueryError, match="QUERY_TIMEOUT") as failure:
+                route.run(writer, DERIVED, ROWS, facade_profile="records")
+        assert failure.value is errors[0]
+        assert derived_rows.assess is assess
+        assert derived_rows.is_derived is real_flag
+        assert derived_rows.target is real_target
+        assert real_time.monotonic is real_clock
+    [record] = [json.loads(line) for line in log.read_text().splitlines()]
+    phases = record["phases"]
+    parent = phases["derived.row_source"]
+    assert record["timeout_ms"] == 200
+    assert record["query_deadline_elapsed_ms"] >= 201
+    assert record["largest_selected_values"] is None
+    assert parent["thread_cpu_ms"] >= 0
+    for name in ("is_derived", "target", "assess"):
+        child = phases[f"derived.row_source.{name}"]
+        assert child["calls"] == 1
+        assert child["thread_cpu_ms"] >= 0
+        assert 0 <= parent["first_started_after_query_ms"] <= child["first_started_after_query_ms"]
+        assert child["last_finished_after_query_ms"] <= parent["last_finished_after_query_ms"]
+    assert DERIVED not in log.read_text()
+    assert "samples/" not in log.read_text()
+    assert route.run(writer, DERIVED, ROWS, facade_profile="records")["rows"] == before["rows"]
 
 
 def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived):

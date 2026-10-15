@@ -324,7 +324,8 @@ def test_the_header_says_the_turn_is_already_activated() -> None:
     header = hook._WORKING_SET_HEADER
     assert "\n" not in header
     assert "already activated for this turn" in header
-    assert "call `activate_context` again only for another anchor" in header
+    assert "trigger=task_refresh" in header
+    assert "original turn" in header and "conversation.focus" in header
 
 
 def test_the_block_carries_state_then_units_then_pointers_with_refs() -> None:

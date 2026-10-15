@@ -74,3 +74,82 @@ the client delivers (Claude Code: `SessionStart`, `PreCompact`, `SessionEnd`; Co
 #### Scenario: An episode recap renders as a session line
 - **WHEN** the packet's recent-context block carries an entry whose reason is `episode`
 - **THEN** the hook renders it as one whole `session` line with its title and ref
+
+## ADDED Requirements
+
+### Requirement: Bounded lifecycle checkpoints for task refresh
+
+A client with applicable host events SHALL expose bounded refresh checkpoints after
+substantive external evidence, before an action or final response, and after continuation
+restoration. Its capability report SHALL name the events it actually supports.
+The active agent SHALL decide whether new evidence or a task transition warrants refresh
+and supply bounded task focus. Hooks SHALL NOT infer semantic need from tool-name lists,
+word lists, regular expressions or response wording.
+Tool-only clients SHALL retain agent-requested refresh with best-effort initiation.
+
+The client SHALL deduplicate checkpoints within bounded existing conversation state using
+human-turn identity, task revision and inspected source versions.
+It MAY use compiler generation only when the caller already receives it.
+Deduplication SHALL NOT disclose vault-wide generation or freshness counters to restricted callers.
+Checkpoint bookkeeping SHALL NOT persist conversation text or its hashes.
+It SHALL impose a finite refresh count and cumulative work budget for each human turn.
+Refresh results SHALL NOT schedule another refresh.
+Memory-only reads and activations SHALL remain within their current checkpoint budget.
+Another checkpoint SHALL require distinct external evidence, a source correction or a
+real task transition; a rephrased summary alone SHALL NOT qualify.
+
+These bounds prevent recursive memory work from consuming the turn.
+A limit can omit useful context, so the client SHALL report exhaustion explicitly and
+leave deeper source inspection available under its existing operation budget.
+Refresh unavailability SHALL NOT create a blanket action or release gate.
+An action SHALL retain its own evidence and authorization requirements.
+Injected packets SHALL retain the existing retrieved-data header and rendering ceiling.
+
+When native events omit input origin, the client SHALL report correlation-scope accounting and unavailable human-origin enforcement separately.
+The first controller MAY cover only statically read-only operations generated from the canonical command registry.
+Its capability report SHALL identify mixed invocations and unmatched dispatch as uncovered.
+Every recognized memory response SHALL remain ineligible to create an external-evidence checkpoint, including uncovered mixed responses.
+An explicit end SHALL clear association without resetting totals or refunding reserved work.
+An exhausted checkpoint SHALL NOT block canonical writes, imports or ordinary inspection outside its active association.
+
+#### Scenario: The agent prepares a response after new evidence
+
+- **WHEN** a supported checkpoint exposes newly inspected external evidence before the final response
+- **THEN** the agent can request task refresh without another human message
+- **AND** the original human turn remains unchanged and retrieved context remains labelled data
+
+#### Scenario: Memory results do not trigger a recursive loop
+
+- **WHEN** refresh leads to memory reads and another activation inside one checkpoint
+- **THEN** those operations consume the existing checkpoint budget without scheduling another checkpoint
+- **AND** repeated summaries cannot reset the budget or manufacture new evidence
+
+#### Scenario: A client lacks a lifecycle event
+
+- **WHEN** a client exposes tools but lacks the relevant post-tool or response checkpoint
+- **THEN** its capability report states best-effort initiation for that checkpoint
+- **AND** the tools remain usable without claiming native enforcement
+
+#### Scenario: An exhausted checkpoint leaves ordinary work available
+
+- **WHEN** associated static reads exhaust a native correlation scope and the agent ends their checkpoint
+- **THEN** the controller allows ordinary inspection to reach its dispatcher
+- **AND** repeated end and late completion receipts neither restore the allowance nor reopen association
+
+#### Scenario: A mixed memory response cannot renew the allowance
+
+- **WHEN** a recognized mixed memory tool returns under partial accounting coverage
+- **THEN** the controller reports that invocation as uncovered
+- **AND** its response creates no external-evidence invitation or new allowance
+
+#### Scenario: A restricted caller receives no vault-wide generation
+
+- **WHEN** disclosure removes vault-wide generation and freshness counters from a packet
+- **THEN** checkpoint deduplication uses only the available caller-visible evidence
+- **AND** it neither requests nor exposes those counters to complete bookkeeping
+
+#### Scenario: Refresh is unavailable or reaches its bound
+
+- **WHEN** refresh fails or its finite budget is exhausted
+- **THEN** the client reports the limitation within the existing hook budget
+- **AND** the agent follows the action's existing evidence contract rather than a new blanket refusal
