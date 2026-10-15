@@ -1,3 +1,4 @@
+{{- $enabledJobs := include "exomem.scheduler.enabledJobs" . | fromJsonArray -}}
 {{- $contractRaw := .Files.Get "files/observability-v1.json" -}}
 {{- $runtimeImage := required "platformJobs.image is required" .Values.platformJobs.image -}}
 {{- $contractSha256 := $contractRaw | sha256sum -}}
@@ -7,7 +8,7 @@
 {{- $scheduleRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
 {{- $schedule := $scheduleRaw | fromJson -}}
 {{- $jobNames := list -}}
-{{- range $job := $schedule.jobs -}}
+{{- range $job := $enabledJobs -}}
 {{- $jobNames = append $jobNames $job.name -}}
 {{- end }}
 apiVersion: v1
@@ -32,17 +33,8 @@ metadata:
 data:
   scheduler_runtime.py: |-
 {{ .Files.Get "files/scheduler_runtime.py" | indent 4 }}
-{{- range $job := $schedule.jobs }}
-{{- $cadenceSeconds := 0 -}}
-{{- if eq $job.schedule "* * * * *" -}}
-{{- $cadenceSeconds = 60 -}}
-{{- else if eq $job.schedule "*/5 * * * *" -}}
-{{- $cadenceSeconds = 300 -}}
-{{- else if eq $job.schedule "17 * * * *" -}}
-{{- $cadenceSeconds = 3600 -}}
-{{- else -}}
-{{- fail "scheduler job has an unsupported cadence" -}}
-{{- end }}
+{{- range $job := $enabledJobs }}
+{{- $cadenceSeconds := int $job.cadenceSeconds -}}
 {{- $stateName := printf "exomem-hosted-scheduler-state-%s" $job.name -}}
 {{- $initialState := printf `{"schema_version":1,"job":%q,"cadence_seconds":%d,"attempts_total":0,"failures_total":0,"consecutive_failures":0,"last_attempt_unixtime":0,"last_success_unixtime":0,"duration_seconds":{"buckets":{"1":0,"5":0,"20":0,"+Inf":0},"count":0,"sum":0.0}}` $job.name $cadenceSeconds -}}
 {{- /*
@@ -115,7 +107,7 @@ rules:
     resources: ["configmaps"]
     resourceNames:
       - exomem-hosted-scheduler-alert-state
-{{- range $job := $schedule.jobs }}
+{{- range $job := $enabledJobs }}
       - exomem-hosted-scheduler-state-{{ $job.name }}
 {{- end }}
     verbs: ["get"]
@@ -142,7 +134,7 @@ rules:
     resources: ["configmaps"]
     resourceNames:
       - exomem-hosted-scheduler-alert-state
-{{- range $job := $schedule.jobs }}
+{{- range $job := $enabledJobs }}
       - exomem-hosted-scheduler-state-{{ $job.name }}
 {{- end }}
     verbs: ["get"]

@@ -149,14 +149,28 @@ def evaluate_alerts(
         raise ValueError("scheduler alert thresholds are invalid")
     if alert_state.get("schema_version") != 1 or set(alert_state) != set(initial_alert_state()):
         raise ValueError("scheduler alert state is invalid")
+    for state in states:
+        _validate_state(state)
+    jobs = {state["job"] for state in states}
     updated = copy.deepcopy(alert_state)
     baselines = updated["baselines"]
     active = updated["active"]
     if not isinstance(baselines, dict) or not isinstance(active, dict):
         raise ValueError("scheduler alert state is invalid")
     transitions: list[dict[str, Any]] = []
+    # Successfully acquired states name every enabled job; missing names are disabled.
+    for job in list(baselines):
+        if job not in jobs:
+            del baselines[job]
+    for key, previous in list(active.items()):
+        job, alert_name = key.rsplit(":", 1)
+        if job not in jobs:
+            if not isinstance(previous, bool):
+                raise ValueError("scheduler alert state is invalid")
+            del active[key]
+            if previous:
+                transitions.append({"job": job, "alert": alert_name, "active": False})
     for state in states:
-        _validate_state(state)
         job = state["job"]
         baseline = baselines.setdefault(job, observed_at)
         if not isinstance(baseline, int) or baseline <= 0:
@@ -192,8 +206,10 @@ def render_metrics(states: list[dict[str, Any]], alert_state: dict[str, Any]) ->
         "# TYPE exomem_hosted_scheduler_last_success_unixtime gauge",
         "# TYPE exomem_hosted_scheduler_alert_active gauge",
     ]
+    jobs: set[str] = set()
     for state in sorted(states, key=lambda item: str(item.get("job", ""))):
         _validate_state(state)
+        jobs.add(state["job"])
         labels = _labels(job=state["job"], contract_version="1")
         lines.append(f"exomem_hosted_scheduler_attempts_total{labels} {state['attempts_total']}")
         lines.append(f"exomem_hosted_scheduler_failures_total{labels} {state['failures_total']}")
@@ -218,6 +234,8 @@ def render_metrics(states: list[dict[str, Any]], alert_state: dict[str, Any]) ->
         raise ValueError("scheduler alert state is invalid")
     for key, firing in sorted(active.items()):
         job, alert = key.rsplit(":", 1)
+        if job not in jobs:
+            continue
         lines.append(
             f"exomem_hosted_scheduler_alert_active{_labels(job=job, alert=alert)} "
             f"{1 if firing else 0}"
