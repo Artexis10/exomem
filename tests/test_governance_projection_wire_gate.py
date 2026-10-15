@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +53,17 @@ _REST_KEY = "governance-wire-release-key"
 _VECTOR_EXTRACTOR = "projected-text-v1"
 _GRAPH_EXTRACTOR = "projected-graph-v1"
 _GRAPH_MODEL = "projected-graph-v1"
+
+
+def _require_wire_report(manifest, observations, report) -> None:
+    if not report.passed:
+        # Preserve the measured series, never response bodies or request credentials.
+        pytest.fail(json.dumps({
+            "observer": "governance-wire-failure-v1",
+            "manifest": {**asdict(manifest), "routes": sorted(manifest.routes)},
+            "observations": [asdict(observation) for observation in observations],
+            "report": asdict(report),
+        }, indent=2, allow_nan=False), pytrace=False)
 
 
 def _digest(value: str) -> str:
@@ -1149,9 +1161,45 @@ def test_projected_hidden_corpus_actual_wire_characterization(
         route=route,
         observations=tuple(observations),
     )
-    assert report.passed, report
+    _require_wire_report(manifest, observations, report)
     assert "wire-hidden-" not in caplog.text
     assert _REST_KEY not in caplog.text
+
+
+def test_failed_wire_gate_retains_series_for_independent_recalculation() -> None:
+    """A native failure must retain the samples that explain its statistical verdict."""
+    manifest = projection_timing.validate_release_manifest(
+        json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    )
+    observations = tuple(
+        projection_timing.WireObservation(
+            sample=sample,
+            elapsed_ms=285.0 if sample.hidden_present else 250.0,
+            canonical_envelope_sha256="0" * 64,
+        )
+        for sample in projection_timing.release_sample_schedule(manifest, route="keyword")
+    )
+    report = projection_timing.evaluate_wire_route(
+        manifest, route="keyword", observations=observations,
+    )
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _require_wire_report(manifest, observations, report)
+    record = json.loads(str(failure.value))
+    restored = tuple(
+        projection_timing.WireObservation(
+            sample=projection_timing.WireSample(**observation["sample"]),
+            elapsed_ms=observation["elapsed_ms"],
+            canonical_envelope_sha256=observation["canonical_envelope_sha256"],
+        )
+        for observation in record["observations"]
+    )
+    assert asdict(projection_timing.evaluate_wire_route(
+        manifest, route=record["report"]["route"], observations=restored,
+    )) == record["report"]
+    assert record["manifest"] == json.loads(json.dumps({
+        **asdict(manifest), "routes": sorted(manifest.routes),
+    }))
+    assert _REST_KEY not in str(failure.value)
 
 
 def test_envelope_tolerance_returns_first_completed_attempt() -> None:

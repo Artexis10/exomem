@@ -9,6 +9,7 @@ import pytest
 
 from exomem import (
     audit,
+    commands,
     deferred_index,
     dreamer_families,
     epistemic_graph,
@@ -20,6 +21,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.governance.principal import owner_principal, request_scope
 
 KB = "Knowledge Base/Notes/Insights"
 TARGET = f"{KB}/frag-target.md"
@@ -171,6 +173,31 @@ def test_relation_row_fragment_lands_on_the_rich_unit_and_keeps_its_source_ancho
     assert edge["dst_key"] == rich["node_key"]
     assert edge["src_key"] == source_block["node_key"]
     assert edge["source_anchor"] == "src-rich"
+
+
+def test_public_note_rename_preserves_exact_relation_destination(tmp_path: Path) -> None:
+    root, _index = _built(tmp_path)
+    unit_ref = f"exomem://memory/{TARGET_ID}#rich-1"
+    moved = f"{KB}/renamed-target.md"
+    with request_scope(owner_principal(surface="mcp")):
+        before = commands.op_read_memory(root, path=TARGET, unit_ref=unit_ref)
+        commands.op_manage_memory_file(
+            root, operation="move", old_path=TARGET, new_path=moved, update_wikilinks=True
+        )
+        current = commands.op_read_memory(
+            root, path=f"exomem://memory/{TARGET_ID}", unit_ref=unit_ref
+        )
+        context = epistemic_graph.graph_context(root, path=SOURCE, depth=1)
+    assert current["status"] == "found"
+    assert current["unit"]["unit_ref"] == before["unit"]["unit_ref"] == unit_ref
+    assert current["unit"]["content"] == before["unit"]["content"]
+    assert current["parent"]["path"] == moved
+    edge, = [edge for edge in context["edges"] if edge["relation_type"] == "answers"]
+    target, = [node for node in context["nodes"] if node["node_key"] == edge["dst_key"]]
+    assert target["path"] == moved
+    assert target["metadata"]["unit_ref"] == unit_ref
+    assert f"{KB}/renamed-target#rich-1" in (root / SOURCE).read_text(encoding="utf-8")
+    assert not (root / TARGET).exists()
 
 
 def test_unresolvable_and_ambiguous_fragments_keep_the_page_edge_and_say_why(

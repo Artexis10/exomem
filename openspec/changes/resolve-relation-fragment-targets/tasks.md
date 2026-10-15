@@ -50,7 +50,7 @@
 - [ ] 10.3 Bind precise correction targets to their current fingerprints and commit guards; never use graph fallback as claim identity.
 - [ ] 10.4 Prove same-page and cross-page relations, actual self-target rejection, case mismatches, re-anchoring, incremental graph consistency and admitted compiler currency.
 
-- [ ] 10.5 Settle move-safe unit identity and compatibility resolution before selecting an identifier format or migration; prove note rename, wording change, reparenting, stale references and preserved relation/evidence/history bindings. Reparenting remains pending architecture.
+- [ ] 10.5 Settle move-safe unit identity and compatibility resolution before selecting an identifier format or migration; prove note rename, wording change, reparenting, stale references and preserved relation/evidence/history bindings. This batch retains parent UUID plus anchor and characterizes unsupported raw reparenting without forwarding. Independent unit UUIDs and an atomic two-parent move remain pending design.
 
 ## 9. Open follow-ups
 

@@ -87,6 +87,9 @@ def test_structural_summary_matches_selected_parser_and_activation_without_body(
         (unit.form, unit.kind, unit.category, unit.line, unit.end_line, unit.unit_ref, unit.fingerprint)
         for unit in document.units
     ]
+    for unit in document.units:
+        assert selected.resolve_unit(unit.unit_ref).status == document.resolve_unit(unit.unit_ref).status
+        assert selected.resolve_unit(unit.unit_ref, expected_fingerprint="0" * 64).status == "stale"
     counts = activation.frontmatter_link_counts({"sources": ["First", "Second"], "related": "Other"})
     expected = activation.measure_document(
         document, relations, project=project, page_type=None,
@@ -120,6 +123,9 @@ def test_unavailable_definitions_serve_only_units_no_custom_heading_encloses() -
     # claim, owns the duplicate anchor, or shifts the anonymous occurrence.
     assert [(unit.kind, unit.line) for unit in selected.units] == [("decision", 2), ("observation", 11)]
     assert selected.complete is False
+    known = selected.units[0]
+    assert selected.resolve_unit(known.unit_ref, expected_fingerprint="0" * 64).status == "stale"
+    assert selected.resolve_fragment("missing").status == "unavailable"
     assert semantic_units.core_safe_occurrences(candidates) == {
         unit.occurrence_key for unit in selected.units
     }

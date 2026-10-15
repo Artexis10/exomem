@@ -559,7 +559,9 @@ The unit-identity decision SHALL cover note rename, anchored wording changes and
 Supported moves SHALL preserve the intended unit's relations, evidence and retained interpretation history.
 Compatibility references SHALL resolve deterministically or report stale, ambiguous or unavailable state.
 The implementation SHALL NOT silently substitute another claim.
-The architecture evaluation SHALL settle the identifier and migration contract before implementation claims support for reparenting.
+This batch SHALL retain the parent UUID and anchor API, with fingerprints guarding content revisions.
+Raw copy-and-remove reparenting SHALL remain unsupported and SHALL NOT forward old references.
+A future independent unit UUID SHALL require a compatibility policy and atomic publication across both parents, including history, authorization and source bindings.
 
 #### Scenario: A corrected unit's note is renamed
 
@@ -567,11 +569,17 @@ The architecture evaluation SHALL settle the identifier and migration contract b
 - **THEN** the unit keeps its identity, current content, relations and retained interpretations
 - **AND** an exact read reports its current parent citation
 
-#### Scenario: A unit moves to another note
+#### Scenario: Raw reparenting leaves the old unit reference missing
 
-- **WHEN** an authorized writer reparents a unit through the supported move contract
-- **THEN** references, evidence and retained interpretations continue to identify that unit
-- **AND** an unsupported or stale reference reports its state rather than selecting another claim
+- **WHEN** a unit is copied into another note and removed from its original parent without a supported move contract
+- **THEN** an exact read through the old parent reports the unit missing
+- **AND** the implementation does not forward the reference or select the copied claim
+
+#### Scenario: Revision and ambiguity guards prevent claim substitution
+
+- **WHEN** an anchor changes, anonymous content changes or duplicate anchors prevent unique resolution
+- **THEN** exact reads report missing, stale or ambiguous state, respectively
+- **AND** full and selected resolution agree when the selected definitions are complete
 
 ### Requirement: Compiler correction proof includes context sufficiency and resource use
 

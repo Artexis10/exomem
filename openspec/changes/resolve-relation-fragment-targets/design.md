@@ -193,7 +193,10 @@ gate, and the candidate stays a proposal.
 ## Move-safe identity evaluation
 
 The endpoint contract must eventually support a unit that changes parents while preserving relations, evidence and retained interpretation history.
-Current parent-identity and anchor references already survive note renames and anchored wording changes; reparenting remains unimplemented.
-A bounded architecture decision will settle independent unit identity and compatibility resolution before any identifier format or migration changes.
+This batch retains the parent UUID and anchor API: note renames and anchored wording changes preserve identity, while fingerprints guard revisions.
+Raw copy-and-remove reparenting remains unsupported; the old parent reports the unit missing without forwarding.
+Anchor renames, changed anonymous content and moved path-based legacy references do not silently select a replacement claim.
+A future persistent unit UUID in Markdown remains a design task, with an atomic move across both parents, historical authorization and source publication.
+That design must settle compatibility before introducing an identifier format or migration.
 Acceptance must distinguish rename, wording change, reparenting, stale references and ambiguous references through deterministic public reads.
 Compiler and SQLite resource acceptance stays with the connected correction journey in `close-memory-loop`; optional backend comparisons do not gate it.

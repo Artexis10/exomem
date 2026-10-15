@@ -6,7 +6,14 @@ import json
 from pathlib import Path
 
 import pytest
-from test_observe_memory import PAGE, _page_hash, _page_source, _write_page
+from test_observe_memory import (
+    PAGE,
+    UNTYPED_PAGE,
+    _page_hash,
+    _page_source,
+    _untyped_page_source,
+    _write_page,
+)
 
 from exomem import commands, compiled_history, semantic_index, semantic_writes, vault
 from exomem.governance.principal import owner_principal, request_scope
@@ -273,3 +280,31 @@ def test_a_note_rename_preserves_unit_identity_and_retained_interpretations(
     assert current["status"] == "found" and current["unit"]["content"] == "Second wording."
     assert current["parent"]["path"] == moved
     assert current["revision_history"]["revisions"] == before["revisions"]
+
+
+def test_governed_legacy_correction_uses_existing_edit_and_keeps_prior_account(
+    tmp_path: Path, owner
+) -> None:
+    source = _untyped_page_source("# Existing account\n\nThe window is 30 minutes.\n")
+    _write_page(tmp_path, rel=UNTYPED_PAGE, source=source)
+    before = commands.op_read_memory(tmp_path, path=UNTYPED_PAGE)
+    operation = {
+        "kind": "replace_string",
+        "old_string": "The window is 30 minutes.",
+        "new_string": "The window is 45 minutes.",
+        "expected_hash": before["content_hash"],
+    }
+    preview = commands.op_edit_memory(
+        tmp_path, path=UNTYPED_PAGE, why="A source corrected the window.",
+        operation=operation, validate_only=True,
+    )
+    commands.op_edit_memory(
+        tmp_path, path=UNTYPED_PAGE, why="A source corrected the window.",
+        operation={**operation, "transition_token": preview["semantic"]["transition_token"]},
+    )
+    current = commands.op_read_memory(tmp_path, path=UNTYPED_PAGE, include_history=True)
+    assert "The window is 45 minutes." in current["body"]
+    revision, = current["revision_history"]["revisions"]
+    assert revision["prior"]["source"] == source
+    assert revision["reason"] == "A source corrected the window."
+    assert list((tmp_path / "Knowledge Base/Notes").rglob("*.md")) == [tmp_path / UNTYPED_PAGE]

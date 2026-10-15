@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import heapq
 import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import yaml
+from pytest_split.algorithms import Algorithms
 
 ROOT = Path(__file__).parents[1]
 
@@ -31,10 +33,10 @@ FULL_CI_JOBS = {
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
     ("core-tests", 12, "core"),
-    ("harness-tests", 4, "harness"),
+    ("harness-tests", 6, "harness"),
 )
 
-#: Session caps per tier; the headroom test derives the floor from the durations file.
+#: Session caps per tier; the partition test derives headroom from current collection.
 CORE_SESSION_TIMEOUT = 1400
 HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
@@ -138,7 +140,8 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     command = _run_step(job)["run"]
     assert f"--splits={shards}" in command
     assert "--group=${{ matrix.shard }}" in command
-    assert "--splitting-algorithm=least_duration" in command
+    algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
+    assert f"--splitting-algorithm={algorithm}" in command
     assert "--durations-path=.test_durations.json" in command
 
     # The tier suites share the environment the lean lane always had: full
@@ -237,7 +240,16 @@ def test_harness_module_list_is_pinned_to_the_import_derivation() -> None:
         assert (ROOT / module_path).is_file(), f"{module_path} is listed but does not exist"
 
 
-def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> set[str]:
+class _CollectedItem(NamedTuple):
+    nodeid: str
+    display: str
+
+    def __str__(self) -> str:
+        # pytest-split uses the real item's display string to break duration ties.
+        return self.display
+
+
+def _collect_items(label: str, tier: str | None, extra_args: list[str]) -> list[_CollectedItem]:
     env = os.environ.copy()
     env.pop("EXOMEM_TEST_TIER", None)
     env.pop("EXOMEM_VAULT_PATH", None)
@@ -246,8 +258,19 @@ def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> se
     result = subprocess.run(
         [
             sys.executable,
-            "-m",
-            "pytest",
+            "-c",
+            """
+import json
+import sys
+import pytest
+
+class Collection:
+    def pytest_collection_finish(self, session):
+        items = [(item.nodeid, str(item)) for item in session.items]
+        print("EXOMEM_COLLECTION_ITEMS=" + json.dumps(items))
+
+raise SystemExit(pytest.main(sys.argv[1:], plugins=[Collection()]))
+""",
             "--collect-only",
             "-q",
             "--no-header",
@@ -265,13 +288,17 @@ def _collect_node_ids(label: str, tier: str | None, extra_args: list[str]) -> se
         f"{label} collection failed (rc={result.returncode}):\n"
         f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
     )
-    nodes = {
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.startswith("tests/") and "::" in line
-    }
-    assert nodes, f"{label} collection yielded no test nodes"
-    return nodes
+    rows = next(
+        (
+            json.loads(line.removeprefix("EXOMEM_COLLECTION_ITEMS="))
+            for line in result.stdout.splitlines()
+            if line.startswith("EXOMEM_COLLECTION_ITEMS=")
+        ),
+        [],
+    )
+    items = [_CollectedItem(*row) for row in rows]
+    assert items, f"{label} collection yielded no test nodes"
+    return items
 
 
 @pytest.mark.timeout(1800)
@@ -284,11 +311,17 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     pytest collections — the same mechanism CI runs — rather than over the
     module lists that configure them, so a tier-selection defect in
     tests/conftest.py fails here and not in coverage.
+    Each session cap must also hold 1.5x its predicted busiest shard, using
+    the workflow's installed algorithm on those same ordered collections.
     """
-    full = _collect_node_ids("full lean suite", None, [])
-    core = _collect_node_ids("core tier", "core", [])
-    harness = _collect_node_ids("harness tier", "harness", [])
-    latency = _collect_node_ids("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
+    full_items = _collect_items("full lean suite", None, [])
+    core_items = _collect_items("core tier", "core", [])
+    harness_items = _collect_items("harness tier", "harness", [])
+    latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
+    full, core, harness, latency = (
+        {item.nodeid for item in items}
+        for items in (full_items, core_items, harness_items, latency_items)
+    )
 
     assert core | harness | latency == full, (
         f"tier union misses {len(full - (core | harness | latency))} node(s) and "
@@ -297,6 +330,31 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     assert not core & harness, f"{len(core & harness)} node(s) collected by both PR tiers"
     assert not core & latency, "the core tier still collects the nightly-owned latency file"
     assert not harness & latency, "the harness tier collects the nightly-owned latency file"
+
+    # Use the installed algorithms on current ordered items, including their
+    # missing-duration fallback; stale duration entries do not belong to a tier.
+    durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
+    workflow = _workflow()
+    for job_id, items in (("core-tests", core_items), ("harness-tests", harness_items)):
+        job = workflow["jobs"][job_id]
+        command = _run_step(job)["run"]
+        options = dict(
+            token.removeprefix("--").split("=", 1)
+            for token in shlex.split(command)
+            if token.startswith("--") and "=" in token
+        )
+        groups = Algorithms[options["splitting-algorithm"]].value(
+            int(options["splits"]), items, durations
+        )
+        predicted = max(group.duration for group in groups)
+        timeout = int(options["session-timeout"])
+        assert timeout >= 1.5 * predicted, (
+            f"{job_id}: --session-timeout={timeout}s is under 1.5x the predicted "
+            f"busiest shard ({predicted:.0f}s); rebalance the shards"
+        )
+        assert timeout < job["timeout-minutes"] * 60, (
+            f"{job_id}: the session timeout must stay inside the job budget"
+        )
 
 
 def test_an_unknown_test_tier_fails_collection_loudly() -> None:
@@ -328,54 +386,6 @@ def test_an_unknown_test_tier_fails_collection_loudly() -> None:
     )
     assert result.returncode != 0, "an unknown tier value collected anyway"
     assert "not a CI tier" in result.stdout + result.stderr
-
-
-def _predicted_max_shard_seconds(
-    durations: dict[str, float], members: set[str], splits: int
-) -> float:
-    """pytest-split least_duration over the recorded durations of one tier."""
-    items = sorted(
-        ((node, seconds) for node, seconds in durations.items() if node.split("::", 1)[0] in members),
-        key=lambda pair: pair[1],
-        reverse=True,
-    )
-    assert items, "no recorded durations matched the tier; the prediction would be vacuous"
-    heap: list[tuple[float, int]] = [(0.0, index) for index in range(splits)]
-    heapq.heapify(heap)
-    for _node, seconds in items:
-        total, index = heapq.heappop(heap)
-        heapq.heappush(heap, (total + seconds, index))
-    return max(total for total, _index in heap)
-
-
-def test_session_timeouts_carry_headroom_over_predicted_tier_runtime() -> None:
-    """Each tier's --session-timeout holds ≥1.5x its predicted busiest shard.
-
-    Derived from the canonical inputs — the refreshed durations file, the
-    harness module list, and the shard counts in ci.yml — rather than
-    restated, so re-sharding or a durations refresh that outgrows the timeout
-    fails here instead of as a mid-run session kill.
-    """
-    durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
-    harness_members = set(_harness_modules_from_file())
-    all_members = {node.split("::", 1)[0] for node in durations}
-    core_members = all_members - harness_members - {NIGHTLY_OWNED_MODULE}
-
-    workflow = _workflow()
-    for job_id, shards, tier in PR_TIER_JOBS:
-        command = _run_step(workflow["jobs"][job_id])["run"]
-        match = re.search(r"--session-timeout=(\d+)", command)
-        assert match, f"{job_id} sets no --session-timeout"
-        timeout = int(match.group(1))
-        members = harness_members if tier == "harness" else core_members
-        predicted = _predicted_max_shard_seconds(durations, members, shards)
-        assert timeout >= 1.5 * predicted, (
-            f"{job_id}: --session-timeout={timeout}s is under 1.5x the predicted "
-            f"busiest shard ({predicted:.0f}s); raise the timeout or add shards"
-        )
-        assert timeout < workflow["jobs"][job_id]["timeout-minutes"] * 60, (
-            f"{job_id}: the session timeout must stay inside the job budget"
-        )
 
 
 def test_every_package_install_is_bounded_and_retried() -> None:

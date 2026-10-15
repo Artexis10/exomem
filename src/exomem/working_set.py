@@ -999,6 +999,7 @@ def run_lanes(
     admit: Callable[[str, Any], bool] | None = None,
     request_anchors: Sequence[Any] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    request_segment: str = "turn",
 ) -> tuple[tuple[LaneItem, ...], tuple[dict[str, Any], ...]]:
     """Run one bounded lane per selected role. Every lane soft-fails alone.
 
@@ -1082,6 +1083,7 @@ def run_lanes(
                     visible=visible,
                     status_basis=status_basis,
                     parent_reads=parent_reads,
+                    request_segment=request_segment,
                 )
                 result = result._replace(items=_reader_admitted(result.items, visible))
                 if extra and standing_pages:
@@ -1305,6 +1307,7 @@ def _lane(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
+    request_segment: str = "turn",
 ) -> LaneResult:
     """Dispatch one role to its lane.
 
@@ -1343,6 +1346,7 @@ def _lane(
             visible=visible,
             status_basis=status_basis,
             parent_reads=parent_reads,
+            request_segment=request_segment,
         )
     if role.lane == "records":
         return LaneResult(_records_lane(role, current_state=current_state))
@@ -1501,6 +1505,7 @@ def _material_lane(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
+    request_segment: str = "turn",
 ) -> LaneResult:
     """Relevant unowned units and uncovered prose, from the ready catalogue."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -1615,13 +1620,12 @@ def _material_lane(
     pointer_hashes = store.page_content_hashes([path for path, _score in pointers[:MAX_ITEMS_PER_ROLE]])
     relations = relation_registry.load_registry(vault_root)
     wanted = {stem for unit in retained_query_units for stem in unit.stems}
-    # Only a resolved name in this turn can associate a sentence's retained
-    # query words with its base reach. Focus and conversation spans use other
-    # coordinates; neither can allocate a current-turn request.
+    # Only names in this request's coordinate segment can allocate its material.
+    # The two segments are fixed by the human-turn and task-refresh protocol.
     named = [
         (anchor, anchor.name_spans or ((anchor.name_span,) if anchor.name_span else ()))
         for anchor in (request_anchors if request_anchors is not None else anchors)
-        if getattr(anchor, "name_span_segment", "turn") == "turn"
+        if getattr(anchor, "name_span_segment", "turn") == request_segment
         and set(anchor.evidence) & working_set_resolve.WORDED_CONTACT_KINDS
     ]
     breaks = sorted({0, len(analysis.tokens), *(
@@ -3504,7 +3508,14 @@ def compile_packet(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     origins: dict[str, str] = {}
     packet = _compile_packet(vault_root, _origins=origins, **kwargs, status_basis=status_basis)
-    _label_origins(packet, origins)
+    _label_origins(
+        packet,
+        origins,
+        default_origin=(
+            working_set_conversation.ORIGIN_FOCUS
+            if kwargs.get("trigger") == "task_refresh" else _DEFAULT_ORIGIN
+        ),
+    )
     return packet
 
 
@@ -3512,7 +3523,9 @@ def compile_packet(
 _DEFAULT_ORIGIN = working_set_conversation.ORIGIN_TURN
 
 
-def _label_origins(packet: dict[str, Any], origins: Mapping[str, str]) -> None:
+def _label_origins(
+    packet: dict[str, Any], origins: Mapping[str, str], *, default_origin: str = _DEFAULT_ORIGIN
+) -> None:
     """Stamp `origin` on every anchor and ambiguity entry of a compiled packet.
 
     An entry keeps the origin an earlier stage gave it (a carried anchor), then
@@ -3527,14 +3540,14 @@ def _label_origins(packet: dict[str, Any], origins: Mapping[str, str]) -> None:
             entry["origin"] = (
                 origins.get(str(entry.get("ref") or ""))
                 or origins.get(str(entry.get("path") or ""))
-                or _DEFAULT_ORIGIN
+                or default_origin
             )
     # A row listed through a carried page (`via`) was reached by whatever
     # reached that page; the egress guard stamps a row it relists the same way.
     anchors = [entry for entry in packet.get("anchors") or () if isinstance(entry, dict)]
     _stamp_via_origins(anchors, [entry for entry in anchors if entry.get("via")])
     for entry in anchors:
-        entry.setdefault("origin", _DEFAULT_ORIGIN)
+        entry.setdefault("origin", default_origin)
 
 
 def _compile_packet(
@@ -3559,6 +3572,8 @@ def _compile_packet(
     attribution: working_set_heat.Attribution | None = None,
     marks: Mapping[str, working_set_heat.SessionMark] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    trigger: str = "user_turn",
+    _intent_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve, select, retrieve and budget — the whole compiler in one call.
 
@@ -3576,6 +3591,7 @@ def _compile_packet(
     see, both for the ranking only.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    task_refresh = trigger == "task_refresh"
     root = Path(vault_root)
     limit = clamp_budget(max_chars)
     index = index or working_set_index.WorkingSetIndex(root)
@@ -3647,7 +3663,7 @@ def _compile_packet(
     # the packet without a conversation, and says so.
     segments = None
     entry_candidates: Any = tuple
-    if conversation is not None and conversation.present and not anchor:
+    if conversation is not None and conversation.present and (not anchor or task_refresh):
         if _conversation_affordable():
             with _span(timings, "working_set.conversation"):
                 segments = working_set_conversation.analyze(
@@ -3656,11 +3672,17 @@ def _compile_packet(
             generation["conversation"] = conversation.state
         else:
             generation["conversation"] = working_set_conversation.ABSENT
+            # Focus is the task request; skipping it cannot prove no subject exists.
+            if task_refresh:
+                active_budget = request_budget.current()
+                if active_budget is not None:
+                    active_budget.note_skipped("working_set.conversation")
+                raise BudgetExhausted("working_set.conversation")
 
     if budget_exhausted("working_set.semantic"):
         raise BudgetExhausted("working_set.semantic")
     with _span(timings, "working_set.semantic"):
-        if anchor:
+        if anchor and not task_refresh:
             bands, semantic_state = {}, "agent_choice"
         else:
             bands, semantic_state = signature_evidence(index, turn)
@@ -3690,7 +3712,24 @@ def _compile_packet(
         # as one whose refs name nothing does.
         passed = bool(continuity_refs) if continuity_passed is None else bool(continuity_passed)
         hot = HotSet()
-        if anchor:
+
+        def _hot_for(request_analysis: Any) -> HotSet:
+            return (
+                hot_profile(
+                    root,
+                    rows=rows,
+                    continuity_refs=continuity_refs,
+                    continuity_minted_ns=continuity_minted_ns,
+                    continuity_passed=passed,
+                    profile=heat,
+                    attribution=attribution,
+                    marks=marks,
+                    status_basis=status_basis,
+                )
+                if request_analysis.referential else HotSet()
+            )
+
+        if anchor and not task_refresh:
             if visible is not None:
                 rows = tuple(
                     row for row in rows if working_set_resolve.anchor_visible(row, visible)
@@ -3707,21 +3746,25 @@ def _compile_packet(
             # A reader other than the owner resolves the turn over the anchors
             # it may see: the ones the turn's words can reach are decided, and
             # name-term counts and derived short names follow its view.
-            if visible is not None:
+            human_dependencies: set[str] = set()
+            if visible is not None or task_refresh:
                 # The caller's view is decided over every segment's words, so
                 # an anchor withheld from it is reached by none of them.
                 rows, term_counts, decided_ids = working_set_resolve.audience_view(
                     segments.union(analysis) if segments is not None else analysis,
                     rows,
                     term_counts,
-                    visible,
+                    visible if visible is not None else lambda _path: True,
+                    dependency_analysis=analysis if task_refresh else None,
+                    admitted_dependencies=human_dependencies if task_refresh else None,
                 )
                 # Non-worded evidence can reach any catalogue row. Decide its
                 # canonical page before hot-tier selection and candidate caps;
                 # filtering a capped batch leaves hidden rows behind the cap.
-                rows = tuple(
-                    row for row in rows if working_set_resolve.anchor_visible(row, visible)
-                )
+                if visible is not None:
+                    rows = tuple(
+                        row for row in rows if working_set_resolve.anchor_visible(row, visible)
+                    )
             routing_targets = _routing_targets(
                 root, index_token[1], index_token=index_token, visible=visible
             )
@@ -3739,21 +3782,7 @@ def _compile_packet(
                 # for a referential turn: on any other the prior decides
                 # nothing, so it is not computed and the turn resolves exactly
                 # as it did before the prior could supply a referent.
-                hot = (
-                    hot_profile(
-                        root,
-                        rows=rows,
-                        continuity_refs=continuity_refs,
-                        continuity_minted_ns=continuity_minted_ns,
-                        continuity_passed=passed,
-                        profile=heat,
-                        attribution=attribution,
-                        marks=marks,
-                        status_basis=status_basis,
-                    )
-                    if analysis.referential
-                    else HotSet()
-                )
+                hot = _hot_for(analysis)
                 return working_set_resolve.candidates_for(
                     analysis,
                     rows,
@@ -3787,6 +3816,44 @@ def _compile_packet(
             )
             candidates = working_set_resolve.apply_continuity(candidates, continuity_refs)
 
+    if task_refresh:
+        # Human intent is qualified before agent focus or an agent choice enters it.
+        with _span(timings, "working_set.resolve"):
+            human_resolution = working_set_resolve.resolve(
+                candidates,
+                turn_tokens=analysis.tokens,
+                referential=analysis.referential,
+                property_scopes=working_set_resolve.possessive_scopes(analysis),
+            )
+        if _intent_resolution is not None:
+            _intent_resolution["status"] = human_resolution.status
+            # Retain admitted inputs before resolution caps, including naming rivals.
+            # A withdrawn input invalidates qualification without assembling twice.
+            witness_ids = human_dependencies | {candidate.anchor_id for candidate in candidates}
+            witness = [
+                {"path": row.path, "ref": row.ref}
+                for row in rows if row.anchor_id in witness_ids
+            ]
+            witness_paths = set(retrieval_paths)
+            for candidate in candidates:
+                witness_paths.update(candidate.neighbourhood)
+                witness_paths.update(candidate.anchor_neighbourhood)
+            witness.extend(
+                {"path": path} for path in sorted(witness_paths)
+                if visible is None or visible(path)
+            )
+            _intent_resolution["_witness"] = {"anchors": witness}
+        if segments is None or segments.focus is None:
+            return abstained_packet(
+                reason=activation_result.UNRESOLVED,
+                max_chars=limit,
+                generation=generation,
+                status_basis=status_basis,
+            )
+        # The existing focus matcher supplies worded evidence over the same rows.
+        candidates = ()
+        partial_pages.clear()
+
     if segments is not None:
         # At the top level, beside the resolve stage: a stage name must mean one
         # depth. `focus` joins the turn as a second segment; the earlier entries
@@ -3813,7 +3880,21 @@ def _compile_packet(
                             _origins[key] = origin
 
     with _span(timings, "working_set.resolve"):
-        if not anchor:
+        if task_refresh:
+            analysis = segments.focus
+            turn = conversation.focus
+            hot = _hot_for(analysis)
+            # Human retrieval contact cannot qualify an unrelated agent task.
+            retrieval_paths = frozenset()
+            candidates = (
+                tuple(
+                    replace(item, name_span_segment=working_set_conversation.ORIGIN_FOCUS)
+                    for item in working_set_resolve.override_candidates(rows, anchor)
+                )
+                if anchor else working_set_resolve.apply_continuity(candidates, continuity_refs)
+            )
+            segments = replace(segments, focus=None)
+        if not anchor or task_refresh:
             resolution = working_set_resolve.resolve(
                 candidates,
                 turn_tokens=(
@@ -4418,6 +4499,7 @@ def _compile_packet(
         analysis=analysis,
         request_anchors=resolution.anchors,
         status_basis=status_basis,
+        request_segment=working_set_conversation.ORIGIN_FOCUS if task_refresh else _DEFAULT_ORIGIN,
     )
     missing = (
         *missing,

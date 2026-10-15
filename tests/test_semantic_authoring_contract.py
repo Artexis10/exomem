@@ -21,8 +21,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    7,
-    "sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2",
+    8,
+    "sha256:3963eb40234a5132d09a71312a187e254784f16b0b48efd644b46ed59eabf069",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -160,7 +160,11 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "relation or the rich form."
         ),
     }
-    assert contract["rich"] == {
+    rich = dict(contract["rich"])
+    # The normative digest pins guidance prose; this check covers structural fields.
+    assert rich.pop("correction_rule")
+    assert rich.pop("correction_detail")
+    assert rich == {
         "heading_syntax": "## <Governed Kind>",
         "kind_vocabulary": "governed",
         "metadata_syntax": [
@@ -169,6 +173,8 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "- tags: <comma-separated tags>",
             "- context: <context>",
             "- relations: <relation-type>: [[Target]]",
+            "- verdict: <epistemic outcome>",
+            "- check_by: <ISO revisit date>",
         ],
         "accepted_metadata_order": "flexible while rows remain leading",
         "canonical_metadata_order": [
@@ -177,10 +183,12 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "tags",
             "context",
             "relations",
+            "verdict",
+            "check_by",
         ],
         "metadata_rule": (
             "Metadata rows are optional and leading; the canonical writer emits category, "
-            "id, tags, context, then relations; category defaults to the governed kind "
+            "id, tags, context, relations, verdict and check_by; category defaults to the governed kind "
             "when omitted."
         ),
         "body_rule": (

@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 9c690ef4cba738083260141c3e289a2220c74feee8d2d1976f8aa3c3f66483c5
+  skill_contract: 0bc783a97efb41bc9e5d250adfd4712e411b5f740d71faf5b3cb0dc207dd8ea9
   version: "0.32.0"
 ---
 
@@ -135,6 +135,19 @@ Follow the live recall policy: at `balanced`, skip unrelated fresh tasks; at
 authorize sending context or saving it.
 
 Before a substantive turn with no prior context, call `activate_context` with the turn verbatim; on `ambiguous`, call again with `anchor`.
+
+After new evidence, a task change, or continuation restoration, judge whether
+the context needs refresh. When the exposed tool supports it, set
+`trigger="task_refresh"` and `initiator="agent"`. Keep the original human `turn`
+and put the current task in `conversation.focus`. Reuse relevant held material;
+memory replies alone do not justify another refresh. Refresh grants no write
+authority. See [recall](references/recall.md) for qualification and client limits.
+
+When a configured native hook reports a checkpoint controller, associate a bounded
+refresh through its content-free declaration, then end that association after the
+read group. New declarations keep the scope's cumulative totals. Ordinary reads
+after end and governed writes remain available. Native correlation does not prove
+human origin; honor the reported coverage and unavailable states.
 
 Only when needed to resolve the current subject in a long thread or attachments, also pass `conversation`: relevant `focus` (including attachment names) and `refs`; never rewrite the turn or send full history.
 

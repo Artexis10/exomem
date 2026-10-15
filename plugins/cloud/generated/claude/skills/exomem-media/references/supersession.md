@@ -1,31 +1,23 @@
 # Supersession Protocol
 
-When information in the Knowledge Base needs to be replaced, **supersede; do not
-delete or rewrite in place**. Supersession preserves causal history (why is the
-current page the way it is?) and keeps the audit trail intact.
+Use supersession when a new page should replace another page as the current answer.
+The active engagement policy supplies the authority for that replacement.
+Ordinary corrections can update an existing unit or page through guarded writers.
+The semantic writer keeps the prior interpretation in the same atomic transition.
 
-## User-facing trigger
+## Corrections and replacement
 
-When a user says "this replaces the old conclusion," "the old recommendation is
-wrong now," or "make the new version the current answer," use supersession. Do
-not create a parallel note unless the old page is not actually being replaced.
-Report it in user language: "Saved the new conclusion and marked the old one as
-superseded."
-## When to supersede vs. edit
+Inspect the affected claims and evidence before choosing the writer.
+Keep the existing home when its subject and retrieval question still fit.
+Use `observe_memory` for an exact unit on a registered compiled page, or the existing authorized edit owner elsewhere.
+Preserve a false historical proposition and author its verdict when its history matters.
+Add a distinct corrective unit and exact links when that makes the evidence clearer.
+Refutation and contradiction do not imply supersession or reduce a unit's rank.
 
-**Edit in place** (small changes; same `updated` field bump):
-- Typo, formatting, link fix
-- Adding a new source citation to an existing claim
-- Adding an `## Open thread` or extending `## Relations`
-- Reorganizing sections without changing the substantive claim
-
-**Supersede** (substantive change):
-- The core claim, finding, or recommendation has changed
-- The page's structure has changed enough that diff history is hard to follow
-- A new source has shifted the conclusion
-- The note has accumulated cruft and needs a clean restatement
-
-When in doubt, supersede. It's recoverable; in-place rewrites are not.
+Use `replace_memory` when the agent judges that another page should become the current answer.
+Honor the active engagement policy for that operation.
+Do not create a replacement only to retain old wording: guarded edits already retain prior Markdown.
+Read those revisions with `read_memory(include_history=true)`; the `revision_history` envelope remains separate from the page log.
 
 ## How supersession works
 

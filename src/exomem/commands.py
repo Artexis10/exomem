@@ -6420,34 +6420,31 @@ def op_activate_context(
     session: str | None = None,
     workspace: str | None = None,
     conversation: dict[str, Any] | None = None,
+    trigger: Literal["user_turn", "task_refresh"] = "user_turn",
+    initiator: str | None = None,
 ) -> dict:
-    """Compile authorized stored context for the user's current turn.
+    """Compile authorized context for a human turn or agent task refresh.
 
-    Follow the user's recall settings. For initial recall, pass the current user
-    message verbatim once per turn; reuse context already supplied.
-    Use conversation only for relevant subject or attachment cues; never full history.
-
-    Returns bounded authorized context, current state, references and provenance.
-    Abstains on unresolved subjects; retry with a chosen visible anchor.
-    Origin labels distinguish cues from user words. Reads no attachments and writes no memory.
-    Due items and upkeep grant no write authority.
-    Use ask_memory for a known gap; read_memory opens a chosen ref.
+    Follow live recall policy; reuse injected context. Keep turn verbatim.
+    For task_refresh, put the task in conversation.focus. intent_resolution
+    qualifies the human request separately. Origin labels cues, not human words.
+    Returns bounded context, state, refs and provenance; abstains instead of guessing.
+    Choose a visible anchor for ambiguity. ask_memory recalls gaps; read_memory opens refs.
+    Reads no attachments. Due items and refresh grant no write authority.
 
     Args:
-        turn: Current user message verbatim, not a rewritten query. Empty abstains.
-        max_chars: Text ceiling, clamped to 500..8,000; overflow becomes pointers.
-        purpose: Declared purpose; governs visibility, never ranking.
-        continuity: Previous packet's token unchanged; drop on new session or
-            compaction. Helps reach prior anchors.
-        anchor: Chosen visible compiled ref, not Sources/Evidence. Ineligible
-            and hidden refs refuse identically.
-        include_timings: Per-stage timings.
-        client: Lowercase client label; invalid labels are ignored.
-        session: Same opaque conversation id each turn; max 256 characters.
-        workspace: Project/folder key for thread continuity; max 256 characters.
-        conversation: Optional focus, already-read refs and up to six relevant excerpts
-            (2,400 characters total). Omit when the turn suffices; never full history
-            or unrelated personal data. The server clips excess and ignores unknown fields.
+        turn: Original human message verbatim. Empty abstains.
+        max_chars: Prose ceiling, clamped to 500..8,000; overflow becomes pointers.
+        purpose: Visibility purpose; never ranking.
+        continuity: Prior token unchanged; drop on compaction or new session.
+        anchor: Chosen visible compiled ref; hidden and ineligible refs refuse alike.
+        include_timings: Include stage timings.
+        client: Lowercase client label; invalid labels ignored.
+        session: Stable opaque conversation ID, at most 256 characters.
+        workspace: Thread project key, at most 256 characters.
+        conversation: Focus, read refs, six relevant excerpts/2,400 chars; never full history.
+        trigger: user_turn for initial recall; task_refresh keeps turn and uses focus.
+        initiator: Descriptive caller label; grants no authority. Invalid labels ignored.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
@@ -6495,6 +6492,10 @@ def op_activate_context(
     packet = None
     outcome = None
     error_code = None
+    # These are the two modes fixed by the public activation protocol.
+    if trigger not in ("user_turn", "task_refresh"):
+        raise ValueError("unsupported activation trigger")
+    intent_resolution = {"status": "unavailable"} if trigger == "task_refresh" else None
     # Finalization and logging share the leaf's budget, including error paths.
     bound_token = None
     try:
@@ -6523,6 +6524,8 @@ def op_activate_context(
                 workspace=workspace,
                 conversation=bounded,
                 observation_timings=observation_timings,
+                trigger=trigger,
+                intent_resolution=intent_resolution,
             )
             # After the guard and outside the packet cache, like `continuity`:
             # at a caller's session start, at most one upkeep item, and only in
@@ -6539,6 +6542,12 @@ def op_activate_context(
             due_state_module.for_activation(vault_root, packet, purpose=purpose)
         _carry_thread_through_abstention(packet, continuity)
         _withhold_vault_generation(vault_root, packet)
+        if intent_resolution is not None:
+            packet["trigger"] = trigger
+            packet["intent_resolution"] = {"status": intent_resolution["status"]}
+        declared_initiator = working_set_heat_module.client_label(initiator)
+        if declared_initiator:
+            packet["initiator"] = declared_initiator
         # Every packet reports how its conversation was bounded; the compiler has
         # already said `absent` when it skipped the stage for the request's budget.
         if isinstance(packet.get("generation"), dict):
@@ -6631,6 +6640,8 @@ def _op_activate_context_body(
     workspace: str | None = None,
     conversation: working_set_conversation_module.Conversation | None = None,
     observation_timings: find_types.FindTimings | None = None,
+    trigger: str = "user_turn",
+    intent_resolution: dict[str, Any] | None = None,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
@@ -6890,7 +6901,7 @@ def _op_activate_context_body(
         # counts only, so the diagnostic never carries the turn's words.
         lexical_selection: dict[str, int] = {}
         with find_types.timing_span(timings, "working_set.lexical"):
-            if anchor:
+            if anchor and trigger == "user_turn":
                 hits, lexical_state = [], "agent_choice"
             else:
                 hits, lexical_state = working_set_runtime_module.lexical_evidence(
@@ -7005,6 +7016,8 @@ def _op_activate_context_body(
         lexical_seconds=lexical_seconds,
         attribution=attribution,
         conversation=conversation,
+        trigger=trigger,
+        intent_resolution=intent_resolution,
     )
     # An override that resolved nothing named no anchor of this index. Refused
     # here, before the guard, with the same words a withheld ref gets below —
@@ -7021,6 +7034,8 @@ def _op_activate_context_body(
     # that first ran out of room, not every boundary crossed afterward while
     # carrying nothing.
     if not packet.get("abstained") and working_set_module.budget_exhausted("working_set.guard"):
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return _abstain(
             working_set_runtime_module.UNAVAILABLE,
             generation=packet.get("generation") or generation_stub,
@@ -7030,8 +7045,15 @@ def _op_activate_context_body(
     # when the retrieval lane happened to succeed is not a guard.
     try:
         with find_types.timing_span(timings, "working_set.guard"):
-            guarded = egress_module.guard_working_set(vault_root, packet, release, purpose=purpose)
+            guard_arguments: dict[str, Any] = {"purpose": purpose}
+            if intent_resolution is not None:
+                guard_arguments["intent_resolution"] = intent_resolution
+            guarded = egress_module.guard_working_set(
+                vault_root, packet, release, **guard_arguments
+            )
     except Exception:  # noqa: BLE001 - a guard that cannot decide must not disclose
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         log.warning("activation egress guard failed; abstaining", exc_info=True)
         return _abstain(activation_result_module.UNAVAILABLE, generation=packet.get("generation") or generation_stub)
     # The release plane's own decision, reused rather than re-derived: the
@@ -7057,6 +7079,8 @@ def _op_activate_context_body(
     ):
         raise ValueError(ACTIVATE_ANCHOR_REFUSAL)
     if guarded is None:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
         return _abstain(
             activation_result_module.WITHHELD,
             generation=packet.get("generation") or generation_stub,
@@ -7082,16 +7106,18 @@ def _op_activate_context_body(
         # heat, against the profile this request compiled with. Its advisory
         # rides on this response only, like `episode_due`: never cached,
         # never part of the key, and nothing it names is written.
-        learning = working_set_learning_module.observe_pick(
-            vault_root,
-            turn=turn,
-            packet=packet,
-            profile=working_set_heat_module.profile(vault_root),
-            attribution=attribution,
-            purpose=purpose,
-        )
-        if learning is not None:
-            packet["learning"] = learning
+        # Only a human-turn correction is evidence of a human naming miss.
+        if trigger == "user_turn":
+            learning = working_set_learning_module.observe_pick(
+                vault_root,
+                turn=turn,
+                packet=packet,
+                profile=working_set_heat_module.profile(vault_root),
+                attribution=attribution,
+                purpose=purpose,
+            )
+            if learning is not None:
+                packet["learning"] = learning
         # The agent's admitted choice is a deliberate act (design D6): after the
         # guard, so a refused or withheld pick never reaches here. Serving a
         # packet is never heat; only this seam and the read and citation seams
