@@ -162,7 +162,8 @@ def encode(value: object, kind: str, metadata: FieldMetadata) -> int | bytes | s
         return original
     if initial:
         return coordinate - epoch
-    return _FRAME.pack(_VERSION, coordinate - epoch, metadata.intern(asdict(spelling)))
+    # A frozen spelling of instant_spelling's str and int fields: equal spellings give identical format JSON.
+    return _FRAME.pack(_VERSION, coordinate - epoch, metadata.intern_as(spelling, asdict))
 
 
 def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int | None,

@@ -123,15 +123,15 @@ def read_format(conn, collection_id: str, generation: int, ordinal: int, format_
 class _Memo:
     """Successful reads of one scan's snapshot or one writer transaction, never cached longer."""
 
-    __slots__ = ("epochs", "formats", "ids", "retained")
+    __slots__ = ("epochs", "formats", "ids", "keyed", "retained")
 
     def __init__(self):
-        self.epochs, self.formats, self.ids, self.retained = {}, {}, {}, 0
+        self.epochs, self.formats, self.ids, self.keyed, self.retained = {}, {}, {}, {}, 0
 
     def admit(self, size: int) -> bool:
         # Reserve for raw text and a closed four-field temporal format, including Python overhead.
         charge = 8 * size + 512
-        if len(self.formats) + len(self.ids) >= MEMO_ENTRIES or self.retained + charge > MEMO_BYTES:
+        if len(self.formats) + len(self.ids) + len(self.keyed) >= MEMO_ENTRIES or self.retained + charge > MEMO_BYTES:
             return False
         self.retained += charge
         return True
@@ -249,6 +249,17 @@ class _ScopedField:
                 self.memo.ids[key] = found
         return found
 
+    def intern_as(self, key, make) -> int:
+        """Intern ``make(key)``; remember its ID by ``key``, which must identify that value exactly."""
+        memo_key = self.namespace, key
+        found = self.memo.keyed.get(memo_key)
+        if found is None:
+            value = make(key)
+            found = intern_format(self.connection, *self.namespace, value)
+            if self.memo.admit(len(self.canonical(value).encode("utf-8"))):
+                self.memo.keyed[memo_key] = found
+        return found
+
 
 @dataclass(frozen=True, slots=True)
 class FieldMetadata:
@@ -281,3 +292,6 @@ class FieldMetadata:
         if self.database != "main":
             raise RuntimeError("native metadata writes use their file's writer connection")
         return intern_format(self.connection, self.collection_id, self.generation, self.ordinal, value)
+
+    def intern_as(self, key, make) -> int:
+        return self.intern(make(key))
