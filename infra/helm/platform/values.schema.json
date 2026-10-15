@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": ["platformJobs", "scheduler", "observability"],
+  "allOf": [{"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}}],
   "properties": {
     "runtime": false,
     "platformJobs": {
@@ -29,13 +30,25 @@
               "type": "object",
               "additionalProperties": false,
               "required": ["servesCloud"],
-              "properties": {"servesCloud": {"const": true}}
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
             },
             "exomem-reconcile": {
               "type": "object",
               "additionalProperties": false,
               "required": ["servesCloud"],
-              "properties": {"servesCloud": {"const": true}}
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
+            },
+            "exomem-health-control": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "servesCloud"],
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
+            },
+            "exomem-health-email": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "servesCloud"],
+              "properties": {"servesCloud": {"const": true}, "enabled": {"type": "boolean"}}
             }
           }
         }
@@ -350,12 +363,32 @@
         "apiServerCidrs": {"type": "array", "items": {"type": "string"}}
       }
     },
+    "memoryHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "cellId", "databaseSecretName", "databaseSecretKey", "bearerSecretName", "bearerSecretKey", "page", "bodyTemplate", "timeoutMs", "activeDeadlineSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "cellId": {"type": "string"},
+        "databaseSecretName": {"type": "string"},
+        "databaseSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "bearerSecretName": {"type": "string"},
+        "bearerSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "page": {"type": "string"},
+        "bodyTemplate": {"type": "string", "maxLength": 32000},
+        "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 20000},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 30}
+      },
+      "if": {"properties": {"enabled": {"const": true}}},
+      "then": {"properties": {"cellId": {"pattern": "^[a-z2-7]{16}$", "$comment": "Cloud cell IDs follow the fixed 16-character base32 protocol."}, "databaseSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}, "bearerSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}, "page": {"minLength": 1}, "bodyTemplate": {"pattern": "\\{\\{nonce\\}\\}", "$comment": "The synthetic runner requires the fixed {{nonce}} protocol placeholder."}}}
+    },
     "cloudIngress": {
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "hostname", "acmeEmail", "cloudflareApiTokenSecretName", "cloudflareApiTokenSecretKey"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "functionalHealthEnabled": {"type": "boolean"},
         "hostname": {"type": "string"},
         "acmeEmail": {"type": "string"},
         "cloudflareApiTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},

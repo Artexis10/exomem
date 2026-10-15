@@ -65,6 +65,7 @@ class PlatformConfig:
     trusted_ingress_source_value: str
     attachments_limit_fallback: int = 20
     local_storage_coexistence: bool = False
+    operator_restore_abort: bool = False
 
 
 @dataclass
@@ -121,6 +122,8 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
         "templates/namespaces.yaml",
     )
+    if config.operator_restore_abort:
+        show_only += ("templates/operator-access.yaml",)
     rendered = render_chart(
         stack, values,
         show_only=() if config.local_storage_coexistence else show_only,
@@ -133,6 +136,10 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             or (config.local_storage_coexistence
                 and (source == "templates/cell-local-storage.yaml" or source.startswith("charts/topolvm/"))))
         and (source != "templates/namespaces.yaml" or doc["metadata"]["name"] == PLATFORM_NAMESPACE)
+        # The opt-in runner mints the shipped break-glass identity. Applying
+        # the CONNECT guard would also block the ordinary rehearsal observer.
+        and (source != "templates/operator-access.yaml"
+             or (doc["kind"] == "ClusterRoleBinding" and doc["metadata"]["name"] == "exomem-break-glass"))
     ]
     hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
     return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"])

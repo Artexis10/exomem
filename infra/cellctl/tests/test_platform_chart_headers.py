@@ -1202,3 +1202,32 @@ def test_the_platform_jobs_image_is_required_and_digest_pinned() -> None:
     result = _helm_render("--set-string", "platformJobs.image=ghcr.io/artexis10/exomem:latest")
     assert result.returncode != 0
     assert "/platformJobs/image" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_functional_health_ingress_rewrites_get_only_without_changing_pod_probes() -> None:
+    default = _helm_template()
+    assert not any(
+        doc.get("kind") == "Middleware"
+        and doc["metadata"]["name"] == "exomem-cloud-functional-health"
+        for doc in default
+    )
+    documents = _helm_template("--set", "cloudIngress.functionalHealthEnabled=true")
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    health = next(rule for rule in route["spec"]["routes"] if "Path(`/healthz`)" in rule["match"])
+    assert health["match"] == "Host(`mcp.example.test`) && Path(`/healthz`) && Method(`GET`)"
+    assert health["middlewares"] == [
+        {"name": "exomem-cloud-functional-health"},
+        {"name": "exomem-cloud-trusted-ingress"},
+    ]
+    assert health["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    middleware = _find(documents, "Middleware", "exomem-cloud-functional-health")
+    assert middleware["spec"] == {"replacePath": {"path": "/healthz/canary"}}
+    assert route["spec"]["tls"]["secretName"] == "exomem-cloud-gateway-tls"
+    assert "/healthz/canary" not in json.dumps(route["spec"]["routes"])
+    assert "/readyz" not in json.dumps(route["spec"]["routes"])
+    container = _find(documents, "Deployment", "exomem-cloud-gateway")["spec"]["template"]["spec"][
+        "containers"
+    ][0]
+    assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+    assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
