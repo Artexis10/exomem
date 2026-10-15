@@ -118,7 +118,7 @@ def check_sqlite_version(version_info: tuple[int, ...] | None = None) -> None:
 def _connect(
     database: str, *, uri: bool = False, busy_timeout_ms: int = BUSY_TIMEOUT_MS
 ) -> sqlite3.Connection:
-    return sqlite3.connect(
+    conn = sqlite3.connect(
         database,
         isolation_level=None,
         factory=_CONNECTION_FACTORY,
@@ -126,6 +126,14 @@ def _connect(
         timeout=busy_timeout_ms / 1000,
         check_same_thread=False,
     )
+    try:
+        from .native_operands import FileRole, register_native_operands
+
+        register_native_operands(conn, databases={FileRole.STORE: "main", FileRole.DERIVED: "derived"})
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:

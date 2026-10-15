@@ -109,6 +109,8 @@ def _rows_file(found, cid=DERIVED):
 def _digests_of_rebuilt_rows(store_path, cid=DERIVED):
     """Each logged member's digest recomputed from the rebuilt rows: a SHA-256 chained over the item key
     and payload hash of each of the member's rows, taken in row order, member by member."""
+    from exomem.collection_store import native_identity, typed_storage
+
     with closing(connection.open_reader(store_path)) as main, \
             closing(sqlite3.connect(derived_rows.path(store_path))) as derived:
         goal = derived_rows.target(main, cid)
@@ -116,17 +118,17 @@ def _digests_of_rebuilt_rows(store_path, cid=DERIVED):
                            (cid,)).fetchall()
         columns = ",".join((*goal.layout.value_columns, "r"))
         rows = derived.execute(f"SELECT item_key,{columns} FROM {goal.table} ORDER BY row_id").fetchall()
-    from exomem.collection_store import typed_storage
-
-    found, offset = [], 0
-    for accepted, logged in log:
-        running = hashlib.sha256(b"").hexdigest()
-        for key, *encoded in rows[offset:offset + accepted]:
-            payload = tokens.payload_hash(1, key, typed_storage.decode_row(goal.layout, encoded), "")
-            running = hashlib.sha256(f"{running}\0{key}\0{payload}".encode()).hexdigest()
-        found.append((running, logged))
-        offset += accepted
-    return found
+        found, offset = [], 0
+        for accepted, logged in log:
+            running = hashlib.sha256(b"").hexdigest()
+            for key, *encoded in rows[offset:offset + accepted]:
+                if goal.layout.encoding == typed_storage.TYPED_V2:
+                    key = native_identity.decode(key, goal.layout.identity)
+                payload = tokens.payload_hash(1, key, typed_storage.decode_row(goal.layout, encoded, connection=derived), "")
+                running = hashlib.sha256(f"{running}\0{key}\0{payload}".encode()).hexdigest()
+            found.append((running, logged))
+            offset += accepted
+        return found
 
 
 def agent(writer, handle=None, **request):
