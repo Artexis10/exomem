@@ -1,3 +1,4 @@
+{{- $enabledJobs := include "exomem.scheduler.enabledJobs" . | fromJsonArray -}}
 {{- $contractRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
 {{- $runtimeImage := required "platformJobs.image is required" .Values.platformJobs.image -}}
 {{- $contract := $contractRaw | fromJson -}}
@@ -27,6 +28,7 @@ kind: ServiceAccount
 metadata:
   name: exomem-hosted-scheduler
 automountServiceAccountToken: false
+{{- if $enabledJobs }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -36,7 +38,7 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames:
-{{- range $job := $contract.jobs }}
+{{- range $job := $enabledJobs }}
       - exomem-hosted-scheduler-state-{{ $job.name }}
 {{- end }}
     verbs: ["get", "update"]
@@ -53,6 +55,7 @@ subjects:
   - kind: ServiceAccount
     name: exomem-hosted-scheduler
     namespace: exomem-platform
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -63,21 +66,8 @@ metadata:
 data:
   contract.json: |-
 {{ $contractRaw | indent 4 }}
-{{- range $job := $contract.jobs }}
-{{- $jobPolicy := index $.Values.scheduler.jobs $job.name -}}
-{{- if not $jobPolicy -}}
-{{- fail (printf "scheduler job %s has no chart policy" $job.name) -}}
-{{- end -}}
-{{- $cadenceSeconds := 0 -}}
-{{- if eq $job.schedule "* * * * *" -}}
-{{- $cadenceSeconds = 60 -}}
-{{- else if eq $job.schedule "*/5 * * * *" -}}
-{{- $cadenceSeconds = 300 -}}
-{{- else if eq $job.schedule "17 * * * *" -}}
-{{- $cadenceSeconds = 3600 -}}
-{{- else -}}
-{{- fail "scheduler job has an unsupported cadence" -}}
-{{- end }}
+{{- range $job := $enabledJobs }}
+{{- $cadenceSeconds := int $job.cadenceSeconds }}
 ---
 apiVersion: batch/v1
 kind: CronJob

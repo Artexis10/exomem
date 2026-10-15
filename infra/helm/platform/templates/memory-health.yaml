@@ -1,0 +1,149 @@
+{{- if .Values.memoryHealth.enabled }}
+{{- $health := .Values.memoryHealth -}}
+{{- $syntheticNamespace := printf "exo-cell-%s" $health.cellId -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-memory-health-runner
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: exomem-memory-health-runner
+  labels:
+    app.kubernetes.io/name: exomem-memory-health-runner
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 45
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $health.activeDeadlineSeconds }}
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: exomem-memory-health-runner
+        spec:
+          serviceAccountName: exomem-memory-health-runner
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          nodeSelector:
+            {{- toYaml .Values.cloudGateway.nodeSelector | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: memory-health
+              image: {{ .Values.cloudGateway.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["node", "/app/gateway/memory-health-runner.cjs"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $health.databaseSecretName | quote }}
+                      key: {{ $health.databaseSecretKey | quote }}
+                - name: EXOMEM_HEALTH_MEMORY_BEARER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $health.bearerSecretName | quote }}
+                      key: {{ $health.bearerSecretKey | quote }}
+                - name: EXOMEM_HEALTH_MEMORY_PAGE
+                  value: {{ $health.page | quote }}
+                - name: EXOMEM_HEALTH_MEMORY_BODY_TEMPLATE
+                  value: {{ $health.bodyTemplate | quote }}
+                - name: EXOMEM_HEALTH_MEMORY_TIMEOUT_MS
+                  value: {{ $health.timeoutMs | quote }}
+                - name: EXOMEM_HEALTH_MEMORY_MCP_URL
+                  value: {{ printf "http://cell.%s.svc.cluster.local:8765/mcp" $syntheticNamespace | quote }}
+              resources:
+                requests: {cpu: 5m, memory: 32Mi}
+                limits: {cpu: 100m, memory: 128Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-memory-health-runner
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-memory-health-runner
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # These labels are cellctl's runtime protocol; the namespace selects only the configured synthetic cell.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $syntheticNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+              exomem.io/cell: {{ $health.cellId | quote }}
+            matchExpressions:
+              - key: exomem.io/cell-job
+                operator: DoesNotExist
+      ports:
+        - port: 8765
+          protocol: TCP
+    - to:
+        {{- range .Values.cloudGateway.databaseEgressCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+# This one chart-owned policy requires a pre-existing, dedicated synthetic namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exomem-memory-health-ingress
+  namespace: {{ $syntheticNamespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-cell
+      exomem.io/cell: {{ $health.cellId | quote }}
+    matchExpressions:
+      - key: exomem.io/cell-job
+        operator: DoesNotExist
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-memory-health-runner
+      ports:
+        - port: 8765
+          protocol: TCP
+{{- end }}
