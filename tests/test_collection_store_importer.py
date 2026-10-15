@@ -286,16 +286,37 @@ def test_a_governed_session_previews_and_starts_without_loading_the_source(store
     size = (store.root / SOURCE).stat().st_size
     session(store, monkeypatch, paths="Unrelated/**")
     who = _session_at(store, NOW, 600)
-    tracemalloc.start()
+    import threading as _diag_threading
+
+    diag_threads = sorted(t.name for t in _diag_threading.enumerate())
+    diag_steps = {}
+    tracemalloc.start(25)
     try:
         assert refused(call, store, who, mode="preview", source_ref=SOURCE, format="ndjson",
                        mapping=MAPPING).code == "IMPORT_SOURCE_NOT_FOUND"
+        diag_steps["refused"] = tracemalloc.get_traced_memory()[1]
+        tracemalloc.reset_peak()
         preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=MAPPING)
+        diag_steps["preview"] = tracemalloc.get_traced_memory()[1]
+        tracemalloc.reset_peak()
         job = start(store, who)
-        peak = tracemalloc.get_traced_memory()[1]
+        diag_steps["start"] = tracemalloc.get_traced_memory()[1]
+        diag_snapshot = tracemalloc.take_snapshot()
+        peak = max(diag_steps.values())
     finally:
         tracemalloc.stop()
-    assert size > 24 << 20 and peak < 8 << 20, peak
+    diag_after = sorted(t.name for t in _diag_threading.enumerate())
+    diag_top = [str(s) for s in diag_snapshot.statistics("traceback")[:3]]
+    diag_top_lines = []
+    for stat in diag_snapshot.statistics("traceback")[:3]:
+        diag_top_lines.append(f"{stat.size} B in {stat.count} blocks")
+        diag_top_lines.extend(stat.traceback.format()[-12:])
+    print("DIAG threads_before", diag_threads, flush=True)
+    print("DIAG threads_after", diag_after, flush=True)
+    print("DIAG steps", diag_steps, flush=True)
+    print("DIAG top", diag_top, flush=True)
+    print("DIAG top_traceback\n" + "\n".join(diag_top_lines), flush=True)
+    assert size > 24 << 20 and peak < 8 << 20, (peak, diag_steps, diag_threads)
     assert preview["source"]["bytes"] == size and job["state"] == "running"
 
 
