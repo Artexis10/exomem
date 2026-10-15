@@ -9,6 +9,7 @@ the defect only it catches.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import time
 
 import pytest
@@ -163,11 +164,47 @@ def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, request())
     started = time.monotonic()
-    result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
+    process_started, thread_started = time.process_time(), time.thread_time()
+    try:
+        result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
+    except runtime.QueryError as error:
+        try:
+            _report_analytics_failure(error, started, process_started, thread_started)
+        except Exception:  # noqa: BLE001 - diagnostics cannot replace the query failure.
+            pass
+        raise
     elapsed = time.monotonic() - started
     assert result["plan"]["strategy"] == "base" and len(result["groups"]) == len(daily) <= 200
     assert by_bucket(result) == daily and result["flagged_rows"] == len(flagged)
     assert elapsed < 2.0, elapsed
+
+
+def _report_analytics_failure(error, started, process_started, thread_started):
+    """Report only numeric counters after failure, without tracing the measured loop."""
+    numbers = {"window": "reduce-call-through-error-unwind", "wall_s": time.monotonic() - started,
+               "process_cpu_s": time.process_time() - process_started,
+               "thread_cpu_s": time.thread_time() - thread_started, "partial_reduce": None}
+    from exomem.query_engine import reductions
+
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend((current.__cause__, current.__context__))
+        trace = current.__traceback__
+        while trace is not None:
+            frame = trace.tb_frame
+            if frame.f_code is reductions._from_rows.__code__:
+                # Fixed reducer counters exclude source rows, values and query text.
+                counters = {name: value if type(value := frame.f_locals.get(name)) is int else None
+                            for name in ("visited", "flagged", "retained")}
+                groups = frame.f_locals.get("groups")
+                counters["groups"] = len(groups) if type(groups) is dict else None
+                numbers["partial_reduce"] = counters
+            trace = trace.tb_next
+    print("analytics_failure " + json.dumps(numbers, sort_keys=True), flush=True)
 
 
 def test_whole_call_deadline_returns_no_partial_reduction_or_continuation(store):
