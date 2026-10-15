@@ -161,27 +161,3 @@ ALTER TABLE exomem_cloud_cells
 
 ALTER TABLE exomem_cloud_cells
   ADD COLUMN grown_storage_gib int CHECK (grown_storage_gib IS NULL OR grown_storage_gib > 0);
-
--- Imported cell-only contract from companion migration 0071.
-ALTER TABLE exomem_cloud_cells
-  ADD COLUMN observed_storage_pvc_uid text,
-  ADD COLUMN observed_storage_pvc_version text,
-  ADD COLUMN observed_storage_capacity_bytes bigint CHECK (observed_storage_capacity_bytes > 0),
-  ADD COLUMN observed_storage_generation bigint CHECK (observed_storage_generation > 0),
-  ADD COLUMN observed_storage_at timestamptz;
-
-CREATE OR REPLACE FUNCTION exomem_cloud_cells_touch() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  NEW.updated_at := now();
-  IF TG_OP = 'INSERT' THEN
-    PERFORM pg_notify('exomem_cloud_cells', NEW.cell_id);
-  ELSIF NEW.desired_state IS DISTINCT FROM OLD.desired_state
-     OR NEW.desired_image IS DISTINCT FROM OLD.desired_image
-     OR NEW.storage_gib IS DISTINCT FROM OLD.storage_gib THEN
-    NEW.generation := OLD.generation + 1;
-    PERFORM pg_notify('exomem_cloud_cells', NEW.cell_id);
-  END IF;
-  RETURN NEW;
-END;
-$$;

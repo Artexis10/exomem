@@ -10,6 +10,7 @@ down at the end of the test session.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -24,7 +25,22 @@ import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SCHEMA_SQL = (FIXTURES / "exomem_cloud_schema.sql").read_text(encoding="utf-8")
-GRANTS_SQL = (FIXTURES / "exomem_cloud_grants.sql").read_text(encoding="utf-8")
+
+
+def substrate_contract_sql() -> tuple[str, str]:
+    """Read pinned canonical SQL only when a PostgreSQL fixture needs it."""
+    contract = json.loads((FIXTURES / "substrate-contract.json").read_text(encoding="utf-8"))
+    checkout = os.environ["CELLCTL_SUBSTRATE_CONTRACT_ROOT"]
+    # Read committed blobs so dirty or newer checkout files cannot change the fixture contract.
+    return tuple(
+        subprocess.run(
+            ["git", "-C", checkout, "show", f"{contract['ref']}:{contract[key]}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        for key in ("migration", "grants")
+    )
 
 # Migration 0056 references exomem_tenants(id), which an earlier Substrate
 # migration owns. The fixtures carry only the Cloud files, so the suite
@@ -196,7 +212,11 @@ async def _create_cell_db(server: PostgresServer) -> str:
                                        "redirect_uris_digest bytea)")
         await owner_connection.execute((FIXTURES / "exomem_cloud_imports.sql").read_text())
         await owner_connection.execute((FIXTURES / "exomem_cloud_import_cleanup.sql").read_text())
-        await owner_connection.execute(GRANTS_SQL)
+        # Earlier migrations own entitlements; the canonical paid-storage migration extends it.
+        await owner_connection.execute("CREATE TABLE exomem_entitlements (tenant_id uuid PRIMARY KEY)")
+        migration_sql, grants_sql = substrate_contract_sql()
+        await owner_connection.execute(migration_sql)
+        await owner_connection.execute(grants_sql)
     finally:
         await owner_connection.close()
     return name
