@@ -279,8 +279,30 @@ def test_a_row_over_one_mebibyte_refuses_at_its_position(store, fmt):
     assert result["rows"]["imported"] == 0 and count(store.connection) == 0
 
 
-def test_a_governed_session_previews_and_starts_without_loading_the_source(store, monkeypatch):
+#: Set in the fresh interpreter that measures one memory-bound test on its own.
+_FRESH_INTERPRETER = "EXOMEM_TEST_FRESH_INTERPRETER"
+
+
+@pytest.mark.timeout(300)
+def test_a_governed_session_previews_and_starts_without_loading_the_source(
+    store, monkeypatch, request
+):
     """A release check that fingerprints the source by reading it loads a large export whole."""
+    if os.environ.get(_FRESH_INTERPRETER) != "1":
+        # The traced peak is process-wide. In a shared suite process, strings that
+        # earlier tests interned can make CPython resize its intern table inside this
+        # window (one 14.7 MiB block in CI), so the bound would depend on test order.
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", request.node.nodeid],
+            capture_output=True,
+            text=True,
+            timeout=240,
+            env={**os.environ, _FRESH_INTERPRETER: "1"},
+            cwd=request.config.rootpath,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-2000:]
+        return
     setup(store, b"")
     _write_export(store.root / SOURCE, 3_000, "ndjson")
     size = (store.root / SOURCE).stat().st_size
