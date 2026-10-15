@@ -718,7 +718,8 @@ def row_source(conn: sqlite3.Connection, collection_id: str, *, attached: bool) 
     applied, progress = conn.execute(
         "SELECT c.applied_seq,p.record_json FROM derived.derived_collections c LEFT JOIN derived.derived_progress p "
         "ON p.collection_id=c.collection_id WHERE c.collection_id=?", (collection_id,)).fetchone()
-    return RowSource(f"derived.{goal.table}", "derived", goal.reads("derived"), _json([applied, progress]))
+    layout = goal.reads("derived")
+    return RowSource(layout.items, "derived", layout, _json([applied, progress]))
 
 
 def rebuilds_pending(store_path: Path) -> bool:
