@@ -1321,6 +1321,7 @@ class _SecureDirectory:
         self.path = path
         self.fd = fd
         self.windows_handles = windows_handles or []
+        self.session_lock_descriptor: int | None = None
 
     @property
     def windows_handle(self) -> int:
@@ -2016,15 +2017,21 @@ def _valid_session_manifest(
     client: str,
     state_name: str,
 ) -> bool:
-    if not isinstance(value, dict) or set(value) != {
-        "schema_version",
-        "kind",
-        "client",
-        "session_id",
-        "state_name",
-        "state_root_binding",
-        "created_at_ns",
-    }:
+    # This optional one-way flag belongs to the closed session manifest protocol.
+    if (
+        not isinstance(value, dict)
+        or set(value) - {"refresh_initialized"}
+        != {
+            "schema_version",
+            "kind",
+            "client",
+            "session_id",
+            "state_name",
+            "state_root_binding",
+            "created_at_ns",
+        }
+        or value.get("refresh_initialized", True) is not True
+    ):
         return False
     session_id = value.get("session_id")
     return (
@@ -2145,7 +2152,7 @@ def _published_session_matches_pending(
         )
         return (
             status_value == "valid"
-            and manifest == dict(pending)
+            and all(manifest.get(key) == value for key, value in pending.items())
             and _same_directory_entry(root, state_name, state)
         )
     except OSError:
@@ -2349,6 +2356,32 @@ def load_session_manifest_at(
     return value, "valid"
 
 
+def initialize_refresh_state_at(
+    state: _SecureDirectory, home: Path, client: str, session_id: str
+) -> bool:
+    """Record initialization before publication; missing initialized state cannot reset totals."""
+    descriptor = state.session_lock_descriptor
+    if descriptor is None:
+        raise OSError("refresh initialization requires the held session lock")
+    manifest, status_value = load_session_manifest_at(
+        state, home, client, state.path.name, descriptor=descriptor
+    )
+    if status_value != "valid" or manifest["session_id"] != session_id:
+        raise OSError("refresh session manifest is unavailable")
+    if manifest.get("refresh_initialized") is True:
+        return False
+    manifest["refresh_initialized"] = True
+    payload = b"\0" + _canonical_bytes(manifest)
+    # Retain the existing manifest reader's byte ceiling; refusal leaves ordinary dispatch usable.
+    if len(payload) > 4096:
+        raise ValueError("refresh session manifest exceeds its byte bound")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    _write_all(descriptor, payload)
+    os.ftruncate(descriptor, len(payload))
+    os.fsync(descriptor)
+    return True
+
+
 @contextlib.contextmanager
 def _session_lock(
     home: Path,
@@ -2434,7 +2467,7 @@ def _session_lock(
                     create
                     and manifest_status == "valid"
                     and pending is not None
-                    and _manifest == pending
+                    and all(_manifest.get(key) == value for key, value in pending.items())
                     and _same_directory_entry(root_handle, state_name, state_handle)
                 ):
                     try:
@@ -2453,8 +2486,11 @@ def _session_lock(
                 state_context.__exit__(*sys.exc_info())
                 raise
         try:
+            # Windows manifest access must use the descriptor that owns its byte lock.
+            state_handle.session_lock_descriptor = session.fd
             yield state_handle
         finally:
+            state_handle.session_lock_descriptor = None
             session.__exit__(None, None, None)
             state_context.__exit__(None, None, None)
 
@@ -2764,8 +2800,13 @@ def _write_all(fd: int, value: bytes) -> None:
         view = view[written:]
 
 
-def _write_temp(state: _SecureDirectory, checkpoint: Mapping[str, Any]) -> str:
-    temporary = f"current.json.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+def _write_temp(
+    state: _SecureDirectory, checkpoint: Mapping[str, Any], *, name: str = "current.json"
+) -> str:
+    # These basenames belong to the closed local continuation/refresh state protocol.
+    if name not in {"current.json", "refresh.v1.json"}:
+        raise ValueError("unsupported checkpoint state name")
+    temporary = f"{name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
     fd = _open_secure_file_at(
         state,
         temporary,
@@ -3032,7 +3073,7 @@ def _cleanup_temporaries(
     for name in names:
         if time.monotonic() >= scan_deadline:
             return
-        if not name.startswith("current.json.tmp-"):
+        if not _STATE_TEMPORARY.fullmatch(name):
             continue
         try:
             _unlink_at(state, name)
@@ -3040,11 +3081,12 @@ def _cleanup_temporaries(
             continue
 
 
-_STATE_TEMPORARY = re.compile(r"^current\.json\.tmp-[0-9]+-[0-9a-f]{16}$")
+# Only the two atomic-writer basenames and its generated nonce format are recognized.
+_STATE_TEMPORARY = re.compile(r"^(?:current\.json|refresh\.v1\.json)\.tmp-[0-9]+-[0-9a-f]{16}$")
 
 
 def _recognized_state_name(name: str) -> bool:
-    return name in {".lock", "current.json", "previous.json"} or bool(
+    return name in {".lock", "current.json", "previous.json", "refresh.v1.json"} or bool(
         _STATE_TEMPORARY.fullmatch(name)
     )
 
@@ -3075,6 +3117,36 @@ def _recognized_state_directory(
         if mode is None or not stat.S_ISREG(mode):
             return False
     return True
+
+
+def _refresh_state_is_current(
+    state: _SecureDirectory, home: Path, client: str, state_name: str, now: int
+) -> bool:
+    """Keep additive refresh state while its bound session has recent activity."""
+    try:
+        fd = _open_secure_file_at(state, "refresh.v1.json", os.O_RDONLY)
+        try:
+            _require_nudge_file(state, "refresh.v1.json", fd)
+            if os.name != "nt" and stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                return False
+            raw = os.read(fd, MAX_CHECKPOINT_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > MAX_CHECKPOINT_BYTES:
+            return False
+        value = json.loads(raw)
+        return (
+            isinstance(value, dict)
+            and value.get("schema_version") == 1
+            and value.get("client") == client
+            and _bounded_safe_text(value.get("session_id"))
+            and session_state_dir(home, client, value["session_id"]).name == state_name
+            and value.get("state_root_binding") == _state_root_binding(home, client)
+            and type(value.get("observed_at_ns")) is int
+            and 0 <= now - value["observed_at_ns"] <= RETENTION_NS
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _prune_candidate_authorized(
@@ -3365,6 +3437,8 @@ def _tombstone_expired_candidate(
     locked = True
     try:
         if not _recognized_state_directory(state_handle, deadline=deadline):
+            return None
+        if _refresh_state_is_current(state_handle, home, client, name, now):
             return None
         current = load_checkpoint_at(state_handle, "current.json")
         previous = load_checkpoint_at(state_handle, "previous.json")

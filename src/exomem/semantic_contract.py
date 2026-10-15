@@ -2992,11 +2992,27 @@ def build_corpus_context_with_census(
         # Unarmed, the public overlay is every page's meaning. Armed, each visible
         # page carries its own instance and every other page keeps core meaning.
         corpus_registry = relation_registry.load_registry(root) if unarmed else context.registry
-    # Enrichment reparses units under each page's definitions, so relation facts
-    # and the resolver follow the enriched states, not the structural context.
-    enriched = _context_from_state_map(
-        root, states, corpus_registry, identity, writer_visibility=writer_visibility,
-    )
+    # Enrichment changes interpretation, not titles, paths or structural census inputs.
+    if candidate is None:
+        resolver = _WikilinkResolverView(
+            full_paths=context.resolver_full_paths,
+            kb_stripped=context.resolver_kb_stripped,
+            stems=context.resolver_stems,
+            titles=context.resolver_titles,
+        )
+        facts = _derive_relation_facts(root, states, resolver, corpus_registry)  # type: ignore[arg-type]
+        enriched = _context_from_resolved_state(
+            root, states, corpus_registry, identity,
+            entries=context.resolver_entries,
+            resolver=resolver,  # type: ignore[arg-type]
+            facts=facts,
+            writer_visibility=writer_visibility,
+            validated_census=context.activation_census,
+        )
+    else:
+        enriched = _context_from_state_map(
+            root, states, corpus_registry, identity, writer_visibility=writer_visibility,
+        )
     if memo_key is not None:
         with _CORPUS_CONTEXT_CACHE_LOCK:
             cached = _CORPUS_CONTEXT_CACHE.get(memo_key)
@@ -3538,25 +3554,44 @@ def _context_with_stable_topology_candidate(
     """Replace one page without re-resolving every authored corpus fact."""
     pages = dict(context.pages)
     pages[state.path] = state
-    resolver = vault.WikilinkResolver.from_entries(context.vault_root, context.resolver_entries)
+    resolver = _WikilinkResolverView(
+        full_paths=context.resolver_full_paths,
+        kb_stripped=context.resolver_kb_stripped,
+        stems=context.resolver_stems,
+        titles=context.resolver_titles,
+    )
     candidate_facts = _derive_relation_facts(
         context.vault_root,
         {state.path: state},
-        resolver,
+        resolver,  # type: ignore[arg-type]
         context.registry,
         target_states=pages,
     )
     retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
     facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
+    current = context.pages[state.path]
+    census = None
+    if current.structurally_compiled and state.structurally_compiled:
+        census = context.activation_census._with_replaced_candidate(
+            activation_manifest.ActivationCandidate(
+                state.path,
+                state.source_hash,
+                state.identity if state.identity_kind == "exomem_id" else None,
+                activation_manifest.recorded_status(state.frontmatter.get("status")),
+            )
+        )
+    elif not current.structurally_compiled and not state.structurally_compiled:
+        census = context.activation_census
     return _context_from_resolved_state(
         context.vault_root,
         pages,
         context.registry,
         context.identity_census,
         entries=context.resolver_entries,
-        resolver=resolver,
+        resolver=resolver,  # type: ignore[arg-type]
         facts=facts,
         writer_visibility=context.writer_visibility,
+        validated_census=census,
     )
 
 
@@ -3570,6 +3605,7 @@ def _context_from_resolved_state(
     resolver: vault.WikilinkResolver,
     facts: tuple[RelationFact, ...],
     writer_visibility: Any = _DECIDE,
+    validated_census: activation_manifest.ActivationCensus | None = None,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -3583,16 +3619,18 @@ def _context_from_resolved_state(
     full_paths, kb_stripped, stems, titles = _resolver_snapshot(resolver)
     # The census is structural and records raw labels unclassified, so it is the
     # same for every caller and may live in the shared cache.
-    census = activation_manifest.ActivationCensus.from_candidates(
-        activation_manifest.ActivationCandidate(
-            state.path,
-            state.source_hash,
-            state.identity if state.identity_kind == "exomem_id" else None,
-            activation_manifest.recorded_status(state.frontmatter.get("status")),
+    census = validated_census
+    if census is None:
+        census = activation_manifest.ActivationCensus.from_candidates(
+            activation_manifest.ActivationCandidate(
+                state.path,
+                state.source_hash,
+                state.identity if state.identity_kind == "exomem_id" else None,
+                activation_manifest.recorded_status(state.frontmatter.get("status")),
+            )
+            for state in ordered_pages.values()
+            if state.structurally_compiled
         )
-        for state in ordered_pages.values()
-        if state.structurally_compiled
-    )
     return SemanticCorpusContext(
         vault_root=root,
         pages=MappingProxyType(ordered_pages),
