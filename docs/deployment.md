@@ -816,7 +816,7 @@ operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
 7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
-9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED` or `COLLECTION_STORE_EXPORT_UNVERIFIED`, follow "When an export cannot finish" below.
+9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED`, `COLLECTION_STORE_EXPORT_UNVERIFIED` or `COLLECTION_STORE_SYNC_PENDING`, follow "When an export cannot finish" below.
 10. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local`.
 11. Install the older release on every host, then start the Exomem services.
 
@@ -842,15 +842,22 @@ transitions it summarizes. Inspection then reports `acknowledged_gap` for that
 collection.
 
 After it verifies that file mode reads every collection as the store served it,
-the export retires the coordinator's store fence through the operator-only
+the export records that result in its intent. Then it retires the coordinator's
+store fence through the operator-only
 `POST /v1/vaults/<id>/collection-store-fence/retire`. Then it renames
 `<knowledge base folder>/_Collections/mode.json` (`Knowledge Base` by default)
 to `mode.json.exported-<utc>`, renames the replica and the live store to
 `collections.sqlite.exported-<utc>`, and removes the store's state compatibility
 descriptors. No host adopts the renamed files; they stay as evidence of the
-export. An apply that stops after the fence retire verifies the files again
-while the marker still routes collections, then finishes these renames. A
-retired fence alone never lets a rerun retire the marker.
+export.
+
+An apply that stops after the fence retire finishes these renames without
+reading the files again, so a file-mode edit made after the retire does not
+stop it. First it reads the coordinator's newest retired fence through
+`GET /v1/vaults/<id>/collection-store-fence/retired` and checks that the
+recorded head is this store's own. A retired fence alone never lets a rerun
+retire the marker: after a fence retire made by hand, the rerun first writes and
+verifies the files.
 
 The retire and the lease revocation are one coordinator transaction. The lease
 holder at that moment loses its fencing token, so a store writer that opened
@@ -895,23 +902,47 @@ the backups, and restore a copy taken after the latest migration.
 
 An apply that stops leaves its intent in the live store. The store then keeps
 every row and refuses writes, and the services refuse its collections until the
-export finishes. This release has no step that abandons an export.
+export finishes or the owner abandons it.
 
 - `COLLECTION_STORE_EXPORT_VIEW_EDITED` names each view that changed after the
-  export began. Put back the bytes of each named file, for example from the
-  vault's sync history, then run the apply again with the same `plan_id`. A
-  rerun accepts a view that holds the bytes the store published or the bytes
-  this export wrote.
+  export began. To export without the change, put back the bytes of each named
+  file, for example from the vault's sync history, then run the apply again
+  with the same `plan_id`. A rerun accepts a view that holds the bytes the
+  store published or the bytes this export wrote. To keep the change for a
+  later decision, abandon the export.
 - `COLLECTION_STORE_EXPORT_UNVERIFIED` means that file mode does not read a
   collection as the store served it. A rerun repeats the same check, so it
-  cannot finish. Keep the services stopped. Keep `mode.json`, the live store,
-  the vault replica and the coordinator's fence as they are: the store still
-  holds every row. File a bug report with the refusal text.
+  cannot finish. Abandon the export, then file a bug report with the refusal
+  text.
+- `COLLECTION_STORE_SYNC_PENDING` means that another host adopted the vault
+  replica and wrote rows after the export began, and this host's store does not
+  have them. Keep the services stopped. Keep both stores, `mode.json` and the
+  coordinator's fence as they are, because the other host's store holds the
+  newer rows. File a bug report with the refusal text.
 
-Never retire the fence by hand. The export retires it only after it verifies
-every file. A fence retired before the export wrote every file leaves the
-vault refused with `COLLECTION_STORE_EXPORT_UNVERIFIED`, and no rerun can
-finish it.
+To abandon an export:
+
+1. Keep the Exomem service stopped on every host that serves the vault.
+2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
+3. Start the Exomem services. The services serve every store collection again.
+
+The command reports `abandoned`. The vault stays routed to the store, and the
+store keeps every row that it served before the export. The abandon rewrites no
+vault file. Each file that the export already wrote keeps the export's bytes,
+and the store records those bytes as that file's view. A view that a person
+edited keeps the edit, and the store adopts no part of it. Before a later
+export, restore the bytes of each edited view, or wait for the release that
+classifies view edits. Then start again at step 2 of the export steps.
+
+The abandon refuses with `COLLECTION_STORE_RETIRED` when the coordinator's
+fence is already retired, because the store cannot serve again without a new
+enrolment. After a fence retire made by hand, run the apply again instead: it
+writes the files from the store, verifies them and finishes the renames.
+
+Do not retire the fence by hand. If the apply after a retire made by hand
+refuses, no step continues the export or abandons it. Keep the services
+stopped, keep `mode.json`, the live store and the fence as they are, and file a
+bug report with the refusal text.
 
 #### When the exporting host loses its live store after the fence retire
 
