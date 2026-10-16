@@ -2455,8 +2455,8 @@ def _reconcile_markdown_delta(
             identities.pop(rel_path, None)
 
     # A governed commit, and most watcher events, edit one page in place. When
-    # its title, identity and registries hold, the resolver and every other
-    # page's facts still hold, so re-derive that page alone, not the corpus.
+    # its title, identity and registries hold, the resolver still holds, so
+    # re-derive that page and the pages that link into it, not the corpus.
     if len(changed_paths) == 1:
         rel_path = changed_paths[0]
         state = states.get(rel_path)
@@ -3557,7 +3557,7 @@ def _context_from_state_map(
 def _stable_topology_replacement(
     context: SemanticCorpusContext, state: SemanticPageState
 ) -> bool:
-    """Whether `state` can replace its page without re-deriving any other page's facts.
+    """Whether `state` can replace its page by re-deriving it and the pages that link into it.
 
     Relation fact identities count occurrences per authored identity across the
     whole corpus, so a page that shares its `exomem_id` with another page is
@@ -3612,9 +3612,11 @@ def _context_with_stable_topology_candidate(
         if fact.resolved_target_path is not None
         and fact.resolved_target_path.split("#", 1)[0] == state.path
     }
+    # Sorted, as in a full build: fact identities count occurrences per authored
+    # identity, so pages that share an id must be derived in the same order.
     candidate_facts = _derive_relation_facts(
         context.vault_root,
-        {path: pages[path] for path in affected},
+        {path: pages[path] for path in sorted(affected)},
         resolver,  # type: ignore[arg-type]
         context.registry,
         target_states=pages,

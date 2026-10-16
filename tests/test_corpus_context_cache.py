@@ -376,6 +376,39 @@ def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
+def test_edit_to_a_unit_target_keeps_shared_id_inbound_identities(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_id = "4d1f7a2c-9b3e-4c6a-8e5d-1f2a3b4c5d6e"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    (notes / "two.md").write_text(
+        _page(title="Two", body="## Observations\n\n- [claim] The first wording ^claim\n"),
+        encoding="utf-8",
+    )
+    # Six linking pages share one id, so a hash-ordered re-derive would number
+    # their identical facts in a different order from a full build.
+    for index in range(6):
+        (notes / f"link-{index}.md").write_text(
+            f"---\ntitle: Link {index}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n"
+            "## Relations\n- supports [[Knowledge Base/Notes/Insights/two#^claim]]\n",
+            encoding="utf-8",
+        )
+    _shared_context(vault)
+    (notes / "two.md").write_text(
+        _page(title="Two", body="## Observations\n\n- [claim] The second wording ^claim\n"),
+        encoding="utf-8",
+    )
+    incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert len({fact.identity for fact in rebuilt.relation_facts}) == 6
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
 def test_live_event_patch_makes_hot_reads_census_free(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
