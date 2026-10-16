@@ -116,7 +116,3 @@ A batch SHALL be authorised over the complete collection item set and every path
 #### Scenario: A generic client bulk-loads from describe alone
 - **WHEN** a client authors a batch only from the `describe` example against a fresh sample collection
 - **THEN** the batch is accepted without a guessed field, code or limit
-
-#### Scenario: Frozen hosted candidates are unchanged
-- **WHEN** the v1, v2 and v3 Claude hosted candidate schemas are compared with their released digests
-- **THEN** they are byte-identical, and only the local surface, the v5 candidate and the command binding list `bulk_upsert`
