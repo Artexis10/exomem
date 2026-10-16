@@ -74,8 +74,8 @@ class NativeProjectionPlan(ProjectionPlan):
     def upsert(self):
         return _upsert(self)
 
-    def parameters(self, connection, row_id: int, item_key: str, row_version: int, values, *, scope=None) -> dict:
-        encoded = native_rows.encode_row(connection, self.layout, values, scope=scope)
+    def parameters(self, connection, row_id: int, item_key: str, row_version: int, values) -> dict:
+        encoded = native_rows.encode_row(connection, self.layout, values)
         return {"row_id": row_id, "item_key": native_identity.encode(item_key, self.layout.identity), "row_version": row_version,
                 **dict(zip((*self.layout.value_columns, "r"), encoded, strict=True))}
 

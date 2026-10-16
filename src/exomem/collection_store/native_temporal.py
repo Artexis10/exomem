@@ -47,7 +47,7 @@ class TemporalView(NamedTuple):
         shifted = self.coordinate + minutes * 60 * 1000000
         if not 0 <= shifted < _COORDINATE_LIMIT:
             raise OverflowError("date value out of range")
-        return dt.date.fromordinal(shifted // _MICROSECONDS_PER_DAY + 1)
+        return _local_day(shifted)
 
 
 class _ReconstructionFormat(NamedTuple):
@@ -56,6 +56,9 @@ class _ReconstructionFormat(NamedTuple):
     quantum: int
     text_bytes: int
     shift: int
+    #: The coordinates whose instant and local time both lie inside the calendar: ``low <= coordinate < high``.
+    low: int
+    high: int
 
 
 def _coordinate(instant: dt.datetime) -> int:
@@ -65,14 +68,26 @@ def _coordinate(instant: dt.datetime) -> int:
 
 def _local_instant(coordinate: int, spelling: InstantSpelling, compiled=None, *, day_only=False) -> dt.date | dt.datetime:
     compiled = _compiled_spelling(spelling) if compiled is None else compiled
-    local_coordinate = coordinate + compiled.shift
-    if not 0 <= coordinate < _COORDINATE_LIMIT or not 0 <= local_coordinate < _COORDINATE_LIMIT:
+    return _view(coordinate, compiled, None, day_only).local
+
+
+def _view(coordinate: int, compiled: _ReconstructionFormat, max_bytes: int | None, day_only: bool) -> TemporalView:
+    """The one rule set for a native instant: budget, then calendar range, then the format's precision."""
+    if max_bytes is not None and compiled.text_bytes > max_bytes:
+        raise TypedStorageError("native instant exceeds the decoding budget")
+    if not compiled.low <= coordinate < compiled.high:
         raise OverflowError("date value out of range")
-    if local_coordinate % compiled.quantum:
+    local = coordinate + compiled.shift
+    if local % compiled.quantum:
         raise TypedStorageError("native instant precision cannot represent its coordinate")
-    if day_only:
-        return dt.date.fromordinal(local_coordinate // _MICROSECONDS_PER_DAY + 1)
-    return (_ORIGIN + dt.timedelta(microseconds=coordinate)).astimezone(compiled.zone)
+    when = (_local_day(local) if day_only
+            else (_ORIGIN + dt.timedelta(microseconds=coordinate)).astimezone(compiled.zone))
+    # TemporalView.__new__ builds exactly this tuple; calling it directly skips one Python frame per cell.
+    return tuple.__new__(TemporalView, (coordinate, when, compiled.spelling, compiled.text_bytes))
+
+
+def _local_day(local: int) -> dt.date:
+    return dt.date.fromordinal(local // _MICROSECONDS_PER_DAY + 1)
 
 
 def _text_length(spelling: InstantSpelling) -> int:
@@ -107,9 +122,10 @@ def _format(raw: object) -> InstantSpelling:
 
 def _compiled_spelling(spelling: InstantSpelling) -> _ReconstructionFormat:
     minutes = offset_minutes(spelling.offset)
+    shift = minutes * 60 * 1000000
     return _ReconstructionFormat(spelling, dt.timezone(dt.timedelta(minutes=minutes)),
-                                 10 ** max(0, 6 - spelling.fraction_digits), _text_length(spelling),
-                                 minutes * 60 * 1000000)
+                                 10 ** max(0, 6 - spelling.fraction_digits), _text_length(spelling), shift,
+                                 max(0, -shift), min(_COORDINATE_LIMIT, _COORDINATE_LIMIT - shift))
 
 
 def _compile_format(raw: object) -> _ReconstructionFormat:
@@ -124,6 +140,50 @@ def _unpack(cell: object) -> tuple[int, int]:
         if version == _VERSION and format_id > _INITIAL_FORMAT:
             return delta, format_id
     raise TypedStorageError("native instant cell or frame is invalid")
+
+
+def instant_days(metadata: FieldMetadata):
+    """Return one scan's day-only instant readers, ``(inline, accept)``, for one datetime field.
+
+    ``accept(cell, max_bytes)`` is ``inspect`` itself, and it learns each format it accepts. ``inline(cell,
+    max_bytes)`` is the scan's hot copy of ``_unpack`` and ``_view`` above, kept beside them: for a native cell of
+    an accepted format it returns what they return, and None wherever they would refuse. Change the three
+    together; the warm-scan parity test compares ``inline`` with ``inspect``.
+    """
+    epoch = None
+    formats = {}  # accepted format IDs of this field, the initial format included
+    frame_size, unpack, day, view = _FRAME.size, _FRAME.unpack, dt.date.fromordinal, tuple.__new__
+
+    def inline(cell: object, max_bytes: int) -> TemporalView | None:
+        kind = type(cell)
+        if kind is int:
+            delta, compiled = cell, formats.get(_INITIAL_FORMAT)
+        elif kind is bytes and len(cell) == frame_size:
+            version, delta, format_id = unpack(cell)
+            compiled = formats.get(format_id) if version == _VERSION and format_id > _INITIAL_FORMAT else None
+        else:
+            return None
+        if compiled is None or compiled.text_bytes > max_bytes:
+            return None
+        coordinate = epoch + delta
+        if not compiled.low <= coordinate < compiled.high:
+            return None
+        local = coordinate + compiled.shift
+        if local % compiled.quantum:
+            return None
+        return view(TemporalView, (coordinate, day(local // _MICROSECONDS_PER_DAY + 1), compiled.spelling,
+                                   compiled.text_bytes))
+
+    def accept(cell: object, max_bytes: int) -> TemporalView | str | None:
+        nonlocal epoch
+        found = inspect(cell, "datetime", metadata, max_bytes=max_bytes, day_only=True)
+        if type(found) is TemporalView and len(formats) < MEMO_ENTRIES:
+            # Accepted in this snapshot, so the append-only epoch and this format stay readable.
+            epoch, format_id = metadata.epoch(), _unpack(cell)[1]
+            formats[format_id] = metadata.temporal_format(format_id, max_bytes=_FORMAT_BYTES)
+        return found
+
+    return inline, accept
 
 
 def encode(value: object, kind: str, metadata: FieldMetadata) -> int | bytes | str | None:
@@ -195,54 +255,9 @@ def inspect(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int 
         if kind != "datetime":
             raise TypedStorageError("native temporal cell does not match its codec")
         delta, format_id = _unpack(cell)
-        compiled = metadata.temporal_format(format_id, max_bytes=_FORMAT_BYTES)
-        spelling, length = compiled.spelling, compiled.text_bytes
-        if max_bytes is not None and length > max_bytes:
-            raise TypedStorageError("native instant exceeds the decoding budget")
-        return TemporalView(epoch + delta, _local_instant(epoch + delta, spelling, compiled, day_only=day_only),
-                            spelling, length)
+        return _view(epoch + delta, metadata.temporal_format(format_id, max_bytes=_FORMAT_BYTES), max_bytes, day_only)
     except (ValueError, TypeError, OverflowError, collections.CollectionError) as error:
         raise TypedStorageError("native temporal reconstruction is invalid") from error
-
-
-def instant_days(metadata: FieldMetadata):
-    """Return one scan's day-only instant inspector; it inlines plain-integer cells and compact frames.
-
-    A cell takes the inline path only when ``inspect`` already accepted its format in this scan, and it returns
-    exactly what ``inspect`` returns. Any other cell, or any failed check, goes to ``inspect`` itself.
-    """
-    epoch = initial = None
-    formats = {}  # accepted frame format IDs, all above the initial format
-    frame_size, unpack, day = _FRAME.size, _FRAME.unpack, dt.date.fromordinal
-
-    def read(cell: object, max_bytes: int) -> TemporalView | str | None:
-        nonlocal epoch, initial
-        if type(cell) is int:
-            delta, compiled = cell, initial
-        elif type(cell) is bytes and len(cell) == frame_size:
-            version, delta, format_id = unpack(cell)
-            compiled = formats.get(format_id) if version == _VERSION else None
-        else:
-            compiled = None
-        if compiled is not None:
-            coordinate = epoch + delta
-            local = coordinate + compiled.shift
-            if (0 <= coordinate < _COORDINATE_LIMIT and 0 <= local < _COORDINATE_LIMIT
-                    and not local % compiled.quantum and compiled.text_bytes <= max_bytes):
-                return TemporalView(coordinate, day(local // _MICROSECONDS_PER_DAY + 1), compiled.spelling,
-                                    compiled.text_bytes)
-        view = inspect(cell, "datetime", metadata, max_bytes=max_bytes, day_only=True)
-        if type(view) is TemporalView and len(formats) < MEMO_ENTRIES:
-            # Accepted in this snapshot, so the append-only epoch and this format stay readable.
-            epoch, format_id = metadata.epoch(), _unpack(cell)[1]
-            compiled = metadata.temporal_format(format_id, max_bytes=_FORMAT_BYTES)
-            if format_id == _INITIAL_FORMAT:
-                initial = compiled
-            else:
-                formats[format_id] = compiled
-        return view
-
-    return read
 
 
 def decode(cell: object, kind: str, metadata: FieldMetadata, *, max_bytes: int) -> str | None:

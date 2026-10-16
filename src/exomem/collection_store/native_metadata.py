@@ -195,26 +195,40 @@ def snapshot_fields(conn, collection_id: str, generation: int, ordinals, *, data
     return {ordinal: ReadMetadata(ordinal) for ordinal in ordinals}
 
 
+def _sqlite(connection):
+    # The writer routes statements through an accounting wrapper that names its sqlite3 connection.
+    return getattr(connection, "connection", connection)
+
+
 class WriteScope:
     """Memoize one writer transaction's metadata across its rows; reads and writes stay in that transaction.
 
-    Create it inside the transaction, pass it to every row that transaction encodes, and discard it with it.
+    Only a transaction's owner opens one, bound to its sqlite3 connection, and closes it when that transaction
+    ends; use after the close, or with another connection's rows, refuses.
     """
 
-    __slots__ = ("_memo", "_canonical")
+    __slots__ = ("_memo", "_canonical", "_sqlite", "_open", "_checked")
 
     def __init__(self, connection):
         from .typed_storage import canonical_json
 
         if not connection.in_transaction:
             raise RuntimeError("native metadata scope requires a writer transaction")
-        self._memo, self._canonical = _Memo(), canonical_json
+        self._memo, self._canonical, self._sqlite = _Memo(), canonical_json, _sqlite(connection)
+        self._open, self._checked = True, None
+
+    def close(self) -> None:
+        self._open = False
 
     def field(self, connection, collection_id: str, generation: int, ordinal: int) -> "_ScopedField":
         # Triggers keep these rows append-only and collection_store opens no SAVEPOINT, so what this transaction
-        # read or wrote stays valid until it ends; outside a transaction the memo may be stale, so refuse it.
-        if not connection.in_transaction:
+        # read or wrote stays valid until it ends; its owner closes the scope then, so a later one cannot reuse it.
+        if not self._open or not connection.in_transaction:
             raise RuntimeError("native metadata scope outlived its writer transaction")
+        if connection is not self._checked:
+            if _sqlite(connection) is not self._sqlite:
+                raise RuntimeError("native metadata scope belongs to another connection's transaction")
+            self._checked = connection
         return _ScopedField(self._memo, self._canonical, connection, (collection_id, generation, ordinal))
 
 

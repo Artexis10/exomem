@@ -7,14 +7,7 @@ import json
 import sqlite3
 from dataclasses import replace
 
-from . import (
-    index_migrations,
-    native_identity,
-    native_layout,
-    native_metadata,
-    tokens,
-    typed_storage,
-)
+from . import index_migrations, native_identity, native_layout, tokens, typed_storage
 from .native_operands import FileRole
 from .native_projections import NativeProjectionPlan
 
@@ -97,7 +90,7 @@ def _extent(conn, source, row_id):
         typed_storage.canonical_json(source.fields).encode())
 
 
-def _copy_one(conn, plan, source, row_id, scope):
+def _copy_one(conn, plan, source, row_id):
     version, key, schema_version, raw, body, payload = conn.execute(
         "SELECT row_version,item_key,schema_version,values_json,body,payload_hash FROM items WHERE row_id=?",
         (row_id,)).fetchone()
@@ -105,7 +98,7 @@ def _copy_one(conn, plan, source, row_id, scope):
     canonical = typed_storage.canonical_json(values)
     if (raw is not None and canonical != raw) or tokens.payload_hash(schema_version, key, values, body) != payload:
         raise typed_storage.TypedStorageError("source row does not match its canonical payload hash")
-    parameters = plan.parameters(conn, row_id, key, version, values, scope=scope)
+    parameters = plan.parameters(conn, row_id, key, version, values)
     conn.execute(plan.upsert, parameters)
     layout = replace(plan.layout, current=plan.table_name)
     decoded = typed_storage.current_values(conn, layout, row_id)
@@ -146,7 +139,6 @@ def migrate_batch(conn, cid, fields, *, limit=128):
     last = conn.execute("SELECT last_row_id FROM typed_encoding_mappings WHERE collection_id=? AND generation=?",
                         (cid, plan.layout.generation)).fetchone()[0]
     remaining_rows, remaining_bytes = limit, index_migrations._MAX_BATCH_BYTES
-    scope = native_metadata.WriteScope(conn)
     for catchup in (False, True):
         where = "(t.row_id IS NULL OR t.row_version<>i.row_version)" if catchup else "i.row_id>?"
         parameters = (cid,) if catchup else (cid, last)
@@ -170,7 +162,7 @@ def migrate_batch(conn, cid, fields, *, limit=128):
                 _begin(conn, cid, fields, identity="utf8")
                 return "building"
             try:
-                _copy_one(conn, plan, source, row_id, scope)
+                _copy_one(conn, plan, source, row_id)
             except sqlite3.OperationalError as error:
                 if error.sqlite_errorcode != sqlite3.SQLITE_ERROR:
                     raise

@@ -232,6 +232,7 @@ class WriterConnection:
         self._closed = False
         self._release_cache = None
         self._inspection_identity = object()
+        self._write_scope, self._owns_transaction = None, False
         # Host-local import job facts (``importer``), keyed by job id: this handle's
         # proofs of bound source bytes, the store refusal blocking a running job, and
         # a streamed job's open reader. A new handle, as after a takeover, starts with none.
@@ -291,6 +292,7 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
         cache.begin()
+        self._owns_transaction = True
         try:
             yield self.connection
             cache.prepare()
@@ -302,6 +304,25 @@ class WriterConnection:
             if isinstance(error, DBAPIError):
                 raise error.orig from error
             raise
+        finally:
+            self._close_write_scope()
+
+    @property
+    def write_scope(self):
+        """This transaction's native metadata scope, opened on first use and closed when the transaction ends."""
+        if not self._owns_transaction:
+            raise RuntimeError("a native metadata scope belongs to this handle's open transaction")
+        if self._write_scope is None:
+            from .native_metadata import WriteScope
+
+            self._write_scope = WriteScope(self.connection)
+        return self._write_scope
+
+    def _close_write_scope(self) -> None:
+        self._owns_transaction = False
+        if self._write_scope is not None:
+            self._write_scope.close()
+            self._write_scope = None
 
     def execute(self, statement, parameters=None):
         """Execute Core statements only within this handle's mutation scope."""

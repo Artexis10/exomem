@@ -127,9 +127,8 @@ class Layout:
     def encoded(self) -> str:
         return canonical_json({"version": 1, "fields": list(self.fields)})
 
-    @property
-    def encoding(self) -> str:
-        return TYPED_V1
+    #: A class constant, not a property: scans read it once per row.
+    encoding = TYPED_V1
 
 
 @functools.lru_cache(maxsize=64)
