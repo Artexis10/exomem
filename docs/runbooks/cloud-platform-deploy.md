@@ -219,6 +219,14 @@ helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-pl
 Do not run this upgrade while a cell restore runs
 ([cloud-operator-restore.md](cloud-operator-restore.md)).
 
+A cellctl release can change the pod template it renders for a backup Job.
+The release that lets a local cell's backup Job tolerate its node's cordon is
+one. A backup Job that is still running cannot take the new template, because
+Kubernetes refuses any change to a Job's template. cellctl then parks that
+cell's apply once and retries it after its backoff, and the cell keeps
+serving. With local storage enabled, every local cell whose hourly backup runs
+during the upgrade parks once. Expect it; it needs no action.
+
 ## Verify
 
 ```bash

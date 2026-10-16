@@ -10,7 +10,7 @@ Run the `kubectl` steps as break-glass ([cloud operator access](cloud-operator-a
 
 ## Relocate the cells of a lost agent
 
-Relocation restores each cell on the lost agent from its last hourly backup onto other capacity. It loses the writes since that backup, at most an hour's. Never start it for a node that is only unreachable: a cell still running there would keep writing to a volume nobody reads again.
+Relocation restores each cell on the lost agent from its last hourly backup onto other capacity. It loses the writes since that backup, at most an hour's. Never start it for a node that is only unreachable: a cell still running there would keep writing to a volume nobody reads again. To take cells off a healthy node, move them instead ([move a cell](cloud-dedicated-host.md#move-a-cell-to-a-new-claim)): a move backs the cell up when it stops, so it loses no write.
 
 1. Make sure replacement capacity exists: a surviving agent with free slots, or a new or recovery agent that has joined. It must run the cluster's CPU architecture ([one cluster, one architecture](#change-the-cpu-architecture)).
 2. Confirm the agent stopped, by the rule node removal uses: the host is reachable and shows no container process, no pod or CSI mount and no open storage mapping, or you have confirmed the server is destroyed.

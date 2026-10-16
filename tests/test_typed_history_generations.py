@@ -16,6 +16,24 @@ from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
 
+def previous_release(patch):
+    """Write as the schema-10 release did, through the maintained writer."""
+    patch.setattr(schema, "SCHEMA_VERSION", 10)
+    # The old writer has no native conversion diagnostics or schema-11 column.
+    patch.setattr(typed_storage, "migration_diagnostic", lambda *_: None)
+    trigger = typed_storage._identity_trigger
+    patch.setattr(typed_storage, "_identity_trigger",
+                  lambda layout, generation_bound=False: trigger(layout, generation_bound=False))
+    # Schema 10 has six identity columns; this is its fixed historical INSERT.
+    patch.setattr(tables, "INSERT_IDENTITY", text(
+        "INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version) "
+        "VALUES(:row_id,:row_version,:encoding,:payload_hash,:txn_id,:schema_version)"))
+    # Schema 10 has no typed-v2, so a new summary collection published typed-v1.
+    batch = typed_storage.migrate_batch
+    patch.setattr(typed_storage, "migrate_batch",
+                  lambda conn, cid, fields, *, limit=128, encoding=None: batch(conn, cid, fields, limit=limit))
+
+
 @pytest.fixture
 def historical_store(tmp_path, monkeypatch):
     """Seed the shipped schema-10 identity wire through the maintained writer."""
@@ -24,15 +42,7 @@ def historical_store(tmp_path, monkeypatch):
     path = tmp_path / "historical.sqlite"
     with monkeypatch.context() as old:
         old.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
-        old.setattr(schema, "SCHEMA_VERSION", 10)
-        # The old writer has no native conversion diagnostics or schema-11 column.
-        old.setattr(typed_storage, "migration_diagnostic", lambda *_: None)
-        trigger = typed_storage._identity_trigger
-        old.setattr(typed_storage, "_identity_trigger", lambda layout: trigger(layout, generation_bound=False))
-        # Schema 10 has six identity columns; this is its fixed historical INSERT.
-        old.setattr(tables, "INSERT_IDENTITY", text(
-            "INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version) "
-            "VALUES(:row_id,:row_version,:encoding,:payload_hash,:txn_id,:schema_version)"))
+        previous_release(old)
         with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
             writer = CollectionWriter(root, handle)
             create(writer)

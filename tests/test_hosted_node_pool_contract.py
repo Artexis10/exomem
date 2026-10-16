@@ -1144,6 +1144,7 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
         "Refuse a node that is not an agent",
         "Refuse unless the cells fit the remaining nodes",
         "Cordon the agent",
+        "Move each cell off the agent's local storage",
         "Drain the agent without force",
         "Stop the agent completely",
         "Require a confirmed stop before deleting a present node",
@@ -1183,6 +1184,37 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
     revoke = tasks["Converge the inter-node firewall without the removed agent"]
     assert "k3s_remove_node" in revoke["vars"]["k3s_firewall_peer_ips"]
 
+
+
+def test_the_removal_preflight_runs_alone_and_changes_nothing(tmp_path: Path) -> None:
+    # The operator checks room with --tags preflight before moving any cell
+    # by hand (cloud-dedicated-host.md, "Remove the host" step 3). A tag that
+    # also selected the cordon, a move, the stop or the node deletion would
+    # start a removal the operator only meant to check.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.yml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {"hosted_nodes": {
+        "hosts": {"server": None}, "children": {"k3s_agents": {"hosts": {"exomem-agent-01": None}}}}}}}))
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "--list-tasks", "--tags", "preflight", "-i", str(inventory),
+         str(ANSIBLE / "remove-agent.yml"), "-e", "k3s_remove_node=exomem-agent-01"],
+        cwd=ANSIBLE, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    tasks = [line.split("\t")[0].strip() for line in result.stdout.splitlines()
+             if "TAGS:" in line and not line.strip().startswith("play #")]
+
+    assert tasks == [
+        "Resolve the one K3s server",
+        "Refuse anything but one inventoried agent",
+        "Look up the agent's Kubernetes node",
+        "Record whether the node is present and Ready",
+        "Refuse a node that is not an agent",
+        "Read the cluster state the preflight measures",
+        "Parse the cluster state",
+        "Refuse unless the cells fit the remaining nodes",
+    ]
 
 def test_remove_stop_kills_containers_unmounts_and_closes_volume_mappings() -> None:
     stop = _read(K3S_ROLE / "tasks/remove_stop.yml")
@@ -1327,13 +1359,13 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
     }]
     variables = {
         "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
-        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5, "k3s_local_storage_driver": "topolvm.io",
         "k3s_remove_nodes_doc": {"items": nodes},
         "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
             for n in nodes]},
         "k3s_remove_statefulsets_doc": {"items": statefulsets},
-        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvs", "pvcs")},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvs", "pvcs", "storageclasses")},
     }
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
@@ -1358,27 +1390,37 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
             "status": {"phase": phase}}
 
 
-@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+@pytest.mark.parametrize(("hold_on", "volume_phase", "target_ready", "refusal", "moves"), [
     # An hourly backup on another node's cell no longer blocks the removal...
-    ("shared", "Bound", None),
-    # ...one on a cell whose volume is on the target still does.
-    ("target", "Released", "maintenance is in flight"),
-    # A cell still living on the target refuses it: deleting the Node would
-    # relocate that cell from its last backup.
-    (None, "Bound", "still holds"),
-    # A volume a relocation retained holds no live cell.
-    (None, "Released", None),
-], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+    ("shared", "Bound", "True", None, []),
+    # ...one on a cell whose live volume is on the target still does...
+    ("target", "Bound", "True", "maintenance is in flight", None),
+    # ...but not one on a cell moved off the target before the removal, which
+    # left only its retained volume there and backs up on its new node.
+    ("target", "Released", "True", None, []),
+    # A cell still living on the target moves off it before the node goes:
+    # deleting the Node would relocate it from its last backup.
+    (None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
+    # A target that is not Ready cannot take the move's stopped backup.
+    (None, "Bound", "Unknown", "is not Ready", None),
+    # A volume a relocation or a move retained holds no live cell.
+    (None, "Released", "True", None, []),
+], ids=["hold-elsewhere", "hold-on-target", "hold-on-a-cell-moved-off-the-target", "live-volume-on-target",
+        "live-volume-on-a-target-not-ready", "retained-volume-on-target"])
 def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
-    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+    tmp_path: Path, hold_on: str | None, volume_phase: str, target_ready: str, refusal: str | None,
+    moves: list[str] | None,
 ) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
-    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
-              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    nodes = [{"metadata": {"name": name, "labels": {}, "annotations": {"capacity.topolvm.io/thin": str(100 * 1024**3)}},
+              "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": target_ready if name == "target" else "True"}]}}
              for name in ("target", "shared")]
     held = "aaaaaaaaaaaaaaaa"
     volumes = [_local_volume(held, hold_on or "target", volume_phase)]
+    claims = [{"metadata": {"namespace": f"exo-cell-{held}", "name": "cell-data"},
+               "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": "4Gi"}}}}]
     statefulsets = [] if hold_on is None else [{
         "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
         "spec": {"replicas": 1, "template": {"spec": {}}},
@@ -1391,19 +1433,271 @@ def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
         "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
             for n in nodes]},
+        "k3s_topolvm_device_class": "thin", "k3s_local_backup_concurrency_per_node": 2,
+        "k3s_local_default_cell_gib": 4,
         "k3s_remove_statefulsets_doc": {"items": statefulsets},
         "k3s_remove_pvs_doc": {"items": volumes},
-        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvcs")},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_storageclasses_doc": {"items": [{"metadata": {"name": "exomem-cloud-local"},
+                                                     "provisioner": "topolvm.io"}]},
+        "k3s_remove_attachments_doc": {"items": []},
     }
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
-        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"k3s_remove_moves == {moves}"]}}]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
                             capture_output=True, text=True)
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
+GIB = 1024**3
+
+
+# D6 at the role's defaults, which are cellctl's: a node keeps 2 x 4 GiB x 2
+# backups = 16 GiB of its pool free for hourly backups beyond the cells it
+# takes. A cell larger than 4 GiB raises that to 2 x its size x 2.
+@pytest.mark.parametrize(("pools", "cordoned", "moving", "elsewhere", "hetzner_slots", "refusal"), [
+    # A local-only cluster publishes no attachment slots at all.
+    ({"spare": 20}, [], [4], [], None, None),
+    # Free bytes that hold the cell but not the reserve beyond it are no room.
+    ({"spare": 18}, [], [4], [], None, "with room for the local volume"),
+    # A volume cannot span two nodes, so room on two nodes does not add up.
+    ({"spare": 36, "spare-2": 36}, [], [8], [], None, "with room for the local volume"),
+    # The largest cell anywhere sets the reserve, as it does in cellctl.
+    ({"spare": 24}, [], [4], [8], None, "with room for the local volume"),
+    # The target's own pool leaves with it.
+    ({"target": 100, "spare": 18}, [], [4], [], None, "with room for the local volume"),
+    # A cordoned node takes no new claim.
+    ({"spare": 18, "cordoned": 100}, ["cordoned"], [4], [], None, "with room for the local volume"),
+    # A removal holding both kinds counts each against its own capacity.
+    ({"spare": 20}, [], [4], [], 1, None),
+    ({"spare": 18}, [], [4], [], 1, "with room for the local volume"),
+    ({"spare": 20}, [], [4], [], 0, "cell slots"),
+    # The removal moves the largest claim first, the order the placement
+    # assumes, so an early small cell cannot take a later large one's room.
+    ({"spare": 100}, [], [4, 8, 4], [], None, None),
+], ids=["local-with-room", "local-without-room", "room-split-across-nodes", "larger-cell-elsewhere",
+        "target-excluded", "cordoned-node-excluded", "mixed-with-room", "mixed-without-local-room",
+        "mixed-without-attachment-slots", "largest-claim-moves-first"])
+def test_removal_counts_each_cell_against_the_storage_it_uses(
+    tmp_path: Path, pools: dict[str, int], cordoned: list[str], moving: list[int], elsewhere: list[int],
+    hetzner_slots: int | None, refusal: str | None,
+) -> None:
+    # Counting only attachment slots refuses every removal of a local-storage
+    # agent, and never sees a moved cell with nowhere to land: its restore
+    # would wait for room while the cell stays stopped.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": name, "labels": {},
+                           "annotations": {"capacity.topolvm.io/thin": str(pools[name] * GIB)} if name in pools else {}},
+              "spec": {"unschedulable": True} if name in cordoned else {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ["target", *(pool for pool in pools if pool != "target")]
+             + (["cloud"] if hetzner_slots is not None else [])]
+    volumes, claims, attachments = [], [], []
+    for index, gib in enumerate(moving):
+        cell = "abcd"[index] * 16
+        volumes.append(_local_volume(cell, "target", "Bound"))
+        claims.append({"metadata": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-local",
+                                "resources": {"requests": {"storage": f"{gib}Gi"}}}})
+    for index, gib in enumerate(elsewhere):
+        cell = "mnop"[index] * 16
+        volumes.append(_local_volume(cell, "spare", "Bound"))
+        claims.append({"metadata": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-local",
+                                "resources": {"requests": {"storage": f"{gib}Gi"}}}})
+    if hetzner_slots is not None:
+        volumes.append({"metadata": {"name": "pv-hetzner"},
+                        "spec": {"csi": {"driver": "csi.hetzner.cloud", "volumeHandle": "123"},
+                                 "claimRef": {"namespace": f"exo-cell-{'h' * 16}", "name": "cell-data"}},
+                        "status": {"phase": "Bound"}})
+        claims.append({"metadata": {"namespace": f"exo-cell-{'h' * 16}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-encrypted",
+                                "resources": {"requests": {"storage": "10Gi"}}}})
+        attachments.append({"spec": {"attacher": "csi.hetzner.cloud", "nodeName": "target",
+                                     "source": {"persistentVolumeName": "pv-hetzner"}},
+                            "status": {"attached": True}})
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        **{key: defaults[key] for key in ("k3s_local_storage_driver", "k3s_local_storage_topology_key",
+                                          "k3s_topolvm_device_class", "k3s_local_backup_concurrency_per_node",
+                                          "k3s_local_default_cell_gib")},
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [] if hetzner_slots is None else [
+            {"metadata": {"name": "cloud"},
+             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 5 + hetzner_slots}}]}}]},
+        "k3s_remove_storageclasses_doc": {"items": [
+            {"metadata": {"name": "exomem-cloud-local"}, "provisioner": "topolvm.io"},
+            {"metadata": {"name": "exomem-cloud-encrypted"}, "provisioner": "csi.hetzner.cloud"}]},
+        "k3s_remove_attachments_doc": {"items": attachments},
+        "k3s_remove_pvs_doc": {"items": volumes},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_statefulsets_doc": {"items": []},
+    }
+    # What remove-agent.yml loops its moves over, evaluated after the preflight.
+    tasks = {task["name"]: task for task in _tasks_in_order(_yaml(ANSIBLE / "remove-agent.yml"))}
+    moves = tasks["Move each cell off the agent's local storage"]["loop"].strip()[2:-2]
+    order = [f"exo-cell-{'abcd'[i] * 16}" for i in sorted(range(len(moving)), key=lambda i: (-moving[i], i))]
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"({moves}) == {order}"]}}]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
+
+ROOM_CASES = json.loads(_read(ROOT / "infra/cellctl/tests/fixtures/removal-room-cases.json"))["cases"]
+
+
+@pytest.mark.parametrize("case", ROOM_CASES, ids=[case["name"] for case in ROOM_CASES])
+def test_the_removal_playbook_agrees_with_cellctl_on_where_a_moved_cell_fits(tmp_path: Path, case: dict) -> None:
+    # The preflight copies cellctl's room rule; cellctl's own test checks
+    # cellctl on the same cases. A side that drifts places a moved cell on a
+    # node whose backups then have no room, or refuses a removal that fits.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": "target", "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+    for entry in case["nodes"]:
+        nodes.append({
+            "metadata": {"name": entry["name"], "labels": entry.get("labels", {}),
+                         "annotations": {"capacity.topolvm.io/thin": str(entry["free_gib"] * GIB)}},
+            "spec": {"unschedulable": entry.get("unschedulable", False), "taints": entry.get("taints", [])},
+            "status": {"conditions": [{"type": "Ready", "status": "True" if entry.get("ready", True) else "False"}]},
+        })
+    claims = [{"metadata": {"namespace": f"exo-cell-{letter * 16}", "name": "cell-data"},
+               "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": f"{gib}Gi"}}}}
+              for letter, gib in zip("abcd", [case["moving_gib"], *case["other_claims_gib"]], strict=False)]
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        **{key: defaults[key] for key in ("k3s_local_storage_driver", "k3s_local_storage_topology_key",
+                                          "k3s_topolvm_device_class", "k3s_local_backup_concurrency_per_node",
+                                          "k3s_local_default_cell_gib")},
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_pvs_doc": {"items": [_local_volume("a" * 16, "target", "Bound")]},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_storageclasses_doc": {"items": [{"metadata": {"name": "exomem-cloud-local"},
+                                                     "provisioner": "topolvm.io"}]},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("csinodes", "attachments", "statefulsets")},
+    }
+    takes = ("k3s_remove_local_rooms | dict2items | selectattr('value', 'ge', "
+             f"{case['moving_gib'] * GIB}) | map(attribute='key') | sort")
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables, "tasks": [
+        {"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+        {"ansible.builtin.assert": {"that": [f"k3s_remove_snapshot_reserve | int == {case['reserve_bytes']}",
+                                             f"({takes}) == {case['takes_the_moving_cell']}"]}},
+    ]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+# Plays cellctl's part for remove_move.yml: answers kubectl from a scenario,
+# one namespace listing per poll, and logs every call.
+_FAKE_KUBECTL = r"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[2:]
+with (here / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+scenario = json.loads((here / "scenario.json").read_text())
+if args[:2] == ["get", "statefulsets,persistentvolumeclaims,jobs"]:
+    count = here / "polls"
+    polls = int(count.read_text()) if count.exists() else 0
+    count.write_text(str(polls + 1))
+    print(json.dumps({"items": scenario["polls"][min(polls, len(scenario["polls"]) - 1)]}))
+elif args[:3] == ["get", "persistentvolumeclaim", "cell-data"]:
+    print(scenario["claim_volume"], end="")
+elif args[:2] == ["get", "persistentvolume"]:
+    print(scenario["volumes"][args[2]], end="")
+"""
+
+
+def _cell_objects(*, hold: str | None = None, outcome: str | None = None, volume: str = "pv-old",
+                  ready: bool = True, failed_restore: bool = False) -> list[dict]:
+    annotations = {key: value for key, value in (("exomem.io/hold", hold), ("exomem.io/backup-outcome", outcome))
+                   if value}
+    objects = [
+        {"kind": "StatefulSet", "metadata": {"name": "cell", "generation": 4, "annotations": annotations},
+         "spec": {"replicas": 1}, "status": {"observedGeneration": 4, "readyReplicas": 1 if ready else 0}},
+        {"kind": "PersistentVolumeClaim", "metadata": {"name": "cell-data"},
+         "spec": {"volumeName": volume}, "status": {"phase": "Bound"}},
+    ]
+    if failed_restore:
+        objects.append({"kind": "Job", "metadata": {"name": "cell-restore-0a1b2c3d4e",
+                                                    "labels": {"exomem.io/cell-job": "restore"}},
+                        "status": {"failed": 1}})
+    return objects
+
+
+@pytest.mark.parametrize(("polls", "new_volume_nodes", "refusal"), [
+    ([_cell_objects(), _cell_objects(hold="move"), _cell_objects(hold="restore", volume="pv-new", ready=False),
+      _cell_objects(volume="pv-new")], "shared", None),
+    ([_cell_objects(hold="move"), _cell_objects(hold="move", outcome="failed")], "shared",
+     "failed before its claim changed"),
+    ([_cell_objects(hold="restore", volume="pv-new", ready=False, failed_restore=True)], "shared",
+     "failed after its claim was retired"),
+    ([_cell_objects(volume="pv-new")], "target", "not to another node"),
+], ids=["moved", "backup-failed", "restore-failed", "landed-back-on-the-agent"])
+def test_removal_moves_a_cell_off_the_agent_and_stops_on_a_failed_move(
+    tmp_path: Path, polls: list, new_volume_nodes: str, refusal: str | None
+) -> None:
+    # move-cloud-cells-to-local-storage 6.4. Going on before a move finished,
+    # or after it failed, would delete the node of a cell's only current
+    # volume, and cellctl would relocate it from an older backup.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    kubectl = tmp_path / "k3s"
+    kubectl.write_text(_FAKE_KUBECTL)
+    kubectl.chmod(0o755)
+    (tmp_path / "scenario.json").write_text(json.dumps({
+        "claim_volume": "pv-old", "polls": polls,
+        "volumes": {"pv-old": "vol-old target", "pv-new": new_volume_nodes},
+    }))
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    play = tmp_path / "move.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        "k3s_remove_node": "target", "k3s_remove_move_namespace": "exo-cell-aaaaaaaaaaaaaaaa",
+        "k3s_remove_kubectl": [str(kubectl), "kubectl"], "k3s_remove_move_delay": 0,
+        **{key: defaults[key] for key in ("k3s_remove_move_annotation", "k3s_remove_move_retries",
+                                          "k3s_remove_move_pinned_jsonpath", "k3s_local_storage_topology_key")},
+    }, "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_move.yml")}]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    marks = [call[2:] for call in calls if call[0] == "annotate"]
+    assert marks[0] == ["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume=vol-old", "--overwrite"]
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        # The mark goes only once the cell serves from its new volume.
+        assert marks[1:] == [["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume-"]]
+        assert (tmp_path / "polls").read_text() == str(len(polls))
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+        # A failed move keeps its mark, which keeps the cell stopped on its volume.
+        assert marks[1:] == []
 
 
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
