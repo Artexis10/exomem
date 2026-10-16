@@ -322,6 +322,45 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
+def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_at_the_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queue that never drains still converges, but not on its first refusal.
+
+    The availability arm stays out while receipts are queued, because the queue
+    owns that repair. A queue that can never drain would then leave the graph
+    unreadable forever, so the loop asks for a whole-vault rebuild once its
+    backoff has reached the ceiling, and never sooner.
+    """
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.08)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: False)
+    attempts: list[int] = []
+    requests: list[int] = []
+
+    def no_progress(_root: Path) -> int:
+        attempts.append(1)
+        return 0
+
+    def request(_root: Path) -> bool:
+        requests.append(len(attempts))
+        return False
+
+    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
+    monkeypatch.setattr(graph_drain, "_request_full_rebuild", request)
+
+    graph_drain.start(tmp_path)
+    assert _wait_for(lambda: len(requests) >= 2, timeout=5.0)
+    graph_drain.stop()
+
+    # Backoff after each failed pass: 0.01, 0.02, 0.04, then the 0.08 ceiling.
+    assert requests[0] == 4, f"whole-vault requested after {requests[0]} failed pass(es)"
+    assert all(after >= 4 for after in requests), requests
+
+
 def test_a_failing_drain_never_kills_the_daemon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -595,6 +634,47 @@ def test_a_stopped_first_rebuild_leaves_whole_vault_debt_the_drain_converges(
 
     assert graph_drain._work_once(vault) == 1
     assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """The bounded cover is tried once per generation, then whole-vault takes over.
+
+    With coverage that never holds, no per-path drain can move the
+    acknowledgement. The first pass spends its one covering drain, the second
+    queues the whole-vault marker, and the third converges through it.
+    """
+    vault = _published_vault(tmp_path)
+    created = vault / "Knowledge Base/Notes/Insights/c.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, _page("C", "C is a new plain claim."))],
+            vault_root=vault,
+        )
+    committed = graph_sync.read_checkpoint(vault)
+    assert committed is not None
+    real_coverage = EpistemicGraphIndex._drained_graph_checkpoint
+
+    def never_covers(self: EpistemicGraphIndex, batch: list[Path]) -> Any:
+        return real_coverage(self, [])
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_drained_graph_checkpoint", never_covers)
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert not EpistemicGraphIndex(vault).available()
+
+    assert graph_drain._work_once(vault) == 1
+    assert deferred_index.graph_full_rebuild_pending(vault) is not None
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert graph_sync.acknowledged_generation(vault) == committed.generation
     assert EpistemicGraphIndex(vault).available()
 
 

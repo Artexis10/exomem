@@ -95,6 +95,11 @@ _PROGRESS = threading.Event()
 #: Monotonic time of the last debt signal: the start of the current quiet window.
 _last_debt = 0.0
 
+#: The checkpoint generation this process last spent a covering drain on, per
+#: vault. Scheduling state only, like `_last_debt`: it authorizes nothing, and a
+#: restart that forgets it costs one more bounded drain.
+_covered_generation: dict[str, int] = {}
+
 
 def note_graph_debt() -> None:
     """Wake the drain: this process just queued epistemic-graph repair.
@@ -215,11 +220,23 @@ def _request_full_rebuild(
         log.warning("graph drain: could not queue a rebuild for an unreadable graph")
         return False
     log.info(
-        "graph drain: %s; queued a whole-vault rebuild at generation %d",
+        "graph drain: %s; queued a whole-vault rebuild at generation %d acknowledged=%s",
         _FULL_REBUILD_CAUSES.get(cause, cause),
         generation,
+        _acknowledged_label(vault_root),
     )
     return True
+
+
+def _acknowledged_label(vault_root: Path) -> str:
+    """The acknowledged generation for a log line, or the state that hid it. Never raises."""
+    from . import graph_sync
+
+    try:
+        state, acknowledged = graph_sync.acknowledgement_state(vault_root)
+    except Exception:  # noqa: BLE001 - a log line never stops the drain
+        return "unreadable"
+    return str(acknowledged.generation) if acknowledged is not None else state
 
 
 def _queue_pending(vault_root: Path) -> bool:
@@ -353,6 +370,58 @@ def _republish_once(vault_root: Path) -> bool:
         return False
 
 
+def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
+    """Drain the committed checkpoint as one batch, once. Never raises.
+
+    A drain acknowledges only a batch that held the committed checkpoint's
+    whole path set. A truncated batch and the single-receipt replays after it
+    each publish their proven rows and retire their receipts without that
+    claim, so the queue can empty while the acknowledgement stays behind and
+    no reader can open the graph. Queueing the checkpoint again and draining
+    exactly its paths lets the existing acknowledgement rule decide.
+
+    Declines, leaving the whole-vault route to the caller, unless the
+    checkpoint is path-scoped, ahead of the acknowledgement, fits one drain,
+    no external change is pending, and this process has not already covered
+    this generation. True when it ran the drain, acknowledged or not: a cover
+    that did not acknowledge is escalated on the next pass, not retried.
+    """
+    from . import deferred_index, freshness, graph_sync, index_sync
+
+    key = str(vault_root)
+    try:
+        checkpoint = graph_sync.read_checkpoint(vault_root)
+        if checkpoint is None or checkpoint.scope != "paths":
+            return False
+        generation = int(checkpoint.generation)
+        # An unreadable acknowledgement reads as 0. That costs at most one
+        # bounded drain, whose own coverage rule decides what it acknowledges.
+        if graph_sync.acknowledged_generation(vault_root) >= generation:
+            return False
+        rels = {rel for rel, _content_hash in checkpoint.paths}
+        rels.update(checkpoint.created_paths)
+        if len(rels) > DRAIN_LIMIT or freshness.external_pending(vault_root):
+            return False
+        if _covered_generation.get(key) == generation:
+            return False
+        _covered_generation[key] = generation
+        before = _acknowledged_label(vault_root)
+        deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
+        index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+    except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
+        log.warning("graph drain: covering drain failed", exc_info=True)
+        return False
+    log.info(
+        "graph drain: drained the unacknowledged checkpoint as one batch generation=%d "
+        "acknowledged_before=%s acknowledged_after=%s checkpoint_paths=%d",
+        generation,
+        before,
+        _acknowledged_label(vault_root),
+        len(rels),
+    )
+    return True
+
+
 def _per_path_work_once(vault_root: Path) -> int:
     """The per-path half of a pass, for while whole-vault work is held.
 
@@ -406,19 +475,27 @@ def _work_once(vault_root: Path) -> int:
                 and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
             ):
                 processed += 1
-    elif _availability_pending(vault_root):
+    elif not _queue_pending(vault_root) and _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
-        # decline. Reaching here means the graph is unreadable and nothing in
-        # the system is holding a signal that says so.
+        # decline. Only with an empty queue: receipts still queued mean the
+        # queue owns the repair, and the next pass drains them. Reaching here
+        # means the graph is unreadable and nothing in the system is holding a
+        # signal that says so.
         #
-        # The stranded state lands here rather than in the drain above: a
-        # withdrawn marker with an empty queue is not queued work, so
-        # `_drain_once` -- and the republication inside it -- never runs, and a
-        # whole-vault rebuild would be spent on a sidecar whose rows may already
-        # match disk. Try that proof first; it declines on its own when repair
-        # is genuinely owed, and the rebuild is still there when it does.
-        if _republish_once(vault_root) or _request_full_rebuild(vault_root):
+        # Cheapest sufficient repair first. An acknowledgement left behind a
+        # path-scoped checkpoint is closed by one bounded drain of that
+        # checkpoint; republication cannot close it, because it never moves
+        # the acknowledgement. A withdrawn marker with an empty queue is not
+        # queued work, so `_drain_once` -- and the republication inside it --
+        # never ran, and a whole-vault rebuild would be spent on a sidecar
+        # whose rows may already match disk. Each step declines on its own
+        # when it cannot help, and the rebuild is still there when all do.
+        if (
+            _cover_unacknowledged_checkpoint(vault_root)
+            or _republish_once(vault_root)
+            or _request_full_rebuild(vault_root)
+        ):
             processed += 1
     return processed
 
@@ -543,6 +620,17 @@ def _run_owned(vault_root: Path) -> None:
                 # rebuild already in flight, or a write landing mid-pass -- is
                 # retried on the backoff alone, never on a write's signal.
                 not_before = time.monotonic() + backoff
+            elif (
+                backoff >= MAX_RETRY_SECONDS
+                and _queue_pending(vault_root)
+                and _availability_pending(vault_root)
+            ):
+                # The availability arm stays out while receipts are queued, so
+                # a queue that can never drain -- an epoch that never admits
+                # per-path repair, a refusal that persists -- would leave the
+                # graph unreadable for good. Once the backoff has reached its
+                # ceiling, hand it to the whole-vault route.
+                _request_full_rebuild(vault_root)
 
 
 def start(vault_root: Path) -> threading.Thread | None:
