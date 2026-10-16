@@ -1886,7 +1886,8 @@ class CollectionStoreFenceState:
             _collection_store_uuid(self.store_id)
             if self.generation < 1:
                 raise ValueError("collection store fence generation is invalid")
-        elif self.store_id is not None or self.generation != 0:
+        # An unenrolled fence reports its newest retired generation, or 0 if never enrolled.
+        elif self.store_id is not None:
             raise ValueError("collection store fence metadata is inconsistent")
 
     @classmethod
@@ -2263,6 +2264,35 @@ class LeaseCoordinatorClient:
                 or state.generation not in {expected_generation, expected_generation + 1}
             ):
                 raise ValueError("collection store fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def retire_collection_store_fence(
+        self,
+        *,
+        expected_generation: int,
+        store_id: str,
+    ) -> CollectionStoreFenceState:
+        """Retire the enrolled store fence; the operator credential only, on a vault exported to files."""
+        if type(expected_generation) is not int or expected_generation < 1:
+            raise ValueError("expected_generation must be a positive integer")
+        _collection_store_uuid(store_id)
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "POST",
+            f"/v1/vaults/{vault}/collection-store-fence/retire",
+            {
+                "expected_generation": expected_generation,
+                "store_id": store_id,
+                "capability": COLLECTION_STORE_CAPABILITY,
+            },
+            contract_route="/v1/vaults/<id>/collection-store-fence/retire",
+        )
+        try:
+            state = CollectionStoreFenceState.from_json(payload)
+            if state.enrolled or state.generation != expected_generation:
+                raise ValueError("collection store fence retire result is inconsistent")
             return state
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None

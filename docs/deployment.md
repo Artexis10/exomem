@@ -800,6 +800,62 @@ replica before leaving it. Session and auth-generation reads are always direct t
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
 
+### Retire the collection store fence before a downgrade
+
+While a vault has a collection store fence, the coordinator refuses the lease to
+every writer that does not offer the store capability. A file-mode writer, such
+as a release from before the store, cannot write that vault. The operator retires
+the fence so that file-mode writers get the lease again. The retire is only the
+coordinator step of a downgrade. It does not export, move or delete a collection,
+and it does not change the vault's store marker or machine-local state.
+
+Only the operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, can
+retire the fence. The writer credential that the service holds gets HTTP 401.
+
+Retire the fence only after the vault's store collections are files again. A
+retire on a vault that still routes collections to the store makes those
+collections unavailable on every host, and this release has no command that
+undoes it.
+
+1. Stop the Exomem service on every host that serves the vault.
+2. Read the fence with the writer credential:
+   `curl -s -H "Authorization: Bearer $EXOMEM_WRITER_LEASE_TOKEN" http://127.0.0.1:8770/v1/vaults/main/collection-store-fence`
+3. Note the `store_id` and `generation` values in the response.
+4. Retire the fence with the operator credential and the noted values:
+   `curl -s -X POST -H "Authorization: Bearer $EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN" -H "Content-Type: application/json" -d '{"expected_generation": <generation>, "capability": "collections-store-v1", "store_id": "<store_id>"}' http://127.0.0.1:8770/v1/vaults/main/collection-store-fence/retire`
+5. If the response to step 4 is lost, run step 4 again.
+6. If the coordinator answers HTTP 409, start again at step 2.
+7. If the coordinator answers HTTP 404, upgrade the coordinator, then start again at step 2.
+8. Start the Exomem services.
+
+The retire answers `{"capability": "collections-store-v1", "enrolled": false,
+"store_id": null, "generation": <generation>}`.
+
+The retire and the lease revocation are one coordinator transaction. The lease
+holder at that moment loses its fencing token, so a store writer that opened
+against the fence cannot renew or write. A repeated retire returns the same
+answer and does not revoke the lease again.
+
+After the retire, the hosts behave as follows:
+
+- A host whose vault copy routes no collection to the store acquires the lease
+  as on a vault that was never enrolled.
+- A host whose vault copy still has the store marker does not serve the store.
+  This release refuses its store requests with `COLLECTION_STORE_RETIRED` until
+  the exported vault reaches that host.
+- A store-serving client from a release before the retire, such as 0.117, cannot
+  read a retired fence. It fails closed with `WRITER_COORDINATOR_UNAVAILABLE` and
+  does not serve the store. The cost is that the store collections stay
+  unavailable on that host until its vault copy no longer routes to the store.
+
+The coordinator keeps every retired generation. The fence read reports
+`enrolled: false` with the newest retired generation, or 0 for a vault that was
+never enrolled. A later enrolment, such as the owner's first
+`exomem collections create` on a vault without a store marker, takes the next
+generation. Run that enrolment with a release that has the retire, because an
+older release cannot read a retired fence. An enrolment request based on an
+older generation gets HTTP 409.
+
 ### Durable-session cutover and rollback
 
 Treat the upgrade from FastMCP reference tokens as a coordinated HA cutover, not
