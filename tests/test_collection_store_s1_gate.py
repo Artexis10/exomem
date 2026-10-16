@@ -1396,3 +1396,20 @@ def test_log_marker_ownership_preserves_structural_path_boundaries(abc):
     for path in (entry["source_path"] + "/other.md", entry["source_path"] + "#not-an-item",
                  "Knowledge Base/Records/Detached/Other.md", "Knowledge Base/Records/Work/Notes.md"):
         assert authority.owned_entry(abc.root, marker, path) is None
+
+
+def test_a_callers_change_to_a_parsed_marker_never_reaches_the_next_caller(abc):
+    """Parsing is cached per marker spelling, so each caller must still get its own copy."""
+    raw = authority.read_marker(abc.root)
+    first = authority.parse_marker(abc.root, raw)
+    first["collections"][0]["source_path"] = "Knowledge Base/Records/Elsewhere/Items"
+    first["collections"].append(dict(first["collections"][0]))
+    again = authority.parse_marker(abc.root, raw)
+    assert again == json.loads(raw)
+    assert authority.owned_entry(abc.root, again, "Knowledge Base/Records/Elsewhere/Items/x.md") is None
+
+
+def test_a_missing_marker_is_refused_as_unreadable_not_crashed_on(abc):
+    """Callers pass `read_marker` straight through, and it returns None when no marker exists."""
+    with pytest.raises(CollectionStoreError, match="unreadable mode marker"):
+        authority.parse_marker(abc.root, None)
