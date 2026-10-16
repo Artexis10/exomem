@@ -399,6 +399,22 @@ pair instead — a real re-validation against the one writer the sequence has no
 already excluded, and deliberately cheaper, because a full source proof would
 add seconds to the one window this whole sequence exists to shorten.
 
+### A collection store schema change
+
+A release that changes the collection store's schema records `migration` as
+`skipped`, because the store schema is not a state-root migration. The new
+worker migrates the store itself once it acquires the writer lease. Until then,
+the old worker keeps the lease and serves.
+
+A release from before the schema change cannot open the migrated store. On a
+vault with a collection store fence, its writer gets no lease and every write
+refuses with `WRITER_LEASE_REQUIRED`. After a handoff has migrated the store,
+roll back only to a release at or after the one that migrated it. 0.119.0
+changed the store schema; 0.119.1 is the first release that migrates a store
+from an earlier release. Take a backup with the earlier release before the
+upgrade, as "A release that changes the collection store's schema" in
+`docs/deployment.md` describes.
+
 ### The service environment file
 
 A worker child is spawned with every `EnvironmentFile=` the unit declares,

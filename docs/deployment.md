@@ -802,20 +802,37 @@ could resurrect a revoked session.
 
 ### A release that changes the collection store's schema
 
-A release can change the schema of the live collection store. The first service
-on that release that holds the writer lease migrates the store before it serves
-the store's collections. The migration keeps every row and the store head, so
-the coordinator's recorded head and the vault replica still match it.
+A release can change the schema of the live collection store. 0.119.0 changed
+it from 10 to 11. From 0.119.1, the first service on the new release that holds
+the writer lease migrates the store before it serves the store's collections.
+The migration keeps every row and the store head, so the coordinator's recorded
+head still matches it. If the migration fails, it rolls back and leaves the
+store at its earlier schema.
 
-Until that writer has migrated the store, store reads on that host refuse with
-`COLLECTION_STORE_SCHEMA_PENDING`. File collections and knowledge writes are not
-affected. In a handoff, the earlier release's worker keeps the lease and serves
-until it stops, and the new worker migrates the store once it acquires the lease.
+Until a writer has migrated the store, its collections are not served:
+
+- In a handoff, the earlier release's worker keeps the lease and serves until it
+  stops. The new worker refuses store writes with `WRITER_LEASE_REQUIRED`, and it
+  migrates the store once it acquires the lease.
+- An offline owner command, such as `exomem collections backup`, refuses with
+  `COLLECTION_STORE_SCHEMA_PENDING`. Start the service once to migrate the store.
+
+File collections and knowledge writes are not affected.
 
 A release from before the schema change cannot open a migrated store. Its writer
 then gets no lease on a vault with a collection store fence, so every write on
-that host refuses with `WRITER_LEASE_REQUIRED`. After an upgrade has migrated the
-store, roll back only to a release at or after the one that migrated it.
+that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover. After an
+upgrade has migrated the store, roll back only to a release at or after the one
+that migrated it.
+
+To upgrade a vault with a collection store to a release that changes its schema:
+
+1. With the release that you run now, take a backup of the store: `exomem collections backup --vault <vault> --to <file outside the vault>`.
+2. Upgrade the service.
+3. Read a store collection, for example with `record_memory` and `action: inspect`, and check that it answers.
+
+The backup in step 1 is a copy at the earlier schema. It does not make a rollback
+safe, because restoring it loses every store write after the upgrade.
 
 ### Retire the collection store fence before a downgrade
 
