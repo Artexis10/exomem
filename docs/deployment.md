@@ -888,7 +888,8 @@ cannot open a migrated store. 0.119.0 and later read schema 11, so they stay
 valid rollback targets.
 
 The managed supervisor refuses an upgrade target that cannot read the live
-store when the vault's marker routes collections to the store. It compares the
+store when the vault's marker routes collections to the store, or the store
+records a pending intent. It compares the
 newest store schema that the target reads with the schema of the live store, and
 it refuses before the serving worker stops. The serving worker keeps serving.
 

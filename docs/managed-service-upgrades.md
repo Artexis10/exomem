@@ -407,7 +407,8 @@ state migration. The new worker migrates the store itself once it acquires the
 writer lease. Until then, the old worker keeps the lease and serves.
 
 A release from before the schema change cannot open the migrated store. When
-the vault's marker routes collections to the store, the supervisor compares the
+the vault's marker routes collections to the store, or the store records a
+pending intent, the supervisor compares the
 newest store schema that an upgrade target reads with the schema of the live
 store. It refuses a target that cannot read the live store before the serving
 worker stops, so that worker keeps serving. Releases 0.114.0 through 0.118.x read

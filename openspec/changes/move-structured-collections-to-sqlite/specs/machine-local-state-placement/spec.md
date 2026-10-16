@@ -50,9 +50,9 @@ fence; that remedy SHALL not substitute for validated collection export.
 
 Supported launchers SHALL refuse a candidate whose newest readable store schema
 is below the live store's schema, before the serving worker stops, when the
-vault's marker routes collections to the store. Without that marker, without a
-live store, or with one whose schema the launcher cannot read, this check SHALL
-refuse nothing. Each live store schema from 12 on SHALL also have one optional
+vault's marker routes collections to the store or the store records a pending
+intent. Without that marker and pending intent, without a live store, or with one
+whose schema the launcher cannot read, this check SHALL refuse nothing. Each live store schema from 12 on SHALL also have one optional
 compatibility ID, `collections-store-schema-<N>`; schema 11 has none, because
 releases since 0.114.0 treat an unknown ID alike, so an ID would also refuse the
 releases that read schema 11. A release SHALL support the IDs up to its own
