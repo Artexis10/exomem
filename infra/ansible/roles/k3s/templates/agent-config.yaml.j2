@@ -5,7 +5,9 @@ token: {{ k3s_agent_join_token | to_json }}
 node-name: {{ inventory_hostname | to_json }}
 node-ip: {{ private_node_ip | to_json }}
 flannel-iface: {{ k3s_resolved_private_interface | to_json }}
+{% if k3s_flannel_mtu is not none %}
 flannel-conf: {{ k3s_flannel_conf_path | to_json }}
+{% endif %}
 node-label:
   - {{ k3s_agent_node_label | to_json }}
 {% if inventory_hostname in (groups['dedicated_hosts'] | default([])) %}

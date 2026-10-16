@@ -111,6 +111,15 @@ link and Tang to the inventory, so a run over part of the fleet would remove
 the missing nodes' rules on every node it reaches. The shared control database
 is not in this inventory; substrate-infra converges it.
 
+A routine gate run restarts no K3s node for the flannel MTU: the k3s role
+leaves `k3s_flannel_mtu` unset, and then installs no flannel configuration. Its
+rollout is the reviewed commit that sets the value, merged and run in an
+operator window
+([cloud-dedicated-host.md](cloud-dedicated-host.md#roll-out-the-flannel-mtu)).
+Once the value is set, a gate run whose nodes already run at it changes
+nothing. Do not use the gate for the rollout itself: its output hides the
+MTU check's message.
+
 ```bash
 set -euo pipefail
 umask 077

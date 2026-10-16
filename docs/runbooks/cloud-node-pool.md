@@ -20,7 +20,8 @@ server with encrypted local cell storage), follow
 - The first run that introduces the agent token restarts the K3s server once.
   Schedule it in a maintenance window; running cells ride through the restart.
   Straight after that run, save the bootstrap data again, as in steps 4 to 6 of
-  [Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token).
+  [Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token), with
+  step 6's first-selection credentials.
 - Pick an unused private address in the subnet (not the fleet server's
   `10.50.1.10`), and a type from the allow-list: `cpx42`, `ccx23`, `ccx33`
   or `ccx43`. A `cx33` (4 CPU / 8 GiB) is permitted only with a nonempty

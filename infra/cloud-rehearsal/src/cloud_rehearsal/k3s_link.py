@@ -127,7 +127,11 @@ def tool_version(name: str) -> str:
 def render_role(workdir: Path) -> tuple[dict[str, Any], Path]:
     """The k3s role's flannel configuration and the values the checks expect,
     rendered by the pinned ansible-core from the role's template and defaults,
-    so that no MTU or CIDR in this module is a copy of the role's."""
+    so that no MTU or CIDR in this module is a copy of the role's.
+
+    The role leaves k3s_flannel_mtu unset until its rollout commit sets it to
+    the smallest dedicated link, so the rehearsal sets that from the role's own
+    link MTUs."""
 
     conf, values, play = workdir / "flannel-net-conf.json", workdir / "role-values.json", workdir / "render-role.yml"
     play.write_text(yaml.safe_dump([{
@@ -135,10 +139,13 @@ def render_role(workdir: Path) -> tuple[dict[str, Any], Path]:
         "vars": {"ansible_python_interpreter": "{{ ansible_playbook_python }}"},
         "tasks": [
             {"ansible.builtin.include_vars": {"file": str(ROLE / "defaults/main.yml")}},
+            {"ansible.builtin.set_fact": {"k3s_role_default_flannel_mtu": "{{ k3s_flannel_mtu }}"}},
+            {"ansible.builtin.set_fact": {"k3s_flannel_mtu": "{{ [k3s_vswitch_mtu, k3s_wireguard_mtu] | min | int }}"}},
             {"ansible.builtin.template": {"src": str(ROLE / "templates/flannel-net-conf.json.j2"),
                                           "dest": str(conf), "mode": "0644"}},
             {"ansible.builtin.copy": {"dest": str(values), "mode": "0644", "content": (
                 "{{ {'k3s_version': k3s_version, 'cluster_cidr': k3s_cluster_cidr,"
+                " 'role_default_flannel_mtu': k3s_role_default_flannel_mtu,"
                 " 'flannel_mtu': k3s_flannel_mtu | int, 'pod_mtu': k3s_flannel_pod_mtu | int,"
                 " 'conf_path': k3s_flannel_conf_path} | to_json }}")}},
         ],

@@ -9,11 +9,13 @@
 
 # Recreating the flannel device below stops and starts K3s, which applies
 # everything a restart would; restarting first as well would only add an outage.
+# tasks/main.yml queues the recreation when the configuration changed or the
+# running device differs from it.
 - name: Restart K3s
   ansible.builtin.systemd_service:
     name: "{{ k3s_service_name }}"
     state: restarted
-  when: k3s_flannel_conf is not defined or k3s_flannel_conf is not changed
+  when: not ((k3s_flannel_conf | default({})) is changed or (k3s_flannel_drift | default({})) is changed)
 
 # A new flannel MTU (task 6.5). A restart alone keeps the old one: flannel
 # reads its configuration only at start, and reuses an existing flannel.1
@@ -65,6 +67,7 @@
       flannel did not take k3s_flannel_mtu {{ k3s_flannel_mtu }} on {{ inventory_hostname }}:
       expected {{ k3s_flannel_pod_mtu }} on flannel.1 and in /run/flannel/subnet.env, read
       {{ k3s_flannel_observed.stdout_lines | default([]) | join(', ') or k3s_flannel_observed.stderr | default('nothing') }}.
+      Run site.yml again: each run recreates a device left at another MTU.
 
 - name: Restart WireGuard
   ansible.builtin.systemd_service:

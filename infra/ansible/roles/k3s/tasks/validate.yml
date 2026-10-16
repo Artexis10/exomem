@@ -67,6 +67,41 @@
   no_log: true
   when: k3s_node_role == 'agent'
 
+# Before any restart. Prevents: VXLAN packets larger than a link in use, which
+# that link drops while every node stays Ready, and a dedicated host joining
+# before the MTU is set. Fires wrongly: never for an MTU that fits every link.
+- name: Validate the flannel MTU against the links in use
+  ansible.builtin.assert:
+    that:
+      - k3s_flannel_mtu is none or k3s_flannel_mtu is integer
+      # 1280 is the smallest MTU an IPv6 link may have (RFC 8200).
+      - k3s_flannel_mtu is none or (k3s_flannel_mtu >= 1280 and k3s_flannel_mtu <= k3s_smallest_link_mtu | int)
+      - k3s_flannel_mtu is not none or (k3s_vswitch_hosts + k3s_wireguard_hosts) | length == 0
+    fail_msg: >-
+      k3s_flannel_mtu must be unset or an integer from 1280 to {{ k3s_smallest_link_mtu }},
+      the smallest link in use, and it must be set before any vSwitch or WireGuard
+      host joins. It is {{ k3s_flannel_mtu | to_json }}.
+
+- name: Look for a flannel configuration the role installed
+  ansible.builtin.stat:
+    path: "{{ k3s_flannel_conf_path }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: k3s_flannel_conf_installed
+  when: k3s_flannel_mtu is none
+
+# Prevents: a split MTU nothing reports. Without the MTU, K3s writes its own
+# configuration, and a restart keeps flannel.1 at the role's old MTU.
+- name: Refuse to unset a flannel MTU the role applied
+  ansible.builtin.assert:
+    that:
+      - not k3s_flannel_conf_installed.stat.exists
+    fail_msg: >-
+      {{ k3s_flannel_conf_path }} exists but k3s_flannel_mtu is unset. Undo the MTU by
+      setting k3s_flannel_mtu to {{ k3s_cloud_network_mtu }}, never by unsetting it.
+  when: k3s_flannel_mtu is none
+
 - name: Look for the removal marker on the agent
   ansible.builtin.stat:
     path: /etc/rancher/k3s/removed

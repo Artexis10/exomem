@@ -34,18 +34,35 @@ k3s_kubelet_args:
   - container-log-max-size=10Mi
   - container-log-max-files=3
 
-# The pod network. It is K3s's own default; the server's cluster-cidr and every
-# node's flannel configuration both render this one value.
-k3s_cluster_cidr: 10.42.0.0/16
-# Flannel's VXLAN packets must fit the smallest private link a node joins over
-# (move-cloud-cells-to-local-storage D8, task 6.5): a vSwitch carries 1400 bytes,
-# the WireGuard interface 1420 and the Cloud network 1450. Without this value
-# flannel takes the interface's MTU, and a Cloud node's packets would be 1450.
-k3s_flannel_mtu: 1400
+# The MTU of each private link a node joins over (move-cloud-cells-to-local-storage
+# D8). The vSwitch and WireGuard templates render theirs from here.
+k3s_cloud_network_mtu: 1450
+k3s_vswitch_mtu: 1400
+k3s_wireguard_mtu: 1420
+# Flannel's VXLAN packets must fit the smallest link in use (task 6.5). Unset,
+# flannel takes its interface's MTU, so a Cloud node sends 1450-byte packets
+# that a vSwitch or WireGuard link drops; validate.yml refuses a dedicated host
+# until it is set. Setting it recreates flannel.1 on every node, which stops
+# and starts K3s, so the rollout is the reviewed commit that sets it, run in an
+# operator window (docs/runbooks/cloud-dedicated-host.md). Never unset it once
+# set: a plain restart keeps flannel.1 at the old MTU. Undo by setting the Cloud
+# network's 1450, which is what flannel derives when unset.
+k3s_flannel_mtu: null
 # flannel.1 and every pod run below k3s_flannel_mtu by VXLAN's overhead, which
 # flannel fixes at 50 bytes (encapOverhead in its vxlan backend).
 k3s_flannel_pod_mtu: "{{ k3s_flannel_mtu | int - 50 }}"
 k3s_flannel_conf_path: /etc/rancher/k3s/flannel-net-conf.json
+# The pod network: K3s's own default. The server's cluster-cidr and the flannel
+# configuration both render it, and only with k3s_flannel_mtu, so that adding
+# it restarts no server outside the MTU rollout.
+k3s_cluster_cidr: 10.42.0.0/16
+k3s_vswitch_hosts: >-
+  {{ groups['hosted_nodes'] | default([]) | map('extract', hostvars)
+     | selectattr('k3s_private_link', 'defined') | selectattr('k3s_private_link', 'equalto', 'vswitch')
+     | map(attribute='inventory_hostname') | list }}
+k3s_smallest_link_mtu: >-
+  {{ ([k3s_cloud_network_mtu] + ([k3s_vswitch_mtu] if k3s_vswitch_hosts else [])
+      + ([k3s_wireguard_mtu] if k3s_wireguard_hosts else [])) | min }}
 
 # server: the one cluster-init server (hosted_nodes outside k3s_agents).
 # agent: a node in k3s_agents. Derived from group membership, so no play can

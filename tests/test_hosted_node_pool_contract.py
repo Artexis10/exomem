@@ -850,6 +850,159 @@ def test_the_pod_network_and_flannel_mtu_render_from_one_place(tmp_path: Path) -
     assert install["ansible.builtin.template"]["dest"] == "{{ k3s_flannel_conf_path }}"
 
 
+def test_an_unset_flannel_mtu_adds_nothing_a_restart_would_apply(tmp_path: Path) -> None:
+    # The role's default. Catches a routine deploy that restarts K3s on every
+    # node: a new key in either config restarts it, and flannel-conf would
+    # also recreate flannel.1.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    rendered = {name: tmp_path / name for name in ("server.yaml", "agent.yaml")}
+    play = tmp_path / "render.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {
+            "k3s_server_token": "s" * 32, "k3s_agent_token": "a" * 32, "k3s_agent_join_token": "test-token",
+            "private_node_ip": "10.0.0.2", "k3s_server_private_ip": "10.0.0.1",
+            "k3s_resolved_private_interface": "eth0",
+        }},
+        *({"ansible.builtin.template": {"src": str(K3S_ROLE / "templates" / source), "dest": str(rendered[name]),
+                                        "mode": "0600"}}
+          for source, name in (("config.yaml.j2", "server.yaml"), ("agent-config.yaml.j2", "agent.yaml"))),
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+    server, agent = _yaml(rendered["server.yaml"]), _yaml(rendered["agent.yaml"])
+    assert "flannel-conf" not in server and "cluster-cidr" not in server
+    assert "flannel-conf" not in agent
+
+
+@pytest.mark.parametrize(
+    "groups,mtu,refused",
+    [
+        # Today's fleet: nothing set, nothing joined over a dedicated link.
+        (_TERRAFORM_ONLY, None, False),
+        (_WITH_DEDICATED, 1400, False),
+        # 1450 fits the Cloud network but not the vSwitch host's 1400 link.
+        (_WITH_DEDICATED, 1450, True),
+        # A dedicated host joining while flannel sends 1450-byte packets.
+        (_WITH_DEDICATED, None, True),
+        # A quoted value would render, but never compare as a number.
+        (_TERRAFORM_ONLY, "1400", True),
+    ],
+)
+def test_the_flannel_mtu_must_fit_every_link_in_use(
+    tmp_path: Path, groups: dict, mtu: int | str | None, refused: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    check = next(task for task in _yaml(K3S_ROLE / "tasks/validate.yml")
+                 if task["name"] == "Validate the flannel MTU against the links in use")
+    play = tmp_path / "mtu.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-alpha", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {"k3s_flannel_mtu": mtu}},
+        check,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if refused:
+        assert result.returncode != 0 and "k3s_flannel_mtu must be unset or an integer" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_the_role_refuses_to_unset_a_flannel_mtu_it_applied(tmp_path: Path, installed: bool) -> None:
+    # Unset after a rollout, K3s writes its own configuration and a restart
+    # keeps flannel.1 at the role's MTU: a split MTU that nothing reports.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    conf = tmp_path / "flannel-net-conf.json"
+    if installed:
+        conf.write_text("{}", encoding="utf-8")
+    checks = [task for task in _yaml(K3S_ROLE / "tasks/validate.yml") if task["name"] in (
+        "Look for a flannel configuration the role installed",
+        "Refuse to unset a flannel MTU the role applied",
+    )]
+    assert len(checks) == 2
+    play = tmp_path / "unset.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {"k3s_flannel_conf_path": str(conf)}},
+        *checks,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if installed:
+        assert result.returncode != 0 and "never by unsetting it" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "rc,lines,recreates",
+    [
+        (0, ["1350", "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1350"], False),
+        # A run that failed, or lost its notification, after the configuration
+        # changed: the device still runs at the old MTU.
+        (0, ["1400", "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1400"], True),
+        # No flannel.1 yet: K3s creates it from the configuration at start.
+        (1, ["FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1400"], False),
+    ],
+)
+def test_each_run_recreates_a_flannel_device_left_at_another_mtu(
+    tmp_path: Path, rc: int, lines: list[str], recreates: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    drift = next(task for task in _yaml(K3S_ROLE / "tasks/main.yml")
+                 if task["name"] == "Recreate a flannel device that runs at another MTU")
+    play = tmp_path / "drift.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        # What the read before it found on the node.
+        "vars": {"k3s_flannel_running": {"rc": rc, "stdout_lines": lines}, "recreates": recreates},
+        "tasks": [
+            {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+            {"ansible.builtin.set_fact": {"k3s_flannel_mtu": 1400}},
+            # The play has no handlers; the result shows whether it would notify.
+            {key: value for key, value in drift.items() if key != "notify"},
+            {"ansible.builtin.assert": {"that": ["(k3s_flannel_drift is changed) == recreates"]}},
+        ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("rotation", ["keeps the token", "changes the token", "never runs"])
+def test_the_resave_helper_reports_any_change_to_the_server_token(tmp_path: Path, rotation: str) -> None:
+    # An empty or different --new-token rotates the real server token, and a
+    # server restarted on a changed token no longer finds its bootstrap data.
+    token = tmp_path / "token"
+    token.write_text("" if rotation == "never runs" else "K10invented::server:invented\n", encoding="utf-8")
+    ran = tmp_path / "k3s-ran"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "k3s"
+    stub.write_text(f"#!/bin/sh\ntouch {ran}\n"
+                    + (f"echo K10invented::server:other > {token}\n" if rotation == "changes the token" else ""),
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    helper = tmp_path / "helper.sh"
+    helper.write_text(_read(K3S_ROLE / "files/exomem-k3s-resave-bootstrap.sh").replace(
+        "/var/lib/rancher/k3s/server/token", str(token)), encoding="utf-8")
+    result = subprocess.run(["sh", str(helper)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    if rotation == "keeps the token":
+        assert result.returncode == 0 and "the server token is unchanged" in result.stdout, result.stderr
+    elif rotation == "changes the token":
+        assert result.returncode != 0 and "Do not restart K3s" in result.stderr
+    else:
+        assert result.returncode != 0 and "refused" in result.stderr and not ran.exists()
+
+
 @pytest.mark.parametrize(
     "device,subnet_env,passes",
     [
@@ -873,6 +1026,7 @@ def test_the_flannel_handler_refuses_a_node_left_at_the_old_mtu(
         "vars": {"k3s_flannel_observed": {"rc": 0, "stdout_lines": [
             device, "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_SUBNET=10.42.1.1/24", subnet_env]}},
         "tasks": [{"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+                  {"ansible.builtin.set_fact": {"k3s_flannel_mtu": 1400}},
                   {key: value for key, value in check.items() if key != "listen"}]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
@@ -1272,7 +1426,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
         "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
-        "k3s_flannel_conf_path": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_conf_path"],
+        "k3s_flannel_mtu": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_mtu"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),

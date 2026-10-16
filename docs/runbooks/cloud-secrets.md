@@ -258,8 +258,9 @@ Escrowing it activates nothing. Activate v1 in a reviewed commit that adds
 below (see `cloud-node-pool.md`). The first run with it restarts the K3s
 server with a new agent token. Save the bootstrap data again straight after
 that run, as in steps 4 to 6 of
-[Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token);
-otherwise the server's next start stops with `cred/passwd newer than datastore`.
+[Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token), with
+step 6's first-selection credentials. Otherwise the server's next start stops
+with `cred/passwd newer than datastore`.
 
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.

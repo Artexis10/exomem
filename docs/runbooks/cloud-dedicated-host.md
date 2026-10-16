@@ -109,12 +109,12 @@ it cannot administer over NetBird.
 
 ## Choose the private link
 
-Precondition for either link: every node runs flannel at the k3s role's
-`k3s_flannel_mtu` of 1400, so VXLAN packets are 1400 bytes. A vSwitch carries
-at most 1400, and the role's WireGuard interface 1420. A node converged before
-the role set this MTU sends 1450-byte VXLAN packets, which a dedicated agent
-never receives. Roll the MTU out first, as in
-[Roll out the flannel MTU](#roll-out-the-flannel-mtu).
+Precondition for either link: every node runs flannel at a `k3s_flannel_mtu`
+of 1400, so VXLAN packets are 1400 bytes. A vSwitch carries at most 1400, and
+the role's WireGuard interface 1420. Until the MTU is set, flannel takes the
+Cloud interface's 1450, and a dedicated agent never receives those packets. The
+role refuses a vSwitch or WireGuard host until the MTU is set, so roll it out
+first, as in [Roll out the flannel MTU](#roll-out-the-flannel-mtu).
 
 - **Hetzner dedicated: vSwitch.** Create the vSwitch in Robot, attach the
   server, and set the foundation variable. Plan and apply as usual. This adds
@@ -136,31 +136,42 @@ never receives. Roll the MTU out first, as in
 ## Roll out the flannel MTU
 
 Run this once per cluster, before the first dedicated join, in an operator
-window. The `site.yml` run that first installs the role's flannel configuration
-on a node recreates the node's `flannel.1`: it stops K3s, deletes the device and
-starts K3s. A plain restart would keep the old MTU. Cell pods keep running
-while K3s is stopped. The run then fails unless `flannel.1` and `FLANNEL_MTU`
-in `/run/flannel/subnet.env` both read 1350, which is 1400 less VXLAN's 50
-bytes.
+window. The k3s role leaves `k3s_flannel_mtu` unset, and installs no flannel
+configuration while it is unset. The rollout is a reviewed commit that sets
+`k3s_flannel_mtu: 1400` in `infra/ansible/roles/k3s/defaults/main.yml`. 1400 is
+`k3s_vswitch_mtu`, the smallest dedicated link.
 
-Do not start a platform deploy or a cell image release during the window.
+A node's first `site.yml` run with the value installs the flannel
+configuration. It adds `flannel-conf` to the node's K3s configuration, and
+`cluster-cidr` on the server. It then recreates `flannel.1`: it stops K3s,
+deletes the device and starts K3s. A plain restart would keep the old MTU. Cell
+pods keep running while K3s is stopped. The run fails unless `flannel.1` and
+`FLANNEL_MTU` in `/run/flannel/subnet.env` both read 1350, which is 1400 less
+VXLAN's 50 bytes.
 
-1. Converge the server first, with the inventory and variables of
-   [Add the host](#add-the-host): `infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}" -- --limit exomem-alpha`.
-2. If the cluster has agents, converge one canary agent: end the same command with `-- --limit 'exomem-alpha,<agent>'`. An agent's run needs the server's facts from the same run; the server reports no change.
-3. Converge each other agent the same way, one at a time.
-4. On each node, read the MTU: `ssh exomem-admin@<node> 'cat /sys/class/net/flannel.1/mtu; grep FLANNEL_MTU /run/flannel/subnet.env'`.
-5. Restart the platform Deployments, so their pods take the new MTU: `kubectl rollout restart deployment --namespace exomem-cloud`, then the same for `exomem-platform` and `exomem-edge`.
+1. Check that every node's pod range is inside the role's `k3s_cluster_cidr`, `10.42.0.0/16`: `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.spec.podCIDR}{"\n"}{end}'`. If a range is outside it, stop: the role's value does not match the cluster.
+2. Do not start a platform deploy or a cell image release until the last step is done.
+3. Merge the reviewed commit only now: after the merge, every `site.yml` run, the deploy gate included, rolls the MTU out on each node it reaches.
+4. Converge the server, with the inventory and variables of [Add the host](#add-the-host): `infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}" -- --limit exomem-alpha`.
+5. If the cluster has agents, converge one canary agent, then each other agent, one at a time. End the same command with `-- --limit 'exomem-alpha,<agent>'`: an agent's run needs the server's facts from the same run, and the server reports no change.
+6. On each node, read the MTU: `ssh exomem-admin@<node> 'cat /sys/class/net/flannel.1/mtu; grep FLANNEL_MTU /run/flannel/subnet.env'`.
+7. If the cluster has agents, restart the pods that run on the pod network, so that they take the new MTU. In each of `kube-system`, `exomem-platform`, `exomem-cloud` and `exomem-edge`, run `kubectl rollout restart deployment --namespace <namespace>`, then the same for `daemonset` and `statefulset`. Then restart each cell in turn: `kubectl --namespace exo-cell-<id> delete pod cell-0`.
 
-Expected result: each run reports the handler "Require flannel.1 and new pods at
-the configured MTU" as passed, and step 4 prints `1350` and `FLANNEL_MTU=1350`
-on every node. Pods that started before their node's run keep the old MTU
-until they restart; cells take the new one at their next restart.
+Expected result: each run reports "Require flannel.1 and new pods at the
+configured MTU" as passed, and step 6 prints `1350` and `FLANNEL_MTU=1350` on
+every node. A pod that started before its node's run keeps the old MTU until it
+restarts, which matters only for traffic to a pod on another node. With the
+server as the only node, which is production until an agent token is
+selected, no pod traffic crosses nodes, so step 7 has nothing to do.
+
+If a run fails at that check, run the same command again. Every run reads each
+node's `flannel.1`, and recreates it while it runs at another MTU.
 
 To undo while no dedicated node is joined, set `k3s_flannel_mtu: 1450`, the
-Cloud network's MTU, in `group_vars/hosted_nodes.yml` and repeat steps 1 to 5.
-Flannel then sends 1450-byte packets again, as it did when it took its MTU
-from the Cloud interface. A dedicated agent cannot receive them.
+Cloud network's MTU, in a reviewed commit, and repeat steps 4 to 7. Flannel
+then sends 1450-byte packets again, as it did with the value unset. The role
+refuses 1450 once a vSwitch or WireGuard host is in the inventory, and it
+refuses to unset the value once it has applied one.
 
 ## Add the host
 
@@ -214,7 +225,7 @@ and that Tang still unlocks it.
 If this run is the first with an agent token selected, it restarts the K3s
 server with that token. Run steps 4 to 6 of
 [Rotate the agent token](#rotate-the-agent-token) straight after it, before
-anything else restarts the server.
+anything else restarts the server, with step 6's first-selection credentials.
 
 A WireGuard host's public key goes in the host list, so that a run limited to
 the server can configure the host as a peer without reaching it. After the
@@ -338,6 +349,8 @@ After the last `site.yml` run, every peer holds the host's new public key and th
 The removed disk held the old WireGuard key and the agent token
 (`/etc/rancher/k3s/config.yaml`) unencrypted. Unless the provider confirms
 that it destroyed the disk, [rotate the agent token](#rotate-the-agent-token).
+The rotation does not revoke the agent's kubelet client certificate, which the
+same disk held: see [What a lost disk still exposes](#what-a-lost-disk-still-exposes).
 
 ## Remove the host
 
@@ -371,7 +384,9 @@ node has also stopped `wg-quick@wgexomem` and removed its configuration and
 key. After step 5, `nvme format` has completed on both disks. The WireGuard
 key and the agent token were only on those disks.
 [Rotate the agent token](#rotate-the-agent-token) unless the wipe is confirmed:
-`blkdiscard` and an empty `blkid --probe` do not prove erasure.
+`blkdiscard` and an empty `blkid --probe` do not prove erasure. The rotation does
+not revoke the agent's kubelet client certificate, which the same disks held:
+see [What a lost disk still exposes](#what-a-lost-disk-still-exposes).
 
 ## Rotate the agent token
 
@@ -383,8 +398,8 @@ restarts the server.
 That restart leaves etcd with the old copy of `server/cred/passwd`, because
 K3s saves its bootstrap data at start only when etcd holds none. The server's
 next start would then stop with `cred/passwd newer than datastore`. Step 4 saves
-the data again. The `k3s-link` mode of the `Cloud rehearsal` workflow rehearses
-these steps.
+the data again. The `Cloud k3s-link rehearsal` workflow rehearses the K3s side of these steps
+on a disposable cluster.
 
 1. Escrow the next version, here v2, to both destinations. Keep v1 for the undo:
 
@@ -400,10 +415,13 @@ these steps.
 3. Run `site.yml` as in [Add the host](#add-the-host). The server restarts with v2, then each agent restarts with it.
 4. Save the bootstrap data again on the server. Do not replace the helper with a typed `k3s token rotate`: an empty or wrong `--new-token` rotates the server token. Run `ssh exomem-admin@<server> 'sudo /usr/local/sbin/exomem-k3s-resave-bootstrap'`.
 5. Restart the server: `ssh exomem-admin@<server> 'sudo systemctl restart k3s && sudo k3s kubectl get --raw=/readyz'`.
-6. Present each token alone to the server. The token travels from SOPS over SSH, and `curl` reads it from stdin. Run this for v1, then for v2:
+6. Present the old credential, then the new token, each alone, to the server. Each travels from SOPS over SSH, and `curl` reads it from stdin. Set `escrow` to each escrow file in turn, and run the command:
+   - for a rotation from v1 to v2, the old credential is `infra/secrets/escrow/k3s-agent-token.v1.sops.json`, and the new token is `k3s-agent-token.v2.sops.json`;
+   - for the first selection of an agent token, the old credential is the selected server token's escrow file, for example `k3s-server-token.v1.sops.json`, because agents used the server token until an agent token was set. The new token is `k3s-agent-token.v1.sops.json`.
 
    ```bash
-   sops decrypt --extract '["token"]' infra/secrets/escrow/k3s-agent-token.v1.sops.json \
+   escrow=infra/secrets/escrow/k3s-agent-token.v1.sops.json
+   sops decrypt --extract '["token"]' "$escrow" \
      | ssh exomem-admin@<server> 'read -r token; printf "user = \"node:%s\"\n" "$token" \
        | sudo curl -sS -o /dev/null -w "%{http_code}\n" -K - \
          --cacert /var/lib/rancher/k3s/server/tls/server-ca.crt https://127.0.0.1:6443/v1-k3s/readyz'
@@ -411,11 +429,23 @@ these steps.
 
 Expected result: step 4 prints `bootstrap data saved again; the server token is
 unchanged`. Step 5 prints `ok`, and `kubectl get nodes` shows every node Ready.
-Step 6 prints `401` for v1 and `200` for v2; repeat it if it prints `503`,
-which means the server is still starting. A Ready agent does not prove the new
-token, because a joined agent also authenticates with its kubelet client
-certificate. The rotation does not revoke that certificate, so a lost disk's
-certificate stays valid until it expires.
+Step 6 prints `401` for the old credential and `200` for the new token. Repeat
+it if it prints `503`, which means the server is still starting. A Ready agent
+does not prove the new token, because a joined agent also authenticates with
+its kubelet client certificate.
+
+If step 4 reports that the server token changed, do not restart K3s. With the
+old token in its configuration, the server would no longer find its bootstrap
+data in etcd. While the server runs, rotate the token back to the escrowed
+server token, then run step 4 again:
+
+```bash
+sops decrypt --extract '["token"]' infra/secrets/escrow/k3s-server-token.v1.sops.json \
+  | ssh exomem-admin@<server> 'read -r token; test -n "$token" && sudo k3s token rotate --new-token "$token"'
+```
+
+If step 4 reports that `k3s token rotate` failed and the token is unchanged,
+run step 4 again.
 
 If the server stops with `newer than datastore` before step 4, remove the file
 it names: `sudo rm /var/lib/rancher/k3s/server/cred/passwd`. Then run
@@ -423,3 +453,20 @@ it names: `sudo rm /var/lib/rancher/k3s/server/cred/passwd`. Then run
 
 To undo, select v1 again in a reviewed commit and repeat steps 3 to 6, with the
 expected codes swapped.
+
+### What a lost disk still exposes
+
+The rotation closes the agent token, not the other credentials on the disk.
+The disk also held the agent's kubelet client certificate and key, under
+`/var/lib/rancher/k3s/agent/`, and its node password,
+`/etc/rancher/node/password`. K3s keeps accepting that certificate after the
+rotation. With it, a caller can get new kube-proxy and k3s-controller client
+certificates from the server. While the host's Node still exists, the
+certificate and the node password also get a new kubelet certificate.
+
+Expiry is therefore no remedy: until a removed host's certificate expires, it
+can get other new certificates, and a host still in the cluster renews its own. Only a
+rotation of the cluster's client CA closes the exposure, and this runbook does
+not cover it yet. The host firewall admits port 6443 only from the other
+inventoried nodes' private addresses, which limits who can use these
+credentials.
