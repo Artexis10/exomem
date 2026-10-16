@@ -2035,6 +2035,9 @@ def test_a_residue_adoption_keeps_reads_refusing_until_the_repair_lands(
     )
     assert set(deferred_index.list_graph_paths(root)) == set(adoption.residue)
 
+    # The watcher publishes the edit it observed: a drain derives only bytes
+    # the registry records, so the repair waits for that publication.
+    freshness.on_files_changed(root, changed=[page])
     for _ in range(12):
         if not deferred_index.list_graph_paths(root):
             break

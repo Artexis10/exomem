@@ -397,7 +397,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   title until its own receipt drains, or widen on it when the pass changes it.
   Since 9.2, a replayed page whose rows such a drain already rewrote proves current and
   is dropped, so the whole-vault replay no longer heals its old-title dependants by
-  accident.
+  accident. 10.2 narrows this without closing it: see 10.4.
 - [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
   page that is on disk with no row (or a differing row) and not queued as explained, so a
   drain can derive an edge to it. If that page is deleted, or retitled and back, before
@@ -464,3 +464,42 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   even when the graph is unavailable and a graph receipt is still queued (a request
   replay deferral, or the external-pending door). Report `pending` while graph
   receipts for the committed generation remain queued or availability is withdrawn.
+
+## 10. A drain derives only bytes its resolver has seen
+
+- [x] 10.1 Red tests in `tests/test_graph_deferred_queue.py`, each driven by a canonical
+  batch committed before its fan-out and a corpus publication that lands inside the
+  drain's pass. Results on the base: a raced retitle left the old title's linker with
+  its edge and the new title's linker with none; a raced create cost one whole-vault
+  pass (`existing_row_with_create`); a create a drain acknowledged first cost one
+  whole-vault pass through the write's own dispatch (`caller_create_outside_delta`).
+- [x] 10.2 Under the writers' boundary, a drain proves every batch page against the
+  registry map bound to its resolver's checkpoint, before the pass and again at commit.
+  A page that the map does not record as the disk has it lands nothing, and the drain
+  returns `moved` (`outcome=bytes_ahead_of_checkpoint`). The queue rotates a moved
+  batch's receipts and does not replay each receipt alone. A write's dispatch that finds
+  the graph readable takes the checkpoint when its pages are exactly that checkpoint's
+  batch and the replay currency proof finds their rows current. The refresh's
+  acknowledged no-op then applies. The checkpoint binding check is one helper that the
+  refresh and the dispatch share.
+- [x] 10.3 Evidence: the three 10.1 tests fail on the base. With the drain proof
+  reverted, the retitle and create tests fail again; with the dispatch routing
+  reverted, the acknowledged-first test fails. A fourth test, a reconcile reprojection
+  of the last written batch with stale unit rows, passes on the base and fails when the
+  dispatch routing skips the row currency proof. Two existing tests changed only their
+  setup and still pass on the base. The late-registry-update test lands its update as a
+  stat-only change, because a drain no longer acknowledges bytes the registry has not
+  recorded. The residue-adoption test publishes the watcher's event before it drains.
+  Scoped suites (graph, standby, drain, index_sync, file watcher, media, episode,
+  semantic-unit and records-recall modules): 62 modules, 1925 passed, 26 skipped,
+  0 failed.
+- [ ] 10.4 **Open, not fixed here.** 10.2 does not close 8.9. A drain still rewrites an
+  affected page whose retitle the registry already records and that the batch did not
+  queue, after a `DRAIN_LIMIT` truncation, a path-scoped drain, or a receipt queued
+  after the snapshot. A probe on 10.2 left the old title's linker with its edge to the
+  retitled page. Two whole-vault doors also remain on this race, both reproduced by a
+  probe on 10.2. First, a dispatch that finds its generation acknowledged while a later
+  registry update left the marker stale registers a rebuild from the predecessor probe
+  (`graph_sync_predecessor_mismatch`, or `graph_sync_predecessor_present_at_genesis` at
+  generation 1). Second, a created page that a drain derived correctly but withheld
+  still declines the write's refresh (`existing_row_with_create`).

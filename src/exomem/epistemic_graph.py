@@ -5798,40 +5798,11 @@ class EpistemicGraphIndex:
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
 
         if graph_checkpoint is not None:
-            durable_checkpoint = graph_sync.read_checkpoint(self.vault_root)
-            expected_paths: list[tuple[str, str | None]] = []
-            for path in paths:
-                rel = _vault_rel(self.vault_root, path)
-                if rel is None:
-                    return fallback("path_outside_vault")
-                try:
-                    expected_paths.append(
-                        (
-                            rel,
-                            vault_module.content_hash(
-                                vault_module.read_bytes_without_pinning(path).decode("utf-8")
-                            ),
-                        )
-                    )
-                except (OSError, UnicodeDecodeError):
-                    return fallback("path_unreadable")
-            expected_created = sorted(
-                rel
-                for path in created_paths
-                if (rel := _vault_rel(self.vault_root, Path(path))) is not None
+            refused = _checkpoint_binding_refusal(
+                self.vault_root, graph_checkpoint, paths, created_paths, fallback
             )
-            # Named individually rather than as one disjunction: these are the
-            # four candidate gates the incident could not choose between, and a
-            # single "receipt binding mismatch" line would have left the same
-            # question open.
-            if durable_checkpoint != graph_checkpoint:
-                return fallback("durable_checkpoint_moved")
-            if graph_checkpoint.scope != "paths":
-                return fallback("checkpoint_scope_is_not_paths")
-            if graph_checkpoint.paths != tuple(sorted(expected_paths)):
-                return fallback("checkpoint_paths_mismatch")
-            if graph_checkpoint.created_paths != tuple(expected_created):
-                return fallback("checkpoint_created_paths_mismatch")
+            if refused is not None:
+                return refused
         snapshot = self._open_read_snapshot(require_current_projection=False)
         if snapshot is None:
             return fallback("graph_snapshot_unavailable")
@@ -6221,6 +6192,37 @@ class EpistemicGraphIndex:
                 )
         return stored == expected
 
+    def _registry_records_disk(
+        self, entries: dict[str, freshness.FileSignature], path: Path
+    ) -> bool:
+        """Whether `entries`, a recall registry map, holds `path` as the disk has it.
+
+        `path` is spelled under the vault's own root, as the registry keys it.
+        The registry never lists a page recall does not admit, and the graph
+        holds no rows for one, so such a page matches by its absence. Raises
+        `OSError` when an admitted page cannot be statted.
+        """
+        exists = os.path.lexists(path)
+        if exists and not recall_policy.is_recall_candidate(self.vault_root, path):
+            return True
+        return entries.get(str(path)) == (freshness.stat_signature(path) if exists else None)
+
+    def _registry_describes(
+        self, entries: dict[str, freshness.FileSignature], paths: Iterable[Path]
+    ) -> bool:
+        """Whether the registry map `entries` holds every page in `paths` as the disk has it."""
+        for path in paths:
+            rel = _vault_rel(self.vault_root, path)
+            if rel is None:
+                # Outside the vault: no row derives from it.
+                continue
+            try:
+                if not self._registry_records_disk(entries, self.vault_root / rel):
+                    return False
+            except OSError:
+                return False
+        return True
+
     def _replayed_path_currency(
         self, paths: list[Path]
     ) -> tuple[list[str], list[str]] | None:
@@ -6257,18 +6259,10 @@ class EpistemicGraphIndex:
                 path = self.vault_root / rel
                 exists = os.path.lexists(path)
                 admitted = exists and recall_policy.is_recall_candidate(self.vault_root, path)
-                if exists and not admitted:
-                    # The registry never lists a page recall does not admit, and
-                    # the graph holds no rows for one.
-                    recorded_matches = True
-                else:
-                    recorded = entries.get(str(path))
-                    try:
-                        on_disk = freshness.stat_signature(path) if exists else None
-                    except OSError:
+                try:
+                    if not self._registry_records_disk(entries, path):
                         return None
-                    recorded_matches = recorded == on_disk
-                if not recorded_matches:
+                except OSError:
                     return None
                 row = conn.execute(
                     "SELECT source_hash FROM graph_nodes WHERE path = ? AND kind = 'file'",
@@ -6448,6 +6442,12 @@ class EpistemicGraphIndex:
         revision, which this drain's compare-and-swap clear cannot retire. Only
         a page this pass indexed moving under it rolls the pass back; movement
         elsewhere keeps the proven rows and withholds the publication.
+
+        Proving a row against its own bytes is not enough on its own: the
+        resolver it was derived under must have seen those bytes too. A batch
+        whose pages the resolver's checkpoint does not record as the disk has
+        them -- a write whose bytes landed before its corpus publication --
+        lands nothing and returns `moved`.
         """
         report: dict[str, Any] = {
             "indexed_files": 0,
@@ -6484,8 +6484,16 @@ class EpistemicGraphIndex:
             # Cache-only admission avoids a policy reprojection under the lock.
             # Preserve the drain's existing external-pending semantics: queued
             # paths can repair their own fence before the watcher dispatches it.
+            # The map is the one the resolver's checkpoint describes; the batch
+            # is proved against it below.
+            try:
+                live, recorded = freshness.recall_projection_snapshot(
+                    self.vault_root, "vault", allow_fallback=False
+                )
+            except freshness.RecallProjectionUnavailable:
+                live, recorded = None, {}
             if (
-                freshness.live_recall_checkpoint(self.vault_root, "vault") != checkpoint
+                live != checkpoint
                 or freshness.external_pending_epoch(self.vault_root) != external_epoch
             ):
                 log.info("deferred graph drain outcome=moved_before_pass queued=%d", len(paths))
@@ -6520,6 +6528,14 @@ class EpistemicGraphIndex:
             if affected is None:
                 return {**report, "requires_rebuild": 1}
             batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
+            if not self._registry_describes(recorded, batch):
+                # A write's bytes land before its corpus publication; rows derived
+                # here would come from a resolver that never saw them.
+                log.info(
+                    "deferred graph drain outcome=bytes_ahead_of_checkpoint queued=%d",
+                    len(paths),
+                )
+                return {**report, "moved": 1}
             indexed_versions: dict[str, GraphSourceSignature] = {}
             published = False
             # For the outcome line: what the batch covered of the committed
@@ -6539,9 +6555,13 @@ class EpistemicGraphIndex:
                 # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
                 # rather than here.
                 nonlocal published, withheld, coverage
-                if not self._source_versions_current(indexed_versions):
-                    # A page this pass indexed moved under it: those rows are
-                    # stale, so nothing here may land.
+                if not (
+                    self._source_versions_current(indexed_versions)
+                    and self._registry_describes(recorded, batch)
+                ):
+                    # A page this pass indexed moved under it, or the disk moved
+                    # past the resolver's checkpoint after the check above: those
+                    # rows are stale, so nothing here may land.
                     raise _DrainPublicationMoved
                 # Read at commit time, not before the pass: the coverage claim
                 # has to be about the generation that is committed now, not
@@ -6556,8 +6576,9 @@ class EpistemicGraphIndex:
                     withheld = "external_epoch"
                 if withheld is not None:
                     # The vault moved elsewhere under the pass. Every row it
-                    # wrote is proven against its own bytes, so the rows land
-                    # and their receipts retire; the movement queued its own.
+                    # wrote is proven against its own bytes, which the
+                    # resolver's checkpoint describes, so the rows land and
+                    # their receipts retire; the movement queued its own.
                     # The marker, lineage and acknowledgement describe the whole
                     # projection, and wait for a drain it holds still for.
                     #
@@ -9715,6 +9736,55 @@ def _record_graph_repair_demand(
     return {receipt.rel_path for receipt in receipts} == set(scope)
 
 
+def _checkpoint_binding_refusal(
+    vault_root: Path,
+    checkpoint: graph_sync.GraphSyncCheckpoint,
+    paths: Iterable[Path],
+    created_paths: Iterable[Path],
+    fallback: Callable[[str], Any],
+) -> Any:
+    """`fallback(reason)` when these pages are not exactly `checkpoint`'s batch, else None.
+
+    The batch is the durable checkpoint, its path scope, its changed pages with
+    their current content hashes, and its created pages. The parameter keeps the
+    name `fallback` so the disposition table's source scan finds every reason.
+    """
+    durable_checkpoint = graph_sync.read_checkpoint(vault_root)
+    expected_paths: list[tuple[str, str | None]] = []
+    for path in paths:
+        rel = _vault_rel(vault_root, path)
+        if rel is None:
+            return fallback("path_outside_vault")
+        try:
+            expected_paths.append(
+                (
+                    rel,
+                    vault_module.content_hash(
+                        vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                    ),
+                )
+            )
+        except (OSError, UnicodeDecodeError):
+            return fallback("path_unreadable")
+    expected_created = sorted(
+        rel
+        for path in created_paths
+        if (rel := _vault_rel(vault_root, Path(path))) is not None
+    )
+    # Named individually rather than as one disjunction: these are the four
+    # candidate gates the incident could not choose between, and a single
+    # "receipt binding mismatch" line would have left the same question open.
+    if durable_checkpoint != checkpoint:
+        return fallback("durable_checkpoint_moved")
+    if checkpoint.scope != "paths":
+        return fallback("checkpoint_scope_is_not_paths")
+    if checkpoint.paths != tuple(sorted(expected_paths)):
+        return fallback("checkpoint_paths_mismatch")
+    if checkpoint.created_paths != tuple(expected_created):
+        return fallback("checkpoint_created_paths_mismatch")
+    return None
+
+
 def upsert_after_write(
     vault_root: Path,
     written_paths: list[Path],
@@ -9887,10 +9957,30 @@ def upsert_after_write(
                     mutation_coordinator,
                 )
             return GraphDispatchResult("completed", "incremental_completed", required)
+        # Readable under a durable checkpoint means a drain already acknowledged
+        # it. Without the checkpoint, this write's late refresh finds its pages
+        # outside the empty delta and rebuilds the vault. The row proof keeps a
+        # reprojection of stale rows on that refresh.
+        acknowledged_batch: dict[str, graph_sync.GraphSyncCheckpoint] = {}
+        if (
+            required is not None
+            and not replayed
+            and _checkpoint_binding_refusal(
+                vault_root, required, written_paths, created, lambda reason: reason
+            )
+            is None
+        ):
+            currency = index._replayed_path_currency(
+                list(dict.fromkeys([*written_paths, *created]))
+            )
+            if currency is not None and not currency[1]:
+                acknowledged_batch["graph_checkpoint"] = required
         report = (
-            index.refresh_paths(written_paths, created_paths=created, **replay)
+            index.refresh_paths(
+                written_paths, created_paths=created, **acknowledged_batch, **replay
+            )
             if created
-            else index.refresh_paths(written_paths, **replay)
+            else index.refresh_paths(written_paths, **acknowledged_batch, **replay)
         )
         if (
             required is not None

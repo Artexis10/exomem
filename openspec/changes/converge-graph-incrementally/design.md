@@ -417,3 +417,33 @@ recorded. The second case is the ordinary queued-work case, which the drain repa
 its own widening. Only a page the registry does not vouch for keeps the whole-vault
 fallback. No schema change: the file rows already store the source hash, and the
 registry already holds each page's stat signature.
+
+## Addendum: a drain derives only bytes its resolver has seen
+
+A canonical batch enqueues its graph receipts before it commits, and its fan-out
+publishes the corpus delta after the commit, outside the writers' boundary. A drain that
+wakes in between samples a recall checkpoint and a resolver from before the batch, then
+reads the batch's new bytes from disk. Each row is proved against its own bytes, so the
+rows landed. They were derived under a resolver that never saw those bytes. For a
+retitle, the write's own refresh then found the new title already stored, saw no
+topology change, and published stale edges as current. For a created page, the refresh
+found a row for a page it had created and rebuilt the whole vault.
+
+The drain therefore proves its batch against the registry map bound to its resolver's
+checkpoint, under the writers' boundary, before the pass and again at commit. A page
+whose stat signature that map does not record, a deleted page that it still lists, or a
+created page that it lacks, lands nothing and leaves the receipts queued. The proof
+reads one stat per batch page and copies the map once. Serializing the drain against
+the writer's fan-out was the alternative; it adds shared state and a liveness risk, and
+this proof needs neither. The cost is a drain that retries while one writer keeps
+rewriting the same pages. That retry is bounded by the queue's existing stall
+escalation.
+
+The other order of the same race is a drain that runs after the publication. It
+acknowledges the write's generation before the write's graph step runs, and that step
+then finds the graph readable. Before this addendum it refreshed with no checkpoint,
+found its created page outside the empty delta, and rebuilt the vault. It now takes the
+checkpoint when its pages are exactly that checkpoint's batch and their rows already
+reflect them, so the refresh's acknowledged no-op applies. The row proof is the replay
+currency proof. Without it, a reconcile reprojection of the last written batch would
+become a no-op and leave stale unit rows.
