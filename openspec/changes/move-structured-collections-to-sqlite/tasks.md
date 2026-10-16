@@ -152,18 +152,22 @@ October 4 private runtime/create foundation: independent review approves current
 
 ## P2. Rendered views and edit-back
 
-- [ ] P2.1 Red: synchronous item, manifest and held views.
+- [x] P2.1 Red: synchronous item, manifest and held views.
   - A crash before commit leaves no view ahead of the store.
   - A crash after commit re-renders on restart.
   - `get_page` right after an acknowledged append returns the new values.
   - A simulated Windows rename failure keeps the mutation committed with a `projection_pending` warning.
   - No audit markers or heads are rendered, and values and body are exact.
-- [ ] P2.1b Red, check-then-swap (A1):
+  Evidence: `tests/test_collection_store_views.py::test_failed_commit_does_not_publish_proposed_view`, `::test_restart_recovers_committed_stage_and_removes_only_orphan_staging[before_install]`, `::test_successive_installs_accept_previous_pending_view` and `::test_blocked_install_warns_without_changing_canonical_receipt`; `tests/test_collection_store_writer.py::test_acknowledged_item_is_readable_with_sources_and_exact_body`; `tests/test_collection_store_edit_back.py::test_views_render_no_file_mode_audit_marker_or_head`, shown red with a manifest view that kept a migrated audit head. The earlier tests exist without a red-before-green record.
+- [x] P2.1b Red, check-then-swap (A1):
   - an agent update landing inside the 2 s settle window, with no watcher running, or after an offline edit, holds the human's bytes as `VIEW_CONFLICT` and loses nothing;
   - a file created between the aside rename and the install is not replaced (no-clobber, N2);
   - the startup reconcile classifies offline edits before the projector runs.
+  Evidence: `tests/test_collection_store_views.py::test_human_edit_survives_reopen_and_is_registered_on_reconcile` and `::test_destination_created_in_install_gap_is_preserved` (existing, no red-before-green record); `tests/test_collection_store_edit_back.py::test_an_edit_made_while_the_service_is_stopped_is_applied_after_it_starts`, red on the base, where the offline edit is never applied. Each views tick runs edit-back before the pending-view publication pass, and that pass leaves an edit at a view path to edit-back.
 - [ ] P2.1c Red, stamps (A2): a stale-buffer or second-device save stamped v4 over v5 is held `VIEW_CONFLICT`; a foreign-instance stamp holds `VIEW_FOREIGN` and sets divergence; a tampered stamp is `VIEW_INVALID`; only exact imported bytes may be unstamped; the same rules apply per log block.
-- [ ] P2.2 View publication: target-adjacent staging and fsync in the transaction, pending hash recorded in the main transaction, check-then-swap install after commit and before the acknowledgement, the stamp rendered in every view and log block, the startup and 60 s reconcile with a stat-identity fast path, `projection_state` bookkeeping, restart drain, and bounded crash recovery of staging files.
+  Item and manifest views: `tests/test_collection_store_edit_back.py::test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held` (stale save, red on the base) and `tests/test_collection_store_views.py::test_reconcile_stamp_precedence` (foreign and tampered). Open: the per-log-block rules (S2), and a test that an unstamped file other than the imported bytes is held.
+- [x] P2.2 View publication: target-adjacent staging and fsync in the transaction, pending hash recorded in the main transaction, check-then-swap install after commit and before the acknowledgement, the stamp rendered in every view and log block, the startup and 60 s reconcile with a stat-identity fast path, `projection_state` bookkeeping, restart drain, and bounded crash recovery of staging files.
+  The reconcile (`collection_store/edit_back.py`) runs on the serving store thread while the release enables `collection-views-v1`, unless the vault's rollback disabled it (`tests/test_collection_store_edit_back.py::test_edit_back_waits_for_its_release_on_a_migrated_collection` and `::test_an_unreleased_route_takes_no_view_edit`): a full pass at startup and every 60 s, which stats and reads views outside the write transaction and records each view's stat identity. Evidence: `tests/test_collection_store_edit_back.py::test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat`, shown red without the stat bookkeeping; the publication and recovery evidence is in `tests/test_collection_store_views.py`.
 - [ ] P2.3 The asynchronous projector for log-layout views (with the stored log frame, re-emitted byte-identically) and held views. It uses the same pending protocol, with bounded lag, drained on quiesce.
 - [ ] P2.4 Red: file tools (`delete_file`, `move_file`, `delete_directory`, `recover_from_trash`) refuse view paths with `COLLECTION_VIEW_PATH`. The `_Collections/` directory is reserved and denied everywhere. One test per A8 leak surface: listing and counts, inbound links and graph, the resolver, the indexes, refusal shapes, attention and due-state, history links, held views, inventory, and sync-conflict copies.
   Done: `authority.refuse_view_paths` decides from the mode marker alone, after each tool's withheld check (`design.md` §10). A hold is decided no further than the existing item it would change, which a refused write and a held view edit both record as `item_key` (`governance.held_target`). A warm release cache decides such holds again when their item changes, and a hold whose candidate cannot be read is shown to the owner only. `tests/test_collection_store_view_paths.py` covers:
@@ -182,10 +186,12 @@ October 4 private runtime/create foundation: independent review approves current
   - a delete is held `VIEW_DELETED` and re-rendered; a move within the root is a governed `view_move` that keeps the moved path; a move out of the root is held `VIEW_MOVED` (A10); an unbound file is held `VIEW_UNBOUND`; a sync-conflict copy is held;
   - a manifest edit becomes revise; a log view is diffed block by block;
   - a typing storm leaves no held correction.
+  Done for item and manifest views, each in `tests/test_collection_store_edit_back.py` and shown red on the base or on a broken copy: own write, formatting-only, managed-block-only, valid edit and replay, stale base, invalid edit held once, Planning hierarchy violation, delete, manifest revise, typing storm, discard of a view correction, and resume of a held stale-buffer save rebased onto the current row. Open: the move, unbound-file and sync-conflict-copy rows, which need a census of the projection roots and a governance basis for a hold with no displaced render context (§16 A8), and the log view (S2).
 - [ ] P2.6 `file_watcher` hook for paths `projection_state` owns: lease holder only, settle windows (2 s apply, 10 s hold), the same leaf functions as MCP, REST and CLI.
-- [ ] P2.7 Held view corrections in `inspect` (the Records `projection` summary and the Planning diagnostics codes with the exact Planning key set unchanged) and in the attention queue.
+- [x] P2.7 Held view corrections in `inspect` (the Records `projection` summary and the Planning diagnostics codes with the exact Planning key set unchanged) and in the attention queue.
+  Evidence: `tests/test_collection_store_edit_back.py::test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held` (the Records summary, diagnostics and the `collection_view_corrections` attention category, then discard), `::test_a_planning_hierarchy_violation_is_held_not_applied` (the Planning diagnostics code with the key set unchanged) and `::test_attention_for_a_withheld_view_correction_equals_attention_without_it`, shown red when the category ignores the caller's release.
 - [ ] P2.8 **Phase gate.**
-  - The edit-back matrix is green.
+  - The edit-back matrix is green; the gate adds `collection-views-v1` to the release (`collection_store.capability.RELEASED`).
   - The sync-view append stays within the P1a.15 budget: store and view ≤ 4 ms p95, end to end < 20 ms.
   - Projection lag for aggregate views is reported and bounded under the harness.
 
