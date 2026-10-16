@@ -125,7 +125,9 @@ class _ProducerSession:
     def bind(self, manager):
         if type(self) is not _ProducerSession:
             raise state_migration.StateMigrationOfflineRequired("collection-store producer custody is absent")
-        if not self.check() or not manager.config.enabled:
+        if not manager.config.enabled:
+            raise coordination_required("the collection store's writer")
+        if not self.check():
             raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "producer writer custody is absent")
         if self.manager is not None and self.manager is not manager:
             raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "session already has a writer")
@@ -686,7 +688,7 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
         # In the service: its own session and writer credential, never the operator's.
         fence_client = serving.fence_client or serving.manager.client
         if fence_client is None:
-            raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "adopt-local needs the configured writer lease")
+            raise coordination_required("adopt-local")
         return {"step": step, **_apply_step(serving, serving.manager, fence_client, step, why=why,
                                             preview_id=preview_id, acknowledge_skipped=acknowledge_skipped)}
     from .runtime import _SERVERS, served
@@ -856,8 +858,28 @@ def unenrolled(fence):
         "reaches this host")
 
 
+COORDINATION_REQUIRED = "COLLECTION_STORE_COORDINATION_REQUIRED"
+COORDINATION_SETUP = ("configure the single-host writer-lease coordinator, as docs/deployment.md describes under "
+                      "\"Automatic single-writer lease and laptop takeover\"")
+
+
+def coordination_required(operation):
+    """The refusal for a store step on an install that configures no writer-lease coordinator.
+
+    Store mode requires lease coordination (ruled D7): the capability fence, the head
+    exchange and takeover all live in the coordinator. This prevents an install from
+    reaching a store that no fence protects, or a step that refuses for an unrelated
+    reason; a false refusal costs the owner the coordinator setup it names.
+    """
+    return CollectionStoreError(
+        COORDINATION_REQUIRED, f"{operation} needs writer-lease coordination, which this install does not "
+        f"configure; {COORDINATION_SETUP}")
+
+
 def enrollment_required():
     """The refusal for a summary create that needs the coordinator's operator fence cut."""
+    if not writer_lease.LeaseConfig.from_env().enabled:
+        return coordination_required("enrolling this vault's collection store")
     return CollectionStoreError(
         "COLLECTION_STORE_ENROLLMENT_REQUIRED",
         f"enrolling this vault's collection store is the owner's offline step: run {ENROLLMENT_COMMAND}")
@@ -884,7 +906,7 @@ def _offline_owner(root, operation, work, *, operator=True):
     fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
                     else writer_lease.LeaseCoordinatorClient(config) if config.enabled else None)
     if fence_client is None:
-        raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
+        raise coordination_required(operation)
     _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.

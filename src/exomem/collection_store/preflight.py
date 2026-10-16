@@ -106,7 +106,12 @@ def preflight(vault_root) -> dict:
     rows, pending, store_ids = candidates(root)
     if pending:
         rows.extend(_prove_all(root, pending))
-    return {**report(rows, store_ids), "dry_run": True, "coordinator": coordinator}
+    found = report(rows, store_ids)
+    if coordinator["status"] == "not_configured" and found["verdict"] != "nothing_to_migrate":
+        # The apply would refuse, so the vault is not migratable here, whatever its collections prove.
+        refusal = admission.coordination_required("the collections-store migration")
+        found = {**found, "verdict": "blocked", "blocker": {"code": refusal.code, "reason": refusal.reason}}
+    return {**found, "dry_run": True, "coordinator": coordinator}
 
 
 def candidates(root):
