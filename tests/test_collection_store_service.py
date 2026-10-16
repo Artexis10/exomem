@@ -38,6 +38,7 @@ from test_collection_store_s1_gate import (
 )
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, manifest_path, manifest_text
+from test_typed_history_generations import previous_release
 
 from exomem import __main__ as cli
 from exomem import commands, record_governance, records, state_migration, writer_lease
@@ -51,6 +52,7 @@ from exomem.collection_store import (
     custody,
     importer,
     runtime,
+    schema,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance import egress
@@ -115,10 +117,8 @@ def offline_create(root, manifest_file, path, *, why):
                                       "--manifest-file", str(manifest_file), "--why", why])
 
 
-@pytest.fixture
-def service(tmp_path, monkeypatch):
-    """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
-    credential, all under a release that enables records-summary-v1."""
+def _served_vault(tmp_path, monkeypatch):
+    """A/B in files and the service's environment, before the owner enrols summary C."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
@@ -143,6 +143,14 @@ def service(tmp_path, monkeypatch):
     (tmp_path / "c.md").write_text(summary_text())
     # Only a release that enables the slice enrols a vault and serves its summary collection C.
     monkeypatch.setattr(capability, "RELEASED", ON)
+    return root
+
+
+@pytest.fixture
+def service(tmp_path, monkeypatch):
+    """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
+    credential, all under a release that enables records-summary-v1."""
+    root = _served_vault(tmp_path, monkeypatch)
     with coordinator(tmp_path / "coordinator.sqlite"):
         assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
@@ -154,6 +162,45 @@ def service(tmp_path, monkeypatch):
         finally:
             if not started.manager._stop.is_set():
                 started.stop()
+
+
+def test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_and_stays_writable(
+        tmp_path, monkeypatch):
+    """A release that bumps the store schema must let its writer migrate a store the previous release fenced.
+
+    Readers refuse a store below the current schema until its writer migrates it, so a writer that
+    needs a reader to attach the store never acquires the fenced lease, and every write refuses.
+    """
+    root = _served_vault(tmp_path, monkeypatch)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        with monkeypatch.context() as previous:
+            previous_release(previous)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
+        with closing(sqlite3.connect(connection.store_path(root))) as raw:
+            assert schema.schema_version(raw) == 10
+        # The previous release's worker still holds the lease while the upgraded one starts, as in a handoff.
+        previous_worker = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env(
+            {**os.environ, "EXOMEM_WRITER_LEASE_REPLICA_ID": "previous-worker"}))
+        held = previous_worker.acquire(collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY)
+        assert held.granted
+        started = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            _until(lambda: runtime.served(root))
+            refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                                 item={"title": "During handoff"}, why="the previous worker still writes"),
+                    "WRITER_LEASE_REQUIRED")
+            with closing(sqlite3.connect(connection.store_path(root))) as raw:
+                assert schema.schema_version(raw) == 10  # only the lease holder migrates
+            previous_worker.release(held.fencing_token)
+            assert call(root, "record_memory", action="append", collection=CID, item={"title": "After upgrade"},
+                        item_key=ROW, why="first row after the upgrade")["outcome"] == "committed"
+            assert titles(root, CID) == ["After upgrade"]
+            assert call(root, "record_memory", action="append", collection=KEY, item={"title": "File row"},
+                        why="file collection after the upgrade")["outcome"] == "committed"
+        finally:
+            started.stop()
+    with closing(sqlite3.connect(connection.store_path(root))) as raw:
+        assert schema.schema_version(raw) == schema.SCHEMA_VERSION
 
 
 def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_path, monkeypatch):

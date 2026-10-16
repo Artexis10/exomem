@@ -246,19 +246,21 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())
 
 
-def target_marker(root, old, sid, entries, *, fence):
+def target_marker(root, old, sid, entries, *, fence, supersede=False):
     """The version-two marker that adds ``entries`` to ``old`` (None before first enrolment), validated.
 
     A first enrolment targets the generation after ``fence``, the coordinator's fence read
     before its cut: the newest retired generation, or 0 if never enrolled, so a create or a
-    migration after an export re-enrols at the next one. A later enrolment keeps the
-    marker's fence and advances the authority epoch, so it ignores ``fence``.
+    migration after an export re-enrols at the next one. ``supersede`` is a first enrolment
+    that replaces the unadmitted store ``fence`` binds, so it too targets the next one. A
+    later enrolment keeps the marker's fence and advances the authority epoch, so it
+    ignores ``fence``.
     """
     if old is not None and old["version"] != 2:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
     if old is None:
         # An enrolled fence makes no cut, so its basis stays the first generation as before.
-        generation = 1 if fence.enrolled else fence.generation + 1
+        generation = fence.generation + 1 if supersede or not fence.enrolled else 1
     target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
               "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
               "collections": ([] if old is None else old["collections"]) + list(entries),
@@ -337,6 +339,7 @@ def _resolve(session, *, force=False):
         return previous.status()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
+    _migrate_schema(session, manager)
     raw, marker, fence = _routed_store(session)
     with manager.writer_authority_guard(vault_root=session.root):
         token = manager._fencing_token
@@ -412,6 +415,8 @@ def rollback_slice(session, manager):
                 raise connection.busy("the live store is still borrowed")
             with session.writer(token) as writer:
                 intent = authority.pending_create(writer.connection)
+                if intent is not None and intent["kind"] == authority.EXPORT:
+                    raise export_pending()
                 if intent is not None:
                     # Reject unestablished custody; a false refusal delays the owner's
                     # narrowing operation, but cannot authorize a first cutover.
@@ -490,27 +495,34 @@ def adopt_local(session, manager, *, why, fence_client, preview_id=None):
                 raise _stale_preview()
             if sealed["preview"]["state"] == "in_sync":
                 return {"status": "in_sync", **sealed}
-            if not runtime.retire_idle_handle():
-                raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
-            abandoned = sealed["preview"]["abandoned_publication"]
-            with session.writer(token) as writer:
-                with writer.handle.transaction(resolve_divergence=True) as conn:
-                    (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
-                        schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
-                    identity = owner.record_fork(conn, sealed["preview"], why=why, token=token)
-                with manager._report_lock:
-                    runtime._identity = identity
-                    # A pending takeover verdict described the old tenure.
-                    runtime._takeover = None
-                kept = None if abandoned is None else replica.discard_abandoned_publication(
-                    session.root, writer.handle, abandoned, predecessor=predecessor,
-                    authority_check=_publication_authority(session, token), deadline=time.monotonic() + 30)
-                published = _publish_current_epoch(session, writer, token)
-        workspace = {} if abandoned is None else {"abandoned_workspace": kept or "removed"}
+            published, identity, workspace = continue_past(session, runtime, token, sealed["preview"], why=why)
         if published.status != "published":
             return {"status": "pending", "reason": published.reason or published.status, **workspace, **sealed}
         manager._renew_collection_store(token)
         return {"status": "adopted", "instance_id": identity[1], **workspace, **sealed}
+
+
+def continue_past(session, runtime, token, preview, *, why):
+    """Adopt-local's apply under the boundary: continue this store as a new tenure past ``preview``.
+
+    It records the fork point, keeps a foreign replica as ``.foreign-*`` evidence, removes
+    the abandoned publication's workspace and republishes. Returns the publication, the
+    new identity and what happened to that workspace; the caller renews once it published.
+    """
+    if not runtime.retire_idle_handle():
+        raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+    abandoned = preview["abandoned_publication"]
+    with session.writer(token) as writer:
+        with writer.handle.transaction(resolve_divergence=True) as conn:
+            (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
+                schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
+            identity = owner.record_fork(conn, preview, why=why, token=token)
+        runtime.rebind(identity)
+        kept = None if abandoned is None else replica.discard_abandoned_publication(
+            session.root, writer.handle, abandoned, predecessor=predecessor,
+            authority_check=_publication_authority(session, token), deadline=time.monotonic() + 30)
+        published = _publish_current_epoch(session, writer, token)
+    return published, identity, {} if abandoned is None else {"abandoned_workspace": kept or "removed"}
 
 
 def reconcile_store(session, manager, *, why, fence_client, preview_id=None, acknowledge_skipped=False):
@@ -718,8 +730,48 @@ def migrate_route(vault_root, *, step):
     if step == "prepare":
         return migration.prepare(root)
     if step == "apply":
-        return _offline_owner(root, "migrate", migration.cutover)
+        result = _offline_owner(root, "migrate", migration.cutover)
+        if result.get("status") == migration.RESTORED and "lease" not in result:
+            # The restore handed its lease back with the head it published; the migration
+            # starts afresh under a new acquisition, which records that head.
+            return {**_offline_owner(root, "migrate", migration.cutover), "restored": result["restored"]}
+        return result
     raise ValueError("migrate step must be dry-run, prepare or apply")
+
+
+def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, abandon=False):
+    """The owner's route behind `exomem collections export` and its maintain_memory mode (P1b.4).
+
+    Without ``plan_id`` it previews, read-only and without the lease. Applying runs only
+    offline: with the service stopped, in its own producer session under the
+    configured lease and the operator credential, as the offline migrate does, so it may
+    retire the coordinator's store fence. A process that serves the vault refuses it.
+    ``abandon`` gives up the unfinished export ``plan_id`` names instead (P1b.4a), offline
+    in the same way. ``retire_local`` is the step for every other host once the exported
+    vault reached it.
+    """
+    require_owner(vault_root, "export")
+    from . import export
+
+    root = Path(vault_root).resolve()
+    if retire_local:
+        # Reading the fence needs only the writer credential, and the step changes this host alone.
+        return _offline_owner(root, "export", export.retire_local, operator=False)
+    if plan_id is None:
+        if abandon:
+            raise ValueError("abandoning an export needs its plan_id")
+        return export.preview(root)
+    from .runtime import served
+
+    if served(root):
+        # Retiring the fence revokes the lease this service writes under.
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SERVICE_ACTIVE",
+            "an export applies only offline: stop the service, then run `exomem collections export --plan-id ID "
+            "--why REASON` with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+    step = export.abandon if abandon else export.apply
+    return _offline_owner(root, "export", lambda session, manager, fence_client: step(
+        session, manager, fence_client, plan_id=plan_id, why=why))
 
 
 def require_summary_manifest(root, manifest_path, manifest_text):
@@ -757,14 +809,24 @@ def migration_pending():
         "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`")
 
 
+def export_pending():
+    """The refusal for a store an unfinished reverse export owns: only the owner's export finishes it."""
+    return CollectionStoreError(
+        takeover.EXPORTING,
+        "an unfinished export to files owns this store; finish it with `exomem collections export --plan-id ID "
+        "--why REASON`, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
 def _require_no_pending_migration(root):
-    """Refuse an owner step on a store an unfinished migration owns, at its preview as at its apply."""
+    """Refuse an owner step on a store an unfinished migration or export owns, at its preview as at its apply."""
     path = connection.store_path(root)
     if path.exists():
         with closing(connection.open_reader(path)) as reader:
             intent = authority.pending_create(reader)
         if intent is not None and intent["kind"] == authority.MIGRATE:
             raise migration_pending()
+        if intent is not None and intent["kind"] == authority.EXPORT:
+            raise export_pending()
 
 
 def adoption_required():
@@ -803,16 +865,18 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work):
-    """Run ``work(session, manager, operator_client)`` as the owner's offline store step.
+def _offline_owner(root, operation, work, *, operator=True):
+    """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
-    lease, which it hands back with the flushed head.
+    lease, which it hands back with the flushed head. ``operator=False`` is for a step
+    that only reads the fence: its client carries the writer credential, not the operator's.
     """
-    fence_client = writer_lease.configured_schema_fence_operator_client()
+    config = writer_lease.LeaseConfig.from_env()
+    fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
+                    else writer_lease.LeaseCoordinatorClient(config) if config.enabled else None)
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
-    config = writer_lease.LeaseConfig.from_env()
     _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.
@@ -861,6 +925,21 @@ def _publication_custody(session, token):
     return False
 
 
+def _migrate_schema(session, manager):
+    """Migrate a store an earlier release wrote, under this host's writer lease, before admission reads it.
+
+    Readers refuse a store below the current schema until its writer migrates it, and
+    every admission read below is one. The migration keeps the store's rows and head,
+    so the takeover that follows decides as it would have on the earlier release.
+    """
+    if not (session.path.exists() and connection.schema_pending(session.path)):
+        return
+    with (manager.writer_authority_guard(vault_root=session.root),
+          manager.consistency_guard(session.root, operation="collection_store_schema"),
+          session.writer(manager._fencing_token)):
+        pass  # open_writer migrates the schema in its own transaction.
+
+
 def _routed_store(session):
     """The marker this takeover serves, with the coordinator's store fence bound to it.
 
@@ -879,6 +958,8 @@ def _routed_store(session):
                     raise connection.busy("a collection create is still publishing; retry shortly")
                 if intent["kind"] == authority.MIGRATE:
                     raise migration_pending()
+                if intent["kind"] == authority.EXPORT:
+                    raise export_pending()
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
@@ -962,6 +1043,8 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if session.path.exists():
         with closing(connection.open_reader(session.path)) as reader:
             intent = authority.pending_create(reader)
+    if intent is not None and intent["kind"] == authority.EXPORT:
+        raise export_pending()
     if session.production:
         if intent is not None and intent["kind"] == authority.MIGRATE:
             capability.require_collections_migrate()
@@ -979,7 +1062,9 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     with manager._report_lock:
         runtime._admitted_token = None
     fence = fence_client.collection_store_fence()
-    initial_cut = not fence.enrolled
+    supersedes = intent.get("supersedes")
+    # A supersede moves the fence from the unadmitted store it binds, so like a first cut it revokes the token.
+    initial_cut = not fence.enrolled or supersedes is not None and fence.store_id == supersedes["store_id"]
     if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
@@ -990,7 +1075,8 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
             if recovered["status"] == "conflict":
                 return recovered
         session.require(preparation_token)
-    fence = _store_fence(fence_client, fence, target, initial=intent["expected_marker"] is None)
+    fence = _store_fence(fence_client, fence, target, initial=intent["expected_marker"] is None,
+                         supersedes=supersedes)
     lease = manager.ensure_writer()
     token = lease.fencing_token
     if preparation_token is not None and not initial_cut and preparation_token != token:
@@ -1082,15 +1168,23 @@ def _require_fence(fence, target, code="COLLECTION_STORE_MARKER_CONFLICT"):
     return fence
 
 
-def _store_fence(fence_client, fence, target, *, initial):
+def _store_fence(fence_client, fence, target, *, initial, supersedes=None):
     """Cut an unenrolled coordinator over to ``target``'s store once, then bind its fence.
 
     ``initial`` says the caller's marker basis may make that first cut: a create that
     replaces no marker, or a copied vault whose marker carries the first generation.
     The cut lands on the generation after the fence's newest retired one (0 if never
     enrolled), so a marker minted before a retire never binds the next enrolment.
+    ``supersedes`` is the unadmitted store and generation a first enrolment's fence binds
+    (P1b.3c): the fence moves from it to ``target`` by one CAS at the next generation.
     """
-    if not fence.enrolled:
+    if initial and fence.enrolled and supersedes is not None and fence.store_id == supersedes["store_id"]:
+        if (fence.generation != supersedes["generation"]
+                or target["collection_store_fence"]["generation"] != fence.generation + 1):
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "superseded fence basis differs")
+        fence = fence_client.transition_collection_store_fence(
+            expected_generation=fence.generation, store_id=target["store_id"])
+    elif not fence.enrolled:
         if not initial or target["collection_store_fence"]["generation"] != fence.generation + 1:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "initial fence basis differs")
         fence = fence_client.transition_collection_store_fence(
@@ -1108,16 +1202,20 @@ def _acquired(runtime, fence, code):
     return acquired
 
 
+def holds_head(conn, recorded, store_id, instance_id):
+    """Whether ``recorded``, a head the coordinator recorded, is this store's: its store, instance and chain."""
+    found = conn.execute(
+        "SELECT store_head_hash FROM txns WHERE commit_seq=?", (recorded.commit_seq,),
+    ).fetchone() if recorded.commit_seq else (None,)
+    return recorded.store_id == store_id and recorded.instance_id == instance_id and found == (recorded.head_hash,)
+
+
 def _verify_acquisition(writer, runtime, fence, target):
     _require_fence(fence, target, "COLLECTION_STORE_CREATE_CONFLICT")
     recorded = _acquired(runtime, fence, "COLLECTION_STORE_CREATE_CONFLICT").collection_store_head
-    if recorded is not None:
-        found = writer.connection.execute(
-            "SELECT store_head_hash FROM txns WHERE commit_seq=?", (recorded.commit_seq,),
-        ).fetchone() if recorded.commit_seq else (None,)
-        if (recorded.store_id != target["store_id"] or found != (recorded.head_hash,)
-                or recorded.instance_id != runtime.sample_head().instance_id):
-            raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "acquired head is not in the local chain")
+    if recorded is not None and not holds_head(
+            writer.connection, recorded, target["store_id"], runtime.sample_head().instance_id):
+        raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "acquired head is not in the local chain")
 
 
 def _require_create_file_ownership(writer, intent):

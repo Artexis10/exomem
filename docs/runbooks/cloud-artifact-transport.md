@@ -2,11 +2,12 @@
 
 # Cloud artifact transport rollout
 
-This procedure activates file-handle preservation for explicitly selected Cloud
-cells. The gateway signs short-lived grants; the internal broker fetches only the
-authorized public HTTPS descriptors; the runtime stages the bytes and uses the
-existing Sources/Evidence writers. The broker is not a custody store. This runbook
-implements `serve-cloud-artifact-handles`; it does not authorize a live rollout.
+This procedure activates file-handle preservation for selected Cloud cells: a
+list of cells first, then every cell by one switch. The gateway signs short-lived
+grants; the internal broker fetches only the authorized public HTTPS descriptors;
+the runtime stages the bytes and uses the existing Sources/Evidence writers. The
+broker is not a custody store. This runbook implements
+`serve-cloud-artifact-handles`; it does not authorize a live rollout.
 
 ## Release and key prerequisites
 
@@ -86,6 +87,46 @@ activate the reviewer. The live rollout belongs to its named owner and the
 reviewed source/image/chart prerequisites; source verification alone is not live
 acceptance.
 
+## Enable the broker for every cell
+
+Do this after the broker has served the listed cells, as the previous section
+describes. `artifactBroker.allCells` gives the broker to every existing cell and
+to each cell created later, so a new tenant needs no edit. Keep `cellIds` as
+set: it stays valid beside the switch. A listed cell keeps its pod. Only the
+cells that are not listed restart, once. The chart renders as before while
+`allCells` is `false`.
+
+The gateway signs grants only for the cells it selects. The gateway image must
+read `EXOMEM_CLOUD_ARTIFACT_ALL_CELLS`, which the chart sets from `allCells`. An
+older gateway image ignores it and signs for the listed cells only. With an older
+gateway, the unlisted cells still restart, receive the broker URL and egress,
+and then fail every file call with `SAFE_FETCH_FAILED`, because no grant
+arrives. Deploy the gateway change first, or in the same release.
+
+The broker has four global transfer slots and keeps 1024 nonce records. Those
+bounds suit one canary cell. Under `allCells` every tenant shares them, so
+revisit them (decision 4 of `serve-cloud-artifact-handles`) before the number
+of tenants grows.
+
+1. Check that the `exomem-artifact-broker` Deployment is Ready and `/health/ready` answers.
+2. Check that a listed cell preserved a real client attachment, which qualifies the broker.
+3. Check that the gateway image to deploy contains Substrate pull request 262. In the Substrate repository, run `git merge-base --is-ancestor <merge commit of 262> <image source commit>`.
+4. Run `kubectl get pods -A -l 'app.kubernetes.io/name=exomem-cell,!exomem.io/cell-job' -o custom-columns=NAMESPACE:.metadata.namespace,STARTED:.status.startTime` and save the output as the before snapshot.
+5. Set `artifactBroker.allCells` to `true` in the private operator values.
+6. Deploy the platform chart and the compatible cellctl and gateway images by the normal release path.
+7. Run the command from step 4 again and compare it with the before snapshot.
+8. Check that only cells outside `cellIds` have a new start time, and that each listed cell kept its start time.
+9. Pick one newly covered cell. Read its `cell` StatefulSet and check that `EXOMEM_CLOUD_ARTIFACT_BROKER_URL` is the broker endpoint.
+10. Read that cell's `runtime-ingress` NetworkPolicy and check that its one egress rule reaches the broker pod on TCP 8767.
+11. Operator step: attach a synthetic file in a real client to a tenant on a newly covered cell.
+12. Ask the client to preserve the file, then read it back and compare its size and SHA-256 with the original.
+
+Expect step 12 to return the stored path, size and SHA-256 of the attached file.
+A real client is required because only a client can produce an attachment handle;
+a test call cannot prove the gateway signs for the cell. If step 3 fails, ship
+the gateway change before step 5. If step 9 or 10 fails, set `allCells` to
+`false` and deploy. Cells then return to the explicit list and render as before.
+
 ## Acceptance and rollback
 
 Use isolated synthetic files for write probes. Before a live native attachment
@@ -105,7 +146,8 @@ Bounded transport failures must report file failure without a stored path/hash
 or direct-network fallback. Directory Submit/Publish remains held for review.
 
 To roll back, disable `cloudGateway.artifactTransportEnabled` first and wait for
-current transfers/grants to finish (grants live at most 60 seconds). Empty
+current transfers/grants to finish (grants live at most 60 seconds). Set
+`artifactBroker.allCells` to `false` if it is on, empty
 `artifactBroker.cellIds`, then wait for the selected runtime's endpoint and
 8767 edge to disappear and verify its zero-egress policy. Keep the broker
 enabled while the controller restores that policy, then disable the broker.

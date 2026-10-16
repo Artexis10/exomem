@@ -16,14 +16,20 @@ HOLD_KINDS = ("upgrade", "backup", "restore", "import")
 # move-cloud-cells-to-local-storage D3: the hourly backup of a cell on local
 # storage, a hold that does not stop the cell.
 SNAPSHOT_BACKUP = "snapshot-backup"
+# Tasks 6.4 and 7.3: a planned move's first step, the cell stopped on its old
+# volume for a fresh backup. The move then continues as a relocation's restore.
+MOVE = "move"
+# What a hold records on its StatefulSet when its backup failed (D3).
+BACKUP_OUTCOME_FAILED = "failed"
 
 
 def row_hold_kind(kind: str | None) -> str | None:
     """The hold kind as the row records it. The C1 schema Substrate owns
-    allows only upgrade, backup and restore, so the hourly hold is recorded
-    as the backup it is; its StatefulSet annotation keeps the exact kind."""
+    allows only upgrade, backup and restore, so the hourly hold and a move's
+    stopped backup are recorded as the backups they are; the StatefulSet's
+    annotation keeps the exact kind."""
 
-    return "backup" if kind == SNAPSHOT_BACKUP else kind
+    return "backup" if kind in (SNAPSHOT_BACKUP, MOVE) else kind
 
 # move-cloud-cells-to-local-storage D10: what one measured hourly backup found.
 # GROWTH_NO_ROOM and GROWTH_AT_CAP each raise the storage-growth alert: the
@@ -55,6 +61,10 @@ VOLUME_MISSING = "VOLUME_MISSING"
 # delete) was refused. A refusal does not resolve itself, so the relocation
 # ends for the operator, like RESTORE_FAILED, and no longer holds back others.
 RELOCATION_REFUSED = "RELOCATION_REFUSED"
+# Tasks 6.4 and 7.3: a planned move's stopped backup failed. The cell stays
+# stopped on its old volume, with its claim untouched, until the operator
+# removes the mark; it then starts there as before.
+MOVE_BACKUP_FAILED = "MOVE_BACKUP_FAILED"
 # move-cloud-cells-to-local-storage D5: cell-init's own value-free refusal,
 # read from its termination message. Only these codes ever reach the row.
 EMPTY_VOLUME_REFUSED = "CELL_INIT_EMPTY_VOLUME_REFUSED"
@@ -148,6 +158,9 @@ class ClusterObservation:
     # D4: the operator's `exomem.io/volume-lost` mark on the namespace, naming
     # the recorded volume that no disk holds, so the cell is relocated.
     namespace_volume_lost: str | None = None
+    # Tasks 6.4 and 7.3: the operator's `exomem.io/move-volume` mark, naming
+    # the volume a healthy cell is on, so the cell moves to a new claim.
+    namespace_move_volume: str | None = None
 
     pvc_bound: bool = False
     pvc_volume_id: str | None = None

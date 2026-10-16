@@ -19,25 +19,36 @@ When the cell storage driver is installed, the join SHALL complete only once the
 Removing an agent SHALL, in order:
 
 1. refuse unless the target is an agent, and not a server node;
-2. refuse while a stopping maintenance hold is present on a cell whose volume is on the target; wait for running hourly backups on the target to finish, and start no new one there;
-3. refuse unless every non-deleted cell in the cluster fits the remaining nodes' published slots, computed by storage size as the controller computes them;
-4. when the remaining nodes cannot reach the target's cell volumes, relocate each cell on the target through a fresh stopped backup and a restore, starting it only after the restore succeeds and accepting it before continuing, and keep the target's volumes until every relocated cell is accepted. A target that cannot be reached cannot produce that backup: its cells SHALL first be relocated under the node-loss requirement, and cells already bound elsewhere are skipped;
-5. cordon the agent and, when it is Ready, drain it without force;
-6. stop K3s, every pod container and every process in a pod cgroup on it, remove its agent credentials, unmount every pod and CSI volume mount, and close the storage encryption mappings. Treat the stop as confirmed only when a reachable host shows no container process, no pod or CSI volume mount and no open storage mapping, or on the operator's explicit confirmation that the server is gone;
-7. only once the stop is confirmed, force remaining pods off it, then delete its Kubernetes node and confirm it stays absent;
-8. converge the remaining nodes' inter-node firewall rules without it.
+2. refuse while any maintenance hold, an hourly backup included, is present on a cell whose live volume is on the target. A cell moved off the target keeps only a retained volume there, and its holds do not refuse. A cordoned target still runs the hourly backups of the cells on it, because each backup's Job tolerates the cordon of the node its volume pins it to;
+3. refuse unless the cells fit the remaining nodes, each against the storage it uses: every cell on an attachable volume fits the remaining nodes' published attachment slots, as the controller computes them; and each live cell on the target's local storage fits one remaining node's pool, whose published free bytes must still hold the controller's snapshot reserve after the cells placed there. No cell is placed on the target's own pool, or on a node that is not Ready, is cordoned or is reserved;
+4. cordon the agent;
+5. when the remaining nodes cannot reach the target's cell volumes, move each cell on the target to a new claim on another node, one at a time and the largest claim first, through a fresh stopped backup and a restore, starting it only after the restore succeeds. The operator moves the cells and accepts each one before the next, while its old volume on the target is still a rollback copy, and only then runs the removal playbook. The playbook skips cells already bound elsewhere. As a fallback it moves any cell still on the target itself, waiting until each serves, and that cell is accepted after the removal. A failed move SHALL stop the removal with the agent still in the cluster and cordoned. A target that is not Ready cannot produce that backup: its cells SHALL first be relocated under the node-loss requirement;
+6. when it is Ready, drain it without force;
+7. stop K3s, every pod container and every process in a pod cgroup on it, remove its agent credentials, unmount every pod and CSI volume mount, and close the storage encryption mappings. Treat the stop as confirmed only when a reachable host shows no container process, no pod or CSI volume mount and no open storage mapping, or on the operator's explicit confirmation that the server is gone;
+8. only once the stop is confirmed, force remaining pods off it, then delete its Kubernetes node and confirm it stays absent;
+9. converge the remaining nodes' inter-node firewall rules without it.
 
-The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconfirmed. It MUST NOT delete a cell volume on the target before that cell's relocated copy is accepted. It MUST be safe to rerun after any step until the agent's server is destroyed. A removed agent's host MUST NOT rejoin through the join playbook, and a lone unreachable agent MUST NOT stop the removal from reaching its confirmation check.
+The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconfirmed. It MUST NOT delete a cell volume on the target: each moved cell's old volume stays retained on the target's storage, which the operator erases only after accepting every moved cell. It MUST be safe to rerun after any step until the agent's server is destroyed. A removed agent's host MUST NOT rejoin through the join playbook, and a lone unreachable agent MUST NOT stop the removal from reaching its confirmation check.
 
 #### Scenario: Not enough room elsewhere
 
-- **WHEN** the cluster's non-deleted cells exceed the remaining nodes' slots
-- **THEN** removal stops before relocating or cordoning, and nothing changes
+- **WHEN** the cluster's cells on attachable volumes exceed the remaining nodes' attachment slots, or a live cell on the target's local storage fits no remaining node's pool with the snapshot reserve kept
+- **THEN** removal stops before moving or cordoning, and nothing changes
 
-#### Scenario: Relocated cell fails acceptance
+#### Scenario: Removing a local-storage agent where no node has attachment slots
 
-- **WHEN** a relocated cell does not answer recall, report its governance schema or accept a governed write
-- **THEN** removal stops, and the original cell volume on the target is kept
+- **WHEN** every cell is on local storage, no node publishes attachment slots, and the target's live cells fit the remaining pools with the snapshot reserve kept
+- **THEN** removal proceeds to cordon the target and move its cells
+
+#### Scenario: A move fails
+
+- **WHEN** a cell's stopped backup or restore fails during the removal
+- **THEN** removal stops with the agent still in the cluster, and the cell's original volume on the target is kept
+
+#### Scenario: Moved cell fails acceptance
+
+- **WHEN** a moved cell does not answer recall, report its governance schema or accept a governed write
+- **THEN** its original volume on the target is still retained, and the target's storage is not erased
 
 #### Scenario: Unreachable agent without confirmation
 

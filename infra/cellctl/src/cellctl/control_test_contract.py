@@ -26,3 +26,17 @@ def control_test_sql(fixtures: Path) -> tuple[str, str]:
     # Earlier migrations own entitlements; the companion migration extends this minimal stand-in.
     schema += "\nCREATE TABLE exomem_entitlements (tenant_id uuid PRIMARY KEY);\n"
     return schema + committed_sql("migration"), committed_sql("grants")
+
+
+def import_test_sql(fixtures: Path) -> str:
+    """C5's import tables, run after `control_test_sql`'s schema and before its grants."""
+    return "\n".join(
+        [
+            "CREATE EXTENSION IF NOT EXISTS pgcrypto;",
+            # C5's canonical migration also seeds the CLI client. Earlier OAuth migrations own this table.
+            "CREATE TABLE exomem_oauth_clients (client_id text PRIMARY KEY, admission_mode text, enabled boolean, "
+            "redirect_uris jsonb, redirect_uris_digest bytea);",
+            (fixtures / "exomem_cloud_imports.sql").read_text(encoding="utf-8"),
+            (fixtures / "exomem_cloud_import_cleanup.sql").read_text(encoding="utf-8"),
+        ]
+    )

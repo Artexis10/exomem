@@ -1,6 +1,6 @@
 """`exomem-cloud-rehearsal k3s-link`: the private-link rehearsal of
-move-cloud-cells-to-local-storage tasks 6.5 and 5.7, on a K3s server and one
-agent with no cell images. It takes about ten minutes and needs no sudo.
+move-cloud-cells-to-local-storage tasks 6.5, 5.7 and 5.8, on a K3s server and
+one agent with no cell images. It takes about ten minutes and needs no sudo.
 
 What runs:
 - the pinned K3s image as a server with embedded etcd and as one agent. Each
@@ -8,12 +8,14 @@ What runs:
   1450-byte MTU, and the agent lowers its own interface to a vSwitch's 1400;
 - the k3s role's flannel configuration on both nodes, rendered by the pinned
   ansible-core from the role's own template and defaults;
-- the k3s role's bootstrap re-save helper on the server.
+- the k3s role's bootstrap re-save helper on the server;
+- the k3s role's client-CA rotation helper, against the server.
 
 The checks are listed in infra/cloud-rehearsal/README.md. Each names the
 failure it exists to catch, and every value in the report says where it was
 read. A failed 6.5 check does not block the 5.7 checks, which use the cluster
-but not its MTU.
+but not its MTU. A failed 5.7 check blocks the 5.8 checks, which rotate the
+client CA on the agent token 5.7 leaves, as the runbook requires.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import os
 import secrets
 import shutil
 import ssl
+import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -33,6 +36,9 @@ from typing import Any
 
 import httpx
 import yaml
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import images, infra
 from .drill import DrillReport
@@ -65,16 +71,24 @@ IP_ICMP_HEADERS = 28
 K3S_DATA = "/var/lib/rancher/k3s"
 RESAVE_SOURCE = ROLE / "files/exomem-k3s-resave-bootstrap.sh"
 RESAVE = "/usr/local/sbin/exomem-k3s-resave-bootstrap"
+ROTATE_CLIENT_CA_SOURCE = ROLE / "files/exomem-k3s-rotate-client-ca.sh"
+ROTATE_CLIENT_CA = "/usr/local/sbin/exomem-k3s-rotate-client-ca"
+# A check of one task also stops when a check of the task it builds on failed.
+BUILDS_ON = {"5.8": "5.7"}
 # K3s's fatal message when a file on disk is newer than its bootstrap copy in
 # etcd (ReconcileBootstrapData in pkg/cluster/bootstrap.go, pinned version).
 NEWER_THAN_DATASTORE = "newer than datastore"
-# Busybox ping cannot forbid fragmentation; iputils can (-M do).
-PING_DOCKERFILE = "FROM {alpine}\nRUN apk add --no-cache iputils-ping\n"
+# Busybox ping cannot forbid fragmentation; iputils can (-M do). openssl runs
+# the k3s role's client-CA helper, which the K3s image cannot run.
+TOOLS_DOCKERFILE = "FROM {alpine}\nRUN apk add --no-cache iputils-ping openssl\n"
 ADAPTATIONS = [
     "both nodes run in privileged containers on one runner; the agent's eth0 is lowered to 1400 bytes to "
     "model a vSwitch, and the Docker network's 1450 models the Hetzner Cloud network",
     "a K3s restart is a container restart, which also recreates the node's network namespace and pods",
     "the server takes its token and agent token from a bind-mounted config.yaml, which the checks rewrite",
+    "the K3s image has no openssl, so the client-CA helper runs in the tools image, in the server's network "
+    "namespace, on the server's data volume and with the server's own k3s binary",
+    "the lost disk is a copy of the agent's kubelet client certificate, key and node password, taken while it runs",
 ]
 
 
@@ -107,13 +121,15 @@ class Link:
     # The role's values as ansible-core evaluated them, and its rendered flannel configuration.
     role: dict[str, Any] = field(default_factory=dict)
     conf: Path | None = None
-    ping_image: str = ""
+    tools_image: str = ""
     server: Node | None = None
     agent: Node | None = None
     server_token: str = ""
     agent_tokens: dict[str, str] = field(default_factory=dict)
     ca_hash: str = ""
     volumes: list[str] = field(default_factory=list)
+    # The copy of the agent's kubelet credentials that stands for a lost disk.
+    lost_disk: Path | None = None
 
 
 def tool_version(name: str) -> str:
@@ -174,11 +190,11 @@ def require_role_k3s_version(image_version: str, role_version: str) -> None:
         raise RuntimeError(f"the rehearsal's K3s image reports {image_version}, but the k3s role pins {role_version}")
 
 
-def build_ping_image(run_id: str, workdir: Path, image_labels: list[str]) -> str:
-    context = workdir / "ping-image"
+def build_tools_image(run_id: str, workdir: Path, image_labels: list[str]) -> str:
+    context = workdir / "tools-image"
     context.mkdir(parents=True, exist_ok=True)
-    (context / "Dockerfile").write_text(PING_DOCKERFILE.format(alpine=images.ALPINE), encoding="utf-8")
-    tag = f"rehearsal.local/k3s-link-ping:{run_id}"
+    (context / "Dockerfile").write_text(TOOLS_DOCKERFILE.format(alpine=images.ALPINE), encoding="utf-8")
+    tag = f"rehearsal.local/k3s-link-tools:{run_id}"
     run(["docker", "build", *image_labels, "--tag", tag, str(context)], timeout=900)
     return tag
 
@@ -256,7 +272,7 @@ def start_server(link: Link) -> None:
     stack.containers.append(container)
     stack.k3s = link.server.k3s
     infra.wait_api_server(container, timeout=300)
-    infra.import_images(container, [*images.K3S_SYSTEM_IMAGES, link.ping_image])
+    infra.import_images(container, [*images.K3S_SYSTEM_IMAGES, link.tools_image])
     wait_ready(link, link.server)
     ca = run(["docker", "exec", container, "sha256sum", f"{K3S_DATA}/server/tls/server-ca.crt"]).stdout
     link.ca_hash = ca.split()[0]
@@ -277,7 +293,7 @@ def start_agent(link: Link) -> None:
     ])
     stack.containers.append(container)
     wait_ready(link, link.agent)
-    infra.import_images(container, [*images.K3S_SYSTEM_IMAGES, link.ping_image])
+    infra.import_images(container, [*images.K3S_SYSTEM_IMAGES, link.tools_image])
 
 
 def wait_ready(link: Link, node: Node, timeout: float = 300) -> None:
@@ -337,7 +353,7 @@ def ping_from_node(link: Link, node: Node, address: str, packet_bytes: int) -> b
     """A ping of exactly `packet_bytes` with fragmentation forbidden, sent
     from the node's own network namespace."""
 
-    result = run(["docker", "run", "--rm", *link.labels, "--network", f"container:{node.container}", link.ping_image,
+    result = run(["docker", "run", "--rm", *link.labels, "--network", f"container:{node.container}", link.tools_image,
                   "ping", "-M", "do", "-c", "2", "-W", "2", "-s", str(packet_bytes - IP_ICMP_HEADERS), address],
                  check=False, timeout=60)
     return result.returncode == 0
@@ -370,6 +386,20 @@ def ping_pod(name: str, node: str, image: str) -> dict[str, Any]:
 def pod_status(link: Link, name: str) -> dict[str, Any]:
     assert link.server is not None
     return json.loads(link.server.k3s.kubectl("get", "pod", name, "--namespace", "default", "-o", "json").stdout)["status"]
+
+
+def server_tls(link: Link, credentials: Path | None = None) -> ssl.SSLContext:
+    """A client TLS context that trusts only the server's CA. With
+    `credentials`, it presents the kubelet client certificate kept there."""
+
+    assert link.server is not None
+    ca = link.stack.workdir / "server-ca.crt"
+    ca.write_text(run(["docker", "exec", link.server.container, "cat", f"{K3S_DATA}/server/tls/server-ca.crt"]).stdout,
+                  encoding="utf-8")
+    context = ssl.create_default_context(cafile=str(ca))
+    if credentials is not None:
+        context.load_cert_chain(credentials / "client-kubelet.crt", credentials / "client-kubelet.key")
+    return context
 
 
 def pod_running_since(status: dict[str, Any], since: dt.datetime) -> bool:
@@ -427,7 +457,7 @@ async def check_pods(link: Link, record: StepRecord) -> None:
     assert link.server is not None and link.agent is not None
     pods = {node.name: f"link-ping-{node.name}" for node in (link.server, link.agent)}
     manifest = {"apiVersion": "v1", "kind": "List", "items": [
-        ping_pod(pod, node, link.ping_image) for node, pod in pods.items()]}
+        ping_pod(pod, node, link.tools_image) for node, pod in pods.items()]}
     link.server.k3s.kubectl("apply", "-f", "-", input_text=json.dumps(manifest))
     for pod in pods.values():
         link.server.k3s.kubectl("wait", "--namespace", "default", "--for=condition=Ready", f"pod/{pod}", "--timeout=180s")
@@ -516,11 +546,7 @@ async def check_token_probe(link: Link, record: StepRecord) -> None:
     no Ready node shows: joined agents authenticate with their kubelet client
     certificate."""
 
-    assert link.server is not None
-    ca = link.stack.workdir / "server-ca.crt"
-    ca.write_text(run(["docker", "exec", link.server.container, "cat", f"{K3S_DATA}/server/tls/server-ca.crt"]).stdout,
-                  encoding="utf-8")
-    context = ssl.create_default_context(cafile=str(ca))
+    context = server_tls(link)
     attempts: list[dict[str, int]] = []
 
     def probe() -> dict[str, int] | None:
@@ -566,6 +592,216 @@ async def check_agent_rejoin(link: Link, record: StepRecord) -> None:
         raise StepFailure(f"the agent did not rejoin on the new token: {record.evidence}")
 
 
+# --- 5.8 ------------------------------------------------------------------
+
+
+def copy_kubelet_credentials(link: Link, directory: Path) -> Path:
+    """The agent's kubelet client certificate and key and its node password,
+    the credentials an agent's disk holds, copied to the runner. Nothing
+    prints their contents."""
+
+    assert link.agent is not None
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sources = {"client-kubelet.crt": f"{K3S_DATA}/agent/client-kubelet.crt",
+               "client-kubelet.key": f"{K3S_DATA}/agent/client-kubelet.key",
+               "node-password": "/etc/rancher/node/password"}
+    for name, source in sources.items():
+        target = directory / name
+        target.touch(mode=0o600)
+        target.write_text(run(["docker", "exec", link.agent.container, "cat", source]).stdout, encoding="utf-8")
+    return directory
+
+
+def throwaway_csr() -> bytes:
+    """A certificate request for a key made here and then dropped. The
+    supervisor signs it as it signs an agent's own request, and returns no key."""
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    request = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([])).sign(key, hashes.SHA256())
+    return request.public_bytes(serialization.Encoding.DER)
+
+
+def kubelet_credential_status(link: Link, credentials: Path) -> dict[str, int]:
+    """The status of three requests made from the runner with the kubelet
+    credentials in `credentials`, as a lost disk's holder would make them:
+    the agent's own Node from the API server, which the node authorizer admits;
+    a kube-proxy certificate from the supervisor, which needs the certificate
+    alone; and a kubelet certificate, which also needs the node password."""
+
+    password = (credentials / "node-password").read_text(encoding="utf-8").strip()
+    base = f"https://{SERVER_IP}:6443"
+    with httpx.Client(verify=server_tls(link, credentials), trust_env=False, timeout=15) as client:
+        return {
+            "api_server_own_node": client.get(f"{base}/api/v1/nodes/{AGENT_NAME}").status_code,
+            "supervisor_kube_proxy_certificate": client.post(
+                f"{base}/v1-k3s/client-kube-proxy.crt", content=throwaway_csr()).status_code,
+            "supervisor_kubelet_certificate_with_node_password": client.post(
+                f"{base}/v1-k3s/client-kubelet.crt", content=throwaway_csr(),
+                headers={"K3s-Node-Name": AGENT_NAME, "K3s-Node-Password": password}).status_code,
+        }
+
+
+def settled_status(link: Link, credentials: dict[str, Path]) -> dict[str, dict[str, int]]:
+    """kubelet_credential_status for each set of credentials, once no request
+    gets 503, which means the server is still starting."""
+
+    def probe() -> dict[str, dict[str, int]] | None:
+        codes = {label: kubelet_credential_status(link, path) for label, path in credentials.items()}
+        return None if any(503 in by_request.values() for by_request in codes.values()) else codes
+
+    return wait_for(probe, timeout=120, interval=3, description="the server to answer past 503")
+
+
+def public_key(certificate_pem: str) -> bytes:
+    certificate = x509.load_pem_x509_certificates(certificate_pem.encode())[0]
+    return certificate.public_key().public_bytes(serialization.Encoding.DER,
+                                                 serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+def renewed_lease_since(link: Link, node: Node, since: dt.datetime) -> bool:
+    """Whether the node's kubelet renewed its lease after `since`. A Ready
+    condition alone can be one the kubelet posted before a restart."""
+
+    assert link.server is not None
+    renewed = link.server.k3s.kubectl("get", "lease", node.name, "--namespace", "kube-node-lease",
+                                      "--output=jsonpath={.spec.renewTime}", check=False).stdout.strip()
+    return bool(renewed) and dt.datetime.fromisoformat(renewed.replace("Z", "+00:00")) > since
+
+
+def node_file(node: Node, path: str) -> str:
+    return run(["docker", "exec", node.container, "cat", path]).stdout
+
+
+def fingerprint(pem: str) -> str:
+    """The SHA-256 fingerprint of a bundle's first certificate, as openssl prints it."""
+
+    return x509.load_pem_x509_certificates(pem.encode())[0].fingerprint(hashes.SHA256()).hex(":").upper()
+
+
+def run_client_ca_helper(link: Link) -> subprocess.CompletedProcess[str]:
+    """The role's client-CA helper, run as the runbook runs it on the server:
+    as root, on the server's data, with its k3s binary and its API on the
+    loopback address."""
+
+    assert link.server is not None
+    k3s = link.stack.workdir / "k3s"
+    run(["docker", "cp", "--follow-link", f"{link.server.container}:/bin/k3s", str(k3s)])
+    return run([
+        "docker", "run", "--rm", *link.labels, "--network", f"container:{link.server.container}",
+        "--mount", f"type=volume,src={link.server.volume_at(K3S_DATA)},dst={K3S_DATA}",
+        "--mount", f"type=bind,source={k3s},target=/usr/local/bin/k3s,readonly",
+        "--mount", f"type=bind,source={ROTATE_CLIENT_CA_SOURCE},target={ROTATE_CLIENT_CA},readonly",
+        link.tools_image, "sh", ROTATE_CLIENT_CA,
+    ], check=False, timeout=300)
+
+
+async def check_lost_disk_before(link: Link, record: StepRecord) -> None:
+    """Copies the agent's kubelet credentials, as a lost disk holds them, and
+    presents them before the rotation: the API server and the supervisor admit
+    them. Catches probes that would read as refused whatever the rotation did."""
+
+    link.lost_disk = copy_kubelet_credentials(link, link.stack.workdir / "lost-disk")
+    codes = settled_status(link, {"lost disk": link.lost_disk})["lost disk"]
+    record.evidence["status_before_rotation"] = codes
+    if set(codes.values()) != {200}:
+        raise StepFailure(f"the agent's own credentials were not admitted before the rotation: {codes}")
+
+
+async def check_client_ca_rotation(link: Link, record: StepRecord) -> None:
+    """Runs the role's client-CA helper against the server, then restarts the
+    server, and the agent as soon as the server is ready, as the runbook does.
+    Both nodes are Ready again, the server serves the CA the helper made, and
+    the agent holds it. Catches a CA that K3s does not load, and a node that
+    does not come back on it."""
+
+    assert link.server is not None and link.agent is not None
+    server_ca_path, agent_ca_path = f"{K3S_DATA}/server/tls/client-ca.crt", f"{K3S_DATA}/agent/client-ca.crt"
+    before = node_file(link.server, server_ca_path)
+    helper = run_client_ca_helper(link)
+    made = next((line.removeprefix("new client CA: ") for line in helper.stdout.splitlines()
+                 if line.startswith("new client CA: ")), None)
+    record.evidence["helper"] = {"exit": helper.returncode, "stdout": helper.stdout.strip()[-600:],
+                                 "stderr": helper.stderr.strip()[-600:]}
+    if helper.returncode != 0 or made is None:
+        raise StepFailure(f"the client-CA helper failed: {record.evidence['helper']}")
+    restart(link.server)
+    restarted = {link.server.name: _now()}
+    if server_outcome(link) != "ready":
+        raise StepFailure("the server did not restart ready on the new client CA; its log is in the diagnostics")
+    # The agent stands for the host whose disk left custody: as the runbook
+    # directs for that host, its new certificates take new keys.
+    run(["docker", "exec", link.agent.container, "sh", "-c", f"rm -f {K3S_DATA}/agent/client-*.key"])
+    restart(link.agent)
+    restarted[link.agent.name] = _now()
+    seconds_to_ready = {}
+    for node in (link.server, link.agent):
+        since = restarted[node.name]
+        try:
+            wait_for(lambda node=node, since=since: node_ready(link.server.k3s, node.name)
+                     and renewed_lease_since(link, node, since),
+                     timeout=300, interval=2, description=f"{node.name} to be Ready on a lease renewed since its restart")
+        except TimeoutError as error:
+            raise StepFailure(f"{node.name} is not Ready on the new client CA: {error}") from error
+        seconds_to_ready[node.name] = round((_now() - since).total_seconds(), 1)
+    after = node_file(link.server, server_ca_path)
+    record.evidence.update({
+        "client_ca_sha256_before": fingerprint(before),
+        "client_ca_sha256_after": fingerprint(after),
+        "client_ca_sha256_the_helper_made": made,
+        "agent_holds_the_server_client_ca": node_file(link.agent, agent_ca_path) == after,
+        "seconds_from_restart_to_ready_by_node": seconds_to_ready,
+    })
+    if fingerprint(after) != made or after == before or not record.evidence["agent_holds_the_server_client_ca"]:
+        raise StepFailure(f"the cluster does not run on the client CA the helper made: {record.evidence}")
+
+
+async def check_lost_disk_refused(link: Link, record: StepRecord) -> None:
+    """Presents the lost disk's credentials again: the API server and the
+    supervisor refuse its certificate, with the node password too. The agent's
+    certificate issued after the rotation, on a new key, gets 200 for the same
+    requests. Catches a rotation that leaves the old certificate valid, as
+    K3s's cross-signed rotation does."""
+
+    assert link.lost_disk is not None
+    current = copy_kubelet_credentials(link, link.stack.workdir / "issued-after-rotation")
+    codes = settled_status(link, {"lost disk": link.lost_disk, "issued after the rotation": current})
+    new_key = public_key((current / "client-kubelet.crt").read_text(encoding="utf-8")) != public_key(
+        (link.lost_disk / "client-kubelet.crt").read_text(encoding="utf-8"))
+    record.evidence.update({"status_after_rotation": codes, "kubelet_certificate_on_a_new_key": new_key})
+    if set(codes["lost disk"].values()) != {401} or set(codes["issued after the rotation"].values()) != {200}:
+        raise StepFailure(f"expected 401 for every request with the lost disk's certificate and 200 with "
+                          f"the certificate issued after the rotation: {codes}")
+    if not new_key:
+        raise StepFailure("the agent's certificate issued after the rotation is on the lost disk's key")
+
+
+async def check_workload_after_rotation(link: Link, record: StepRecord) -> None:
+    """A new pod that the scheduler places on the agent runs, and the API
+    server execs into it through the agent's kubelet. Catches a scheduler left
+    on a certificate the new CA refuses, and a kubelet that still trusts only
+    the old client CA."""
+
+    assert link.server is not None
+    name = "link-after-client-ca"
+    pod = {
+        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": "default"},
+        "spec": {"nodeSelector": {"kubernetes.io/hostname": AGENT_NAME}, "terminationGracePeriodSeconds": 0,
+                 "containers": [{"name": "tools", "image": link.tools_image, "imagePullPolicy": "Never",
+                                 "command": ["sleep", "86400"]}]},
+    }
+    kubectl = link.server.k3s.kubectl
+    kubectl("apply", "-f", "-", input_text=json.dumps(pod))
+    ready = kubectl("wait", "--namespace", "default", "--for=condition=Ready", f"pod/{name}", "--timeout=180s",
+                    check=False)
+    placed = kubectl("get", "pod", name, "--namespace", "default", "--output=jsonpath={.spec.nodeName}",
+                     check=False).stdout.strip()
+    execed = kubectl("exec", "--namespace", "default", name, "--", "true", check=False)
+    record.evidence.update({"pod_ready": ready.returncode == 0, "scheduled_on": placed,
+                            "exec_exit": execed.returncode, "exec_stderr": execed.stderr.strip()[-300:]})
+    if not record.evidence["pod_ready"] or placed != AGENT_NAME or execed.returncode != 0:
+        raise StepFailure(f"a new pod on the agent did not run or could not be reached: {record.evidence}")
+
+
 CHECKS: list[tuple[str, str, Callable[[Link, StepRecord], Awaitable[None]]]] = [
     ("6.5", "the agent's link carries 1400 bytes and drops 1450", check_link),
     ("6.5", "flannel.1 and FLANNEL_MTU at the role's pod MTU on both nodes", check_flannel_devices),
@@ -574,16 +810,25 @@ CHECKS: list[tuple[str, str, Callable[[Link, StepRecord], Awaitable[None]]]] = [
     ("5.7", "the re-save keeps the server token and clears the fatal", check_resave),
     ("5.7", "the old agent token is refused, the new one admitted", check_token_probe),
     ("5.7", "the agent rejoins on the new token alone", check_agent_rejoin),
+    ("5.8", "a lost disk's kubelet certificate and node password work before the rotation",
+     check_lost_disk_before),
+    ("5.8", "the client-CA rotation loads a new CA, and both nodes are Ready on it", check_client_ca_rotation),
+    ("5.8", "the lost disk's certificate is refused, one issued after the rotation admitted",
+     check_lost_disk_refused),
+    ("5.8", "a new pod schedules on the agent, and the API server execs into it",
+     check_workload_after_rotation),
 ]
 
 
 async def run_check(link: Link, number: int, task: str, name: str,
                     body: Callable[[Link, StepRecord], Awaitable[None]]) -> None:
     record = StepRecord(number=number, name=f"{task} {name}")
-    earlier = [check for check in link.report.checks if check.name.startswith(task + " ")]
+    tasks = sorted({task, BUILDS_ON.get(task, task)})
+    earlier = [check for check in link.report.checks if check.name.split(" ", 1)[0] in tasks]
     link.report.checks.append(record)
     if any(check.status != PASSED for check in earlier):
-        record.failure = {"message": f"blocked: an earlier {task} check did not pass, and this one runs on the state it leaves"}
+        record.failure = {"message": f"blocked: an earlier {' or '.join(tasks)} check did not pass, and this one runs "
+                                     "on the state it leaves"}
         print(f"[k3s-link] check {number} {record.name}: blocked", flush=True)
         return
     record.started_at = _now().isoformat()
@@ -629,8 +874,8 @@ async def run_link(args: argparse.Namespace) -> int:
             })
             require_role_k3s_version(version, link.role["k3s_version"])
         with stage(report, "images"):
-            link.ping_image = build_ping_image(run_id, workdir, image_labels)
-            report.inputs["ping_image"] = link.ping_image
+            link.tools_image = build_tools_image(run_id, workdir, image_labels)
+            report.inputs["tools_image"] = link.tools_image
         with stage(report, "cluster"):
             create_network(link)
             start_server(link)
@@ -664,8 +909,8 @@ def teardown(link: Link) -> None:
     infra.teardown(link.stack if link.stack.network else None, keep=False)
     for volume in link.volumes:
         run(["docker", "volume", "rm", "--force", volume], check=False)
-    if link.ping_image:
-        run(["docker", "rmi", "--force", link.ping_image], check=False)
+    if link.tools_image:
+        run(["docker", "rmi", "--force", link.tools_image], check=False)
 
 
 def collect_diagnostics(link: Link) -> None:

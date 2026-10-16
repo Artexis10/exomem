@@ -399,6 +399,9 @@ def move_file(
                 "path is reserved for its owning subsystem",
             ) from None
         raise MoveFileError("MOVE_FAILED", "held file acquisition was refused") from None
+    from .collection_store import authority as collection_authority
+
+    collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
     try:
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
@@ -409,6 +412,8 @@ def move_file(
         new_abs = new_abs.with_name(raw_protection.PREFIX + new_abs.name)
         new_rel = new_abs.relative_to(vault_root).as_posix()
     _admit_destination(vault_root, new_rel)
+    # Decided before any destination existence check, so it cannot tell a withheld view from none.
+    collection_authority.refuse_view_paths(vault_root, (new_rel,), MoveFileError)
     if _in_episode_folder(old_rel) or _in_episode_folder(new_rel):
         raise MoveFileError(
             code="EPISODE_KIND_RESERVED",
@@ -444,6 +449,9 @@ def move_file(
             paired_binary = (binary_rel, new_binary)
         _admit_destination(vault_root, new_rel)
         _admit_destination(vault_root, paired_binary[1])
+        collection_authority.refuse_view_paths(
+            vault_root, (old_rel, new_rel, *paired_binary), MoveFileError
+        )
         if (vault_root / paired_binary[1]).exists():
             raise MoveFileError(
                 code="DEST_EXISTS",

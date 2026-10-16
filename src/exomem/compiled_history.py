@@ -1,6 +1,6 @@
 """Prior Markdown interpretations, retained atomically by the semantic writer.
 
-One entry keeps one logical before image. History stays outside ordinary reads
+One entry keeps one before image as read. History stays outside ordinary reads
 and indexing; this owner admits every retained image before serving its fields.
 It reuses the held history reader and the Records pagination envelope, without
 registry history's rotation policy. Each change costs one full before image.
@@ -57,12 +57,10 @@ def validate_new_entry(
     root: Path, *, path: str, raw: bytes, primary_path: str,
     before_source: str, after_source: str,
 ) -> None:
-    """Bind a new history leaf to the exact logical images used by its producer."""
+    """Bind a new history leaf to the exact images its producer read and wrote."""
     try:
         entry = json.loads(raw)
-        # The semantic writer evaluates the logical (LF) before image; its primary guard binds raw bytes.
-        before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
-        # It writes and hashes the after image as given, so a carried-through CRLF stays in its hash.
+        # Both images are hashed as stored, so a CRLF page chains entry to entry.
         parent_ref = semantic_index.build_parent_index_state(
             root, primary_path, source=before_source
         ).document.parent_ref
@@ -141,12 +139,12 @@ def plan_entry(
         "at": token["history_at"],
         "operation": preflight.operation,
         "transition_id": token["transition_id"],
-        "before_hash": preflight.before.source_hash,
+        "before_hash": preflight.before_hash,
         "after_hash": preflight.after.source_hash,
         "affected_units": affected,
         "reason": reason,
         "actor": {"audience": who.audience_id, "surface": who.surface},
-        "prior": {"source": preflight.before_source},
+        "prior": {"source": preflight.exact_before_source},
         "binding": metadata.payload,
     }
     guard = vault.PathGuard.capture(root, path.relative_to(root).as_posix(), leaf_policy="absent")

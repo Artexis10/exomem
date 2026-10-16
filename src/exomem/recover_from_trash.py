@@ -243,6 +243,20 @@ def recover_from_trash(
                 f"{curated!r}. Pass `allow_curated=true` to override."
             ),
         )
+    if trash_kind == "file":
+        assert trash_file_snapshot is not None
+        restored = ((restore_rel, trash_file_snapshot.data),)
+    else:
+        restored = tuple(
+            (f"{restore_rel.rstrip('/')}/{item.relative_path}", item.snapshot.data)
+            for item in trash_tree
+        )
+    from .collection_store import authority as collection_authority
+
+    # Decided before the existence check below, so it cannot tell a withheld view from none.
+    collection_authority.refuse_view_paths(
+        vault_root, (restore_rel, *(path for path, _data in restored)), RecoverError
+    )
 
     try:
         reserved_paths.inspect_generic_path(vault_root, restore_rel)
@@ -274,21 +288,9 @@ def recover_from_trash(
             ),
         )
 
-    if trash_kind == "file":
-        assert trash_file_snapshot is not None
-        initial_restore_state = (
-            (restore_rel, hashlib.sha256(trash_file_snapshot.data).hexdigest()),
-        )
-    else:
-        initial_restore_state = tuple(
-            sorted(
-                (
-                    f"{restore_rel.rstrip('/')}/{item.relative_path}",
-                    hashlib.sha256(item.snapshot.data).hexdigest(),
-                )
-                for item in trash_tree
-            )
-        )
+    initial_restore_state = tuple(
+        sorted((path, hashlib.sha256(data).hexdigest()) for path, data in restored)
+    )
     catalog_content_paths = tuple(path for path, _digest in initial_restore_state)
 
     today = today or dt.date.today()

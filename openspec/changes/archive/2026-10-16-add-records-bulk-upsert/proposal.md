@@ -25,3 +25,7 @@ None.
 ## Impact
 
 Code touched at implementation: `record_memory` (action, argument rules, docstring), `records` (a bulk writer beside `append_record`, sharing its validation, replay, audit and batch-write helpers), `commands.op_record_memory` (parameters), and the Records `describe` contract. The action is an addition to an existing tool, so no new MCP tool is created. Current local and Cloud surfaces and the command binding pick it up, and the derived artifacts are regenerated per `CONTRIBUTING.md`. Existing manifests stay valid: no schema-version bump. No new dependency.
+
+## Closure note
+
+At archive, the scenario "Frozen hosted candidates are unchanged" was dropped, because a later change retired the hosted candidate artifacts it compared.

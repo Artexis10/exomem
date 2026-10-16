@@ -19,11 +19,13 @@ from .vault import (
     VaultPathError,
     batch_atomic_write,
     content_hash,
+    document_newline,
     in_append_only_tree,
     in_curated_tree,
     plan_log_writes,
     read_guarded_text,
     resolve_under_vault,
+    with_newline,
 )
 
 log = logging.getLogger(__name__)
@@ -157,13 +159,17 @@ def append_to_file(
         and token_value["path"] == rel_path
         and token_value["after_hash"] == content_hash(existing)
     )
+    # The appended text takes the page's line endings, so a CRLF page stays CRLF.
+    # A committed append kept that style, so a retry derives the same bytes.
+    newline = document_newline(existing)
+    appended = with_newline(content, newline)
     if committed_replay:
-        if content and not existing.endswith(content):
+        if appended and not existing.endswith(appended):
             raise AppendError(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "append retry content does not match the committed transition",
             )
-        prefix = existing[: -len(content)] if content else existing
+        prefix = existing[: -len(appended)] if appended else existing
         if token_value is None:
             raise AppendError(
                 "LIFECYCLE_TRANSITION_MISMATCH",
@@ -171,10 +177,10 @@ def append_to_file(
             )
         if content_hash(prefix) == token_value["before_hash"]:
             joiner = ""
-        elif prefix.endswith("\n") and content_hash(prefix[:-1]) == token_value[
-            "before_hash"
-        ]:
-            joiner = "\n"
+        elif prefix.endswith(newline) and content_hash(
+            prefix[: -len(newline)]
+        ) == token_value["before_hash"]:
+            joiner = newline
         else:
             raise AppendError(
                 "LIFECYCLE_TRANSITION_MISMATCH",
@@ -183,13 +189,13 @@ def append_to_file(
         new_text = existing
     else:
         # Ensure a single newline boundary between existing tail and new content.
-        joiner = "\n" if existing and not existing.endswith("\n") else ""
-        new_text = existing + joiner + content
+        joiner = newline if existing and not existing.endswith("\n") else ""
+        new_text = existing + joiner + appended
 
     today = today or dt.date.today()
     date_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
-    bytes_appended = len((joiner + content).encode("utf-8"))
+    bytes_appended = len((joiner + appended).encode("utf-8"))
     log_body = f"Appended {bytes_appended:,} bytes via exomem Tier 2."
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."

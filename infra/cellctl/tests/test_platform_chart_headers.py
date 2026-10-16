@@ -1024,6 +1024,56 @@ def test_artifact_broker_is_ephemeral_confined_and_activated_only_for_selected_c
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_fleet_switch_is_default_off_and_renders_exactly_the_listed_canary() -> None:
+    canary = _helm_template(*ARTIFACT_BROKER_ARGS, "--set", "cloudGateway.artifactTransportEnabled=true")
+    assert _helm_template(*ARTIFACT_BROKER_ARGS, "--set", "cloudGateway.artifactTransportEnabled=true",
+                          "--set", "artifactBroker.allCells=false") == canary
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        env = _find(canary, "Deployment", name)["spec"]["template"]["spec"]["containers"][0]["env"]
+        assert not any("ALL_CELLS" in e["name"] for e in env), name
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_fleet_switch_reaches_cellctl_and_the_gateway_and_opens_the_broker_to_every_cell() -> None:
+    documents = _helm_template(*ARTIFACT_BROKER_ARGS, "--set", "cloudGateway.artifactTransportEnabled=true",
+                               "--set", "artifactBroker.allCells=true")
+    for name in ("cellctl", "exomem-cloud-gateway"):
+        env = {e["name"]: e.get("value") for e in
+               _find(documents, "Deployment", name)["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["CELLCTL_ARTIFACT_BROKER_ALL_CELLS" if name == "cellctl" else "EXOMEM_CLOUD_ARTIFACT_ALL_CELLS"] == "true"
+    # The canary list keeps working beside the switch.
+    cellctl_env = {e["name"]: e.get("value") for e in
+                   _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert cellctl_env["CELLCTL_ARTIFACT_BROKER_CELL_IDS"] == '["aaaaaaaaaaaaaaaa"]'
+    ingress, = _find(documents, "NetworkPolicy", "exomem-artifact-broker")["spec"]["ingress"]
+    assert ingress["ports"] == [{"protocol": "TCP", "port": 8767}]
+    peer, = ingress["from"]
+    unlisted = "bbbbbbbbbbbbbbbb"
+    cell_namespace = {"exomem.io/cloud-cell": unlisted, "kubernetes.io/metadata.name": "exo-cell-" + unlisted}
+    cell_runtime = {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell": unlisted}
+    assert _selects(peer["namespaceSelector"], cell_namespace)
+    assert _selects(peer["podSelector"], cell_runtime)
+    assert not _selects(peer["podSelector"], {**cell_runtime, "exomem.io/cell-job": "backup"})
+    assert not _selects(peer["namespaceSelector"], {"kubernetes.io/metadata.name": "kube-system"})
+    assert not _selects(peer["podSelector"], {"app.kubernetes.io/name": "exomem-cloud-gateway"})
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize(("setting", "refused_at"), [
+    (("--set-string", "artifactBroker.allCells=true"), "/artifactBroker/allCells"),
+    (("--set", "artifactBroker.enabled=false"), "/artifactBroker/enabled"),
+    (("--set-string", "artifactBroker.endpoint="), "/artifactBroker/endpoint"),
+])
+def test_the_fleet_switch_refuses_an_unusable_configuration(setting: tuple[str, str], refused_at: str) -> None:
+    # A string is not a boolean, and the switch alone, with no listed cell,
+    # needs an enabled broker with an endpoint.
+    result = _helm_template_result(*ARTIFACT_BROKER_ARGS, "--set-json", "artifactBroker.cellIds=[]",
+                                   "--set", "artifactBroker.allCells=true", *setting)
+    assert result.returncode != 0, setting
+    assert refused_at in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 @pytest.mark.parametrize("setting", [
     "artifactBroker.image=example:latest", "artifactBroker.endpoint=http://broker:8767",
     "artifactBroker.endpoint=http://8.8.8.8:8767", "artifactBroker.endpoint=http://10.43.0.25:80",
@@ -1066,6 +1116,29 @@ def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
     for selection in (["bad"], [cell_id, cell_id], [cell_id] * 1025, {"extra": cell_id}):
         result = _helm_render("--set-json", "cellctl.dedicatedCellIds=" + json.dumps(selection))
         assert result.returncode != 0 and "dedicatedCellIds" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_media_engine_fleet_default_is_validated_and_delivered_to_cellctl() -> None:
+    def delivered(*extra: str) -> str:
+        deployment = _find(_helm_template(*extra), "Deployment", "cellctl")
+        env = {entry["name"]: entry.get("value")
+               for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        return env["CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT"]
+
+    assert json.loads(delivered()) == []
+    assert json.loads(delivered("--set-json", 'cellctl.mediaEngineFleetDefault=["documents","ocr"]')) == [
+        "documents", "ocr"]
+    for bad in (["Documents"], ["documnets"], ["documents", "documents"], {"documents": []}, "documents"):
+        result = _helm_render("--set-json", "cellctl.mediaEngineFleetDefault=" + json.dumps(bad))
+        assert result.returncode != 0 and "mediaEngineFleetDefault" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_a_misspelt_engine_name_is_refused_in_the_per_cell_selection() -> None:
+    selection = {"documnets": ["aaaaaaaaaaaaaaaa"]}
+    result = _helm_render("--set-json", "cellctl.mediaEngineCellIds=" + json.dumps(selection))
+    assert result.returncode != 0 and "documnets" in result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

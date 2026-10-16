@@ -1,10 +1,11 @@
 """`exomem-cloud-rehearsal local-storage-drill`: the node-loss drill of
 move-cloud-cells-to-local-storage (tasks 4.1-4.3), and the rehearsal
-evidence for tasks 2.3, 2.4, 2.9 and 2.10.
+evidence for tasks 2.3, 2.4, 2.9, 2.10, and the planned move of 6.4 and 7.3.
 
 What runs:
 - drill_cluster's K3s server with embedded etcd and two agents, each with
-  its own loop-device `cells` volume group;
+  its own loop-device `cells` volume group, and a third agent as the planned
+  move's destination;
 - PostgreSQL holding cellctl's fixture schema of the control database's Cloud
   tables, the schema cellctl's own tests and live suite run against;
 - the S3 double as the restic target;
@@ -41,8 +42,8 @@ import asyncpg
 import boto3
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
-from cellctl.control_test_contract import control_test_sql
-from cellctl.k8s_client import OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
+from cellctl.control_test_contract import control_test_sql, import_test_sql
+from cellctl.k8s_client import MOVE_VOLUME_ANNOTATION, OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
 from cellctl.manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
@@ -59,6 +60,7 @@ from cellctl.state import (
     EMPTY_VOLUME_REFUSED,
     GROWTH_AT_CAP,
     GROWTH_PLANNED,
+    MOVE_BACKUP_FAILED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
 )
@@ -96,6 +98,8 @@ MAKE_BACKUP_DUE_SQL = (
     "UPDATE exomem_cloud_cells SET last_backup_at = now() - interval '61 minutes' "
     "WHERE cell_id = $1 AND hold_kind IS NULL"
 )
+# A cell stopped by its row, as Substrate stops one.
+STOP_CELL_SQL = "UPDATE exomem_cloud_cells SET desired_state = 'stopped' WHERE cell_id = $1 AND desired_state = 'running'"
 # D10: the drill's cap, so one growth from the default size reaches it.
 DRILL_MAX_CELL_GIB = 8
 # Runs in a cell: the filesystem's used and total bytes, as the backup Job
@@ -231,6 +235,8 @@ class Drill:
     report: DrillReport
     cell_image: str
     storage_label: str
+    # The host image the cell image was loaded from, for an agent started later.
+    cell_tag: str
     cells: dict[str, Cell] = field(default_factory=dict)
     # PVs a relocation or an operator step set to Retain on a live agent.
     retained_pvs: list[str] = field(default_factory=list)
@@ -1115,6 +1121,149 @@ async def check_growth(drill: Drill, record: StepRecord) -> None:
         raise StepFailure("; ".join(problems))
 
 
+async def check_planned_move(drill: Drill, record: StepRecord) -> None:
+    """6.4 and 7.3: a planned move takes a healthy cell to a new claim on
+    another agent without losing a write. The operator cordons the source,
+    then marks the cell. cellctl stops it, backs up its own volume, and only
+    then retains that volume and restores the backup onto a new claim. A note
+    written just before the mark must survive, which the last hourly backup
+    would not hold.
+
+    Only one `cells` pool can be active on the runner's kernel, so agent C
+    gets its pool between the move's backup and its restore, once agent B's
+    is deactivated. Until then the restore waits with the cordoned source as
+    the only node with a pool, which shows that the cordon keeps the new
+    claim off it."""
+
+    x, y = drill.cells["x"], drill.cells["y"]
+    agent_b = drill.cluster.agents["drill-agent-b"]
+    for cell in (x, y):
+        await drill.wait_row(cell, serving, timeout=900, description=f"cell {cell.label} to serve with no hold")
+    agent_c = drill_cluster.start_agent(drill.cluster, *drill_cluster.MOVE_TARGET)
+    loaded = build.load_into_k3s(agent_c.container, drill.cell_tag)
+    if loaded != drill.cell_image:
+        raise StepFailure(f"agent C holds cell image {loaded}, the cluster runs {drill.cell_image}")
+    run(["docker", "exec", agent_c.container, "crictl", "pull", drill.report.inputs["topolvm_image"]], timeout=600)
+
+    # Cell Y's volume is in B's pool too, which must be inactive before C's
+    # pool can be active.
+    status = await drill.sql(STOP_CELL_SQL, y.cell_id)
+    if status != "UPDATE 1":
+        raise StepFailure(f"stopping cell Y reported {status}")
+    await drill.wait_row(y, lambda r: r.get("observed_state") == "stopped" and r.get("hold_kind") is None,
+                         timeout=600, description="cell Y to stop")
+    wait_for(lambda: drill.cell_pod(y) is None, timeout=300, interval=2, description="cell Y's pod to go")
+
+    row = await drill.row(x)
+    old = drill.claim_volume(x)
+    if old["node"] != agent_b.name or row.get("volume_id") != old["volume_id"]:
+        raise StepFailure(f"cell X's row records volume {row.get('volume_id')}, its claim is on {old}")
+    governance = drill.governance(x)
+    drill.kubectl("cordon", agent_b.name)
+    drill.write(x, "before-move")
+    before = drill.markers(x)
+    marked_at = _now()
+    drill.kubectl("annotate", "namespace", x.namespace, f"{MOVE_VOLUME_ANNOTATION}={old['volume_id']}", "--overwrite")
+    began = time.monotonic()
+    marks: dict[str, float] = {}
+    jobs: dict[str, dict[str, Any]] = {}
+    since = marked_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def job_pods(selector: str) -> list[dict[str, Any]]:
+        """The move's Job pods: created at or after the mark."""
+
+        pods = drill.kube_json("get", "pods", "--namespace", x.namespace, f"--selector={selector}")["items"]
+        return [pod for pod in pods if pod["metadata"]["creationTimestamp"] >= since]
+
+    def look() -> None:
+        # The move's backup Job, then its restore Job, by their kind label.
+        for pod in job_pods(JOB_KIND_LABEL):
+            jobs[pod["metadata"]["labels"][JOB_KIND_LABEL]] = {
+                "pod": pod["metadata"]["name"], "node": pod["spec"].get("nodeName"),
+                "container": container_times(pod),
+            }
+
+    row = await drill.wait_row(
+        x, lambda r: r.get("hold_kind") == "restore" or r.get("last_error_code") == MOVE_BACKUP_FAILED,
+        timeout=1200, during=look, description="cell X's move to finish its stopped backup",
+    )
+    if row.get("last_error_code") == MOVE_BACKUP_FAILED:
+        raise StepFailure(f"the move's stopped backup failed: {row_summary(row)}")
+    marks["backup_done"] = time.monotonic() - began
+    restore_point = row_summary(row)
+
+    def restore_pod() -> dict[str, Any] | None:
+        pods = job_pods(f"{JOB_KIND_LABEL}={JOB_KIND_RESTORE}")
+        return pods[0] if pods else None
+
+    pending = wait_for(restore_pod, timeout=600, interval=2, description="cell X's restore pod")
+    unscheduled: list[str | None] = []
+    for _ in range(12):
+        pending = restore_pod() or pending
+        unscheduled.append(pending["spec"].get("nodeName"))
+        await asyncio.sleep(5)
+    waiting = next((c for c in (pending.get("status") or {}).get("conditions", []) if c["type"] == "PodScheduled"), {})
+    marks["restore_waited"] = time.monotonic() - began
+
+    drill_cluster.deactivate_volume_group(drill.cluster, agent_b, timeout=300)
+    record.evidence["destination_volume_group"] = drill_cluster.create_volume_group(agent_c)
+    drill.label_storage(agent_c)
+    marks["destination_capacity_published"] = time.monotonic() - began
+    row = await drill.wait_row(x, lambda r: serving(r) and r.get("node") == agent_c.name, timeout=1500, during=look,
+                               description="cell X to serve on agent C")
+    marks["serving_on_destination"] = time.monotonic() - began
+    look()
+
+    pod = drill.cell_pod(x)
+    new = drill.claim_volume(x)
+    old_pv = drill.maybe_json("get", "persistentvolume", old["pv"]) or {}
+    after = drill.markers(x)
+    record.evidence.update({
+        "source": agent_b.name, "destination": agent_c.name, "marked_at": marked_at.isoformat(),
+        "row_after_backup": restore_point,
+        "jobs": jobs,
+        "restore_while_only_the_cordoned_source_had_a_pool": {
+            "node_names_seen": unscheduled, "pod_scheduled": {k: waiting.get(k) for k in ("status", "reason", "message")},
+        },
+        "old_volume": {**old, "reclaim_policy": old_pv.get("spec", {}).get("persistentVolumeReclaimPolicy"),
+                       "phase": (old_pv.get("status") or {}).get("phase"), "node_now": pinned_node(old_pv)},
+        "new_volume": new,
+        "new_pod": {"node": pod["spec"]["nodeName"], "created_at": pod["metadata"]["creationTimestamp"]},
+        "row": row_summary(row),
+        "writes": {"before_mark": sorted(before), "after_move": sorted(after)},
+        "marks_seconds": {name: round(value, 1) for name, value in marks.items()},
+        "marks_note": "from the mark; restore_waited and destination_capacity_published include the drill's pool "
+        "swap, so they are not a downtime a production move would see",
+    })
+    record.evidence["acceptance"] = drill.accept(x, recall="before-move", governance=governance, write="after-move")
+    drill.kubectl("annotate", "namespace", x.namespace, f"{MOVE_VOLUME_ANNOTATION}-")
+    drill.retained_pvs.append(old["pv"])
+    record.evidence["retained_on_source"] = drill.retained_state(agent_b)
+
+    problems = []
+    if any(unscheduled):
+        problems.append(f"the restore pod was scheduled while only the cordoned source had a pool: {unscheduled}")
+    if (jobs.get("backup") or {}).get("node") not in (None, agent_b.name):
+        problems.append(f"the move's backup ran on {jobs['backup']['node']}, not on its volume's node {agent_b.name}")
+    restore = jobs.get("restore") or {}
+    if restore.get("node") != agent_c.name or new["node"] != agent_c.name or pod["spec"]["nodeName"] != agent_c.name:
+        problems.append(f"restore on {restore.get('node')}, volume on {new['node']}, pod on {pod['spec']['nodeName']}")
+    if new["volume_id"] == old["volume_id"] or row.get("volume_id") != new["volume_id"]:
+        problems.append(f"the row records {row.get('volume_id')}, the new volume is {new['volume_id']}")
+    if not row.get("last_backup_at") or row["last_backup_at"] <= marked_at:
+        problems.append(f"the restore point {_iso(row.get('last_backup_at'))} is not a backup taken after the mark")
+    if (old_pv.get("spec", {}).get("persistentVolumeReclaimPolicy"), (old_pv.get("status") or {}).get("phase"),
+            pinned_node(old_pv)) != ("Retain", "Released", agent_b.name):
+        problems.append(f"the old volume is not retained on the source: {record.evidence['old_volume']}")
+    finished = (restore.get("container") or {}).get("finished_at")
+    if not finished or pod["metadata"]["creationTimestamp"] < finished:
+        problems.append(f"the cell's pod ({pod['metadata']['creationTimestamp']}) did not start after the restore finished ({finished})")
+    if "before-move" not in after or not before <= after:
+        problems.append(f"the move lost writes: before the mark {sorted(before)}, after it {sorted(after)}")
+    if problems:
+        raise StepFailure("; ".join(problems))
+
+
 # --- setup --------------------------------------------------------------------------------
 
 
@@ -1125,6 +1274,8 @@ async def control_database(stack: infra.Stack) -> None:
         await owner.execute(TENANTS_STANDIN_SQL)
         schema_sql, grants_sql = control_test_sql(FIXTURES)
         await owner.execute(schema_sql)
+        # cellctl reads a cell's open import on every pass.
+        await owner.execute(import_test_sql(FIXTURES))
         await owner.execute(grants_sql)
     finally:
         await owner.close()
@@ -1195,6 +1346,9 @@ ADAPTATIONS = (
     "agent B pulls TopoLVM's image before the loss",
     f"the chart's cellStorage.local.maxCellGib is {DRILL_MAX_CELL_GIB}, so one growth from the 4 GiB default "
     "reaches the cap",
+    "for the same device-mapper reason, the planned move's destination, agent C, gets its volume group only "
+    "after the move's stopped backup succeeded and agent B's pool was deactivated, with cell Y, the other cell "
+    "on B, stopped first; in production both pools stay active and the restore schedules at once",
 )
 
 
@@ -1244,7 +1398,8 @@ async def run_drill(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"the agents hold different cell image digests: {cell_images}")
             [cell_image] = cell_images
             run(["docker", "exec", agent_b.container, "crictl", "pull", report.inputs["topolvm_image"]], timeout=600)
-            drill = Drill(cluster=cluster, report=report, cell_image=cell_image, storage_label=storage_label)
+            drill = Drill(cluster=cluster, report=report, cell_image=cell_image, storage_label=storage_label,
+                          cell_tag=cell_tag)
             report.stages["agents"]["agent_a_volume_group"] = drill_cluster.create_volume_group(agent_a)
             drill.label_storage(agent_a)
             await drill.sql("INSERT INTO exomem_cloud_settings (key, value) VALUES ('cell_image', $1)", json.dumps(cell_image))
@@ -1259,6 +1414,7 @@ async def run_drill(args: argparse.Namespace) -> int:
             ("4.3 an interrupted relocation restore", check_interrupted_restore),
             ("2.9 re-adoption after an older etcd snapshot", check_etcd_restore),
             ("2.10 online growth, then the cap", check_growth),
+            ("6.4 and 7.3 a planned move to another agent", check_planned_move),
         ]
         for number, (name, body) in enumerate(checks, start=1):
             await run_check(drill, number, name, body)
