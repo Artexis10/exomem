@@ -560,8 +560,7 @@ def version_values(conn, row_id: int, row_version: int) -> tuple[dict[str, Any],
 # --- writes -----------------------------------------------------------------
 
 
-def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded, *, item_key=None) -> None:
-    _, _, upsert, _ = _declarations(layout)
+def _current_parameters(conn, layout: Layout, row_id: int, row_version: int, encoded, *, item_key=None):
     values = {"row_id": row_id, "row_version": row_version,
               **dict(zip((*layout.value_columns, "r"), encoded, strict=True))}
     if layout.encoding == TYPED_V2:
@@ -571,7 +570,21 @@ def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded
             item_key = conn.execute("SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
                                     (row_id, layout.collection_id)).fetchone()[0]
         values["item_key"] = native_identity.encode(item_key, layout.identity)
-    conn.execute(upsert, values)
+    return values
+
+
+def _upsert_current(conn, layout: Layout, row_id: int, row_version: int, encoded, *, item_key=None) -> None:
+    _, _, upsert, _ = _declarations(layout)
+    conn.execute(upsert, _current_parameters(conn, layout, row_id, row_version, encoded, item_key=item_key))
+
+
+def _version_parameters(layout, row_id, row_version, encoded, body, payload_hash, txn_id, schema_version):
+    history = {"row_id": row_id, "row_version": row_version, "body": body,
+               **dict(zip((*layout.value_columns, "r"), encoded, strict=True))}
+    identity = {"row_id": row_id, "row_version": row_version,
+                "encoding": layout.encoding, "payload_hash": payload_hash, "txn_id": txn_id,
+                "schema_version": schema_version, "payload_generation": layout.generation}
+    return history, identity
 
 
 def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values: Mapping[str, Any],
@@ -580,11 +593,32 @@ def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values
     encoded = encode_row(layout, values, connection=conn, scope=scope)
     _upsert_current(conn, layout, row_id, row_version, encoded, item_key=item_key)
     _, _, _, insert_version = _declarations(layout)
-    conn.execute(insert_version, {"row_id": row_id, "row_version": row_version, "body": body,
-                                 **dict(zip((*layout.value_columns, "r"), encoded, strict=True))})
-    conn.execute(tables.INSERT_IDENTITY, {"row_id": row_id, "row_version": row_version,
-        "encoding": layout.encoding, "payload_hash": payload_hash, "txn_id": txn_id, "schema_version": schema_version,
-        "payload_generation": layout.generation})
+    history, identity = _version_parameters(layout, row_id, row_version, encoded, body, payload_hash, txn_id, schema_version)
+    conn.execute(insert_version, history)
+    conn.execute(tables.INSERT_IDENTITY, identity)
+
+
+def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_version: int, scope=None) -> None:
+    """Encode new rows once, then install current payloads, history and identities."""
+    current, history, identities = [], [], []
+    for row_id, key, values, body, payload_hash in rows:
+        encoded = encode_row(layout, values, connection=conn, scope=scope)
+        current.append(_current_parameters(conn, layout, row_id, 1, encoded, item_key=key))
+        version, identity = _version_parameters(layout, row_id, 1, encoded, body, payload_hash, txn_id, schema_version)
+        history.append(version)
+        identities.append(identity)
+    _, _, upsert, insert_version = _declarations(layout)
+    if layout.encoding == TYPED_V2:
+        from .native_operands import FileRole, operand_snapshot
+
+        raw = conn if isinstance(conn, sqlite3.Connection) else conn.connection
+        with operand_snapshot(raw, layout, role=FileRole.STORE):
+            conn.executemany(upsert, current)
+    else:
+        conn.executemany(upsert, current)
+    # History must precede its identity: triggers refuse payloads attached to existing identities.
+    conn.executemany(insert_version, history)
+    conn.executemany(tables.INSERT_IDENTITY, identities)
 
 
 # --- forward migration --------------------------------------------------------

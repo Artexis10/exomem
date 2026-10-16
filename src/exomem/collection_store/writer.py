@@ -19,6 +19,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import bindparam, select
+
 from .. import (
     held_fs,
     memory_refs,
@@ -26,6 +28,7 @@ from .. import (
     planning,
     record_formats,
     records,
+    state_paths,
     vault,
     writer_lease,
 )
@@ -1682,38 +1685,55 @@ class CollectionWriter:
             self._execute("UPDATE projection_state SET published_row_version=pending_row_version,"
                           "published_sha256=pending_sha256 WHERE path=?", (path,))
 
+    def _item_write_context(self, manifest):
+        manifest_metadata = self.connection.execute(
+            "SELECT m.governance_json FROM collection_manifests m JOIN collections c "
+            "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+            (manifest.collection_id,),
+        ).fetchone()[0]
+        encoding = typed_storage.collection_encoding(self.connection, manifest.collection_id)
+        layout = None if encoding == typed_storage.JSON_V1 else typed_storage.require_layout(self.connection, manifest.collection_id)
+        return manifest_metadata, encoding, layout
+
+    def _item_parameters(self, manifest, key, values, body, path, txn, before, manifest_metadata, encoding):
+        natural_key = _natural_key(manifest, values)
+        payload = tokens.payload_hash(manifest.schema.version, key, values, body)
+        version = 1 if before is None else before["row_version"] + 1
+        metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
+        # The collection is the encoding authority; typed payloads keep no JSON copy.
+        stored = _json(values) if encoding == typed_storage.JSON_V1 else None
+        parameters = {"natural_key": natural_key, "row_version": version, "values_json": stored,
+                      "body": body, "payload_hash": payload, "updated_txn": txn["txn_id"],
+                      "governance_json": metadata}
+        if before is None:
+            parameters.update(collection_id=manifest.collection_id, item_key=key,
+                              schema_version=manifest.schema.version, view_path=path,
+                              created_txn=txn["txn_id"], encoding=encoding)
+        return parameters
+
+    def _item_effect(self, manifest, key, txn, before, resumed, ordinal, row_id, version, payload):
+        # The built-in v1 audit wire contract fixes Planning's replan label.
+        return {"txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
+                "effect": "resume" if resumed else "insert" if before is None else "update",
+                "effect_label": "replan" if manifest.semantic_profile == "planning" else "correction" if before else None,
+                "version_before": None if before is None else before["row_version"], "version_after": version,
+                "hash_before": None if before is None else before["payload_hash"], "hash_after": payload}
+
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
                     *, ordinal=0, queue_log=True, scope=None):
         if before is None and manifest.view_mode == "items":
             self._require_items_capacity(manifest.collection_id)
         if _renders_rows(manifest):
             self._publication.capture_previous(path)
-        natural_key = _natural_key(manifest, values)
-        payload = tokens.payload_hash(manifest.schema.version, key, values, body)
-        version = 1 if before is None else before["row_version"] + 1
-        manifest_metadata = self.connection.execute(
-            "SELECT m.governance_json FROM collection_manifests m JOIN collections c "
-            "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
-            (manifest.collection_id,),
-        ).fetchone()[0]
-        metadata = governance.row_metadata(manifest.schema, values, manifest_metadata)
-        # The collection is the one encoding authority; json-v1 keeps canonical
-        # JSON, typed-v1 keeps ordinal typed columns and no JSON copy.
-        encoding = typed_storage.collection_encoding(self.connection, manifest.collection_id)
-        stored = _json(values) if encoding == typed_storage.JSON_V1 else None
-        changed = {"natural_key": natural_key, "row_version": version, "values_json": stored,
-                   "body": body, "payload_hash": payload, "updated_txn": txn["txn_id"],
-                   "governance_json": metadata}
+        manifest_metadata, encoding, layout = self._item_write_context(manifest)
+        parameters = self._item_parameters(manifest, key, values, body, path, txn, before, manifest_metadata, encoding)
+        version, payload, stored = parameters["row_version"], parameters["payload_hash"], parameters["values_json"]
         if before is None:
-            cursor = self._execute(tables.INSERT_ITEM, {
-                **changed, "collection_id": manifest.collection_id, "item_key": key,
-                "schema_version": manifest.schema.version, "view_path": path,
-                "created_txn": txn["txn_id"], "encoding": encoding,
-            })
+            cursor = self._execute(tables.INSERT_ITEM, parameters)
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
-            self._execute(tables.UPDATE_ITEM, {**changed, "target_row_id": row_id})
+            self._execute(tables.UPDATE_ITEM, {**parameters, "target_row_id": row_id})
         if encoding == typed_storage.JSON_V1:
             # The JSON payload mints its json-v1 version_identity in the same statement.
             self._execute(tables.INSERT_VERSION, {
@@ -1723,7 +1743,7 @@ class CollectionWriter:
         else:
             typed_storage.write_version(
                 index_migrations.AccountedWriter(self.connection, self._execute),
-                typed_storage.require_layout(self.connection, manifest.collection_id),
+                layout,
                 row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
                 txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key, scope=scope,
             )
@@ -1733,13 +1753,8 @@ class CollectionWriter:
         for source_ordinal, source in enumerate(sources):
             self._execute(tables.INSERT_SOURCE, {"row_id": row_id, "row_version": version,
                           "ordinal": source_ordinal, "source_ref": source})
-        self._execute(tables.INSERT_EFFECT, {
-            "txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
-            "effect": "resume" if resumed else "insert" if before is None else "update",
-            "effect_label": "replan" if manifest.semantic_profile == "planning" else "correction" if before else None,
-            "version_before": None if before is None else before["row_version"], "version_after": version,
-            "hash_before": None if before is None else before["payload_hash"], "hash_after": payload,
-        })
+        self._execute(tables.INSERT_EFFECT,
+                      self._item_effect(manifest, key, txn, before, resumed, ordinal, row_id, version, payload))
         if _renders_rows(manifest):
             _, text = self._render_view({"kind": "item", "row_id": row_id}, manifest)
             self._pending(path, manifest.collection_id, "item", version, text, row_id, manifest=manifest)
@@ -1751,6 +1766,39 @@ class CollectionWriter:
         self.handle.release_cache.touch(manifest.collection_id,
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
+
+    def _write_new_items(self, manifest, plans, txn, *, scope=None):
+        """Apply admitted new summary rows together inside the existing mutation transaction."""
+        manifest_metadata, encoding, layout = self._item_write_context(manifest)
+        parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
+                      for key, values, body, path, _, _ in plans]
+        self._execute(tables.INSERT_ITEM, parameters)
+        statement = select(tables.items.c.item_key, tables.items.c.row_id).where(
+            tables.items.c.collection_id == bindparam("collection_id"),
+            tables.items.c.item_key.in_(bindparam("item_keys", expanding=True)),
+        )
+        row_ids = dict(self._execute(statement, {"collection_id": manifest.collection_id,
+                                               "item_keys": [row["item_key"] for row in parameters]}).fetchall())
+        if encoding == typed_storage.JSON_V1:
+            self._execute(tables.INSERT_VERSION, [{"row_id": row_ids[row["item_key"]], "row_version": 1,
+                "values_json": row["values_json"], "body": row["body"], "payload_hash": row["payload_hash"],
+                "txn_id": txn["txn_id"]} for row in parameters])
+        else:
+            typed_storage.write_new_versions(index_migrations.AccountedWriter(self.connection, self._execute), layout,
+                [(row_ids[key], key, values, body, row["payload_hash"])
+                 for (key, values, body, _, _, _), row in zip(plans, parameters, strict=True)],
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version, scope=scope)
+        index_migrations.maintain_new_items(index_migrations.AccountedWriter(self.connection, self._execute),
+            manifest.collection_id, [(row_ids[key], key, 1, values) for key, values, _, _, _, _ in plans])
+        # Immediate source FKs require every payload identity to exist before sources attach.
+        self._execute(tables.INSERT_SOURCE, [{"row_id": row_ids[key], "row_version": 1,
+            "ordinal": 0, "source_ref": source} for key, _, _, _, _, source in plans])
+        self._execute(tables.INSERT_EFFECT, [self._item_effect(manifest, key, txn, None, None, ordinal,
+            row_ids[key], 1, row["payload_hash"])
+            for ordinal, ((key, _, _, _, _, _), row) in enumerate(zip(plans, parameters, strict=True))])
+        item_type = types.type_for_manifest(manifest).item_type
+        for key, _, _, _, _, _ in plans:
+            self.handle.release_cache.touch(manifest.collection_id, f"exomem://{item_type}/{manifest.collection_id}/{key}")
 
     def _pending_log(self, manifest, txn):
         frame_json = self.connection.execute(
@@ -1861,7 +1909,10 @@ class CollectionWriter:
                                         "source is not a preserved Sources or Evidence page", source=reference))
                         continue
                     source_rel, guard = resolved
-                    values = records._bulk_row_values(manifest, raw["item"], source_rel)
+                    values = (_import.prepared_row(index, manifest, reference, resolved, raw["item"])
+                              if _import is not None else None)
+                    if values is None:
+                        values = records._bulk_row_values(manifest, raw["item"], source_rel)
                 except collections.CollectionError as error:
                     outcomes.append(records._bulk_error_row(index, error))
                     continue
@@ -1922,9 +1973,12 @@ class CollectionWriter:
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans])
             scope = self.handle.write_scope
-            for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
-                self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
-                                 ordinal=ordinal, queue_log=False, scope=scope)
+            if manifest.view_mode == summary.SUMMARY and all(before is None for _, _, _, _, before, _ in plans):
+                self._write_new_items(manifest, plans, txn, scope=scope)
+            else:
+                for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
+                    self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
+                                     ordinal=ordinal, queue_log=False, scope=scope)
             if is_log:
                 self._pending_log(manifest, txn)
             elif manifest.view_mode == summary.SUMMARY:
@@ -1942,9 +1996,11 @@ class CollectionWriter:
                 _import(self, result)
         writer_lease.mark_active_mutation_committed()
         advisory = None
-        for key, values, _, path, before, _ in plans:
-            advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
-                                                  values=values, previous=json.loads(before["values_json"]) if before else None)
+        # Reuse placement within this synchronous batch; each carrier still reads live state.
+        with state_paths.resolution_scope():
+            for key, values, _, path, before, _ in plans:
+                advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
+                                                      values=values, previous=json.loads(before["values_json"]) if before else None)
         return {"due_state": advisory, **result} if advisory else result
 
     def _item_carriers(self, result, manifest, *, path, key, values, previous=None):

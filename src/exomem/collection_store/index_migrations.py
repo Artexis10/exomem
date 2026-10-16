@@ -23,7 +23,7 @@ _MAX_BATCH_BYTES = 4 * 1024 * 1024
 
 
 class AccountedWriter:
-    """Route only this module's individual SQL statements through the writer."""
+    """Route maintenance SQL through the writer's change accounting."""
 
     def __init__(self, connection, execute):
         self.connection = connection
@@ -99,6 +99,10 @@ def ready_plan(conn: sqlite3.Connection, collection_id: str) -> ProjectionPlan |
     """Resolve only a fully published mapping, without DDL or a fallback scan."""
     row = conn.execute("SELECT generation,plan_json,plan_hash FROM query_projection_mappings "
                        "WHERE collection_id=? AND state='ready'", (collection_id,)).fetchone()
+    return _ready_plan(conn, collection_id, row)
+
+
+def _ready_plan(conn, collection_id, row):
     if row is None:
         return None
     if hashlib.sha256(row[1].encode()).hexdigest() != row[2]:
@@ -135,11 +139,24 @@ def maintain_item(conn, collection_id, row_id, item_key, row_version, values: Ma
     _transaction(conn)
     query_freshness.maintain(conn, collection_id, values, previous=previous)
     rollups.maintain(conn, collection_id, row_id, item_key, values, previous=previous)
-    mappings = conn.execute("SELECT generation,state,plan_json FROM query_projection_mappings "
-                            "WHERE collection_id=? AND state IN ('ready','building')",
-                            (collection_id,)).fetchall()
-    for generation, state, encoded in mappings:
-        plan = _plan(collection_id, generation, encoded, connection=conn)
+    _maintain_indexes(conn, collection_id, [(row_id, item_key, row_version, values)])
+
+
+def maintain_new_items(conn, collection_id, rows) -> None:
+    """Maintain one all-new batch without reloading declarations for each row."""
+    _transaction(conn)
+    query_freshness.advance_all(conn, collection_id, count=len(rows))
+    rollups.maintain_new_items(conn, collection_id, ((row_id, key, values) for row_id, key, _, values in rows))
+    _maintain_indexes(conn, collection_id, rows, many=True)
+
+
+def _maintain_indexes(conn, collection_id, rows, *, many=False) -> None:
+    mappings = [(state, _ready_plan(conn, collection_id, (generation, encoded, digest)) if state == "ready"
+                 else _plan(collection_id, generation, encoded, connection=conn))
+                for generation, state, encoded, digest in conn.execute(
+                    "SELECT generation,state,plan_json,plan_hash FROM query_projection_mappings "
+                    "WHERE collection_id=? AND state IN ('ready','building')", (collection_id,)).fetchall()]
+    for state, plan in mappings:
         from .native_projections import NativeProjectionPlan
 
         if isinstance(plan, NativeProjectionPlan):
@@ -149,21 +166,27 @@ def maintain_item(conn, collection_id, row_id, item_key, row_version, values: Ma
             payload_state = conn.execute("SELECT state FROM typed_encoding_mappings WHERE collection_id=? AND generation=?",
                                          (collection_id, plan.layout.generation)).fetchone()
             if payload_state is not None and payload_state[0] == "ready":
-                current = ready_plan(conn, collection_id)
+                current = next((ready for state, ready in mappings if state == "ready"), None)
                 if not isinstance(current, NativeProjectionPlan):
                     raise typed_storage.TypedStorageError("native query build has no current payload relation")
-                _copy_native(conn, current, plan, "row_id=? AND row_version=?", (row_id, row_version))
+                for row_id, _, row_version, _ in rows:
+                    if not _copy_native(conn, current, plan, "row_id=? AND row_version=?", (row_id, row_version)):
+                        break
             # A payload-format build catches up by row version in bounded migration batches.
             continue
         try:
-            keys = plan.encode(values)
+            parameters = [{"row_id": row_id, "item_key": item_key, "row_version": row_version,
+                           "keys_json": plan.encode(values)} for row_id, item_key, row_version, values in rows]
         except ScalarValueError:
             if state == "ready":
                 raise
             _failed(conn, plan)
             conn.execute(f"DROP TABLE {plan.table_name}")
             continue
-        conn.execute(plan.upsert, {"row_id": row_id, "item_key": item_key, "row_version": row_version, "keys_json": keys})
+        if many:
+            conn.executemany(plan.upsert, parameters)
+        else:
+            conn.execute(plan.upsert, parameters[0])
 
 
 def _copy_native(conn, source, target, where, parameters):

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 from io import BytesIO
@@ -25,7 +28,7 @@ from ..query_engine.scalars import (
 )
 from . import native_numbers, native_rows, native_temporal
 from .native_layout import Codec
-from .native_metadata import FieldMetadata
+from .native_metadata import FieldMetadata, snapshot_fields
 from .typed_storage import TypedStorageError
 
 # Function version, components and file roles are closed persisted wire values.
@@ -36,6 +39,36 @@ COMPONENTS = ("tag", "band", "key")  # nosemgrep: ep-word-set -- The versioned o
 class FileRole(StrEnum):
     STORE = "store"
     DERIVED = "derived"
+
+
+@dataclass(frozen=True, slots=True)
+class _MetadataScope:
+    connection: sqlite3.Connection
+    role: FileRole
+    database: str
+    collection_id: str
+    generation: int
+    field_readers: Mapping[int, object]
+
+
+_metadata_scope: ContextVar[_MetadataScope | None] = ContextVar("native_operand_metadata", default=None)
+
+
+@contextmanager
+def operand_snapshot(connection, layout, *, role):
+    """Reuse metadata for one synchronous payload operation after its final metadata write.
+
+    Never span async work or more than one payload operation.
+    """
+    readers = snapshot_fields(connection, layout.collection_id, layout.generation, range(len(layout.fields)),
+                              database=layout.database)
+    scope = _MetadataScope(connection, FileRole(role), layout.database, layout.collection_id, layout.generation,
+                           MappingProxyType(readers))
+    token = _metadata_scope.set(scope)
+    try:
+        yield
+    finally:
+        _metadata_scope.reset(token)
 
 
 def family(kind: str) -> str:
@@ -129,11 +162,18 @@ def register_native_operands(conn: sqlite3.Connection, *, databases: Mapping[Fil
         raise ValueError("native operand roles require database namespaces")
 
     def operand(codec_id, collection_id, generation, ordinal, operand_family, path_json, role, cell, extent, component):
-        # Successful metadata bindings are immutable and share this statement's snapshot.
-        # No metadata cache can outlive rollback, file replacement or connection rebinding.
+        physical_role = FileRole(role)
+        database = roles[physical_role]
         if component not in COMPONENTS:
             raise TypedStorageError("unknown native operand component")
-        metadata = FieldMetadata(conn, collection_id, generation, ordinal, roles[FileRole(role)])
+        scope = _metadata_scope.get()
+        metadata = None
+        if (scope is not None and scope.connection is conn and scope.role is physical_role
+                and scope.database == database and scope.collection_id == collection_id
+                and scope.generation == generation):
+            metadata = scope.field_readers.get(ordinal)
+        if metadata is None:
+            metadata = FieldMetadata(conn, collection_id, generation, ordinal, database)
         parts = cell_operand(Codec(codec_id), cell, metadata, operand_family, _path(path_json), values_bytes=extent)
         return parts[COMPONENTS.index(component)]
 
