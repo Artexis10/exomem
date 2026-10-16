@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -256,6 +257,15 @@ def envelope(success: bool, data: Any = None, error: dict | None = None) -> dict
         if field in error_payload:
             payload[field] = error_payload.pop(field)
     return payload
+
+
+def action_argument_contract(
+    action: str, allowed: Iterable[str], required: Iterable[str]
+) -> str:
+    """Say what an action accepts, from the tables its validator already checks."""
+    names = ", ".join(sorted(allowed)) or "none"
+    needs = ", ".join(sorted(required))
+    return f"{action} allowed: {names}" + (f"; {action} requires: {needs}" if needs else "")
 
 
 def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:

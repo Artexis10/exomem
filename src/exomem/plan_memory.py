@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Never
 
 from . import planning
-from .cli_ops import OpError
+from .cli_ops import OpError, action_argument_contract
 from .structured_collections import CollectionError, collection_remediation
 
 ACTIONS = frozenset(
@@ -369,6 +369,9 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
             parts.append(f"unexpected for {action}: " + ", ".join(sorted(surplus)))
         if missing:
             parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
+        parts.append(
+            action_argument_contract(action, _ACTION_FIELDS[action], _REQUIRED_FIELDS[action])
+        )
         _invalid_arguments("; ".join(parts))
     if action == "query" and values["view"] is not None and supplied & _VIEW_SHAPING_FIELDS:
         offending = sorted(supplied & _VIEW_SHAPING_FIELDS)
