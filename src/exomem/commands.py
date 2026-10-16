@@ -2080,7 +2080,7 @@ def op_bootstrap(
             "original_recovery": {
                 "tool": "transfer_artifact",
                 "when": "recover a stored original through a desktop/personal endpoint",
-                # The tool description already carries these, so compact leaves them to it.
+                # The tool description, its response and the skill carry these, so compact leaves them out.
                 **(
                     {
                         "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},

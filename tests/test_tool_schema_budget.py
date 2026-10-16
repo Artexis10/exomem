@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TOTAL_BUDGET = 90_000
 
-#: Per-tool ceilings in bytes. Their sum is deliberately under TOTAL_BUDGET.
+#: Per-tool ceilings in bytes. Their sum stays within TOTAL_BUDGET.
 # The bounded viewer and original recovery use spare per-tool headroom; the total budget stays unchanged.
 TOOL_CEILINGS: dict[str, int] = {
     "edit_memory": 6600,
