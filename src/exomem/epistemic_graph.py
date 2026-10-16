@@ -142,35 +142,19 @@ class _DrainCoverage:
         return self.committed if self.missing == 0 else None
 
 
-def _log_drain_outcome(
-    queued: int, *, withheld: str | None, coverage: _DrainCoverage | None
-) -> None:
-    """Name how a published or withheld drain pass ended. Counts and outcome words only."""
-    if withheld is not None:
-        log.info("deferred graph drain outcome=withheld moved=%s queued=%d", withheld, queued)
-    elif coverage is None or coverage.committed is None:
-        log.info("deferred graph drain outcome=unacknowledged committed=none queued=%d", queued)
-    elif coverage.acknowledges is not None:
-        log.info(
-            "deferred graph drain outcome=acknowledged generation=%d queued=%d",
-            coverage.committed.generation,
-            queued,
-        )
-    elif coverage.missing is not None:
-        log.info(
-            "deferred graph drain outcome=unacknowledged committed=%d missing_paths=%d "
-            "queued=%d",
-            coverage.committed.generation,
-            coverage.missing,
-            queued,
-        )
-    else:
-        log.info(
-            "deferred graph drain outcome=unacknowledged committed=%d scope=%s queued=%d",
-            coverage.committed.generation,
-            coverage.committed.scope,
-            queued,
-        )
+def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCoverage) -> None:
+    """Name how a drain pass that reached publication ended. Counts and outcome words only."""
+    committed = coverage.committed
+    log.info(
+        "deferred graph drain outcome=%s moved=%s committed=%s scope=%s missing_paths=%s "
+        "queued=%d",
+        "withheld" if withheld else "acknowledged" if coverage.acknowledges else "unacknowledged",
+        withheld or "none",
+        committed.generation if committed else "none",
+        committed.scope if committed else "none",
+        "none" if coverage.missing is None else coverage.missing,
+        queued,
+    )
 
 
 #: Every bail-out reason `_refresh_paths_locked` can emit, and which repair it
@@ -6441,8 +6425,8 @@ class EpistemicGraphIndex:
             batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
             indexed_versions: dict[str, GraphSourceSignature] = {}
             published = False
-            # For the outcome line: which projection proof moved, or what the
-            # published batch covered of the committed checkpoint.
+            # For the outcome line: what the batch covered of the committed
+            # checkpoint, and which projection proof moved, if one did.
             withheld: str | None = None
             coverage: _DrainCoverage | None = None
 
@@ -6462,6 +6446,10 @@ class EpistemicGraphIndex:
                     # A page this pass indexed moved under it: those rows are
                     # stale, so nothing here may land.
                     raise _DrainPublicationMoved
+                # Read at commit time, not before the pass: the coverage claim
+                # has to be about the generation that is committed now, not
+                # the one that was committed when the drain started.
+                coverage = self._drained_graph_checkpoint(batch)
                 # Checked in this order, stopping at the first that moved.
                 if _incremental_projection_identity(self.vault_root) != before:
                     withheld = "projection"
@@ -6497,10 +6485,6 @@ class EpistemicGraphIndex:
                     return
                 if not owns_topology:
                     self._write_topology_carry(conn, carry_after)
-                # Read at commit time, not before the pass: the coverage claim
-                # has to be about the generation that is committed now, not
-                # the one that was committed when the drain started.
-                coverage = self._drained_graph_checkpoint(batch)
                 self._publish_available_marker_in_transaction(
                     conn,
                     before,
@@ -6536,8 +6520,8 @@ class EpistemicGraphIndex:
                 return {**report, "moved": 1}
             if published:
                 self._note_graph_published()
-            if published or withheld is not None:
-                _log_drain_outcome(len(paths), withheld=withheld, coverage=coverage)
+            if coverage is not None:
+                _log_drain_outcome(len(paths), withheld, coverage)
         return {
             **pass_report,
             "published": published,

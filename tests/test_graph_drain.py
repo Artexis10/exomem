@@ -322,43 +322,50 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
-def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_at_the_ceiling(
+def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_the_ladder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A queue that never drains still converges, but not on its first refusal.
+    """A queue that never drains still converges, but not inside a write storm.
 
     The availability arm stays out while receipts are queued, because the queue
     owns that repair. A queue that can never drain would then leave the graph
-    unreadable forever, so the loop asks for a whole-vault rebuild once its
-    backoff has reached the ceiling, and never sooner.
+    unreadable forever, so the loop asks for a whole-vault rebuild once the
+    no-progress streak has lasted the whole backoff ladder. Write signals cut
+    each backoff wait short, so the bound is wall time, not a count of passes:
+    a burst of transient refusals must not buy a whole-vault pass.
     """
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
-    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.01)
-    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.08)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.2)
     monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
     monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
     monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: False)
-    attempts: list[int] = []
-    requests: list[int] = []
+    attempts: list[float] = []
+    requests: list[float] = []
 
     def no_progress(_root: Path) -> int:
-        attempts.append(1)
+        attempts.append(time.monotonic())
         return 0
 
-    def request(_root: Path) -> bool:
-        requests.append(len(attempts))
+    def request(_root: Path, **_kwargs: Any) -> bool:
+        requests.append(time.monotonic())
         return False
 
     monkeypatch.setattr(graph_drain, "_work_once", no_progress)
     monkeypatch.setattr(graph_drain, "_request_full_rebuild", request)
 
     graph_drain.start(tmp_path)
-    assert _wait_for(lambda: len(requests) >= 2, timeout=5.0)
+    _signal_debt_for(0.6, every=0.01)
+    assert _wait_for(lambda: len(requests) >= 1, timeout=5.0)
     graph_drain.stop()
 
-    # Backoff after each failed pass: 0.01, 0.02, 0.04, then the 0.08 ceiling.
-    assert requests[0] == 4, f"whole-vault requested after {requests[0]} failed pass(es)"
-    assert all(after >= 4 for after in requests), requests
+    # The ladder: 0.05 + 0.1, then the 0.2 ceiling, makes 0.35 s.
+    assert requests[0] - attempts[0] >= 0.35, (
+        f"whole-vault requested {requests[0] - attempts[0]:.2f}s into the stall"
+    )
+    # Unsignalled, the ladder runs four passes in 0.35 s; the writes made more.
+    before = [moment for moment in attempts if moment <= requests[0]]
+    assert len(before) > 6, f"the write signals never cut a backoff short: {len(before)} passes"
 
 
 def test_a_failing_drain_never_kills_the_daemon(
