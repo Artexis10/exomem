@@ -266,7 +266,8 @@ def _detect_script(cmd: str, image: Path) -> str | None:
 def _read(cmd: str, image: Path, lang: str | None, psm: str, workdir: Path) -> tuple[float, str]:
     """Read once; return (mean word confidence, text)."""
     base = workdir / f"pass-{psm}"
-    args = [str(image), str(base), "--psm", psm]
+    # Space only at the gaps Tesseract measured; by default it spaces apart each CJK word.
+    args = [str(image), str(base), "--psm", psm, "-c", "preserve_interword_spaces=1"]
     if lang:
         args[2:2] = ["-l", lang]
     _run(cmd, [*args, "txt", "tsv"])
