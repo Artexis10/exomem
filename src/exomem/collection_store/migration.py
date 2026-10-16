@@ -572,7 +572,10 @@ def _unproven(changed=()):
 
 
 def _fenced(session, fence_client):
-    """Whether a lease on this vault needs the store capability, which only a bound runtime sends."""
+    """Whether a lease on this vault needs the store capability.
+
+    While an intent is pending, only a process with a bound store runtime sends it.
+    """
     return authority.read_marker(session.root) is not None or fence_client.collection_store_fence().enrolled
 
 
