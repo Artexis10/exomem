@@ -12,8 +12,13 @@ The vault-side collection directory (the replica, mode marker, staging, aside, f
 - **THEN** the view path, filename and count are absent from every response, exactly as if the item did not exist
 
 #### Scenario: A file tool answers a withheld view as a missing path
-- **WHEN** a caller from whom an item is withheld asks a file tool to delete or move the item's view
-- **THEN** the refusal is the `NOT_FOUND` that the same path gives when the item does not exist, and only a caller who may see the item receives `COLLECTION_VIEW_PATH`
+- **WHEN** a caller from whom an item is withheld names the item's view as the file to delete or the source of a move
+- **THEN** the refusal is the `NOT_FOUND` that the same path gives when the item does not exist, and for that source path only a caller who may see the item receives `COLLECTION_VIEW_PATH`
+- **AND** a move or restore destination inside a collection is refused with `COLLECTION_VIEW_PATH` by its region alone, before any existence check
+
+#### Scenario: A hold is released no further than its item
+- **WHEN** a held candidate would change an existing item that a policy withholds from an audience, by any selector
+- **THEN** the hold is withheld from that audience in every listing, read and count, while the owner still sees it
 
 ### Requirement: Collection type default audience is a subject-level default-deny
 Every item of a collection type whose declaration sets `default_audience: owner` SHALL be evaluated with a subject-level default-deny that follows exactly the existing scope `default_deny` rule:

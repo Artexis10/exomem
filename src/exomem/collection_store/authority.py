@@ -222,30 +222,36 @@ def refuse_view_paths(root, paths, refusal):
     so a withheld view answers exactly as a missing path does.
     """
     try:
-        owned = _marker_owns_any(root, paths)
+        entry = _owning_entry(Path(root), paths)
     except CollectionStoreError as error:
-        # A marker that cannot place the paths refuses them: a view never leaves its store unseen.
         raise refusal(error.code, error.reason) from None
-    if owned:
-        raise refusal(VIEW_PATH, (
-            "this path holds the views of a store collection; change its items with "
-            "record_memory or plan_memory, because the file tools never move, trash or "
-            "restore a collection view"))
+    if entry is not None:
+        profile = entry.get("semantic_profile")
+        tool = "its collection's tool" if profile is None else collection_profiles.profile_for(profile).tool
+        raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
 
 
-def _marker_owns_any(root, paths):
-    # Marker validation keeps every owned region under the knowledge base folder.
-    paths = [path for path in paths if collections._reference_key(Path(root), path) is not None]
+def _owning_entry(root, paths):
+    # A malformed or legacy marker refuses every placed path here, as it already refuses reads.
+    paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
+             # Marker validation keeps every owned region under the knowledge base folder.
+             if collections._reference_key(root, path) is not None]
     if not paths:
-        return False
+        return None
     try:
         raw = read_marker(root)
     except (held_fs.HeldFsError, OSError) as error:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
     if raw is None:
-        return False
+        return None
     marker = parse_marker(root, raw)
-    return any(owned_entry(root, marker, path) is not None for path in paths)
+    return next((entry for path in paths if (entry := owned_entry(root, marker, path)) is not None), None)
+
+
+def _knowledge_base_spelling(root, path):
+    # A case-folding volume opens another casing of the knowledge base folder as the folder itself.
+    canonical = vault._canonical_kb_segment(path)
+    return canonical if canonical == path or vault.vault_casefolds(root) else path
 
 
 def upgraded_marker(root, conn, marker):

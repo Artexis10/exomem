@@ -257,12 +257,15 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
 
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
-                  view_path=None, include_held=True, batch_size=128,
+                  view_path=None, row_key=None, include_held=True, batch_size=128,
                   query_order=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata, yielding the manifest before opening row cursors."""
+    """Stream canonical metadata, yielding the manifest before opening row cursors.
+
+    ``row_key`` selects one item by its key alone: no manifest and no held candidate.
+    """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
-    if identity is not None and view_path is not None:
+    if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
         raise ValueError("canonical subject lookup must have one selector")
     row = conn.execute(
         "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,m.manifest_hash,m.governance_json,"
@@ -296,7 +299,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                                     name, type_version, declaration_hash, domain)
         return CanonicalSubject(cid, row_id, basis)
 
-    if identity in (None, path):
+    if identity in (None, path) and row_key is None:
         yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
     held_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://collection-held/{cid}/") else None
@@ -307,6 +310,8 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     elif view_path is not None:
         item_filter = held_filter = " AND view_path=?"
         item_args = held_args = (view_path,)
+    elif row_key is not None:
+        item_filter, item_args = " AND item_key=?", (row_key,)
     # Admission needs no result ordering; item keys follow the existing index
     # without a sorter whose spill files escape the private TEMP-table quota.
     item_order = "item_key" if query_order else "row_id"
@@ -324,7 +329,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                 policy_path = path if summary else source_path if layout == "markdown-log" else view_path
                 yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
                            declared.item_type, raw_metadata, row_version, payload, "row")
-    if not include_held:
+    if not include_held or row_key is not None:
         return
     with closing(conn.execute(
         "SELECT held_id,view_path,governance_json,governance_hash FROM held_candidates "
@@ -335,6 +340,25 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
             for held_id, path, raw_metadata, payload in batch:
                 yield make(f"exomem://collection-held/{cid}/{held_id}", held_id, path,
                            "held-record", raw_metadata, 1, payload, "held")
+
+
+def held_target(conn: sqlite3.Connection, hold: CanonicalSubject) -> CanonicalSubject | None:
+    """The existing item a hold would change, or None when it proposes a new item.
+
+    A refused write names its item key; a view correction is held at the item's view path.
+    """
+    row = conn.execute("SELECT candidate_json,view_path FROM held_candidates WHERE collection_id=? AND held_id=?",
+                       (hold.collection_id, hold.row_id)).fetchone()
+    if row is None:
+        return None
+    key = json.loads(row[0]).get("item_key")
+    if not isinstance(key, str):
+        found = conn.execute("SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
+                             (hold.collection_id, row[1])).fetchone()
+        key = None if found is None else found[0]
+    if key is None:
+        return None
+    return next(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), None)
 
 
 def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject:
@@ -736,6 +760,20 @@ class OperationAuthorization:
                 connector_boundary.cache_identity(self.root, self.who, self.policy))
 
     def decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
+        """Decide one subject; a hold is released no further than the existing item it would change (A8).
+
+        Without the item's decision, a hold would show a withheld item's values to an audience
+        that every selector of the item withholds it from.
+        """
+        decision = self._subject_decision(subject, session=session)
+        if decision.level == 0 or subject.basis.domain != "held":
+            return decision
+        target = held_target(self.conn, subject)
+        if target is None:
+            return decision
+        return egress._meet_decisions((decision, self._subject_decision(target, session=session)))
+
+    def _subject_decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
         basis = subject.basis
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
@@ -950,6 +988,12 @@ class OperationAuthorization:
                       and self.decision(subject, session=False).level < 6}
             self.cache._remember(state.summaries, dependency, (denied, {}), 16)
         denied, dirty = state.summaries[dependency]
+        if any(subject is not None and isinstance(subject.row_id, int) for subject in dirty.values()):
+            # An item changes without its holds, whose decisions follow it, so they are decided again.
+            for (held_id,) in self.conn.execute("SELECT held_id FROM held_candidates WHERE collection_id=?", (cid,)):
+                identity = f"exomem://collection-held/{cid}/{held_id}"
+                if identity in state.subjects:
+                    dirty.setdefault(identity, state.subjects[identity])
         for identity, subject in dirty.items():
             if subject is not None and self.decision(subject, session=False).level < 6:
                 denied.add(identity)

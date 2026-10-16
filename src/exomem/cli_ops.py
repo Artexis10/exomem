@@ -132,10 +132,6 @@ _REMEDIATION: dict[str, str] = {
         "items to a distinct natural key, or delete/archive one, then retry."
     ),
     "CREATE_ONLY_CONFLICT": "Choose an unused collection path or inspect the existing collection.",
-    "COLLECTION_VIEW_PATH": (
-        "Change the item with record_memory or plan_memory (update, or archive a plan); "
-        "the collection renders its views itself."
-    ),
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
     "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
     "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the governed Knowledge Base.",

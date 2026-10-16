@@ -1072,7 +1072,7 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
   - `move_file` / `delete_file` refusal messages;
   - attention-queue and due-state entries;
   - history-page links;
-  - held-correction views;
+  - held-correction views: a hold is released no further than the existing item it would change, whatever selector withholds that item;
   - activation item anchors (for types that surface);
   - inventory counts;
   - sync-conflict copies of views.

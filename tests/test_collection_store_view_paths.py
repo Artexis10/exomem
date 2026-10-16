@@ -6,6 +6,7 @@ owner's answer shows that the surface does expose the view to a reader who may s
 """
 
 import json
+import shutil
 
 import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
@@ -46,7 +47,7 @@ def vault(store):
         "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
         "authority_epoch": 1,
         "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
-                         "authority": "store", "store_id": sid,
+                         "authority": "store", "store_id": sid, "semantic_profile": "records",
                          "source_path": ITEMS, "layout": "markdown-items"}],
         "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
     }))
@@ -94,7 +95,8 @@ def test_file_tools_answer_a_withheld_view_as_missing_and_refuse_a_released_one(
         _call(vault, "delete", path=OPEN, confirm=True),
         _call(vault, "move_file", old_path=OPEN, new_path="Knowledge Base/Notes/moved.md")])
     assert [str(answer).split(":")[0] for answer in released] == ["COLLECTION_VIEW_PATH"] * 2
-    assert "record_memory" in released[0]
+    # The marker names the collection's profile, so the remediation names its one tool.
+    assert "record_memory" in released[0] and "plan_memory" not in released[0]
     assert _files(vault) == views
 
 
@@ -115,6 +117,28 @@ def test_the_owner_file_tools_refuse_view_paths_from_the_marker_without_a_store(
         ]
     assert [str(answer).split(":")[0] for answer in refusals] == ["COLLECTION_VIEW_PATH"] * 4
     assert _files(vault) == views
+
+
+def test_restoring_a_folder_where_a_collection_lost_its_views_refuses_them(vault):
+    """The views went missing outside Exomem; the restore path holds none, but its children would."""
+    for name in ("Items/Open plan.md", "notes.md"):
+        (vault.root / "Knowledge Base/Notes/Old" / name).parent.mkdir(parents=True, exist_ok=True)
+        (vault.root / "Knowledge Base/Notes/Old" / name).write_text("Stale copy.\n")
+    shutil.rmtree(vault.root / WORK)
+    with request_scope(owner_principal()):
+        _call(vault, "delete", path="Knowledge Base/Notes/Old", confirm=True, recursive=True)
+        in_trash = next(path for path in (vault.root / "Knowledge Base/_trash").rglob("*Old") if path.is_dir())
+        refusal = _call(vault, "recover_from_trash", trash_path=in_trash.relative_to(vault.root).as_posix(),
+                        restore_path=WORK)
+    assert str(refusal).startswith("COLLECTION_VIEW_PATH:")
+    assert not (vault.root / WORK).exists()
+
+
+def test_another_casing_of_the_knowledge_base_folder_is_refused_on_a_case_folding_volume(vault, monkeypatch):
+    """`move_file` rebuilds a protected destination from the caller's own spelling of the folder."""
+    monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
+    with pytest.raises(ValueError, match="COLLECTION_VIEW_PATH"):
+        authority.refuse_view_paths(vault.root, (OPEN.replace("Knowledge Base", "knowledge base"),), ValueError)
 
 
 def test_file_tools_keep_file_collections_and_open_no_store_without_a_marker(tmp_path, monkeypatch):
@@ -190,6 +214,46 @@ def test_a_withheld_held_view_is_absent_from_its_collection_listing(vault):
         vault.append_record(CID, item=SECRET_HOLD, item_key=OTHER, why="capture")
     assert _as(vault, _external(), observe) == absent
     assert refused.value.details["held"]["path"] in str(_as(vault, owner_principal(), observe))
+
+
+def test_a_hold_that_targets_a_withheld_item_is_absent(vault):
+    """The hold carries no tag: only the item it would change is withheld, by its reference."""
+    _add_secret(vault)
+
+    def listing():
+        return _call(vault, "list_directory", path=WORK, recursive=True)
+
+    absent = _as(vault, _external(), listing)
+    with pytest.raises(collections.CollectionError) as refused:
+        vault.append_record(CID, item={**SECRET_ITEM, "count": "many"}, item_key=OTHER, why="correct")
+    held = refused.value.details["held"]
+
+    def read():
+        return _call(vault, "get", path=held["path"])
+
+    withheld = _as(vault, _external(), lambda: [listing(), read()])
+    assert "Acquire Northwind" in str(_as(vault, owner_principal(), read))
+    # Discarding the hold leaves its folder behind, so the listing compares with the hold never made.
+    vault.discard_held(CID, held=held["held_id"], why="discard")
+    assert withheld == [absent, _as(vault, _external(), read)]
+
+
+def test_a_warm_release_cache_withholds_a_hold_once_its_item_is_withheld(vault):
+    """The cache decides changed rows again; a hold of a changed item must be decided with it."""
+    with pytest.raises(collections.CollectionError):
+        vault.append_record(CID, item={"title": "Open plan", "count": "many"}, item_key=KEY, why="correct")
+
+    def held():
+        return _call(vault, "record_memory", action="inspect")["collections"][0]["held"]
+
+    assert _as(vault, _external(), held) == 1
+    inspected = _as(vault, owner_principal(), lambda: _call(vault, "record_memory", action="inspect", collection=CID))
+    version = next(entry["hash"] for entry in inspected["source_versions"] if entry["path"] == OPEN)
+    vault.update_record(CID, item_key=KEY, changes={"tags": ["secret"]}, why="restrict",
+                        expected_container_hash=inspected["lifecycle_guards"]["expected_container_hash"],
+                        expected_item_version=version)
+    assert _as(vault, _external(), held) == 0
+    assert _as(vault, owner_principal(), held) == 1
 
 
 def test_inventory_counts_omit_a_withheld_row_and_its_hold(vault):
