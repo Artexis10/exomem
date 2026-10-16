@@ -728,12 +728,20 @@ def test_memory_health_runner_has_only_synthetic_cell_and_database_authority() -
     )
 
 
+@pytest.mark.parametrize("contract", ["exomem-hosted-schedules-v1.json", "observability-v1.json"])
+def test_chart_copy_of_a_contract_matches_the_canonical_contract(contract: str) -> None:
+    # A copy, not a symlink: Helm reads only files inside the chart, and the
+    # plugin directory scanner refuses to unpack a repository with symlinks.
+    copy = PLATFORM / "files" / contract
+    assert not copy.is_symlink()
+    assert copy.read_bytes() == (ROOT / "infra/contracts" / contract).read_bytes(), (
+        f"copy infra/contracts/{contract} into the chart's files/"
+    )
+
+
 def test_packaged_chart_materializes_the_canonical_scheduler_contract(tmp_path: Path) -> None:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm packaging")
-    linked = PLATFORM / "files/exomem-hosted-schedules-v1.json"
-    assert linked.is_symlink()
-    assert linked.resolve() == CONTRACT.resolve()
     package = subprocess.run(
         [str(HELM), "package", str(PLATFORM), "--destination", str(tmp_path)],
         capture_output=True,

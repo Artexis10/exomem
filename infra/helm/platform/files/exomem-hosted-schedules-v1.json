@@ -1,1 +1,66 @@
-../../../contracts/exomem-hosted-schedules-v1.json
+{
+  "version": 1,
+  "scheduler": "kubernetes-cronjob",
+  "origin": "https://substratesystems.io",
+  "authentication": {
+    "scheme": "bearer",
+    "schedulerEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+    "receiverActiveEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+    "receiverPreviousEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET_PREVIOUS",
+    "maxReceiverVersions": 2
+  },
+  "requestPolicy": {
+    "method": "GET",
+    "redirect": "error",
+    "connectTimeoutSeconds": 5,
+    "totalTimeoutSeconds": 20,
+    "successStatusCodes": [
+      200
+    ]
+  },
+  "kubernetesJobPolicy": {
+    "concurrencyPolicy": "Forbid",
+    "startingDeadlineSeconds": 45,
+    "activeDeadlineSeconds": 30,
+    "backoffLimit": 1,
+    "maxAttempts": 2,
+    "successfulJobsHistoryLimit": 1,
+    "failedJobsHistoryLimit": 3,
+    "ttlSecondsAfterFinished": 300
+  },
+  "observability": {
+    "contentFree": true,
+    "attemptCounterMetric": "exomem_hosted_scheduler_attempts_total",
+    "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
+    "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
+    "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
+    "missedRunAlertAfterSeconds": 900,
+    "consecutiveFailureAlertThreshold": 2
+  },
+  "jobs": [
+    {
+      "name": "exomem-access-delivery",
+      "path": "/api/cron/exomem-access-delivery",
+      "schedule": "*/5 * * * *",
+      "cadenceSeconds": 300
+    },
+    {
+      "name": "exomem-reconcile",
+      "path": "/api/cron/exomem-reconcile",
+      "schedule": "*/5 * * * *",
+      "cadenceSeconds": 300
+    },
+    {
+      "name": "exomem-health-control",
+      "path": "/api/cron/exomem-health-control",
+      "schedule": "* * * * *",
+      "cadenceSeconds": 60
+    },
+    {
+      "name": "exomem-health-email",
+      "path": "/api/cron/exomem-health-email",
+      "schedule": "*/30 * * * *",
+      "cadenceSeconds": 1800
+    }
+  ]
+}
