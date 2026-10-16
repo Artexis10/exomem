@@ -817,37 +817,6 @@ def _remember_reviewed(vault: Path, title: str, slug: str) -> dict:
         return writer_lease.invoke_command(remember, vault, **kwargs)
 
 
-def test_foreign_bytes_under_a_held_intent_leave_the_drain_unattributed(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An outside edit seen under a live intent widens the re-arm like any other."""
-    target = vault / "Knowledge Base" / "Notes" / "foreign-under-intent.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("old", encoding="utf-8")
-    watcher = file_watcher.FileWatcher(vault)
-    real_restore = vault_module._restore_bound_source_timestamps
-
-    def hold_then_edit_outside(source, descriptor, atime_ns, mtime_ns):  # noqa: ANN001
-        real_restore(source, descriptor, atime_ns, mtime_ns)
-        watcher._record(source.path, deleted=False)
-        source.path.write_bytes(b"outside")
-        watcher._resolve_held_publication_intents()
-
-    monkeypatch.setattr(
-        vault_module, "_restore_bound_source_timestamps", hold_then_edit_outside
-    )
-    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None)
-
-    with pytest.raises(vault_module.PathGuardError, match="PATH_GUARD_CONTENT"):
-        vault_module.batch_atomic_write(
-            [vault_module.PlannedWrite(target, "new")], vault_root=vault
-        )
-
-    _media, ups, _dels, _epoch, _policy, self_authored = watcher._drain()
-    assert target in ups
-    assert self_authored is False
-
-
 def test_an_access_policy_change_leaves_the_drain_unattributed(vault: Path) -> None:
     """A policy change can alter any page's visibility, so its scope is unknown."""
     target = vault / "Knowledge Base" / "Notes" / "own.md"

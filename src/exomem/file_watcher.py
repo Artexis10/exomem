@@ -965,12 +965,14 @@ def _graph_incompleteness_scope(
 
     `self_authored` is the exception to the whole-vault repair rule. Every path
     in that batch was named by a governed writer before it wrote it, and reached
-    the watcher because that publication failed or expired. Bytes that match
-    neither image of the transaction are fenced as unattributed instead. An
-    outside edit that restores the writer's exact before-image is
-    indistinguishable from it, but it still lands on one of those named paths.
-    The scope is established, and a whole-vault repair already on the queue is
-    the graph's own debt, not evidence of an unknown edit.
+    the watcher because that publication failed or expired. An outside edit to
+    one of those paths, seen while the watcher resolves the writer's held
+    intent, is labelled the same way; the edit's own change event then arrives
+    unattributed and widens the next drain. An outside edit that restores the
+    writer's exact before-image cannot be told apart from it, but it still
+    lands on one of those named paths. The scope is established, and a
+    whole-vault repair already on the queue is the graph's own debt, not
+    evidence of an unknown edit.
     Widening that mark fenced every later write into another whole-vault
     rebuild, which queued the next one.
     """
@@ -1074,18 +1076,9 @@ class FileWatcher:
         self._last_change = time.monotonic()
 
     def _publication_intent_finalized(
-        self,
-        path: Path,
-        intent: _PublicationIntent,
-        disposition: str,
-        *,
-        foreign: bool = False,
+        self, path: Path, intent: _PublicationIntent, disposition: str
     ) -> None:
-        """Resolve or fence an observed publication as its transaction closes.
-
-        `foreign` means the bytes on disk are neither image of the writer's
-        transaction: that is an outside edit, so it is fenced as unattributed.
-        """
+        """Resolve or fence an observed publication as its transaction closes."""
         with self._lock:
             if self._pending_publication_intents.get(path) is not intent:
                 if disposition == "succeeded":
@@ -1093,9 +1086,7 @@ class FileWatcher:
             else:
                 self._pending_publication_intents.pop(path, None)
             if disposition != "succeeded":
-                self._record_external_locked(
-                    path, deleted=False, self_authored=not foreign
-                )
+                self._record_external_locked(path, deleted=False, self_authored=True)
         self._wake.set()
 
     def _replay_publication_remnant(self, path: Path) -> None:
@@ -1135,7 +1126,6 @@ class FileWatcher:
                     path,
                     intent,
                     "succeeded" if disposition == "suppressed" else "aborted",
-                    foreign=disposition == "external",
                 )
 
     def _held_publication_intent_timeout(self) -> float | None:
