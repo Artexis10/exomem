@@ -874,6 +874,8 @@ def test_both_assertions_run_through_evaluate_scenario() -> None:
 import shutil  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def _cli_or_skip() -> str:
     found = shutil.which("claude")

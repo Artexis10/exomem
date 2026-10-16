@@ -30,6 +30,17 @@ an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Simple front door
 
+For a correction to observed state, inspect Records independently of ordinary
+Note recall. Raw Records items do not appear in ordinary recall results.
+Call `record_memory(action="inspect")` to list admitted collections, then inspect
+one compatible collection using its returned `manifest_path` as `collection`.
+Run a bounded `query` for the known item identity before choosing a write.
+For `update`, copy the returned internal UUID into `item_key`, the row's
+`item_version` into `expected_item_version`, and `snapshot` into
+`expected_container_hash`. Preserve provenance and verify the updated row.
+Do not infer that a matching row exists or create another collection when
+the inventory, schema, or query does not establish one.
+
 For a Planning change, call `plan_memory(action="inspect")` to list admitted
 collections. Copy the chosen `manifest_path` into `collection`, then inspect
 that collection and run a bounded `query` to identify exactly one item.

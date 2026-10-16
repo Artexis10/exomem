@@ -181,6 +181,7 @@ def test_noncanonical_platform_and_reference_spellings_are_refused(raw: str) -> 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:
     from exomem import (
         claims,
+        compiled_history,
         deferred_index,
         due_state,
         epistemic_graph,
@@ -207,6 +208,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "collection-snapshot",
         "collection-audit-spool",
         "collection-migration",
+        "compiled-history",
         "connector-boundary",
         "consolidation-tree",
         "deferred-index-store",
@@ -245,6 +247,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     lexical_live = lexstore.lexical_path(root)
     token32 = "1" * 32
     claims_from_owners = [
+        (root / compiled_history.history_root(), "compiled-history"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),

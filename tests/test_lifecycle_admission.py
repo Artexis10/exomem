@@ -9,8 +9,17 @@ from pathlib import Path
 import pytest
 from test_connector_boundary import configured_boundary as configured_boundary
 
-from exomem import memory_refs, relation_review, server, state_migration, temporal
+from exomem import (
+    compiled_history,
+    memory_refs,
+    relation_review,
+    semantic_index,
+    server,
+    state_migration,
+    temporal,
+)
 from exomem import vault as vault_module
+from exomem.governance import principal
 
 PAGE = "Knowledge Base/Notes/Insights/public-round.md"
 IDENTITY = "11111111-1111-4111-8111-111111111111"
@@ -18,7 +27,7 @@ SOURCE = (
     "---\ntype: insight\ntitle: Public round\nstatus: active\n"
     f"exomem_id: {IDENTITY}\nproject: public-project\n---\n"
     "# Public round\n\n## Observations\n- [planning] An earlier round.\n\n"
-    "## Relations\n- relates_to [[General Context]]\n"
+    "## Relations\n- relates_to [[Knowledge Base/Entities/Organizations/General Context.md]]\n"
 )
 
 
@@ -45,13 +54,20 @@ def test_restricted_mcp_edit_commits_stable_identity_and_prepared_state(
     authenticate("limited")
 
     async def invoke():
-        return await mcp.call_tool("edit_memory", {
+        written = await mcp.call_tool("edit_memory", {
             "path": PAGE, "why": "Record the completed round",
             "operation": {"kind": "replace_string", "old_string": "An earlier round.",
                           "new_string": "The completed round."},
         }, run_middleware=True)
+        read = await mcp.call_tool("read_memory", {"path": PAGE, "include_history": True}, run_middleware=True)
+        unit = semantic_index.current_parent_index_state(vault, PAGE).document.units[0]
+        unit_read = await mcp.call_tool("read_memory", {
+            "path": PAGE, "unit_ref": unit.unit_ref, "include_history": True,
+        }, run_middleware=True)
+        return written, read, unit_read
 
-    response = asyncio.run(invoke()).structured_content
+    written_response, read_response, unit_response = asyncio.run(invoke())
+    response = written_response.structured_content
     written = response.get("result", response)
     assert written["status"] == "committed", json.dumps(written)
     final_source = page.read_text(encoding="utf-8")
@@ -68,6 +84,18 @@ def test_restricted_mcp_edit_commits_stable_identity_and_prepared_state(
     assert relation_review.lifecycle_prepared_path(vault, IDENTITY).read_bytes() == (
         relation_review.serialize_lifecycle_prepared(prepared).encode("utf-8")
     )
+    read = read_response.structured_content
+    read = read.get("result", read)
+    assert "revision_history" in read, json.dumps(read)
+    revision, = read["revision_history"]["revisions"]
+    assert revision["parent_ref"] == memory_refs.memory_ref(IDENTITY)
+    assert revision["prior"]["source"] == SOURCE
+    assert revision["reason"] == "Record the completed round"
+    unit_read = unit_response.structured_content
+    unit_read = unit_read.get("result", unit_read)
+    assert unit_read["status"] == "found"
+    unit_revision, = unit_read["revision_history"]["revisions"]
+    assert unit_revision["prior"]["source"] == SOURCE
 
 
 def test_restricted_mcp_edit_matches_absent_and_withheld_entity_worlds(
@@ -119,10 +147,21 @@ def test_restricted_mcp_edit_matches_absent_and_withheld_entity_worlds(
         prepared = relation_review.load_lifecycle_prepared(root, IDENTITY)
         assert prepared is not None
         assert prepared.after_source_hash == vault_module.content_hash((root / PAGE).read_text(encoding="utf-8"))
+        with principal.request_scope(authenticate("limited")):
+            history = compiled_history.read(root, path=PAGE)
+        revision, = history["revisions"]
+        assert revision["prior"]["source"] == SOURCE
+        assert revision["before_hash"] == vault_module.content_hash(SOURCE)
+        assert revision["after_hash"] == prepared.after_source_hash
+        # Each invocation owns its clock and transition identifier.
+        history["revisions"] = [{
+            key: value for key, value in revision.items()
+            if key not in ("at", "transition_id", "version")
+        }]
         observations.append((
             (root / PAGE).read_bytes(), prepared.after_source_hash,
             {key: written.get(key) for key in (
                 "status", "path", "relation_advisory", "promotion_notices", "entity_candidate",
-            )},
+            )}, history,
         ))
     assert observations[0] == observations[1]

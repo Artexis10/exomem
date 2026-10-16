@@ -27,6 +27,8 @@ import pytest
 from exomem import commands, semantic_blocks, semantic_units, workflow_skills
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
+pytestmark = pytest.mark.reads_repository_docs
+
 #: Every commitment the portable contract has to carry, keyed by payload key.
 _COMMITMENTS = (
     "preserve_the_record",
@@ -174,7 +176,6 @@ def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: P
     assert workflow["authority"] == {
         "contract_version": "v1",
         "scoped_delegation": False,
-        "rule": "Decision not permission; v1 writers retain confirmation.",
     }
 
 

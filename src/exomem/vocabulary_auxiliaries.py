@@ -18,6 +18,7 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         "operation-log",
         # The snapshot of the bytes a registry save replaced (`registry_history`).
         "registry-history",
+        "compiled-history",  # The semantic writer retains its exact prior Markdown.
     }
 )
 _SEAL = object()
@@ -73,6 +74,10 @@ def seal(
         path = _relative(root, Path(write.path))
         if path == primary_path:
             raise ValueError("VOCABULARY_AUXILIARY_PRIMARY_COLLISION")
+        if role == "compiled-history":
+            from . import compiled_history
+
+            compiled_history.validate_new_write(write, path=path)
         if guard.leaf_policy == "absent":
             before = None
         elif guard.leaf_policy == "content" and isinstance(guard.expected_content_hash, str):
@@ -158,6 +163,23 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         ):
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         roles[claim.path] = claim.role
+        if claim.role == "compiled-history":
+            from . import compiled_history, vault
+
+            guard = manifest.primary_guard
+            if (
+                claim.before_sha256 is not None
+                or not isinstance(manifest.primary_before_source, str)
+                or not isinstance(guard, vault.PathGuard)
+                or guard.target != manifest.primary_path or guard.leaf_policy != "content"
+                or guard.expected_content_hash != manifest.primary_before_sha256
+                or _hash(manifest.primary_before_source) != manifest.primary_before_sha256
+            ):
+                raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+            compiled_history.validate_new_entry(
+                root, path=claim.path, raw=image.after, primary_path=manifest.primary_path,
+                before_source=manifest.primary_before_source, after_source=primary.after.decode("utf-8"),
+            )
     lifecycle = tuple(path for path, role in roles.items() if role == "lifecycle-review")
     if lifecycle:
         from . import find_corpus, relation_review, semantic_contract
@@ -196,16 +218,16 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
     return roles
 
 
-def lifecycle_admission(
+def primary_admission(
     vault_root: Path, *, primary_path: str, current_source: str, proposed_source: str,
-    primary_guard: Any,
+    primary_guard: Any, require_identity: bool = False,
 ) -> Callable[[str], bool]:
-    """Admit exact-primary operational paths without inspecting candidate leaves.
+    """Admit bound auxiliary paths without inspecting candidate leaves.
 
     This prevents denied siblings from influencing edits. A false refusal costs
     the caller that edit; unrelated namespaces keep independent admission.
     """
-    from . import access, find_corpus, state_paths, vault
+    from . import access, context_refs, find_corpus, state_paths, vault
     from .governance import connector_boundary, membership, policy
     from .governance.principal import effective_principal
     from .memory_refs import ID_FIELD, memory_ref, normalize_id
@@ -217,19 +239,16 @@ def lifecycle_admission(
     for source in (current_source, proposed_source):
         page = find_corpus.parse_page(root / primary_path, 0, root, content=source.encode("utf-8"))
         found = normalize_id(page.frontmatter.get(ID_FIELD)) if page is not None else None
-        if found is None or identity is not None and found != identity:
+        if page is None or require_identity and (found is None or identity is not None and found != identity):
             raise ValueError("WRITE_REFUSED: target is unavailable")
         identity = found
         classes = page.frontmatter.get("classes") or []
         subjects.append(membership.MetadataSubject(
-            path=primary_path, refs=(memory_ref(found),),
+            path=primary_path, refs=(memory_ref(found) if found else context_refs.vault_ref(primary_path),),
             projects=tuple(value.lower() for value in find_corpus.all_projects(page.frontmatter)),
             tags=tuple(page.tags), types=(page.page_type.lower(),) if page.page_type is not None else (),
             classes=tuple(str(value).lower() for value in classes) if isinstance(classes, list) else (),
         ))
-    from . import relation_review
-
-    directory = relation_review.lifecycle_prepared_path(root, identity).parent.relative_to(root).as_posix()
     proposed_hash = _hash(proposed_source)
 
     def check_admission(path: str) -> bool:
@@ -252,9 +271,7 @@ def lifecycle_admission(
             primary_guard.recheck(root)
             raise ValueError("WRITE_REFUSED: target is unavailable")
         return (
-            path.startswith(f"{directory}/")
-            and "/" not in path.removeprefix(f"{directory}/")
-            and not access.refuse_if_excluded(root, path)
+            not access.refuse_if_excluded(root, path)
             and all(not denied.intersection(membership.evaluate_metadata(replace(subject, path=path), compiled))
                     for subject in subjects)
         )
@@ -263,6 +280,28 @@ def lifecycle_admission(
         # One invocation reuses host resolution; source and admission checks stay live.
         with state_paths.resolution_scope():
             return check_admission(path)
+
+    return admit
+
+
+def lifecycle_admission(
+    vault_root: Path, *, primary_path: str, current_source: str, proposed_source: str,
+    primary_guard: Any,
+) -> Callable[[str], bool]:
+    """Keep lifecycle admission inside the primary's exact UUID directory."""
+    from . import memory_refs, relation_review
+
+    root = Path(vault_root).resolve()
+    primary = primary_admission(
+        root, primary_path=primary_path, current_source=current_source,
+        proposed_source=proposed_source, primary_guard=primary_guard, require_identity=True,
+    )
+    identity = memory_refs.parse_memory_ref(memory_refs.ref_from_markdown(current_source))
+    directory = relation_review.lifecycle_prepared_path(root, identity).parent.relative_to(root).as_posix()
+
+    def admit(path: str) -> bool:
+        allowed = primary(path)
+        return allowed and path.startswith(f"{directory}/") and "/" not in path.removeprefix(f"{directory}/")
 
     # Missing or empty directories cannot invoke the census predicate.
     if not admit(f"{directory}/prepared.json"):

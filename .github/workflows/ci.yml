@@ -34,7 +34,8 @@ jobs:
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
     # anything release-please does not manage. Lint, build (packages, Cloud
-    # archives, privacy), specs and capabilities still run.
+    # archives, privacy), specs, capabilities and the wheel onboarding gate,
+    # which runs the packaged demo, still run.
     if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -57,6 +58,13 @@ jobs:
           # introduction/amendment ancestry. A shallow PR merge checkout
           # cannot prove that history and must not silently weaken the gate.
           fetch-depth: 0
+      - name: Select test scope
+        # A docs-only pull request runs only the tests that read docs
+        # (scripts/ci_change_scope.py); every other event runs the whole tier.
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -118,6 +126,7 @@ jobs:
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
+          ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
       - name: Upload test timing evidence
         if: always()
@@ -153,6 +162,13 @@ jobs:
           # introduction/amendment ancestry — this tier is where those tests
           # live, so the full history is non-negotiable here.
           fetch-depth: 0
+      - name: Select test scope
+        # A docs-only pull request runs only the tests that read docs
+        # (scripts/ci_change_scope.py); every other event runs the whole tier.
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -200,6 +216,7 @@ jobs:
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
+          ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
       - name: Upload test timing evidence
         if: always()
@@ -340,25 +357,19 @@ jobs:
           # Compare the complete PR merge tree with its base parent.
           fetch-depth: 2
       - name: Select installed journey scope
-        id: journey-scope
+        # Docs-only paths are outside the wheel and sdist inputs, and the
+        # journey reads none of them.
+        id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: |
-          run_journey=true
-          # OpenSpec is outside the wheel and sdist inputs; all other paths can affect the journey.
-          if test "$EVENT_NAME" = pull_request &&
-            git diff --quiet --no-renames HEAD^1 HEAD -- . ':!openspec'; then
-            run_journey=false
-            echo "Installed journey not run: only OpenSpec changes relative to the merge parent." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "run_journey=$run_journey" >> "$GITHUB_OUTPUT"
+        run: python3 scripts/ci_change_scope.py "the installed journey"
       - name: Install uv
-        if: steps.journey-scope.outputs.run_journey != 'false'
+        if: steps.scope.outputs.docs_only != 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
       - name: Install the pinned older reader for the installed launcher proof
-        if: steps.journey-scope.outputs.run_journey != 'false'
+        if: steps.scope.outputs.docs_only != 'true'
         timeout-minutes: 5
         run: |
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
@@ -370,7 +381,7 @@ jobs:
       # against an independent reference, recipient field release/revocation,
       # fresh copy adoption, old-reader refusal, rollback, and unchanged file collections.
       - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
-        if: steps.journey-scope.outputs.run_journey != 'false'
+        if: steps.scope.outputs.docs_only != 'true'
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
       # The harness prints the tail inline; this keeps the whole log for the
       # failures whose cause is older than the tail.
@@ -558,7 +569,6 @@ jobs:
 
   onboarding:
     name: onboarding (wheel path)
-    if: *not-release-pr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

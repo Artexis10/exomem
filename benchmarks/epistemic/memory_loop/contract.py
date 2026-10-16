@@ -581,6 +581,9 @@ def logical_state_sha256(root: Path, key_to_path: Mapping[str, str], *, world_id
         parts = path.relative_to(kb).parts
         if path.name in {"index.md", "log.md"} or parts[0] == "_Governance":
             continue
+        # Compiled history entries are writer-minted audit records (clock and transition id).
+        if parts[0] == "_Compiled":
+            continue
         if any(part.startswith(".") for part in parts):
             continue
         # From the schema folder only the registries the world declares count:

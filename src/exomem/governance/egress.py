@@ -4592,6 +4592,84 @@ def _project_page_origin(
     return out, True
 
 
+def _decide_markdown_snapshot(
+    vault_root: Path, rel_path: str, raw: bytes, parsed: Any, *,
+    policy: Policy, principal: RequestPrincipal, purpose: str | None, content_hash: str,
+) -> Decision | None:
+    """Decide exact held Markdown without assuming that it is the current file."""
+    decision = projection_decision(
+        vault_root, rel_path, policy=policy, audience=principal.audience_id,
+        purpose=purpose, authorization_context=principal.verified_authorization_session,
+        content=raw,
+    )
+    if decision is None:
+        try:
+            scope_ids = membership_module.evaluate_snapshot(
+                parsed, policy, content_hash=content_hash
+            )
+        except membership_module.MembershipUnresolved:
+            _record_blocked_outcome(principal.audience_id)
+            return None
+        active_grants, _session_identity = _active_grants_for_snapshot(
+            vault_root,
+            policy=policy,
+            audience=principal.audience_id,
+            purpose=purpose,
+            rel_path=rel_path,
+            content_hash=content_hash,
+            scope_ids=scope_ids,
+            authorization_context=principal.verified_authorization_session,
+        )
+        decision = decide(
+            scope_ids,
+            audience=principal.audience_id,
+            purpose=purpose,
+            policy=policy,
+            active_grants=active_grants,
+        )
+    return decision
+
+
+@canonical_read(projection=True, unavailable=lambda: DISCLOSURE_MIN)
+def _release_level_for_markdown_snapshot(
+    vault_root: Path, rel_path: str, raw: bytes, *,
+    principal: RequestPrincipal, purpose: str | None, policy: Policy,
+) -> int:
+    """Authorize a retained Markdown image under the current release policy."""
+    if lifecycle.is_tombstoned(vault_root, rel_path):
+        return DISCLOSURE_MIN
+    if not content_permits(vault_root, rel_path, principal, snapshot=raw):
+        return DISCLOSURE_MIN
+    if _file_policy_empty(vault_root, policy, rel_path=rel_path):
+        return DISCLOSURE_MAX
+    if policy.blocked or not principal.resolved:
+        return DISCLOSURE_MIN
+    parsed = find_corpus.parse_page(vault_root / rel_path, 0, vault_root, content=raw)
+    if parsed is None or parsed.rel_path != rel_path:
+        return DISCLOSURE_MIN
+    decision = _decide_markdown_snapshot(
+        vault_root, rel_path, raw, parsed, policy=policy, principal=principal,
+        purpose=_declared_purpose(vault_root, principal, purpose),
+        content_hash=hashlib.sha256(raw).hexdigest(),
+    )
+    if decision is None:
+        return DISCLOSURE_MIN
+    from .. import note_types
+
+    metadata, error = bridges.parse_bridge_frontmatter(
+        parsed.frontmatter, note_types.Basis(vault_root, owner_local=True),
+    )
+    # Bridge approvals retain their current path and dependency custody checks.
+    if metadata is not None or error is not None:
+        admission = bridges.admit(
+            vault_root, rel_path, raw, policy=policy, audience=principal.audience_id,
+        )
+        if not admission.allowed:
+            return DISCLOSURE_MIN
+    decision = _resolve_l4_bridge(vault_root, decision, policy=policy, audience=principal.audience_id)
+    return decision.level
+
+
 @canonical_read(projection=True)
 def annotate_page(
     vault_root: Path,
@@ -4698,36 +4776,12 @@ def annotate_page(
         if "content" in page and page.get("content") != raw.decode("utf-8"):
             _record_blocked_outcome(who.audience_id)
             return None
-        decision = projection_decision(
-            vault_root, rel_path, policy=policy, audience=who.audience_id,
-            purpose=declared_purpose, authorization_context=who.verified_authorization_session,
-            content=raw,
+        decision = _decide_markdown_snapshot(
+            vault_root, rel_path, raw, parsed, policy=policy, principal=who,
+            purpose=declared_purpose, content_hash=snapshot_hash,
         )
         if decision is None:
-            try:
-                scope_ids = membership_module.evaluate_snapshot(
-                    parsed, policy, content_hash=snapshot_hash
-                )
-            except membership_module.MembershipUnresolved:
-                _record_blocked_outcome(who.audience_id)
-                return None
-            active_grants, _session_identity = _active_grants_for_snapshot(
-                vault_root,
-                policy=policy,
-                audience=who.audience_id,
-                purpose=declared_purpose,
-                rel_path=rel_path,
-                content_hash=snapshot_hash,
-                scope_ids=scope_ids,
-                authorization_context=who.verified_authorization_session,
-            )
-            decision = decide(
-                scope_ids,
-                audience=who.audience_id,
-                purpose=declared_purpose,
-                policy=policy,
-                active_grants=active_grants,
-            )
+            return None
         admission = bridges.admit(
             vault_root,
             rel_path,
@@ -5019,6 +5073,7 @@ def _withheld_cross_check(
     *,
     principal: RequestPrincipal | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
+    _current_parent_binding: tuple[str, str] | None = None,
 ) -> Any:
     """Second, independent check that nothing sub-notice survived to the wire.
 
@@ -5036,7 +5091,8 @@ def _withheld_cross_check(
     entry dropped; otherwise decide each named path.
     """
     return filter_withheld_entries(vault_root, result, principal=principal,
-                                   _artifact_scan_demand=_artifact_scan_demand)
+                                   _artifact_scan_demand=_artifact_scan_demand,
+                                   _current_parent_binding=_current_parent_binding)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -5081,6 +5137,22 @@ def is_vault_root(value: Any) -> bool:
     return isinstance(value, (str, os.PathLike))
 
 
+def _current_read_parent_binding(vault_root: Path, parent: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Bind only this current read's stable parent ref to its guarded page."""
+    path = parent.get("path")
+    if not isinstance(path, str):
+        return None
+    try:
+        source, guard = vault.read_guarded_text(vault_root, vault_root / path)
+        reference = memory_refs.ref_from_markdown(source)
+        if reference is None or reference != parent.get("ref") or vault.content_hash(source) != parent.get("content_hash"):
+            return None
+        guard.recheck(vault_root)
+    except (OSError, ValueError):
+        return None
+    return reference, path
+
+
 def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """The terminal egress filter: always-on scrubber + withheld cross-check.
 
@@ -5113,8 +5185,19 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             _record_credential_block()
         return cleaned
     vault_root = Path(vault_root)
+    parent_binding = None
+    if command_name == "read_memory" and isinstance(result, Mapping) and "revision_history" in result:
+        parent = result if "path" in result else result.get("parent")
+        if isinstance(parent, Mapping) and memory_refs.parse_memory_ref(parent.get("ref")) is not None:
+            parent_binding = _current_read_parent_binding(vault_root, parent)
+            if parent_binding is None:
+                result = dict(result)
+                result.pop("revision_history")
     artifact_scan_demand = _ArtifactScanDemand()
-    result = _withheld_cross_check(vault_root, result, _artifact_scan_demand=artifact_scan_demand)
+    result = _withheld_cross_check(
+        vault_root, result, _artifact_scan_demand=artifact_scan_demand,
+        _current_parent_binding=parent_binding,
+    )
     from ..collection_store import governance as canonical_governance
 
     inspection_evidence = canonical_governance._inspection_evidence(result)
@@ -6890,6 +6973,16 @@ class ReaderView:
     def __call__(self, rel_path: str) -> bool:
         return self._pages(rel_path)
 
+    def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
+        """Project one actual clipped bundle before it spends a compiler slot."""
+        try:
+            return filter_withheld_entries(
+                self._root, bundle, principal=self._principal, purpose=self._purpose,
+                explicit_reference_markup=True,
+            )
+        except Exception as error:  # noqa: BLE001 - retain whole-request unavailability
+            raise ReaderViewUnavailable("the release plane could not project a pack unit") from error
+
     def verdicts(self, units: Sequence[Mapping[str, Any]]) -> list[str]:
         """`classify_units` for each unit, by everything but its `role`."""
         keys = [
@@ -7179,7 +7272,11 @@ def _directory_of(node: Mapping[str, Any]) -> str | None:
     return raw.strip().replace("\\", "/").rstrip("/")
 
 
-def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str]:
+def _entry_candidate_paths(
+    entry: Any, directory: str | None = None, *,
+    reference_markup: Callable[[str, str | None], list[str]] | None = None,
+    _current_parent_binding: tuple[str, str] | None = None,
+) -> list[str]:
     """Every vault path this entry names, whether as a field or bare string.
 
     N1(a): `_bare_name` used to be consulted only for a list element that WAS
@@ -7193,7 +7290,17 @@ def _entry_candidate_paths(entry: Any, directory: str | None = None) -> list[str
 
     def _add(value: Any) -> None:
         if isinstance(value, str):
+            if reference_markup is not None:
+                found.extend(reference_markup(value, directory))
             value = _strip_identifier_prefix(value)
+            if _current_parent_binding is not None:
+                parent_ref, path = _current_parent_binding
+                reference, marker, fragment = value.partition("#")
+                if reference == parent_ref:
+                    from .. import semantic_units
+
+                    if not marker or semantic_units.is_unit_anchor_shaped(unquote(fragment)):
+                        value = path
         full = _path_like(value)
         if full is not None:
             found.append(full)
@@ -7309,6 +7416,8 @@ def filter_withheld_entries(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
+    explicit_reference_markup: bool = False,
+    _current_parent_binding: tuple[str, str] | None = None,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -7321,6 +7430,9 @@ def filter_withheld_entries(
     Same three-state contract as every other consumer: `empty` -> untouched;
     `blocked` or an unresolved-but-expected principal -> every path-bearing
     entry dropped; otherwise decide each named path.
+
+    The compiler can opt into explicit links in scalar metadata. Bare labels
+    stay literal; the default projection keeps its existing reference rules.
     """
     vault_root = Path(vault_root)
     writer = bound_writer(vault_root)
@@ -7398,6 +7510,40 @@ def filter_withheld_entries(
     resolved_items: dict[str, str | None] = {}
     # One listing per directory per call: (exact names, first name per casefold).
     listings: dict[Path, tuple[frozenset[str], dict[str, str]] | None] = {}
+    def _markup_targets(text: str) -> list[str]:
+        targets = []
+        for raw in _WIKILINK_ANYWHERE.findall(text):
+            target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
+            # Markdown's optional extension is identity syntax, not a literal tag.
+            if "/" not in target and _is_markdown_path(target):
+                target = target[:-3]
+            if target:
+                targets.append(target)
+        return targets
+
+    # Resolve the clipped bundle's explicit names once, through the existing index.
+    resolved_markup: dict[str, tuple[str, ...]] = {}
+    if explicit_reference_markup:
+        pending = [payload]
+        names: set[str] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Mapping):
+                pending.extend(value.values())
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                pending.extend(value)
+            elif isinstance(value, str):
+                names.update(target for target in _markup_targets(value) if _path_like(target) is None)
+        resolved_markup = _resolved_prose_names(vault_root, names)
+
+    def _reference_markup(text: str, directory: str | None) -> list[str]:
+        found = []
+        for target in _markup_targets(text):
+            if _path_like(target) is not None:
+                found.extend(_entry_candidate_paths(target, directory))
+            else:
+                found.extend(resolved_markup.get(target, ()))
+        return list(dict.fromkeys(found))
 
     def _resolve_vault_item(rel_path: str) -> str | None:
         """The real vault-relative path this reference names, or `None`.
@@ -7525,7 +7671,11 @@ def filter_withheld_entries(
                          if metadata_references.get((*location, key)) != value}
             elif metadata_references.get(location) == entry:
                 return []
-        return _entry_candidate_paths(entry, directory)
+        return _entry_candidate_paths(
+            entry, directory,
+            reference_markup=_reference_markup if explicit_reference_markup else None,
+            _current_parent_binding=_current_parent_binding,
+        )
 
     def _kept_paths(entry: Any, directory: str | None = None, location=()) -> list[str] | None:
         candidates = _candidate_paths(entry, directory, location)
@@ -7568,7 +7718,11 @@ def filter_withheld_entries(
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         if isinstance(node, Mapping) and any(
             not content_permits(vault_root, path, who)
-            for path in _entry_candidate_paths(node, directory)
+            for path in _entry_candidate_paths(
+                node, directory,
+                reference_markup=_reference_markup if explicit_reference_markup else None,
+                _current_parent_binding=_current_parent_binding,
+            )
         ):
             return None
         if (location == ("source_versions",) and inspection_evidence is not None
@@ -7613,6 +7767,10 @@ def filter_withheld_entries(
                 if _is_identifier_key(key) or isinstance(value, Mapping):
                     child_candidates = _kept_paths(value, here, child_location)
                     if child_candidates is None:
+                        continue
+                elif explicit_reference_markup and isinstance(value, str) and _WIKILINK_ANYWHERE.search(value):
+                    # Explicit link syntax is a reference; an unmarked tag/status stays literal.
+                    if _kept_paths(value, here, child_location) is None:
                         continue
                 if _artifact_scan_demand is not None and _artifact_text_key(key):
                     _artifact_scan_demand.required = True

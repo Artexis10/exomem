@@ -326,10 +326,17 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
 
 def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_digests(derived):
     """A rebuild drops the guard identity, rejects strings, or reconstructs a different scalar subtype."""
+    from exomem import structured_collections as collections
+    from exomem.collection_store.typed_storage import canonical_json
+
     text = manifest_text(DERIVED, "Mixed", MIXED_FIELDS).replace(
-        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n")
+        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n").removesuffix("---\n") + (
+        "rollups:\n  daily:\n    bucket: day\n    timestamp: local_date\n"
+        "    values:\n      numeric: [sum, max]\n---\n")
     writer, job = derived("mixed", {"samples/mixed.json": MIXED_DOCUMENT}, text=text, mapping=MIXED_MAPPING)
-    assert finish(writer, job)["rows"]["imported"] == 8
+    done = finish(writer, job)
+    assert {name: done["rows"][name] for name in ("inserted", "updated", "unchanged", "imported", "duplicates", "rejected")} == {
+        "inserted": 8, "updated": 0, "unchanged": 0, "imported": 8, "duplicates": 0, "rejected": 0}
 
     def rows(handle):
         with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, handle):
@@ -340,7 +347,28 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
     expected = [{"day": day["day"], "position": position,
                  "text" if type(value) is str else "numeric": value}
                 for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
-    assert rows(writer.handle) == expected
+    assert canonical_json(rows(writer.handle)) == canonical_json(expected)
+    parsed = collections.parse_manifest_bytes(writer.root, writer.root / PATH, text.encode())
+    expected_digest = hashlib.sha256(b"").hexdigest()
+    for row in expected:
+        values = {**row, "local_date": row["day"]}
+        key = collections.derived_item_key(parsed, values)
+        payload = tokens.payload_hash(1, key, values, "")
+        expected_digest = hashlib.sha256(f"{expected_digest}\0{key}\0{payload}".encode()).hexdigest()
+    assert writer.connection.execute("SELECT accepted,rejected,rows_digest,row_count_after FROM import_members").fetchall() == [
+        (8, 0, expected_digest, 8)]
+    daily = {"version": 1, "group_by": [{"field": "local_date", "bucket": "day"}],
+             "aggregates": {"total": {"op": "sum", "field": "numeric"}, "peak": {"op": "max", "field": "numeric"}}}
+
+    def buckets(handle):
+        with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, handle):
+            result = commands.op_record_memory(writer.root, action="query", collection=DERIVED, query=daily)
+            assert result["plan"]["strategy"] == "rollup"
+            return result["groups"]
+
+    expected_buckets = [{"local_date": "2026-11-01", "total": 17.25, "peak": 7},
+                        {"local_date": "2026-11-02", "total": 3.0, "peak": 3}]
+    assert buckets(writer.handle) == expected_buckets
     path = writer.handle.path
     before = _rows_file(derived_rows.path(path))
     writer.handle.close()
@@ -355,7 +383,8 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
                     break
             else:
                 raise AssertionError("the guarded rebuild did not settle")
-        assert rows(handle) == expected
+        assert canonical_json(rows(handle)) == canonical_json(expected)
+        assert buckets(handle) == expected_buckets
         assert _rows_file(derived_rows.path(path)) == before
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
 

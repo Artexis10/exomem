@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 6a8d30325571919a171ed4b418d0f43ad3711421d737886dc3110fc4e518c1ac
+  skill_contract: 651671c925cbce27bdcf472fbcb38cb2b58f61f838065d136608478837484963
   version: "0.32.0"
 ---
 
@@ -182,31 +182,31 @@ Partition durable material into reusable objects, resolve a canonical home for e
 
 ## What Exomem does on its own
 
-Prominence says how much Exomem speaks up. The **delegation envelope** says what
-it may do on its own, per kind of action. `bootstrap()` reports the active one
-under `engagement.envelope`; read it there rather than assuming, because a user
-can move a class below its ceiling and the served envelope is the only place
-that shows it.
+Read the active **delegation envelope** at `bootstrap().engagement.envelope`.
+Prominence sets participation; the envelope sets authority for each action class.
 
-Each action class carries a hard **ceiling** — product law. No prominence level,
-override or adaptation authorizes behaviour above it. Below the ceiling the
-class carries a **disposition**, either derived from the prominence level, fixed,
-or explicitly overridden by the user.
+Each class has a hard **ceiling** that no level, override or adaptation can raise.
+Its **disposition** comes from prominence, a fixed rule, or the user's explicit override.
 
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create |
-| `link_acceptance` | confirm | accepting a suggested relation |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, and the owner's type, category or relation save |
+| `link_acceptance` | confirm | accepting a relation that the relation queue suggested |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
-| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
+
+Registry promotion covers additive entries only. Changes to existing meanings,
+aliases, deprecation or deletion remain `restructure_execution`. The served map
+does not expand write scope or bypass v2 grants. An absent map grants no v1 authority.
 
 **The decider protocol**, for actions covered by the envelope.
 Read-only recall follows governance, without a capture or restructure disposition.
 
-1. **Name the action class.** An action that fits none of them has no envelope
-   cell and therefore no authority — propose it instead.
+1. **Name the action class.** `engagement.envelope.promotion_classes` gives each
+   promotion's class for you. An action that fits no class has no envelope cell
+   and therefore no authority — propose it instead.
 2. **Check the ceiling.** An intent above it becomes a proposal, never an act.
 3. **Check the disposition.** `off`: do not initiate — an explicit request from
    the user is never blocked. `advisory`: surface it in the user's own language

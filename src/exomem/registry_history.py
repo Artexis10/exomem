@@ -89,7 +89,9 @@ class HistoryAdmissionRefused(ValueError):
         super().__init__("AUDIENCE_RESTRICTED: registry history is unavailable")
 
 
-def _require_snapshot_admission(root: Path, path: str, raw: bytes) -> None:
+def _require_snapshot_admission(
+    root: Path, path: str, raw: bytes, *, markdown: bool = False,
+) -> None:
     """Admit the held bytes before any history header or override is parsed."""
     from .governance import egress, policy, raw_protection
     from .governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -115,10 +117,15 @@ def _require_snapshot_admission(root: Path, path: str, raw: bytes) -> None:
     if not egress.content_permits(root, path, who, snapshot=raw):
         raise HistoryAdmissionRefused
     try:
-        level = egress._release_level_for_path_only_snapshot(
-            root, path, principal=who, purpose=purpose, policy=policy.load(root),
-            content_fingerprint=hashlib.sha256(raw).hexdigest(),
-        )
+        if markdown:
+            level = egress._release_level_for_markdown_snapshot(
+                root, path, raw, principal=who, purpose=purpose, policy=policy.load(root),
+            )
+        else:
+            level = egress._release_level_for_path_only_snapshot(
+                root, path, principal=who, purpose=purpose, policy=policy.load(root),
+                content_fingerprint=hashlib.sha256(raw).hexdigest(),
+            )
     except egress.AuthorizationSessionDecisionUnavailable:
         raise HistoryAdmissionRefused from None
     if level < egress.LEVEL_FULL:

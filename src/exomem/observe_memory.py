@@ -7,8 +7,8 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Literal
 
 from . import (
@@ -70,24 +70,11 @@ class ObserveMemoryError(ValueError):
 
 
 def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
-    """One-sentence remediation for a legacy-schema `observe_memory` refusal.
-
-    Built AFTER `resolution` so it names that resolution's own concrete
-    fields — the exact `suggested_path`, the `part_of` target, the in-place
-    alternative, and the migration pointer, in that order — rather than a
-    generic pointer at "resolution" the caller then has to go find. This
-    sentence is not a redundant summary: it is the ONLY place this
-    information reaches a caller today, since `observe_memory`'s refusals are
-    not yet routed into the MCP structured failure envelope (see `design.md`
-    D4) — `commands.op_observe_memory` flattens the whole error into one
-    string, and `resolution` as a JSON object never crosses that boundary.
-    """
+    """Keep unsupported structural edits with the existing authorized owner."""
     return (
-        "This is a legacy page observe_memory cannot mutate structurally (no "
-        "compiled type, or no frontmatter): create "
-        f"{resolution['suggested_path']}, linked part_of "
-        f"{resolution['link']['target']}, or {resolution['in_place']}; "
-        f"migrate via {resolution['migration']}."
+        f"Use the existing authorized edit owner for {resolution['path']}; "
+        "read its current content and hash first. If this surface cannot edit it, "
+        "report that limit. Do not create a dated child or migrate the page for this correction."
     )
 
 
@@ -112,6 +99,8 @@ def observe_memory(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    reason: str | None = None,
+    target_fingerprints: dict[str, str] | None = None,
     today: dt.date | None = None,
 ) -> dict[str, Any]:
     """Validate or atomically mutate one semantic unit in a compiled page."""
@@ -196,12 +185,7 @@ def observe_memory(
                 # form that already starts with the KB prefix, so this is
                 # exactly the vault-relative path of the real, outside-KB page.
                 rel_path = given
-            resolution = _legacy_dated_child_resolution(
-                rel_path,
-                title_source=_legacy_title_source(content, None),
-                today=today or dt.date.today(),
-                vault_root=vault_root,
-            )
+            resolution = _legacy_edit_resolution(rel_path)
             raise ObserveMemoryError(
                 error.code,
                 error.reason,
@@ -343,11 +327,14 @@ def observe_memory(
 
     if origin_block is not None:
         after_body = origin_block + "\n\n" + after_body
+    # Validation and its commit render the same authored day, including across midnight.
+    pinned = temporal.parse(semantic_writes.transition_token_stamp(transition_token))
+    authored_day = today or (pinned.day if pinned is not None else dt.date.today())
     after_source = _rebuild_source(
         editable.original_text,
         editable.fm_text,
         after_body,
-        today=today or dt.date.today(),
+        today=authored_day,
     )
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
@@ -373,6 +360,7 @@ def observe_memory(
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
                 validate_only=operation == "validate",
+                stamp=temporal.stamp(authored_day),
                 timings=timings,
             )
     except semantic_writes.SemanticWriteError as error:
@@ -394,12 +382,7 @@ def observe_memory(
     # The authored type is looked up as written; a withheld definition refuses.
     note_type = note_types.Basis(vault_root).resolve(preflight.before.page_type).require()
     if note_type is None or not note_types.compiled(note_type):
-        resolution = _legacy_dated_child_resolution(
-            editable.rel_path,
-            title_source=_legacy_title_source(content, frontmatter),
-            today=today or dt.date.today(),
-            vault_root=vault_root,
-        )
+        resolution = _legacy_edit_resolution(editable.rel_path)
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
             "observe_memory only mutates writable compiled pages",
@@ -430,6 +413,45 @@ def observe_memory(
             check_by=normalized_check_by,
             preserved=preserved_metadata,
         )
+
+    if target_fingerprints is not None:
+        # An episode correction must not change a different claim after target drift.
+        # A refusal costs this leaf a re-read; ordinary page/heading edits keep their route.
+        from .unit_corrections import CORRECTIVE_FAMILIES
+
+        if not isinstance(target_fingerprints, dict):
+            raise ObserveMemoryError(
+                "INVALID_UNIT_TARGETS", "target_fingerprints must be an object"
+            )
+        guards = []
+        targets = {}
+        for fact in semantic_contract.writer_authored_facts(
+            preflight.after, preflight.after_corpus
+        ):
+            if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
+                continue
+            if fact.family not in CORRECTIVE_FAMILIES:
+                continue
+            if fact.target_unit_status != "found" or fact.logical_target_ref is None:
+                raise ObserveMemoryError(
+                    "EXACT_UNIT_TARGET_REQUIRED", "a corrective target must name one current unit"
+                )
+            targets[fact.logical_target_ref] = fact.target_unit_fingerprint
+            state = preflight.after_corpus.pages[fact.logical_target_path]
+            source, guard = vault.read_guarded_text(vault_root, Path(vault_root) / state.path)
+            if vault.content_hash(
+                source.replace("\r\n", "\n").replace("\r", "\n")
+            ) != preflight.before_corpus.pages[state.path].source_hash:
+                raise ObserveMemoryError(
+                    "STALE_UNIT_TARGET", "a corrective target changed; read it again"
+                )
+            if state.path != preflight.path:
+                guards.append(guard)
+        if targets != target_fingerprints:
+            raise ObserveMemoryError(
+                "STALE_UNIT_TARGET", "exact corrective target fingerprints do not match"
+            )
+        preflight = replace(preflight, unit_target_guards=tuple(guards))
 
     if op == "validate":
         return _result(
@@ -467,6 +489,7 @@ def observe_memory(
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,
+                history_reason=reason,
                 auxiliary_writes=log_plan.writes,
                 derived_auxiliary_writes=tuple(
                     ("operation-log", write) for write in log_plan.writes
@@ -517,68 +540,9 @@ def _legacy_page_given_form(path: str) -> str:
     return given if given.endswith(".md") else given + ".md"
 
 
-def _legacy_title_source(content: str | None, frontmatter: dict[Any, Any] | None) -> str:
-    """The best available text to slug a legacy page's dated-child suggestion.
-
-    The attempted observation names the caller's actual intent, so it wins
-    when present (frontmatterless pages never have a title to fall back on
-    anyway). A page `title` is the next-best signal; a fixed fallback keeps
-    this total so a `resolution` is always offered.
-    """
-    if content:
-        first_line = content.strip().splitlines()[0].strip()
-        if first_line:
-            return first_line
-    if frontmatter is not None:
-        title = str(frontmatter.get("title") or "").strip()
-        if title:
-            return title
-    return "legacy-entry"
-
-
-def _legacy_dated_child_resolution(
-    rel_path: str,
-    *,
-    title_source: str,
-    today: dt.date,
-    vault_root: Path,
-) -> dict[str, Any]:
-    """The safe fallback `observe_memory` offers instead of improvising.
-
-    Colocates the suggested dated child beside the legacy page when that page
-    already lives under the governed Knowledge Base root -- the common case,
-    since exomem only ever authors new pages there and every path reachable
-    through `edit.load_editable` is re-rooted under it before this runs.
-    Falls back to `Notes/Research/<parent-dir-slug>/` for a legacy page
-    outside the KB, mirroring the read-only-paths fallback in
-    `references/write-scope.md`. `link` names the legacy page so the
-    suggested child is discoverable from it via the existing `part_of`
-    relation (`vocabulary/packs/core/relations.yaml`).
-
-    `suggested_path` is de-collided with `vault.unique_path` — the same
-    helper `note.py`'s creation path uses to pick a filename — so the advised
-    path is the exact one a creation call would actually produce, not one a
-    pre-existing same-dated child would silently overwrite. Reads the
-    candidate directory's listing; writes nothing.
-    """
-    date = today.isoformat()
-    slug, _warnings = vault.resolve_filename_slug(title_source, vault_root=vault_root)
-    prefix = kbdir.kb_prefix()
-    parent = PurePosixPath(rel_path).parent
-    if rel_path.startswith(prefix):
-        parent_rel = parent.as_posix()
-    else:
-        parent_slug = vault.slugify_title(parent.name or "legacy")
-        parent_rel = f"{prefix}Notes/Research/{parent_slug}"
-    candidate = vault.unique_path(vault_root / parent_rel, f"{date}-{slug}", vault_root=vault_root)
-    suggested_path = PurePosixPath(parent_rel, candidate.name).as_posix()
-    return {
-        "action": "create-dated-child",
-        "suggested_path": suggested_path,
-        "link": {"relation": "part_of", "target": rel_path},
-        "in_place": "edit_memory section append where the surface has body edits",
-        "migration": "adoption_studio on request",
-    }
+def _legacy_edit_resolution(rel_path: str) -> dict[str, Any]:
+    """A legacy correction stays with its existing authorized edit owner."""
+    return {"action": "use-existing-edit-owner", "path": rel_path}
 
 
 def _canonical_category(value: str) -> str:

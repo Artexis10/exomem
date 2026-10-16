@@ -601,6 +601,16 @@ def _members(goal: Target):
     return members
 
 
+def _key_rows(conn, goal: Target, keys, columns):
+    native = isinstance(goal.projection, NativeProjectionPlan)
+    for offset in range(0, len(keys), 500):
+        chunk = keys[offset:offset + 500]
+        stored_keys = [native_identity.encode(key, goal.layout.identity) for key in chunk] if native else chunk
+        yield from conn.execute(
+            f"SELECT item_key,{','.join(columns)} FROM {goal.table} "  # noqa: S608
+            f"WHERE item_key IN ({','.join('?' for _ in chunk)})", stored_keys)
+
+
 def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[dict[str, Any]]:
     """Upsert ``items`` (``(index, item_key, values)``, in source order) into the collection's rows.
 
@@ -618,15 +628,10 @@ def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[
     columns = (*layout.value_columns, "r")
     found: dict[str, tuple[int, int, tuple]] = {}
     keys = list(dict.fromkeys(key for _, key, _ in items))
-    for offset in range(0, len(keys), 500):
-        chunk = keys[offset:offset + 500]
-        stored_keys = [native_identity.encode(key, layout.identity) for key in chunk] if native else chunk
-        for key, row_id, version, *encoded in conn.execute(
-                f"SELECT item_key,row_id,row_version,{','.join(columns)} FROM {table} "  # noqa: S608
-                f"WHERE item_key IN ({','.join('?' for _ in chunk)})", stored_keys):
-            if native:
-                key = native_identity.decode(key, layout.identity)
-            found[key] = (row_id, version, tuple(encoded))
+    for key, row_id, version, *encoded in _key_rows(conn, goal, keys, ("row_id", "row_version", *columns)):
+        if native:
+            key = native_identity.decode(key, layout.identity)
+        found[key] = (row_id, version, tuple(encoded))
     projection_column = "" if native else ",keys_json"
     projection_parameter = "" if native else ",?"
     projection_update = "" if native else "keys_json=?,"
@@ -634,25 +639,41 @@ def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[
               f"VALUES (?,?{projection_parameter},{','.join('?' for _ in columns)})")
     update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
+    inserted = None
+    # Only new rows can precede upkeep; updates must see earlier members' current values.
+    if native and not found and len(keys) == len(items):
+        from .native_operands import FileRole, operand_snapshot
+
+        parameters = []
+        for _, key, values in items:
+            encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
+            parameters.append((native_identity.encode(key, layout.identity), 1, *encoded))
+        with operand_snapshot(conn, layout, role=FileRole.DERIVED):
+            conn.executemany(insert, parameters)
+        inserted = {native_identity.decode(key, layout.identity): row_id
+                    for key, row_id in _key_rows(conn, goal, keys, ("row_id",))}
     decode, upkeep = _decoder(goal, conn), rollups.Upkeep(conn, members=_members(goal))
     flagged: dict[int, int] = {}
     touched: set[tuple[int, str, str]] = set()
     outcomes = []
     for index, key, values in items:
-        encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
-        before = found.get(key)
-        same = before is not None and (native_rows.encoded_equal(before[2], encoded) if native else before[2] == encoded)
-        if same:
-            outcomes.append({"index": index, "item_key": key, "outcome": "unchanged"})
-            continue
-        projected = () if native else (goal.projection.encode(values),)
-        stored_key = native_identity.encode(key, layout.identity) if native else key
-        if before is None:
-            row_id, version, previous = conn.execute(insert, (stored_key, 1, *projected, *encoded)).lastrowid, 1, None
+        if inserted is not None:
+            row_id, previous, before = inserted[key], None, None
         else:
-            row_id, version, previous = before[0], before[1] + 1, decode(before[2])
-            conn.execute(update, (version, *projected, *encoded, row_id))
-        found[key] = (row_id, version, encoded)
+            encoded = typed_storage.encode_row(layout, values, connection=conn, scope=scope)
+            before = found.get(key)
+            same = before is not None and (native_rows.encoded_equal(before[2], encoded) if native else before[2] == encoded)
+            if same:
+                outcomes.append({"index": index, "item_key": key, "outcome": "unchanged"})
+                continue
+            projected = () if native else (goal.projection.encode(values),)
+            stored_key = native_identity.encode(key, layout.identity) if native else key
+            if before is None:
+                row_id, version, previous = conn.execute(insert, (stored_key, 1, *projected, *encoded)).lastrowid, 1, None
+            else:
+                row_id, version, previous = before[0], before[1] + 1, decode(before[2])
+                conn.execute(update, (version, *projected, *encoded, row_id))
+            found[key] = (row_id, version, encoded)
         for rollup_id, rollup in goal.rollups:
             change, places = upkeep.move(rollup_id, rollup, row_id, key, values, previous)
             if change:

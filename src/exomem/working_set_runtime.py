@@ -50,7 +50,9 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -72,6 +74,33 @@ from .activation_result import INDEX_WARMING as WARMING
 log = logging.getLogger(__name__)
 
 CACHE_SIZE = 16
+
+_DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
+    "activation_deferred_index_builds", default=None
+)
+
+
+@contextmanager
+def defer_index_refreshes() -> Iterator[None]:
+    """Dispatch this activation's refreshes after its live evidence guards.
+
+    A request must not invalidate its own catalogue evidence. Independent
+    publishers still meet the unchanged token guards; no worker waits here.
+    """
+    if _DEFERRED_BUILDS.get() is not None:
+        yield
+        return
+    pending: dict[Path, str] = {}
+    token = _DEFERRED_BUILDS.set(pending)
+    try:
+        yield
+    finally:
+        _DEFERRED_BUILDS.reset(token)
+        for root, stamp in pending.items():
+            try:
+                _schedule_build(root, freshness_stamp=stamp)
+            except Exception:  # noqa: BLE001 - optional dispatch cannot replace the earned result
+                log.warning("deferred activation refresh could not start", exc_info=True)
 
 #: The token's wire version. A payload of any other version is not decoded at
 #: all: a token is a hint, and guessing at an unknown shape is worse than
@@ -2002,6 +2031,11 @@ def _schedule_build(vault_root: Path, *, freshness_stamp: str = "") -> None:
     enough.
     """
     root = Path(vault_root).absolute()
+    pending = _DEFERRED_BUILDS.get()
+    if pending is not None:
+        # Preserve the first dispatch's stamp, as the existing single-flight owner does.
+        pending.setdefault(root, freshness_stamp)
+        return
     with _CACHE_LOCK:
         if root in _BUILDS:
             return
@@ -2306,6 +2340,9 @@ def serve(
     changed = evidence_changed()
     if changed is not None:
         return changed
+    if packet.get("abstained") and packet.get("abstention", {}).get("reason") == UNAVAILABLE:
+        # Resident evidence can recover without changing this packet's cache key.
+        return packet
     if index_stale:
         # Transient, so never cached: the scheduled build may leave the vault's
         # rows and the sidecar token exactly as they were, and a cached copy

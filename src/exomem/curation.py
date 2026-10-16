@@ -61,6 +61,9 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 #: writer's own receipt -- its audit transition -- corroborates it.
 RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
+OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
+# The compatibility flag `allow_records` admits only episode-owned private leaves.
+_EPISODE_STEP_KINDS = RECORDS_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
 MAX_TITLE_CHARS: Final[int] = 500
@@ -162,6 +165,8 @@ _UPDATE_RECORD_FIELDS = frozenset(
     {"collection", "item_key", "changes", "why", "expected_container_hash", "expected_item_version"}
 )
 _EDIT_FIELDS = frozenset({"path", "why", "operation"})
+# nosemgrep: ep-word-set -- the observe-unit leaf's request fields, fixed by its schema.
+_OBSERVE_UNIT_FIELDS = frozenset({"path", "why", "observation"})
 _SUPERSEDE_FIELDS = frozenset(
     {
         "old_path",
@@ -217,6 +222,7 @@ _ARG_FIELDS = {
     "create-entity": _CREATE_ENTITY_FIELDS,
     "accept-relation": _ACCEPT_RELATION_FIELDS,
     "edit": _EDIT_FIELDS,
+    OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
     "supersede": _SUPERSEDE_FIELDS,
     "move": _MOVE_FIELDS,
     "delete": _DELETE_FIELDS,
@@ -229,6 +235,7 @@ _REQUIRED_FIELDS = {
     "create-entity": frozenset({"entity_type", "name", "summary"}),
     "accept-relation": _ACCEPT_RELATION_FIELDS,
     "edit": _EDIT_FIELDS,
+    OBSERVE_UNIT_STEP_KIND: _OBSERVE_UNIT_FIELDS,
     "supersede": frozenset({"old_path", "content", "title"}),
     "move": frozenset({"old_path", "new_path"}),
     "delete": frozenset({"path", "confirm"}),
@@ -435,6 +442,26 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         if not isinstance(expected_hash, str) or not _HEX64.fullmatch(expected_hash):
             raise _error("INVALID_CURATION_PLAN", "edit requires the reviewed expected_hash")
         args["operation"] = normalized_operation
+    elif kind == OBSERVE_UNIT_STEP_KIND:
+        args["path"] = normalize_target_path(args.get("path"), field="path")
+        _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
+        observation = args.get("observation")
+        if not isinstance(observation, Mapping):
+            raise _error("INVALID_CURATION_PLAN", "observation must be an object")
+        from inspect import signature
+
+        from .observe_memory import observe_memory
+
+        # This projection uses the writer's actual argument schema, without another engine.
+        fields = set(signature(observe_memory).parameters) - {
+            "vault_root", "path", "operation", "reason", "today", "transition_token",
+        }
+        _unknown_fields(observation, fields, "observation")
+        for field in ("unit_ref", "expected_fingerprint", "expected_hash", "category", "content"):
+            _require_string(observation.get(field), field)
+        if not isinstance(observation.get("target_fingerprints", {}), Mapping):
+            raise _error("INVALID_CURATION_PLAN", "target_fingerprints must be an object")
+        args["observation"] = {**observation, "target_fingerprints": dict(observation.get("target_fingerprints", {}))}
     elif kind == "supersede":
         args["old_path"] = normalize_target_path(args.get("old_path"), field="old_path")
         _require_string(args.get("content"), f"steps[{ordinal}].args.content")
@@ -602,9 +629,9 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
 
 
 def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
-    """A closed forward plan. `allow_records` admits the episode Records leaf;
-    only the episode seal and already-sealed plans pass it."""
-    kinds = (*STEP_KINDS, *RECORDS_STEP_KINDS) if allow_records else STEP_KINDS
+    """A closed forward plan. The compatibility flag `allow_records` admits
+    private episode leaves; only the episode seal and sealed plans pass it."""
+    kinds = (*STEP_KINDS, *_EPISODE_STEP_KINDS) if allow_records else STEP_KINDS
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
     value = dict(raw)
@@ -643,10 +670,10 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str,
             }
         )
     normalized = {"version": 1, "title": title, "steps": normalized_steps}
-    if any(step["kind"] in RECORDS_STEP_KINDS for step in normalized_steps) and (
+    if any(step["kind"] in _EPISODE_STEP_KINDS for step in normalized_steps) and (
         len(normalized_steps) != 1 or "entity_candidate" in value
     ):
-        raise _error("CURATION_RECORDS_LEAF_ALONE", "a Records leaf is sealed alone in its plan")
+        raise _error("CURATION_RECORDS_LEAF_ALONE", "an episode leaf is sealed alone in its plan")
     if "entity_candidate" in value:
         normalized["entity_candidate"] = _validate_entity_candidate_binding(
             value["entity_candidate"]
@@ -1212,6 +1239,20 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             after_hash = semantic.get("after_hash")
             effect_before = [{"path": path, "content_hash": before_hash}]
             effect_after = [{"path": path, "content_hash": after_hash}]
+        elif kind == OBSERVE_UNIT_STEP_KIND:
+            path = args["path"]
+            preimage, before_hash = _read_target(vault_root, path)
+            observation = dict(args["observation"])
+            if observation["expected_hash"] != before_hash:
+                raise _error("CURATION_BINDING_STALE", "the reviewed parent hash changed")
+            validation = commands.op_observe_memory(
+                vault_root, path=path, operation="validate", reason=args["why"], **observation,
+            )
+            semantic = dict(validation.get("semantic") or {})
+            prepared = {"transition_token": semantic.get("transition_token")}
+            after_hash = validation["after_hash"]
+            effect_before = [{"path": path, "content_hash": before_hash}]
+            effect_after = [{"path": path, "content_hash": after_hash}]
         elif kind == "supersede":
             path = args["old_path"]
             preimage, before_hash = _read_target(vault_root, path)
@@ -1505,7 +1546,7 @@ class PreparedProposal:
 def propose(
     vault_root: Path, plan: Mapping[str, Any], *, allow_records: bool = False
 ) -> dict[str, Any]:
-    """Seal a plan. `allow_records` is the episode `records` route's alone
+    """Seal a plan. `allow_records` admits only private episode leaves
     (`episode_workflow`); every public curation door leaves it off, so none can
     seal a Records plan."""
     return seal_proposal(
@@ -1710,6 +1751,7 @@ def compensation_kind(kind: str) -> str:
         # by removing the one that happened.
         RECORDS_STEP_KIND: "unavailable",
         "update-record": "unavailable",
+        OBSERVE_UNIT_STEP_KIND: "unavailable",
     }[kind]
 
 
@@ -1778,6 +1820,7 @@ def _witness_basis(
         "recover": "manage_memory_file:recover",
         RECORDS_STEP_KIND: "record_memory:append",
         "update-record": "record_memory:update",
+        OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
     }[step["kind"]]
     return {
         "version": 1,
@@ -2114,6 +2157,11 @@ def _dispatch_step(
         operation["relation_review_hash"] = prepared["relation_review_hash"]
         return commands.op_edit_memory(
             vault_root, path=args["path"], why=args["why"], operation=operation
+        )
+    if kind == OBSERVE_UNIT_STEP_KIND:
+        return commands.op_observe_memory(
+            vault_root, path=args["path"], operation="update", reason=args["why"],
+            transition_token=prepared["transition_token"], **args["observation"],
         )
     if kind == "supersede":
         relation = {
@@ -3715,6 +3763,11 @@ def _compensation_args(
         raise _error(
             "CURATION_COMPENSATION_UNAVAILABLE",
             "a Records transition is history; a later Records transition corrects it",
+        )
+    if kind == OBSERVE_UNIT_STEP_KIND:
+        raise _error(
+            "CURATION_COMPENSATION_UNAVAILABLE",
+            "a prior unit interpretation remains history; a later guarded update corrects it",
         )
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:

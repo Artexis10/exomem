@@ -132,6 +132,50 @@ def test_read_memory_reports_missing_anchor_without_substitution(vault: Path) ->
     assert "unit" not in out
 
 
+def test_raw_reparent_does_not_forward_the_old_claim_reference(vault: Path) -> None:
+    original = _write_page(vault, "- [config] Moved claim ^claim\n")
+    old_ref = _unit_ref(vault)
+    destination = "Knowledge Base/Notes/Insights/another-parent.md"
+    (vault / destination).write_text(
+        original.read_text(encoding="utf-8").replace(
+            _PARENT_ID, "23456789-2345-4678-9234-567812345678"
+        ),
+        encoding="utf-8",
+    )
+    _write_page(vault, "- [config] Remaining claim ^remaining\n")
+
+    old = commands.op_read_memory(vault, path=_REL, unit_ref=old_ref)
+    destination_state = semantic_index.current_parent_index_state(vault, destination)
+    moved_ref = destination_state.document.units[0].unit_ref
+    moved = commands.op_read_memory(vault, path=destination, unit_ref=moved_ref)
+
+    assert old["status"] == "missing"
+    assert "unit" not in old
+    assert moved["status"] == "found"
+    assert moved["unit"]["content"] == "Moved claim"
+    assert moved_ref != old_ref
+
+
+def test_raw_legacy_note_rename_does_not_reuse_the_old_path_reference(vault: Path) -> None:
+    path = _write_page(vault, "- [config] Existing claim ^claim\n")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(f"exomem_id: {_PARENT_ID}\n", ""),
+        encoding="utf-8",
+    )
+    old_ref = _unit_ref(vault)
+    moved_path = "Knowledge Base/Notes/Insights/renamed-legacy.md"
+    path.rename(vault / moved_path)
+    old = commands.op_read_memory(vault, path=moved_path, unit_ref=old_ref)
+    current_ref = semantic_index.current_parent_index_state(
+        vault, moved_path
+    ).document.units[0].unit_ref
+    current = commands.op_read_memory(vault, path=moved_path, unit_ref=current_ref)
+    assert old["status"] == "missing"
+    assert "unit" not in old
+    assert current["status"] == "found"
+    assert current_ref != old_ref
+
+
 def test_read_memory_marks_exact_unit_on_superseded_parent(vault: Path) -> None:
     _write_page(
         vault,

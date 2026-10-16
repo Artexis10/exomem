@@ -28,8 +28,10 @@ MIB = 1024 * 1024
 INTERACTIVE = {"timeout_ms": 200, "max_row_visits": 100_000, "max_temp_bytes": 64 * MIB,
                "max_groups": 1000, "max_state_bytes": 8 * MIB}
 ANALYTICS = {**INTERACTIVE, "timeout_ms": 2000, "max_row_visits": 10_000_000, "max_temp_bytes": 256 * MIB}
-#: The largest invented collection that seeds and reduces inside the per-test budget.
+#: Fixed volume for exact reduction and interactive visit-bound checks.
 LARGE = 300_000
+# These labels describe fixed test preparation boundaries, never dataset vocabulary.
+_ANALYTICS_PREPARATION_PHASES = ("create", "generate", "convert", "seed", "reference", "interactive_refusal")
 
 
 def analytics(raw):
@@ -191,22 +193,32 @@ def test_analytics_explain_preview_and_dry_run_report_profile_and_bounds_without
     assert admitted["admitted"] is True and "groups" not in admitted and admitted["bounds"] == ANALYTICS
 
 
-def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference(store):
+def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference(store, monkeypatch):
     """A large exact reduction no rollup answers that is refused, sampled, partial or wrong under
     the analytics profile, or admitted past the interactive visit bound."""
+    _install_analytics_timeout_observer(monkeypatch)
+    preparation_marks = [time.monotonic()]
     create(store)
+    preparation_marks.append(time.monotonic())
     records = list(folded(iter_exercises(LARGE)))
-    seed(store, [exercise(record) for record in records])
+    preparation_marks.append(time.monotonic())
+    items = [exercise(record) for record in records]
+    preparation_marks.append(time.monotonic())
+    seed(store, items)
+    del items
+    preparation_marks.append(time.monotonic())
     daily, flagged = expected_daily(records, "metrics.calories")
+    preparation_marks.append(time.monotonic())
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, request())
+    preparation_marks.append(time.monotonic())
     started = time.monotonic()
     process_started, thread_started = time.process_time(), time.thread_time()
     try:
         result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
     except runtime.QueryError as error:
         try:
-            _report_analytics_failure(error, started, process_started, thread_started)
+            _report_analytics_failure(error, started, process_started, thread_started, preparation_marks)
         except Exception:  # noqa: BLE001 - diagnostics cannot replace the query failure.
             pass
         raise
@@ -216,11 +228,73 @@ def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference
     assert elapsed < 2.0, elapsed
 
 
-def _report_analytics_failure(error, started, process_started, thread_started):
+def _install_analytics_timeout_observer(monkeypatch):
+    import sys
+    import threading
+
+    import pytest_timeout
+
+    from exomem.query_engine import reductions
+
+    original = pytest_timeout.dump_stacks
+    main_ident = threading.main_thread().ident
+    test_code = test_analytics_exact_reduction_over_a_large_collection_matches_the_reference.__code__
+    reduce_code = reductions._from_rows.__code__
+
+    def observed(terminal):
+        # The locked plugin exits without unwinding; reuse its failure dump without another timer.
+        try:
+            _report_analytics_outer_timeout(terminal, sys._current_frames().get(main_ident),
+                                            test_code, reduce_code)
+        except Exception:  # noqa: BLE001 - diagnostics cannot replace the original timeout dump.
+            pass
+        original(terminal)
+
+    monkeypatch.setattr(pytest_timeout, "dump_stacks", observed)
+
+
+def _report_analytics_outer_timeout(terminal, frame, test_code, reduce_code):
+    """Report elapsed clocks and a row count, never row content or query text."""
+    now = time.monotonic()
+    numbers = {"window": "outer-timeout-snapshot", "elapsed_since_reduce_start_s": None,
+               "deadline_delta_ms": None, "visited": None, "preparation": None}
+    while frame is not None:
+        if frame.f_code is test_code:
+            numbers["preparation"] = _analytics_preparation_windows(frame.f_locals.get("preparation_marks"))
+            started = frame.f_locals.get("started")
+            if type(started) in (int, float):
+                numbers["elapsed_since_reduce_start_s"] = now - started
+        elif frame.f_code is reduce_code:
+            visited = frame.f_locals.get("visited")
+            numbers["visited"] = visited if type(visited) is int else None
+            deadline = getattr(frame.f_locals.get("session"), "_deadline", None)
+            if type(deadline) in (int, float):
+                # Positive means overdue; negative means time remains on the native deadline.
+                numbers["deadline_delta_ms"] = (now - deadline) * 1000
+        frame = frame.f_back
+    terminal.write("analytics_outer_failure " + json.dumps(numbers, sort_keys=True) + "\n")
+
+
+def _analytics_preparation_windows(marks):
+    if type(marks) is not list or not marks:
+        return None
+    boundaries, now = tuple(marks), time.monotonic()
+    windows = {}
+    for index, name in enumerate(_ANALYTICS_PREPARATION_PHASES):
+        if index >= len(boundaries):
+            break
+        complete = index + 1 < len(boundaries)
+        end = boundaries[index + 1] if complete else now
+        windows[name] = {"wall_s": end - boundaries[index], "state": "complete" if complete else "incomplete"}
+    return windows
+
+
+def _report_analytics_failure(error, started, process_started, thread_started, preparation_marks=None):
     """Report only numeric counters after failure, without tracing the measured loop."""
     numbers = {"window": "reduce-call-through-error-unwind", "wall_s": time.monotonic() - started,
                "process_cpu_s": time.process_time() - process_started,
-               "thread_cpu_s": time.thread_time() - thread_started, "partial_reduce": None}
+               "thread_cpu_s": time.thread_time() - thread_started, "partial_reduce": None,
+               "preparation": _analytics_preparation_windows(preparation_marks)}
     from exomem.query_engine import reductions
 
     pending, seen = [error], set()

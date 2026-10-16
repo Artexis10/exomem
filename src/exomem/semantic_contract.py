@@ -488,6 +488,11 @@ class RelationFact:
     reviewer_accepted: bool
     target_status: str
     registry_instance: str = "core"
+    logical_source_ref: str | None = None
+    logical_target_ref: str | None = None
+    target_unit_status: str | None = None
+    target_unit_fingerprint: str | None = None
+    target_kind: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authored_projects", tuple(sorted(set(self.authored_projects))))
@@ -519,6 +524,11 @@ class RelationFact:
             "reviewer_accepted": self.reviewer_accepted,
             "target_status": self.target_status,
             "registry_instance": self.registry_instance,
+            "logical_source_ref": self.logical_source_ref,
+            "logical_target_ref": self.logical_target_ref,
+            "target_unit_status": self.target_unit_status,
+            "target_unit_fingerprint": self.target_unit_fingerprint,
+            "target_kind": self.target_kind,
         }
 
 
@@ -2483,8 +2493,8 @@ def _reconcile_markdown_delta(
             identities.pop(rel_path, None)
 
     # A governed commit, and most watcher events, edit one page in place. When
-    # its title, identity and registries hold, the resolver and every other
-    # page's facts still hold, so re-derive that page alone, not the corpus.
+    # its title, identity and registries hold, the resolver still holds, so
+    # re-derive that page and the pages that link into it, not the corpus.
     if len(changed_paths) == 1:
         rel_path = changed_paths[0]
         state = states.get(rel_path)
@@ -3588,7 +3598,7 @@ def _context_from_state_map(
 def _stable_topology_replacement(
     context: SemanticCorpusContext, state: SemanticPageState
 ) -> bool:
-    """Whether `state` can replace its page without re-deriving any other page's facts.
+    """Whether `state` can replace its page by re-deriving it and the pages that link into it.
 
     Relation fact identities count occurrences per authored identity across the
     whole corpus, so a page that shares its `exomem_id` with another page is
@@ -3628,7 +3638,7 @@ def _context_with_stable_topology_candidate(
     context: SemanticCorpusContext,
     state: SemanticPageState,
 ) -> SemanticCorpusContext:
-    """Replace one page without re-resolving every authored corpus fact."""
+    """Replace one page and refresh facts that bind its current units."""
     pages = dict(context.pages)
     pages[state.path] = state
     resolver = _WikilinkResolverView(
@@ -3637,14 +3647,22 @@ def _context_with_stable_topology_candidate(
         stems=context.resolver_stems,
         titles=context.resolver_titles,
     )
+    # Incoming exact endpoints depend on the target's anchors and fingerprints.
+    affected = {state.path} | {
+        fact.authored_path for fact in context.relation_facts
+        if fact.resolved_target_path is not None
+        and fact.resolved_target_path.split("#", 1)[0] == state.path
+    }
+    # Sorted, as in a full build: fact identities count occurrences per authored
+    # identity, so pages that share an id must be derived in the same order.
     candidate_facts = _derive_relation_facts(
         context.vault_root,
-        {state.path: state},
+        {path: pages[path] for path in sorted(affected)},
         resolver,  # type: ignore[arg-type]
         context.registry,
         target_states=pages,
     )
-    retained_facts = (fact for fact in context.relation_facts if fact.authored_path != state.path)
+    retained_facts = (fact for fact in context.relation_facts if fact.authored_path not in affected)
     facts = tuple(sorted((*retained_facts, *candidate_facts), key=lambda item: item.identity))
     current = context.pages[state.path]
     census = None
@@ -3795,8 +3813,14 @@ def _resolve_target(
     raw_target: str,
     resolver: vault.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
+    *,
+    source_path: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None]:
-    _, authored_anchor, alias = _target_parts(raw_target)
+    page_part, authored_anchor, alias = _target_parts(raw_target)
+    if not page_part and authored_anchor and source_path:
+        if visible is not None and not visible(source_path):
+            return "unresolved", None, authored_anchor, alias
+        return "resolved", f"{source_path}#{authored_anchor}", authored_anchor, alias
     try:
         normalized, _ = vault.normalize_wikilink(
             raw_target, root, resolver=resolver, strict=True, visible=visible
@@ -3981,10 +4005,27 @@ def _derive_relation_facts(
             writer_view[1]
             if writer_view is not None and state.path == writer_view[0]
             else None,
+            source_path=state.path,
         )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
+        source_ref = raw["element_identity"] if raw["origin"] == "semantic_relation" else None
+        source_ref = source_ref or state.document.parent_ref
+        target_ref = target_state.document.parent_ref if target_state is not None else None
+        target_unit_status = None
+        target_unit_fingerprint = None
+        if target_anchor and target_state is not None:
+            unit_resolution = target_state.document.resolve_fragment(target_anchor)
+            target_unit_status = (
+                "unavailable" if target_state.definitions_unavailable
+                and unit_resolution.status == "missing" else unit_resolution.status
+            )
+            target_ref = None
+            if unit_resolution.unit is not None:
+                target_ref = unit_resolution.unit.unit_ref
+                target_unit_fingerprint = unit_resolution.unit.fingerprint
+                target_kind = unit_resolution.unit.kind
         resolution = _registry_resolution(
             selected_registry,
             raw["raw_relation"],
@@ -4031,6 +4072,11 @@ def _derive_relation_facts(
                 identity=_fact_identity(identity_payload),
                 logical_source_path=logical_source,
                 logical_target_path=logical_target,
+                logical_source_ref=target_ref if raw["reverse"] else source_ref,
+                logical_target_ref=source_ref if raw["reverse"] else target_ref,
+                target_unit_status=target_unit_status,
+                target_unit_fingerprint=target_unit_fingerprint,
+                target_kind=target_kind,
                 raw_target=str(raw["raw_target"]),
                 resolved_target_path=resolved_target,
                 target_anchor=target_anchor,
@@ -4116,7 +4162,9 @@ def _structural_relation_reasons(
             reasons.append("ineligible_target")
         if fact.logical_target_path not in target_paths and not mutual_supersession:
             reasons.append("ineligible_target")
-        if fact.logical_source_path == fact.logical_target_path:
+        source_endpoint = fact.logical_source_ref or fact.logical_source_path
+        target_endpoint = fact.logical_target_ref or fact.logical_target_path
+        if source_endpoint == target_endpoint:
             reasons.append("self_target")
     if definition is None:
         reasons.append("unregistered_relation")
@@ -4130,7 +4178,7 @@ def _structural_relation_reasons(
             page_type=fact.authored_page_type,
             source_kind=fact.source_kind,
             target_kind=(
-                "file"
+                fact.target_kind or "file"
                 if fact.target_status == "resolved" and resolved_base in corpus.pages
                 else "unresolved"
             ),

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "durable_closure_common.py"
 spec = importlib.util.spec_from_file_location("durable_closure_common", MODULE_PATH)
 common = importlib.util.module_from_spec(spec)

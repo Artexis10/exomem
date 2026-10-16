@@ -1669,6 +1669,86 @@ ownership/egress/continuity controls, four/seven named-domain coverage, full-set
 ambiguity, matched latency and whole-packet bytes/reference tokens before delivery. This
 does not close the original client incident without its actual request and packet.
 
+## Granular epistemic corrections
+
+The active agent identifies the affected propositions and decides whether new
+evidence refutes, qualifies, confirms or replaces them. Deterministic writers
+validate identity, authority and structure; they do not interpret corrections.
+The ordinary workflow reads the exact units, updates their suitable existing
+home, authors justified relationships, and verifies committed and current state.
+It needs no correction-specific user nudge or new confirmation.
+
+An anchored unit keeps its identity when its wording changes.
+A false historical proposition keeps its text and receives an authored verdict.
+A distinct corrective proposition can occupy another unit in the same note.
+Refutation and contradiction do not implicitly author supersession or alter rank.
+Registered relation families govern behaviour; code does not classify meaning
+from relation names or prose keywords.
+
+The semantic write owner retains prior Markdown in the same atomic transition
+as an interpretation change. One internal entry retains the prior document,
+parent identity, before/after hashes, affected units, reason, attribution and
+available source/version bindings. The entry is planned before lifecycle sealing
+and participates in auxiliary hashes, so replay cannot generate another revision.
+Timestamp-only writes need no revision. Full prior documents are the initial
+format; report their storage amplification rather than introducing another store.
+
+History reads use held bytes and bounded pagination. They independently admit
+retained content and source bindings under current policy before returning text,
+unit projections, reasons, attribution or counts. Current-page access cannot
+authorize a prior interpretation. History remains outside ordinary indexing and
+generic reads, receives no implicit registry-history pruning, and travels through
+the maintained export/restore owner.
+
+One episode `observe-unit` leaf projects the existing observation writer and its
+unit fingerprint guards. It reuses validation, atomic witnesses and historical
+hash chains. It adds no semantic engine, compensation interface or authority.
+Registered compiled pages retain observation support. Entity and legacy pages
+use their existing authorized edit owner; Records reuse shipped row corrections
+and retained history. No ordinary correction creates a dated child by default.
+
+The compiler preserves verdict, the check_by deadline, provenance and temporal state.
+For each served unit it can inspect bounded admitted incoming corrective facts,
+including a counterpart absent from the initial retrieval window. Existing
+budgets and disclosure checks apply before context or counts reach the caller.
+A hidden counterpart cannot change visible lifecycle or disclose its existence.
+Missing publication remains unknown; historical revisions do not flood recall.
+
+Incoming discovery holds one exact live graph view and its resident resolver.
+It does not build a cold resolver, prove a cold graph, or wait for publication.
+One request deadline bounds discovery and SQL work; changed publication discards tentative contributions.
+Exact admitted counterparts enter ordinary unit selection, temporal labels, caps and prose budgets.
+They carry no nested plaintext adapter or independent lifecycle override.
+The native renderer shows authored verdicts and check_by deadlines with those ordinary units.
+
+Acceptance combines deterministic public journeys with ordinary agent initiation.
+Invented cases cover exact local and cross-page targets, repeated corrections,
+stale references, evidence grades, legacy and Records routes, and current context.
+The protected 15 October sequence runs outside Git from its source truth.
+Incident closure names what shipped, what the native check proved, and what
+remains open. Source inclusion alone cannot establish seamless agent behaviour.
+
+## Identity and resource follow-through
+
+The bounded identity evaluation retains the current parent UUID and anchor API for this batch.
+Note renames and anchored wording changes preserve identity; fingerprints guard revisions.
+An anchor rename invalidates the old reference, and an anonymous reference becomes stale when its content changes.
+Raw copy-and-remove reparenting is unsupported: the old parent reports the unit missing and never forwards to another claim.
+Path-based legacy references do not gain UUID stability when their note moves.
+A future independent unit UUID in Markdown needs an explicit compatibility policy and an atomic move across both parents.
+That move must publish history, authorization and source bindings together; no identifier migration or dormant UUID field ships here.
+Exact resolution must remain deterministic across full and selected documents and report stale, ambiguous or unavailable state without substitution.
+
+Compiler acceptance must exercise the actual public workflow with the minimum sufficient connected units.
+The served context must retain verdicts, source and version provenance, and temporal state without unconditional parent-page expansion.
+An exact unit read may expand bounded parent context when the agent needs it.
+Legacy in-place correction remains with the existing authorized edit owner, with retained history and no default dated child.
+
+SQLite remains the core disk-backed graph owner.
+Reuse maintained resource instruments and a reproducible synthetic corpus to measure process RSS, defined cold and warm queries, bounded multi-hop traversal, incremental updates and index size.
+Record commands, corpus size, cache conditions, counts, hardware and storage amplification beside each result.
+A graph-backend comparison may evaluate Neo4j separately; it must not delay the SQLite correction and compiler path.
+
 ## Risks / Trade-offs
 
 - Decomposition can overcapture: require supported evidence, explicit uncertainty, incidental-name negatives and no quota for entities/edges.
