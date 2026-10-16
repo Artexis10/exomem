@@ -3,9 +3,9 @@
 import json
 from contextlib import closing
 
-from test_collection_query_index_migrations import revise
-from test_collection_store_typed_storage import bulk, create, migrate, row_ids, typed_page
-from test_collection_store_writer import CID
+from test_collection_query_index_migrations import _import_files, _rows, revise
+from test_collection_store_typed_storage import bulk, create, exact, migrate, row_ids, typed_page
+from test_collection_store_writer import CID, manifest_text
 from test_collection_store_writer import store as store
 
 from exomem.collection_store import connection, index_migrations, typed_storage
@@ -108,6 +108,19 @@ def test_a_large_accepted_record_migrates_without_import_row_limits_or_small_sel
         assert typed_storage.version_values(reopened, row_id, 2)[0] == {**values, "count": 1}
 
 
+def test_a_typed_v1_record_under_the_copy_budget_converts_to_native(store):
+    """A canonical JSON cell charged as escaped text must not refuse a typed-v1 row the budget admits."""
+    create(store)
+    assert migrate(store) == "ready"
+    values = {"title": "Large entry", "meta": {"parts": ["x" * 10000 for _ in range(100)]}}
+    store.append_record(CID, item=values, why="record")
+    assert store.migrate_typed_encoding(CID) == "ready"
+    layout = typed_storage.require_layout(store.connection, CID)
+    assert layout.encoding == typed_storage.TYPED_V2
+    [row_id] = row_ids(store).values()
+    assert exact(typed_storage.current_values(store.connection, layout, row_id)) == exact(values)
+
+
 def test_an_oversized_migration_stays_pending_after_reopen_while_the_old_collection_serves(store):
     """An unsupported source row cannot cause an unsafe cutover, a retry loop or loss of old writes."""
     create(store)
@@ -129,3 +142,15 @@ def test_an_oversized_migration_stays_pending_after_reopen_while_the_old_collect
         assert index_migrations.ready_plan(reopened, CID) == old
         assert json.loads(reopened.execute("SELECT diagnostic_json FROM typed_encoding_mappings").fetchone()[0]) == diagnostic
         assert reopened.execute("SELECT count(*) FROM items").fetchone() == (2,)
+
+
+def test_a_first_projection_that_failed_on_a_large_imported_row_converts_to_native(tmp_path, store):
+    """An imported row over the JSON index cell limit must not leave native conversion without query intent."""
+    fields = "".join(f"    part{n}: {{type: string}}\n" for n in range(9))
+    text = manifest_text().replace("    count: {type: integer}\n", "    count: {type: integer, filterable: true}\n" + fields)
+    _import_files(tmp_path, store, {"title": "Large", "count": 1, **{f"part{n}": "x" * 30_000 for n in range(9)}},
+                  text=text)
+    assert not store.backfill_query_indexes(CID)
+    assert store.migrate_typed_encoding(CID) == "ready"
+    assert typed_storage.collection_encoding(store.connection, CID) == typed_storage.TYPED_V2
+    assert _rows(store, {"title": "string", "count": "integer"}) == [{"title": "Large", "count": 1}]
