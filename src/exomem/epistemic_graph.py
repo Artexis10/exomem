@@ -2064,6 +2064,24 @@ class EpistemicGraphIndex:
         self,
         conn: sqlite3.Connection,
     ) -> sqlite3.Connection:
+        # One transaction. Python's sqlite3 commits each DDL statement on its
+        # own, so a fresh private rebuild file paid about 26 durable commits
+        # before its first row: 32 ms median and up to 2.3 s each on a Windows
+        # CI runner. The schema is also all-or-nothing now.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        try:
+            self._create_graph_schema(conn)
+        except BaseException:
+            conn.rollback()
+            raise
+        # `_connect()` also backs a few direct inspection helpers.  Keep those
+        # connections transaction-free while giving each newly created sidecar
+        # (including every private rebuild result) a stable ABA discriminator.
+        conn.commit()
+        return conn
+
+    def _create_graph_schema(self, conn: sqlite3.Connection) -> None:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         required_edge_columns = {
             "dst_page_key",
@@ -2157,10 +2175,6 @@ class EpistemicGraphIndex:
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
         )
-        # `_connect()` also backs a few direct inspection helpers.  Keep those
-        # connections transaction-free while giving each newly created sidecar
-        # (including every private rebuild result) a stable ABA discriminator.
-        conn.commit()
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)")
         conn.execute(
@@ -2218,7 +2232,6 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
         )
-        return conn
 
     def _connect_existing(
         self,
