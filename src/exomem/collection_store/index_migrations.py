@@ -259,18 +259,16 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     # A plan without scalars keys every row identically from no value, so it reads none
     # and no row is too large for it.
     reads = bool(plan.scalars)
-    cursor = conn.execute("SELECT row_id,item_key,row_version,"
-                          "CASE WHEN ? AND length(CAST(values_json AS BLOB))<=? THEN values_json END,"
-                          "CASE WHEN ? THEN length(CAST(values_json AS BLOB)) ELSE 0 END,encoding FROM items "
-                          "WHERE collection_id=? AND row_id>? ORDER BY row_id LIMIT ?",
-                          (reads, _MAX_CELL_BYTES, reads, collection_id, last, limit))
+    cursor = conn.execute("SELECT row_id,item_key,row_version,encoding FROM items "
+                          "WHERE collection_id=? AND row_id>? ORDER BY row_id LIMIT ?", (collection_id, last, limit))
     rows = cursor.fetchall()
     typed = {row["row_id"]: row["values_json"] for row in typed_storage.hydrate(conn, [
-        {"row_id": row[0], "collection_id": collection_id, "encoding": row[5], "values_json": None}
-        for row in rows if reads and row[5] != typed_storage.JSON_V1])}
+        {"row_id": row[0], "collection_id": collection_id, "encoding": row[3], "values_json": None}
+        for row in rows if reads and row[3] != typed_storage.JSON_V1])}
+    raw = conn.connection if isinstance(conn, AccountedWriter) else conn
     total = 0
     try:
-        for row_id, key, version, values, size, _ in rows:
+        for row_id, key, version, _ in rows:
             if not reads:
                 conn.execute(plan.upsert, {"row_id": row_id, "item_key": key, "row_version": version, "keys_json": plan.encode({})})
                 last = row_id
@@ -278,6 +276,11 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
             if row_id in typed:
                 size = len(typed[row_id].encode())
                 values = typed[row_id] if size <= _MAX_CELL_BYTES else None
+            else:
+                # The blob handle gives the stored byte length without loading a cell too large to index.
+                with raw.blobopen("items", "values_json", row_id, readonly=True) as cell:
+                    size = len(cell)
+                    values = cell.read() if size <= _MAX_CELL_BYTES else None
             if values is None:
                 _failed(conn, plan)
                 return False
