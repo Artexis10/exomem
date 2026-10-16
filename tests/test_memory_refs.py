@@ -841,3 +841,70 @@ def test_a_projection_behind_an_external_edit_falls_back_to_the_scan(
         late: ("Knowledge Base/Notes/late.md",),
     }
     assert len(scans) == 1
+
+
+def test_the_projection_and_the_scan_resolve_upper_case_and_cr_only_pages_alike(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sources read a `.MD` page and a page with CR-only line endings.
+
+    The scan once matched `*.md` case-sensitively on POSIX, and the census read
+    raw bytes, where a CR-only page shows no frontmatter. Either gap made the
+    same reference resolve through one source and read as absent through the
+    other.
+    """
+    upper = memory_refs.new_id()
+    carriage = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/Upper.MD", _page(upper))
+    cr_only = tmp_path / "Knowledge Base" / "Notes" / "carriage.md"
+    cr_only.write_bytes(_page(carriage).replace("\n", "\r").encode("utf-8"))
+    expected = {
+        upper: ("Knowledge Base/Notes/Upper.MD",),
+        carriage: ("Knowledge Base/Notes/carriage.md",),
+    }
+
+    # No projection is current yet, so this reads through the scan.
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [upper, carriage]) == expected
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(vault_root: Path) -> list:
+        raise AssertionError("a current projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    assert memory_refs.paths_for_ids_read_only(tmp_path, [upper, carriage]) == expected
+
+
+def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page under `Knowledge Base/trash/` keeps the ref it is handed today.
+
+    The identity census never admits that directory, while the scan reads it
+    and a read by path returns the page's ref. A current projection would read
+    that ref as absent, so the vault takes the scan even with one available.
+    """
+    live = memory_refs.new_id()
+    trashed = memory_refs.new_id()
+    _write_page(tmp_path, "Knowledge Base/Notes/live.md", _page(live))
+    _write_page(tmp_path, "Knowledge Base/trash/gone.md", _page(trashed))
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    assert semantic_contract.current_reference_identity_snapshot(tmp_path) is not None
+
+    scans: list[str] = []
+    real = memory_refs._scan_pages
+
+    def counted(vault_root: Path) -> list:
+        scans.append(str(vault_root))
+        return real(vault_root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted)
+    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [live, trashed])
+
+    assert resolved == {
+        live: ("Knowledge Base/Notes/live.md",),
+        trashed: ("Knowledge Base/trash/gone.md",),
+    }
+    assert len(scans) == 1
