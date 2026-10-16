@@ -16,8 +16,9 @@ from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
-#: The closed kinds of that one pending intent: admission implements exactly these two flows.
-CREATE, MIGRATE = "create", "migrate"
+#: The closed kinds of that one pending intent: admission implements a create and a migration,
+#: and ``export`` the reverse export back to files.
+CREATE, MIGRATE, EXPORT = "create", "migrate", "export"
 #: The semantic profiles a marker entry may record; an entry from before entries carried one has none.
 PROFILES = tuple(collection_profiles.PROFILES)
 MARKER_REQUIRED = "collection_store_marker_required"
@@ -308,17 +309,73 @@ def _intent_collection(entry):
     return entry
 
 
+def _store_head(value):
+    """Validate a store head an intent records: its commit sequence and chain hash, None only at genesis."""
+    if (not isinstance(value, dict) or set(value) != {"commit_seq", "head_hash"}
+            or type(value["commit_seq"]) is not int or value["commit_seq"] < 0
+            or (value["head_hash"] is None) != (value["commit_seq"] == 0)
+            or not (value["head_hash"] is None or isinstance(value["head_hash"], str) and value["head_hash"])):
+        _invalid()
+
+
+def _migrate_fields(intent):
+    """Validate the fields a migration adds when it replaces an unadmitted store of its own (P1b.3c).
+
+    ``supersedes`` names the store and generation a first enrolment's fence binds, which
+    fresh staging replaces; ``base_head`` is the live store's head that a migration over an
+    enrolled store imports onto, so a recovery can prove the store it restores.
+    """
+    if "supersedes" in intent:
+        found = intent["supersedes"]
+        if (intent["expected_marker"] is not None or not isinstance(found, dict)
+                or set(found) != {"store_id", "generation"} or not isinstance(found["store_id"], str)
+                or not found["store_id"] or type(found["generation"]) is not int or found["generation"] < 1):
+            _invalid()
+    if "base_head" in intent:
+        if intent["expected_marker"] is None:
+            _invalid()
+        _store_head(intent["base_head"])
+
+
+def _export_intent(intent):
+    """Validate an export's intent: it retires ``expected_marker`` with its store and fence, so it has no target.
+
+    ``verified``, once present, records that file mode read every collection as the store
+    served it, so a rerun after the fence retire finishes without reading the files again.
+    """
+    # nosemgrep: ep-word-set -- the closed field names of the intent record this module writes.
+    if (set(intent) - {"verified"} != {"version", "kind", "request_id", "plan_id", "expected_marker", "exported_at",
+                                       "why", "collections"}
+            or intent.get("verified", True) is not True
+            or not all(isinstance(intent[name], str) and intent[name]
+                       for name in ("request_id", "plan_id", "expected_marker", "exported_at", "why"))
+            or not isinstance(intent["collections"], list) or not intent["collections"]):
+        _invalid()
+    for entry in intent["collections"]:
+        if (not isinstance(entry, dict) or set(entry) != {"collection_id", "manifest_path", "source_path"}
+                or not all(isinstance(value, str) and value for value in entry.values())):
+            _invalid()
+    if len(intent_collection_ids(intent)) != len(intent["collections"]):
+        _invalid()
+    return intent
+
+
 def pending_create(conn):
-    """The one pending marker intent, with its closed ``kind`` and the ``collections`` it admits.
+    """The one pending marker intent, with its closed ``kind`` and the ``collections`` it names.
 
     Version 1 is a create of one collection, as every release has written it. Version 2
-    is a migration of existing file collections, each named with its import checkpoint.
+    is a migration of existing file collections, each named with its import checkpoint,
+    or an export of the routed collections back to files; a release without the export
+    refuses its intent as invalid, so it never serves a store that an export owns.
     """
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
     if row is None:
         return None
     try:
         intent = json.loads(row[0])
+        if isinstance(intent, dict) and type(intent.get("version")) is int and intent["version"] == 2 \
+                and intent.get("kind") == EXPORT:
+            return _export_intent(intent)
         if (type(intent["version"]) is not int or intent["version"] not in (1, 2)
                 or not all(isinstance(intent[name], str) and intent[name]
                            for name in ("request_id", "target_marker"))
@@ -331,12 +388,13 @@ def pending_create(conn):
                 _invalid()
             entry = {name: intent[name] for name in ("collection_id", "manifest_path", "source_path", "txn_id")}
             return {**intent, "kind": CREATE, "collections": [entry]}
-        # Version 2 records only migrations; a create keeps writing version 1.
+        # Version 2 records migrations and exports; a create keeps writing version 1.
         if intent["kind"] != MIGRATE or not isinstance(intent["collections"], list) or not intent["collections"]:
             _invalid()
         entries = [_intent_collection(entry) for entry in intent["collections"]]
         if len({entry["collection_id"] for entry in entries}) != len(entries):
             _invalid()
+        _migrate_fields(intent)
         return intent
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "invalid pending create intent") from error
@@ -351,7 +409,12 @@ def marker_status(writer, intent):
 
 
 def intent_status(root, conn, intent):
-    """Whether a pending intent's marker is admitted, still pending, or in conflict; any connection reads it."""
+    """Whether a pending intent's marker is admitted, still pending, or in conflict; any connection reads it.
+
+    An export admits no marker: its collections stay pending until it retires the store.
+    """
+    if intent["kind"] == EXPORT:
+        return "pending"
     try:
         target_marker = parse_marker(root, intent["target_marker"])
         sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]

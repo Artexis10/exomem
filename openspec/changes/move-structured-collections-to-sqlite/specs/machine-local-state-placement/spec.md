@@ -58,7 +58,8 @@ releases since 0.114.0 treat an unknown ID alike, so an ID would also refuse the
 releases that read schema 11. A release SHALL support the IDs up to its own
 store schema. A writer SHALL record the current schema's IDs before it migrates
 a store or installs a migrated copy. A migration that rolls back SHALL record
-the earlier schema's IDs again.
+the earlier schema's IDs again. A reverse export that retires the marker SHALL
+remove the schema IDs together with the store's own IDs.
 
 Supported Exomem launchers SHALL derive required store compatibility from the
 existing vault-side authority marker before fresh external-state bootstrap,

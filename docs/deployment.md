@@ -139,8 +139,9 @@ Tesseract's default language. To read Japanese, install the `jpn` and
 `tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
 
 `EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
-Unset, a personal install runs every engine. HEIC photos are not decoded; see
-`docs/runbooks/cloud-media.md`.
+Unset, a personal install runs every engine and a Cloud cell runs none. cellctl
+renders the variable into a Cloud cell, for one cell or as the fleet default.
+HEIC photos are not decoded; see `docs/runbooks/cloud-media.md`.
 
 Lean / CPU-only boxes can skip all of this — set
 `EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
@@ -800,6 +801,59 @@ replica before leaving it. Session and auth-generation reads are always direct t
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
 
+### When files change before a migration finishes
+
+`exomem collections migrate --apply` publishes its store before it installs the
+marker. Until the marker is installed, the files stay canonical. If an apply
+stops in that window and a writer outside the writer lease, such as a sync
+client or an editor, then changes an imported file, the next apply does not
+admit the published store, because admitting it would lose that change:
+
+- On a vault that no store served before, the apply imports the change into a
+  new store and moves the coordinator's fence to it at the next generation. Its
+  report names the replaced store under `superseded`, and the new store keeps
+  that store's replica as `.foreign-*` evidence.
+- On a vault whose store already served collections, the apply first restores
+  that store, with its rows and its head, and then migrates again with the
+  change. Its report describes the restore under `restored`. When the migrated
+  store's replica or head already left this host, the restored store continues
+  as a new tenure, as adopt-local continues one.
+
+To finish the migration:
+
+1. Keep the Exomem service stopped on every host that serves the vault.
+2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
+3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
+4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
+5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
+6. If the apply reports `COLLECTION_STORE_MIGRATION_STALE`, put back the files of each collection that it names, then run step 2 again.
+7. Start the Exomem services.
+
+The apply reports `marker_admitted` when the migration is finished.
+
+The apply never adopts a replica itself. The service adopts the vault replica when it starts, so step 4 starts it once on this host.
+
+`status: restored` means that the restore finished but could not hand back its
+lease. `COLLECTION_STORE_SYNC_PENDING` means that the coordinator's head or the
+vault replica is neither the restored store nor the migrated store, usually
+because a newer vault replica has not reached this host yet.
+`COLLECTION_STORE_DIVERGED` means that the restored store records a divergence
+that adopt-local must resolve first.
+
+`COLLECTION_STORE_MIGRATION_STALE` means that the apply cannot prove that the
+migrated store is the restored store plus only the migration's own imports, so
+it restored nothing. The stores, the marker, the fence and the files stay as they
+were. When the apply found the changed files, the refusal names the manifest of
+each collection that holds them. Put back those files with the bytes that the
+migration imported, for example from a backup or the vault's sync history.
+
+An apply that stops during a restore, after the migrated store reached the vault
+replica or the coordinator, leaves the restored store refused with
+`COLLECTION_STORE_SYNC_PENDING` until the next apply finishes the restore. An
+apply that finished its restore and then stopped, for example on a failed
+round-trip proof, leaves the restored store serving. The services may run
+meanwhile, and the next apply migrates that store with the writes it served.
+
 ### A release that changes the collection store's schema
 
 A release can change the schema of the live collection store. 0.119.0 changed
@@ -885,41 +939,64 @@ The read answers with the collection.
 The backup in step 1 is a copy at the earlier schema. It does not make a rollback
 safe, because restoring it loses every store write after the upgrade.
 
-### Retire the collection store fence before a downgrade
+### Export the vault to files before a downgrade
 
-While a vault has a collection store fence, the coordinator refuses the lease to
-every writer that does not offer the store capability. A file-mode writer, such
-as a release from before the store, cannot write that vault. The operator retires
-the fence so that file-mode writers get the lease again. The retire is only the
-coordinator step of a downgrade. It does not export, move or delete a collection,
-and it does not change the vault's store marker or machine-local state.
-
-Only the operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, can
-retire the fence. The writer credential that the service holds gets HTTP 401.
-
-Retire the fence only after the vault's store collections are files again. A
-retire on a vault that still routes collections to the store makes those
-collections unavailable on every host, and this release has no command that
-undoes it.
-
-This release ships no export command that turns store collections back into
-files. Retire the fence only on a vault that has no store marker: check that the
-file `<knowledge base folder>/_Collections/mode.json` (`Knowledge Base` by
-default) is absent from every host's copy of the vault.
+A release from before the collection store cannot open a vault whose collections
+live in the store. Before a downgrade, the owner exports the vault: the export
+turns every store collection back into its file layout and then retires the
+store. Only the owner can export, with the service stopped on every host and the
+operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 
 1. Stop the Exomem service on every host that serves the vault.
-2. Read the fence with the writer credential:
-   `curl -s -H "Authorization: Bearer $EXOMEM_WRITER_LEASE_TOKEN" http://127.0.0.1:8770/v1/vaults/main/collection-store-fence`
-3. Note the `store_id` and `generation` values in the response.
-4. Retire the fence with the operator credential and the noted values:
-   `curl -s -X POST -H "Authorization: Bearer $EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN" -H "Content-Type: application/json" -d '{"expected_generation": <generation>, "capability": "collections-store-v1", "store_id": "<store_id>"}' http://127.0.0.1:8770/v1/vaults/main/collection-store-fence/retire`
-5. If the response to step 4 is lost, run step 4 again.
-6. If the coordinator answers HTTP 409, start again at step 2.
-7. If the coordinator answers HTTP 404, upgrade the coordinator, then start again at step 2.
-8. Start the Exomem services.
+2. Preview the export: `exomem collections export --vault <vault> --dry-run`
+3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
+4. Note the `plan_id` value in the preview.
+5. Apply it: `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
+6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
+7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
+8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
+9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED`, `COLLECTION_STORE_EXPORT_UNVERIFIED` or `COLLECTION_STORE_SYNC_PENDING`, follow "When an export cannot finish" below.
+10. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local`.
+11. Install the older release on every host, then start the Exomem services.
 
-The retire answers `{"capability": "collections-store-v1", "enrolled": false,
-"store_id": null, "generation": <generation>}`.
+The services then read every collection from its files. The `--retire-local`
+step needs only the writer-lease credential, because it changes the host that
+runs it and reads the coordinator's fence without moving it.
+
+The preview blocks the whole vault while any one collection cannot leave the
+store, and names the collection and the reason:
+
+- The store created the collection, so file mode never held it. This rule
+  stands until the owner decides whether rollback must cover such collections.
+- The rendered files exceed a file-mode bound: 2,000 item files, 512 KB in one
+  item, 8 MB in one collection or 2 MB in one log.
+- A value or a held correction has no file form.
+- A person changed a store view since the store published it. Restore the
+  view's bytes, or wait for the release that classifies view edits.
+
+A collection that the store never wrote keeps its files byte for byte. The
+export renders a collection that the store wrote from its rows, and records one
+content-free checkpoint in the activity log, `log.md`, that names the store
+transitions it summarizes. Inspection then reports `acknowledged_gap` for that
+collection.
+
+After it verifies that file mode reads every collection as the store served it,
+the export records that result in its intent. Then it retires the coordinator's
+store fence through the operator-only
+`POST /v1/vaults/<id>/collection-store-fence/retire`. Then it renames
+`<knowledge base folder>/_Collections/mode.json` (`Knowledge Base` by default)
+to `mode.json.exported-<utc>`, renames the replica and the live store to
+`collections.sqlite.exported-<utc>`, and removes the store's state compatibility
+descriptors. No host adopts the renamed files; they stay as evidence of the
+export.
+
+An apply that stops after the fence retire finishes these renames without
+reading the files again, so a file-mode edit made after the retire does not
+stop it. First it reads the coordinator's newest retired fence through
+`GET /v1/vaults/<id>/collection-store-fence/retired` and checks that the
+recorded head is this store's own. A retired fence alone never lets a rerun
+retire the marker: after a fence retire made by hand, the rerun first writes and
+verifies the files.
 
 The retire and the lease revocation are one coordinator transaction. The lease
 holder at that moment loses its fencing token, so a store writer that opened
@@ -946,10 +1023,82 @@ that enrolment.
 The coordinator keeps every retired generation. The fence read reports
 `enrolled: false` with the newest retired generation, or 0 for a vault that was
 never enrolled. A later enrolment, such as the owner's first
-`exomem collections create` on a vault without a store marker, takes the next
-generation. Run that enrolment with a release that has the retire, because an
-older release cannot read a retired fence. An enrolment request based on an
-older generation gets HTTP 409.
+`exomem collections create` or `exomem collections migrate --apply` on an
+exported vault, takes the next generation with a new store identity. Run that
+enrolment with a release that has the retire, because an older release cannot
+read a retired fence. An enrolment request based on an older generation gets
+HTTP 409.
+
+A vault that was migrated again after an export has fence generation 2 or later
+in its marker. Only the coordinator that holds that fence can serve it. A
+replaced coordinator, or one restored from a backup older than that migration,
+does not hold the fence. The hosts then refuse the store with
+`COLLECTION_STORE_MARKER_CONFLICT`, because only a marker at generation 1 may
+make the first fence cut on a new coordinator. Keep the coordinator database in
+the backups, and restore a copy taken after the latest migration.
+
+#### When an export cannot finish
+
+An apply that stops leaves its intent in the live store. Once the apply has
+published the replica, the replica carries the intent too. The store then keeps
+every row and refuses writes. The services refuse its collections with
+`COLLECTION_STORE_EXPORT_PENDING` until the export finishes or the owner
+abandons it, on this host and on every host that adopts the replica.
+
+- `COLLECTION_STORE_EXPORT_VIEW_EDITED` names each view that changed after the
+  export began. To export without the change, put back the bytes of each named
+  file, for example from the vault's sync history, then run the apply again
+  with the same `plan_id`. A rerun accepts a view that holds the bytes the
+  store published or the bytes this export wrote. To keep the change for a
+  later decision, abandon the export.
+- `COLLECTION_STORE_EXPORT_UNVERIFIED` means that file mode does not read a
+  collection as the store served it. A rerun repeats the same check, so it
+  cannot finish. Abandon the export, then file a bug report with the refusal
+  text.
+- `COLLECTION_STORE_SYNC_PENDING` means that another host adopted the vault
+  replica and wrote rows after the export began, and this host's store does not
+  have them. Keep the services stopped. Keep both stores, `mode.json` and the
+  coordinator's fence as they are, because the other host's store holds the
+  newer rows. File a bug report with the refusal text.
+
+To abandon an export:
+
+1. Keep the Exomem service stopped on every host that serves the vault.
+2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
+3. Start the Exomem services. The services serve every store collection again.
+
+The command reports `abandoned`. The vault stays routed to the store, and the
+store keeps every row that it served before the export. The abandon rewrites no
+vault file. Each file that the export already wrote keeps the export's bytes,
+and the store records those bytes as that file's view. A view that a person
+edited keeps the edit, and the store adopts no part of it. Before a later
+export, restore the bytes of each edited view, or wait for the release that
+classifies view edits. Then start again at step 2 of the export steps.
+
+The abandon refuses with `COLLECTION_STORE_RETIRED` when the coordinator's
+fence is already retired, because the store cannot serve again without a new
+enrolment. After a fence retire made by hand, run the apply again instead: it
+writes the files from the store, verifies them and finishes the renames.
+
+Do not retire the fence by hand. If the apply after a retire made by hand
+refuses, no step continues the export or abandons it. Keep the services
+stopped, keep `mode.json`, the live store and the fence as they are, and file a
+bug report with the refusal text.
+
+#### When the exporting host loses its live store after the fence retire
+
+The export verified every file before it retired the fence, so only renames
+remain. Do these steps only when the export itself retired the fence:
+
+1. Keep the services stopped on every host.
+2. Pick one time for both renames, in the form `YYYYMMDDTHHMMSSZ` (UTC).
+3. Rename `<knowledge base folder>/_Collections/mode.json` to `mode.json.exported-<time>`.
+4. Rename `<knowledge base folder>/_Collections/collections.sqlite` to `collections.sqlite.exported-<time>`.
+5. Run `exomem collections export --vault <vault> --retire-local`.
+
+The command reports `retired` and removes the store's state compatibility
+descriptors. Start the services, which then read every collection from its
+files.
 
 ### Durable-session cutover and rollback
 

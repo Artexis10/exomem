@@ -1808,7 +1808,8 @@
             "curation",
             "tag-variants",
             "collections-store",
-            "collections-store-adopt-local"
+            "collections-store-adopt-local",
+            "collections-store-export"
           ],
           "type": "string"
         },

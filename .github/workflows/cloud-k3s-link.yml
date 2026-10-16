@@ -1,11 +1,12 @@
 name: Cloud k3s-link rehearsal
 
-# move-cloud-cells-to-local-storage tasks 6.5 and 5.7: the flannel MTU and the
-# agent-token rotation on a disposable K3s server and agent, about ten
-# minutes. A pull request reruns it only when the K3s it rehearses or the
-# files it exercises change: the role's defaults (the K3s version pin, MTU
-# and CIDR), the flannel template, the re-save helper, the K3s image pin, the
-# ansible-core pin in tool-versions.env, and the harness. The whole harness
+# move-cloud-cells-to-local-storage tasks 6.5, 5.7 and 5.8: the flannel MTU,
+# the agent-token rotation and the client-CA rotation on a disposable K3s
+# server and agent, about ten minutes. A pull request reruns it only when the
+# K3s it rehearses or the files it exercises change: the role's defaults (the
+# K3s version pin, MTU and CIDR), the flannel template, the re-save and
+# client-CA helpers, the K3s image pin, the ansible-core pin in
+# tool-versions.env, and the harness. The whole harness
 # directory: its CLI imports every module, and its lockfile pins them all,
 # with cellctl's own dependencies, so cellctl's pyproject and lockfile too.
 on:
@@ -14,6 +15,7 @@ on:
       - "infra/ansible/roles/k3s/defaults/main.yml"
       - "infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2"
       - "infra/ansible/roles/k3s/files/exomem-k3s-resave-bootstrap.sh"
+      - "infra/ansible/roles/k3s/files/exomem-k3s-rotate-client-ca.sh"
       - "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
       - "infra/tool-versions.env"
       - "infra/cloud-rehearsal/**"
@@ -32,7 +34,7 @@ concurrency:
 
 jobs:
   k3s-link:
-    name: Flannel MTU and agent-token rotation on disposable K3s
+    name: Flannel MTU, agent-token and client-CA rotation on disposable K3s
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

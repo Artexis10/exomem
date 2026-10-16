@@ -38,6 +38,8 @@ BUSY = "COLLECTION_STORE_BUSY"
 CUSTODY_LOST = "COLLECTION_STORE_CUSTODY_UNVERIFIED"
 # The writer's migration of a store an earlier release wrote failed and rolled back; retried when due.
 SCHEMA_PENDING = "COLLECTION_STORE_SCHEMA_PENDING"
+# An unfinished reverse export owns the store: no host serves it until the owner finishes it.
+EXPORTING = "COLLECTION_STORE_EXPORT_PENDING"
 SUPERSEDED = ".superseded-"
 _DROPPED = (schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PENDING_REPLICA_PUBLICATION, authority.PENDING_CREATE)
 
@@ -196,8 +198,12 @@ def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token
     if any(staged.collections.get(entry["collection_id"]) != entry["manifest_path"]
            for entry in marker["collections"]):
         return "COLLECTION_STORE_SYNC_PENDING", "the vault replica predates the authority marker"
-    intent = meta.get(authority.PENDING_CREATE)
-    if intent is not None and json.loads(intent)["target_marker"].encode() != raw_marker:
+    intent = None if meta.get(authority.PENDING_CREATE) is None else json.loads(meta[authority.PENDING_CREATE])
+    if intent is not None and intent.get("kind") == authority.EXPORT:
+        # Adopting would drop the intent with the other bookkeeping and serve a store whose
+        # collections are leaving it; only the owner's export finishes it.
+        return EXPORTING, "the vault replica carries an unfinished export; finish it with `exomem collections export`"
+    if intent is not None and intent["target_marker"].encode() != raw_marker:
         return "COLLECTION_STORE_SYNC_PENDING", "the vault replica carries an unfinished create"
     head = (sequence, meta.get(schema.META_STORE_HEAD_HASH))
     if local is not None and recorded_head == head == (local.commit_seq, local.head_hash):

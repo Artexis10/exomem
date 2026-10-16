@@ -417,3 +417,46 @@ recorded. The second case is the ordinary queued-work case, which the drain repa
 its own widening. Only a page the registry does not vouch for keeps the whole-vault
 fallback. No schema change: the file rows already store the source hash, and the
 registry already holds each page's stat signature.
+
+## Addendum: a drain derives only bytes its resolver has seen
+
+A canonical batch enqueues its graph receipts before it commits, and its fan-out
+publishes the corpus delta after the commit, outside the writers' boundary. A drain that
+wakes in between samples a recall checkpoint and a resolver from before the batch, then
+reads the batch's new bytes from disk. Each row is proved against its own bytes, so the
+rows landed. They were derived under a resolver that never saw those bytes. For a
+retitle, the write's own refresh then found the new title already stored, saw no
+topology change, and published stale edges as current. For a created page, the refresh
+found a row for a page it had created and rebuilt the whole vault.
+
+The drain therefore proves its batch against the registry map bound to its resolver's
+checkpoint, under the writers' boundary. It fails the batch for a page whose stat
+signature the map does not record, a deleted page that the map still lists, a created
+page that it lacks, and a page recall no longer admits that the map still lists. The
+proof runs twice. The check before the pass is an early exit. The check at publish is
+the one soundness rests on, because an editor outside the boundary can change a page
+after the first check and before the pass reads it. Each check reads one stat per batch
+page, and the map is copied once. A failed batch lands nothing, and each of its
+receipts then drains alone under the same proof, so an unrecorded page holds back only
+its own receipt. Serializing the drain against the writer's fan-out was the
+alternative; it adds shared state and a liveness risk, and this proof needs neither.
+The cost is a page that waits while one writer keeps rewriting it. That wait is bounded
+by the queue's existing stall escalation.
+
+The other order of the same race is a drain that runs after the publication. It
+acknowledges the write's generation before the write's graph step runs, and that step
+then finds the graph readable. Before this addendum it refreshed with no checkpoint,
+found its created page outside the empty delta, and rebuilt the vault. It now takes the
+checkpoint when its pages are exactly that checkpoint's batch and their rows already
+reflect them, so the refresh's acknowledged no-op applies. The row proof is the replay
+currency proof. Without it, a reconcile reprojection of the last written batch would
+become a no-op and leave stale unit rows.
+
+An acknowledgement alone does not prove the edges. A drain of one queued page can
+rewrite a retitled page only as affected and acknowledge the generation without
+widening on the old title (task 8.9). It leaves the stored topology fingerprint stale,
+and the next topology-changing write fails closed on it. The late refresh is that
+write, so the no-op also requires the stored fingerprint to equal the resident
+resolver's at the live checkpoint. Otherwise the refresh takes the whole-vault repair
+that the stale fingerprint waits for. With no resident resolver it queues its pages,
+and a caller that cannot report pending still gets the rebuild it always got.

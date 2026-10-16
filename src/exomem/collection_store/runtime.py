@@ -321,6 +321,17 @@ class CollectionStoreRuntime:
             self._acquisition = record
             self._admitted_token = None
 
+    def rebind(self, identity):
+        """Serve ``identity``, the ``(store_id, instance_id)`` an owner step made live under the boundary.
+
+        The step replaced the live store or continued it as a new tenure, which the
+        identity check of ``sample_head`` would otherwise refuse, and a pending takeover
+        verdict described the store before it.
+        """
+        with self.manager._report_lock:
+            self._identity = identity
+            self._takeover = None
+
     def record_admission(self, token):
         self._admitted_token = token
         self._takeover = None
@@ -1119,7 +1130,8 @@ class StoreServer:
                 return IMPORT_IDLE_SECONDS
             if intent["kind"] != authority.CREATE:
                 # Only the owner's `exomem collections migrate --apply` finishes a migration: it
-                # first rechecks each collection's files against the basis it imported.
+                # first rechecks each collection's files against the basis it imported. Only the
+                # owner's `exomem collections export` finishes an export, with the service stopped.
                 return IMPORT_IDLE_SECONDS
             with principal.library_scope():
                 result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)

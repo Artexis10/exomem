@@ -63,6 +63,23 @@ Never list snapshots through K3s, `k3s etcd-snapshot ls --s3` included. K3s list
    ```
 
    Expect K3s to report the reset complete and exit.
+
+Step 5 starts the server on the CAs that the snapshot holds. Warning: if the
+snapshot is older than the last completed
+[client-CA rotation](cloud-dedicated-host.md#rotate-the-client-ca), the server
+runs on the old client CA again. Every agent holds certificates from the new
+one, so the agents get 401 and stay NotReady until they restart. In that case,
+after step 6, restart K3s on every agent at once, so that they return on the
+snapshot's client CA:
+
+```bash
+cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'
+```
+
+Then issue a new everyday operator certificate, as in
+[cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate),
+and rotate the client CA again.
+
 5. Start K3s: `systemctl start k3s`. Expect the agents to rejoin within a few minutes.
 6. As soon as the API answers, pause cellctl. It restarts with the snapshot's state:
 
