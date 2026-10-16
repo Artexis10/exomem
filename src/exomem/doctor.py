@@ -1232,6 +1232,16 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "do not delete either governance database.",
             details=details,
         )
+    # Startup and the migrator refuse an unsupported requirement before they look at leftovers.
+    if migration_status == "unsupported":
+        return _check(
+            "state.placement",
+            "fail",
+            "The state records a compatibility requirement this release cannot use; "
+            "ordinary startup refuses it.",
+            "Run the release that wrote this state, and export from it before downgrading.",
+            details=details,
+        )
     if leftovers:
         leftover_names = ", ".join(
             sorted(path.name for members in leftovers.values() for path in members)
@@ -1275,15 +1285,6 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             ),
             "Stop every process that can write this vault, then run `exomem maintain "
             "--migrate-state --offline` before restarting Exomem.",
-            details=details,
-        )
-    if migration_status == "unsupported":
-        return _check(
-            "state.placement",
-            "fail",
-            "The state records a compatibility requirement this release cannot use; "
-            "ordinary startup refuses it.",
-            "Run the release that wrote this state, and export from it before downgrading.",
             details=details,
         )
     if migration_status != "complete":
