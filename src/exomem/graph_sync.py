@@ -2022,6 +2022,25 @@ class GraphRebuildInProgress(GraphRebuildRegistrationError):
         )
 
 
+class GraphRepairQueued(GraphRebuildInProgress):
+    """A whole-vault pass published behind, and the drain owns the rest of its repair.
+
+    A subclass because it means what `GraphRebuildInProgress` means to every
+    caller: the graph converges without this caller, so the outcome is pending
+    rather than failed, it may not mark the registry, and no newer pass is owed
+    for it. Its code tells an operator that nothing is rebuilding: the published
+    graph reports itself not current while the queued paths drain.
+    """
+
+    def __init__(self) -> None:
+        GraphRebuildRegistrationError.__init__(
+            self,
+            "GRAPH_SYNC_REPAIR_QUEUED",
+            "Repair of the changed pages is queued for the background index owner; "
+            "retry a graph-dependent query only if it reports warming.",
+        )
+
+
 class GraphSidecarReplaceUnavailable(GraphRebuildRegistrationError):
     """Windows has an open reader; retain the old sidecar and recover later."""
 
@@ -2803,8 +2822,10 @@ class GraphRebuildCoordinator:
                     continue
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
-                        "graph rebuild coalesced with active external owner "
-                        "checkpoint_sha256=%s generation=%s",
+                        "graph rebuild %s checkpoint_sha256=%s generation=%s",
+                        "published behind; its repair is queued"
+                        if isinstance(error, GraphRepairQueued)
+                        else "coalesced with active external owner",
                         required.checkpoint_sha256,
                         required.generation,
                     )

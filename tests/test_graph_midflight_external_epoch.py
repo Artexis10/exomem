@@ -171,7 +171,11 @@ def _refuse_the_availability_marker(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _move_the_resolver_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Class C: the supplied freshness identity does not name the resolver bytes."""
+    """The supplied freshness identity does not name the resolver bytes.
+
+    Class C only with `_registry_behind_the_disk`: this cause is classified like
+    movement across a pass, and a patched proof leaves nothing unexplained.
+    """
     monkeypatch.setattr(
         EpistemicGraphIndex, "_resolver_source_versions", lambda *_args, **_kwargs: None
     )
@@ -180,7 +184,7 @@ def _move_the_resolver_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 def _move_the_resolver_identity_on_the_first_attempt_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Class C on attempt 1; every later attempt resolves its source versions."""
+    """The resolver cause on attempt 1; every later attempt resolves its source versions."""
     real = EpistemicGraphIndex._resolver_source_versions
     attempts = 0
 
@@ -384,6 +388,7 @@ def test_a_moved_projection_still_escapes_the_off_boundary_loop_as_class_c(
     retires, rather than fencing reads until the watcher's recovery.
     """
     _move_the_resolver_identity(monkeypatch)
+    _registry_behind_the_disk(monkeypatch)
     marks = _count_marks(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
@@ -405,6 +410,7 @@ def test_a_class_c_attempt_followed_by_a_supersession_stays_class_c(
     refusal is therefore gated on `projection_moved` being False.
     """
     _move_the_resolver_identity_on_the_first_attempt_only(monkeypatch)
+    _registry_behind_the_disk(monkeypatch)
     _supersede_after_each_pass(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:

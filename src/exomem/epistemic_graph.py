@@ -61,6 +61,22 @@ log = logging.getLogger(__name__)
 _PARENT_RECEIPTED_GRAPH_HANDOFFS: ContextVar[frozenset[tuple[Path, Path]]] = ContextVar(
     "parent_receipted_graph_handoffs", default=frozenset()
 )
+#: Set by a caller whose own caller can be told "pending": the drain, barrier
+#: recovery, a registered rebuild and the background rebuild. Inside it a
+#: whole-vault pass that saw only recorded movement publishes behind instead of
+#: re-targeting. A context variable rather than a parameter, so every rebuild
+#: seam keeps its signature; a caller whose contract is a converged graph never
+#: sets it.
+_PUBLISH_BEHIND: ContextVar[bool] = ContextVar("graph_publish_behind", default=False)
+
+
+@contextmanager
+def _publishing_behind() -> Iterator[None]:
+    token = _PUBLISH_BEHIND.set(True)
+    try:
+        yield
+    finally:
+        _PUBLISH_BEHIND.reset(token)
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -219,14 +235,18 @@ _FALLBACK_DISPOSITIONS = {
 #:
 #: The re-target is bounded by BOTH a wall-clock deadline and an attempt
 #: ceiling, because neither alone is a bound here. An attempt ceiling is not one
-#: when a full-corpus pass costs 20-175 s (8 passes would be ~23 min); a
-#: deadline alone is not one when a pass is cheap enough to spin. 120 s keeps
-#: the worst case (deadline plus the one pass already in flight when it
-#: expires) at or below today's two full passes at production scale, so this
-#: never costs more wall time than the code it replaces -- it only spends it
-#: better. Hitting either bound raises `GraphProjectionMoved` exactly as today:
-#: same Class C type, same admitted cause, and the single
-#: `mark_external_pending` in the `finally` below is untouched.
+#: when each attempt is a full-corpus pass (eight of them on a large vault run
+#: for a long time); a deadline alone is not one when a pass is cheap enough to
+#: spin. The deadline is checked between attempts only, so it limits how many
+#: extra passes a re-target may start, never how long one pass takes: a pass
+#: longer than the deadline gets the attempt floor and nothing more. That makes
+#: re-targeting the wrong answer to movement the registry recorded. When the
+#: caller can report pending (`_publishing_behind`), such a pass does not
+#: re-target at all -- it publishes behind (`_prepare_behind_build`) and the
+#: drain repairs the movement. What still re-targets is a pass that saw a
+#: retitled or vanished page, a resolver proof that moved before any page was
+#: read, and every pass of a caller whose contract is a converged graph. Hitting either bound raises Class C (`GraphProjectionMoved`) only on
+#: unexplained movement, and Class B (`GraphPublicationUnavailable`) otherwise.
 REBUILD_STABILIZATION_DEADLINE_SECONDS = 120.0
 REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 #: Per-vault backoff for a *refused* availability proof, keyed by vault root and
@@ -1205,7 +1225,13 @@ def recover_suspended_graph(vault_root: Path) -> bool:
         graph.withdraw_availability()
         if freshness.external_pending(vault_root):
             return False
-        graph.rebuild_all()
+        with _publishing_behind():
+            report = graph.rebuild_all()
+        if report.get("behind"):
+            # Published with its movement queued: the drain converges it, and
+            # the barrier it left is the fence until then.
+            log.info("persisted graph barrier recovery published behind; repair is queued")
+            return False
         if not graph.available():
             raise GraphPublicationUnavailable(
                 "recovered graph did not publish an available marker"
@@ -1831,6 +1857,42 @@ class _GraphPublicationTicket:
     temporary_identity: tuple[int, int, int, int, int]
 
 
+@dataclass(frozen=True)
+class _BehindBuild:
+    """A private pass prepared to publish behind (`_prepare_behind_build`).
+
+    `lineage` is the recall checkpoint whose bytes the pass's walk saw, which its
+    resolver was proved against; `created` the pages the resolver never held,
+    whose rows were dropped; `versions` the source signatures bound before any
+    page was read.
+    """
+
+    lineage: freshness.RecallFreshnessCheckpoint
+    created: frozenset[str]
+    versions: dict[str, GraphSourceSignature]
+
+
+@dataclass(frozen=True)
+class _BehindPublicationTicket:
+    """What a behind publication binds before the short replacement hold.
+
+    Not the exact epoch and recall triple of `_GraphPublicationTicket`: those
+    moved, which is why this pass publishes behind. It binds instead what makes
+    "this sidecar plus the queue" equal to the lineage it keeps -- the kept
+    acknowledgement, the recall lineage the registry must still bridge from, the
+    external epoch, the access policy, and the temporary file.
+    """
+
+    acknowledgement: graph_sync.GraphSyncCheckpoint | None
+    lineage: freshness.RecallFreshnessCheckpoint
+    external_epoch: int | None
+    policy_snapshot: access.PublicationPolicySnapshot
+    stale: frozenset[str]
+    created: frozenset[str]
+    temporary: Path
+    temporary_identity: tuple[int, int, int, int, int]
+
+
 def _source_signature(path: Path, source: str) -> GraphSourceSignature:
     """Bind graph rows to the exact bytes and file identity used to derive them."""
     info = path.stat()
@@ -1914,6 +1976,9 @@ def _resolver_topology_fingerprint(
 
 
 class EpistemicGraphIndex:
+    #: Set by `_rebuild_all_locked` when its pass returns `behind`.
+    _behind_build: _BehindBuild | None = None
+
     def __init__(
         self,
         vault_root: Path,
@@ -3421,6 +3486,10 @@ class EpistemicGraphIndex:
         A foreground bulk pass: its whole-vault walks and proofs pause while an
         activation is in flight (`foreground_priority`), except under the
         publication hold or any other boundary, where a yield returns at once.
+
+        Inside `_publishing_behind()` a pass that saw only recorded movement
+        publishes behind: the report carries `behind`, the graph reports itself
+        not current, and the queue holds every change the pass did not derive.
         """
         with foreground_priority.bulk():
             return self._rebuild_all_off_boundary_bulk(
@@ -3577,23 +3646,14 @@ class EpistemicGraphIndex:
                         log.debug("graph Class C mark reconcile failed", exc_info=True)
                     raise
                 foreground_priority.check_cancelled()
-                ticket = self._prepare_publication_ticket(
-                    temporary,
-                    epoch=graph_sync.GraphPublicationEpoch(
-                        epoch.floor, epoch.checkpoint, None
-                    ),
-                    recall=prepared_recall,
-                    required=required,
-                    prior_acknowledgement=prior_acknowledgement,
-                    accept_stabilized_build=False,
-                )
-                if ticket is None:
-                    self._reconcile_recall_publication()
-                    prepared_recall = freshness.prepare_recall_publication(
-                        self.vault_root, "vault"
-                    )
-                    if prepared_recall is None:
+                behind = temporary_index._behind_build if report.get("behind") else None
+                behind_ticket: _BehindPublicationTicket | None = None
+                ticket: _GraphPublicationTicket | None = None
+                if behind is not None:
+                    behind_ticket = self._prepare_behind_ticket(temporary, behind)
+                    if behind_ticket is None:
                         continue
+                else:
                     ticket = self._prepare_publication_ticket(
                         temporary,
                         epoch=graph_sync.GraphPublicationEpoch(
@@ -3602,23 +3662,53 @@ class EpistemicGraphIndex:
                         recall=prepared_recall,
                         required=required,
                         prior_acknowledgement=prior_acknowledgement,
-                        accept_stabilized_build=accept_stabilized_build,
+                        accept_stabilized_build=False,
                     )
                     if ticket is None:
-                        continue
+                        self._reconcile_recall_publication()
+                        prepared_recall = freshness.prepare_recall_publication(
+                            self.vault_root, "vault"
+                        )
+                        if prepared_recall is None:
+                            continue
+                        ticket = self._prepare_publication_ticket(
+                            temporary,
+                            epoch=graph_sync.GraphPublicationEpoch(
+                                epoch.floor, epoch.checkpoint, None
+                            ),
+                            recall=prepared_recall,
+                            required=required,
+                            prior_acknowledgement=prior_acknowledgement,
+                            accept_stabilized_build=accept_stabilized_build,
+                        )
+                        if ticket is None:
+                            continue
                 foreground_priority.check_cancelled()
                 with self._mutation_coordinator.hold(
                     operation="epistemic_graph_publish_rebuild", holder_kind="graph"
                 ):
                     foreground_priority.check_cancelled()
-                    if not self._publication_ticket_matches(ticket):
+                    if not (
+                        self._behind_ticket_matches(behind_ticket)
+                        if behind_ticket is not None
+                        else ticket is not None and self._publication_ticket_matches(ticket)
+                    ):
                         continue
                     try:
                         publication_hold = self._before_publish_replacement(temporary, live)
                     except Exception:  # noqa: BLE001 - discard this ticket and retry boundedly
                         continue
                     try:
-                        if not self._publication_ticket_matches(ticket):
+                        foreground_priority.check_cancelled()
+                        # The last moment before the replacement, with the live
+                        # readers drained: a behind publication queues its
+                        # repair here, so the sidecar never goes live without it.
+                        behind_queued: int | None = None
+                        if behind_ticket is not None:
+                            behind_queued = self._queue_behind_repair(behind_ticket)
+                            if behind_queued is None:
+                                continue
+                        elif ticket is None or not self._publication_ticket_matches(ticket):
                             continue
                         foreground_priority.check_cancelled()
                         try:
@@ -3637,11 +3727,27 @@ class EpistemicGraphIndex:
                             note_publication_refusal(self.vault_root)
                             raise
                         clear_publication_refusal(self.vault_root)
-                        log.info(
-                            "graph rebuild published publication_attempts=%s generation=%s",
-                            attempts,
-                            required.generation if required is not None else None,
-                        )
+                        if behind_ticket is not None:
+                            # Content-free: counts only. The line an operator
+                            # counts behind publications by, and times to the
+                            # drain's next "graph settled" line.
+                            log.info(
+                                "graph rebuild published behind publication_attempts=%s "
+                                "acknowledged=%s queued=%d created=%d stale=%d",
+                                attempts,
+                                behind_ticket.acknowledgement.generation
+                                if behind_ticket.acknowledgement is not None
+                                else None,
+                                behind_queued,
+                                len(behind_ticket.created),
+                                len(behind_ticket.stale),
+                            )
+                        else:
+                            log.info(
+                                "graph rebuild published publication_attempts=%s generation=%s",
+                                attempts,
+                                required.generation if required is not None else None,
+                            )
                         # Leave the hold and the owner claim before paying the
                         # debt: the hold stays bounded to its ticket checks and
                         # the replacement.
@@ -3681,8 +3787,11 @@ class EpistemicGraphIndex:
         if published is not None:
             _retire_covered_full_marker(self.vault_root, paid_marker)
             self._forget_rebuilt_graph_failures()
-            # After the swap, not inside the private copy's transaction.
-            self._note_graph_published()
+            if not published.get("behind"):
+                # After the swap, not inside the private copy's transaction. A
+                # behind graph is not readable yet; the drain's publication
+                # signals when it is.
+                self._note_graph_published()
             return published
         if epoch_error is not None:
             raise epoch_error
@@ -3750,18 +3859,10 @@ class EpistemicGraphIndex:
     ) -> _GraphPublicationTicket | None:
         """Finish and verify every temp-sidecar proof before canonical authority."""
         try:
-            conn = self._connect_existing(temporary, readonly=False)
-            try:
-                if required is not None:
-                    self._write_graph_sync_acknowledgement(conn, required)
-                elif prior_acknowledgement is not None:
-                    self._write_graph_sync_acknowledgement(conn, prior_acknowledgement)
-                conn.commit()
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                if conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-                    return None
-            finally:
-                conn.close()
+            if not self._write_temporary_acknowledgement(
+                temporary, required if required is not None else prior_acknowledgement
+            ):
+                return None
             direct = _recall_projection_identity(
                 self.vault_root, disk_freshness=_disk_vault_freshness(self.vault_root)
             )
@@ -3807,20 +3908,7 @@ class EpistemicGraphIndex:
                         _GRAPH_SYNC_CHECKPOINT_KEY: prior_acknowledgement.render(),
                     }
                 )
-            check = self._connect_existing(temporary, readonly=True)
-            try:
-                graph_sync.limit_graph_metadata_read(check)
-                metadata = dict(
-                    check.execute(
-                        "SELECT key, value FROM graph_meta WHERE key IN "
-                        "('schema_version', 'recall_policy_version', 'recall_access_fingerprint', "
-                        "'recall_projection_identity', 'recall_projection_checkpoint', "
-                        "'graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
-                        "'read_barrier')"
-                    ).fetchall()
-                )
-            finally:
-                check.close()
+            metadata = self._temporary_metadata(temporary)
             metadata_mismatch = any(
                 metadata.get(key) != value for key, value in expected_meta.items()
             )
@@ -3848,21 +3936,7 @@ class EpistemicGraphIndex:
                         return None
                 finally:
                     conn.close()
-                check = self._connect_existing(temporary, readonly=True)
-                try:
-                    graph_sync.limit_graph_metadata_read(check)
-                    metadata = dict(
-                        check.execute(
-                            "SELECT key, value FROM graph_meta WHERE key IN "
-                            "('schema_version', 'recall_policy_version', "
-                            "'recall_access_fingerprint', 'recall_projection_identity', "
-                            "'recall_projection_checkpoint', 'graph_sync_generation', "
-                            "'graph_sync_digest', 'graph_sync_checkpoint', "
-                            "'read_barrier')"
-                        ).fetchall()
-                    )
-                finally:
-                    check.close()
+                metadata = self._temporary_metadata(temporary)
                 metadata_mismatch = any(
                     metadata.get(key) != value for key, value in expected_meta.items()
                 )
@@ -3888,6 +3962,37 @@ class EpistemicGraphIndex:
             )
         except (OSError, sqlite3.Error):
             return None
+
+    def _write_temporary_acknowledgement(
+        self, temporary: Path, acknowledgement: graph_sync.GraphSyncCheckpoint | None
+    ) -> bool:
+        """Write the acknowledgement a private sidecar publishes with, then prove it whole."""
+        conn = self._connect_existing(temporary, readonly=False)
+        try:
+            if acknowledgement is not None:
+                self._write_graph_sync_acknowledgement(conn, acknowledgement)
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        finally:
+            conn.close()
+
+    def _temporary_metadata(self, temporary: Path) -> dict[str, str]:
+        """The metadata rows a publication ticket proves, read back from the private sidecar."""
+        check = self._connect_existing(temporary, readonly=True)
+        try:
+            graph_sync.limit_graph_metadata_read(check)
+            return dict(
+                check.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'recall_policy_version', 'recall_access_fingerprint', "
+                    "'recall_projection_identity', 'recall_projection_checkpoint', "
+                    "'graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
+                    "'read_barrier')"
+                ).fetchall()
+            )
+        finally:
+            check.close()
 
     def _live_acknowledged_checkpoint(self) -> graph_sync.GraphSyncCheckpoint | None:
         """Read one complete exact acknowledgement outside publication authority."""
@@ -3938,6 +4043,199 @@ class EpistemicGraphIndex:
             )
         except (OSError, graph_sync.GraphEpochIncoherent, graph_sync.GraphEpochUnreadable):
             return False
+
+    def _prepare_behind_ticket(
+        self, temporary: Path, behind: _BehindBuild
+    ) -> _BehindPublicationTicket | None:
+        """Finish a behind sidecar and its proofs before canonical authority, or None.
+
+        The sidecar keeps the live acknowledgement: it does not project the
+        generations that landed during the pass, so it may not claim them. A
+        lineage nothing acknowledges yet -- a checkpoint with no live
+        acknowledgement -- publishes current or not at all. An unscoped external
+        mark names no paths to queue, so it refuses too. Each refusal logs its
+        reason, so an operator can tell why a pass re-targeted instead.
+        """
+
+        def refused(reason: str) -> _BehindPublicationTicket | None:
+            log.info("graph rebuild cannot publish behind reason=%s", reason)
+            return None
+
+        try:
+            acknowledgement = self._live_acknowledged_checkpoint()
+            epoch = graph_sync.canonical_publication_epoch(self.vault_root)
+            if epoch.checkpoint is not None and acknowledgement is None:
+                return refused("unacknowledged_lineage")
+            if freshness.external_pending_unscoped(self.vault_root):
+                return refused("unscoped_external_mark")
+            external_epoch = freshness.external_pending_epoch(self.vault_root)
+            policy_snapshot = access.publication_policy_snapshot(self.vault_root)
+            lineage = behind.lineage
+            if policy_snapshot is None or recall_policy.recall_policy_identity(
+                self.vault_root
+            ) != (lineage.policy_version, lineage.access_policy_fingerprint):
+                return refused("policy_moved")
+            stale = self._rows_behind_their_sources(temporary, behind.versions)
+            if not self._write_temporary_acknowledgement(temporary, acknowledgement):
+                return refused("acknowledgement_unwritten")
+            metadata = self._temporary_metadata(temporary)
+            expected = {
+                "schema_version": str(SCHEMA_VERSION),
+                "recall_policy_version": lineage.policy_version,
+                "recall_access_fingerprint": lineage.access_policy_fingerprint,
+                _RECALL_CHECKPOINT_KEY: _checkpoint_value(lineage),
+                _READ_BARRIER_KEY: "unavailable",
+                _AVAILABILITY_FRESHNESS_KEY: None,
+                "graph_sync_generation": None,
+                "graph_sync_digest": None,
+                _GRAPH_SYNC_CHECKPOINT_KEY: None,
+            }
+            if acknowledgement is not None:
+                expected.update(
+                    {
+                        "graph_sync_generation": str(acknowledgement.generation),
+                        "graph_sync_digest": acknowledgement.checkpoint_sha256,
+                        _GRAPH_SYNC_CHECKPOINT_KEY: acknowledgement.render(),
+                    }
+                )
+            if any(metadata.get(key) != value for key, value in expected.items()):
+                return refused("metadata_mismatch")
+            _seal_graph_rebuild_as_wal(self.vault_root, temporary)
+            return _BehindPublicationTicket(
+                acknowledgement,
+                lineage,
+                external_epoch,
+                policy_snapshot,
+                frozenset(stale),
+                behind.created,
+                temporary,
+                self._temporary_identity(temporary),
+            )
+        except (
+            OSError,
+            sqlite3.Error,
+            graph_sync.GraphEpochIncoherent,
+            graph_sync.GraphEpochUnreadable,
+        ) as error:
+            return refused(type(error).__name__)
+
+    def _rows_behind_their_sources(
+        self, temporary: Path, versions: dict[str, GraphSourceSignature]
+    ) -> set[str]:
+        """Rows that may not carry their page's current bytes: queued for the drain.
+
+        A row is current when its page still has the stat signature the pass
+        bound before reading, and the row holds that signature's content hash.
+        Anything else is queued, which costs a no-op re-derivation when the page
+        did not move. A stat per row, no read: this runs before the hold.
+        """
+        conn = self._connect_existing(temporary, readonly=True)
+        try:
+            rows = conn.execute(
+                "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
+            ).fetchall()
+        finally:
+            conn.close()
+        stale: set[str] = set()
+        for path, source_hash in foreground_priority.yielding_in_bulk(rows):
+            rel = str(path)
+            bound = versions.get(rel)
+            try:
+                info = (self.vault_root / rel).stat()
+            except OSError:
+                stale.add(rel)
+                continue
+            if bound is None or (
+                int(info.st_mtime_ns),
+                int(info.st_ctime_ns),
+                int(info.st_size),
+                str(source_hash),
+            ) != bound:
+                stale.add(rel)
+        return stale
+
+    def _behind_ticket_matches(self, ticket: _BehindPublicationTicket) -> bool:
+        """The bounded behind-publication gate: no walk, one metadata read.
+
+        Checked under the canonical hold, which every canonical batch and every
+        graph writer takes, so its canonical half cannot move until the hold is
+        released: the epoch must still be coherent at a generation no lower than
+        the acknowledgement the sidecar keeps, and the live sidecar must still
+        hold exactly that acknowledgement, so the replacement never moves it.
+        The rest can move without that hold, and `_behind_outside_matches`
+        checks it again at the commit.
+        """
+        try:
+            epoch = graph_sync.canonical_publication_epoch(self.vault_root)
+            kept = ticket.acknowledgement
+            if epoch.checkpoint is None:
+                lineage_holds = kept is None
+            else:
+                lineage_holds = kept is not None and epoch.checkpoint.generation >= kept.generation
+            state, live = graph_sync.acknowledgement_state(self.vault_root)
+            return (
+                lineage_holds
+                and (state, live)
+                == (
+                    ("absent", None)
+                    if kept is None
+                    else ("valid", graph_sync.GraphBuildOutcome.covering(kept))
+                )
+                and self._temporary_identity(ticket.temporary) == ticket.temporary_identity
+                and self._behind_outside_matches(ticket)
+            )
+        except (OSError, graph_sync.GraphEpochIncoherent, graph_sync.GraphEpochUnreadable):
+            return False
+
+    def _behind_outside_matches(self, ticket: _BehindPublicationTicket) -> bool:
+        """What a behind ticket binds that moves without the canonical hold.
+
+        No newer external epoch and no unscoped mark, the same access policy,
+        and a registry still live under it. No SQLite, no walk.
+        """
+        return (
+            freshness.external_pending_epoch(self.vault_root) == ticket.external_epoch
+            and not freshness.external_pending_unscoped(self.vault_root)
+            and access.publication_policy_snapshot(self.vault_root) == ticket.policy_snapshot
+            and freshness.live_recall_checkpoint(self.vault_root, "vault") is not None
+        )
+
+    def _queue_behind_repair(self, ticket: _BehindPublicationTicket) -> int | None:
+        """Queue what the behind sidecar does not derive; the path count, or None.
+
+        Runs under both holds, after `_behind_ticket_matches` admitted the
+        ticket and before the replacement, so the sidecar never goes live
+        without its repair queued. The registry's complete
+        history from the lineage names every change since the pass's resolver;
+        a standing scoped watcher mark names changes it recorded and has not
+        published; the stale rows and dropped creates are the rest. Recorded at
+        the acknowledgement the sidecar keeps: a partial set, which is sound
+        because a coverage probe only asks about generations above it.
+        """
+        if not self._behind_outside_matches(ticket):
+            return None
+        lineage = ticket.lineage
+        delta = freshness.recall_delta_since(self.vault_root, "vault", lineage)
+        if not delta.complete or (
+            delta.to.policy_version,
+            delta.to.access_policy_fingerprint,
+        ) != (lineage.policy_version, lineage.access_policy_fingerprint):
+            return None
+        moved = {
+            rel
+            for raw in (
+                *delta.changed,
+                *delta.deleted,
+                *freshness.external_pending_paths(self.vault_root),
+            )
+            if (rel := _vault_rel(self.vault_root, raw)) is not None
+        }
+        scope = moved | ticket.stale | ticket.created
+        if scope and not self._queue_graph_repair(
+            scope, reason="published_behind", graph_checkpoint=ticket.acknowledgement
+        ):
+            return None
+        return len(scope)
 
     def _before_publish_replacement(self, temporary: Path, live: Path) -> str | None:
         """Clear this process's live-sidecar readers for the replacement window.
@@ -3997,15 +4295,16 @@ class EpistemicGraphIndex:
         unexplained_paths: set[str] = set()
         unexplained_unscoped = False
 
-        def classify(cause: str) -> None:
+        def classify(cause: str, after: tuple[tuple[int, int, str], str, str]) -> str:
             """Class C only on positive evidence the registry is behind the disk.
 
             Movement the registry recorded -- a governed write this service
             committed -- is not evidence: an attempt it defeats is a
-            publication failure (Class B), and re-targets as before.
+            publication failure (Class B), and re-targets or publishes behind.
+            Returns the kind `_classify_movement` decided.
             """
             nonlocal projection_moved, moved_cause, publication_cause, unexplained_unscoped
-            kind, paths = self._classify_movement(before, after_identity)
+            kind, paths = self._classify_movement(before, after)
             if kind == "recorded":
                 publication_cause = f"{cause}, and the registry recorded every change"
             elif kind == "unclassifiable":
@@ -4017,6 +4316,18 @@ class EpistemicGraphIndex:
                     unexplained_unscoped = True
                 else:
                     unexplained_paths.update(paths)
+            return kind
+
+        def behind() -> bool:
+            """Whether this attempt's pass may publish behind; prepares it if so.
+
+            Never after Class C evidence in this run: that owes the registry its
+            mark, and a behind publication would not outrun it.
+            """
+            return not projection_moved and self._prepare_behind_build(
+                resolver, lineage, resolver_versions
+            )
+
         # #576. Whether the *last* attempt was invalidated by a moving
         # projection, which is the only condition worth re-targeting: the
         # newer baseline is sampled fresh at the top of every attempt, so an
@@ -4026,6 +4337,7 @@ class EpistemicGraphIndex:
         retarget = False
         attempts = 0
         started = time.monotonic()
+        self._behind_build = None
         try:
             while _may_restabilize(attempts, retarget=retarget, started=started):
                 foreground_priority.check_cancelled()
@@ -4034,6 +4346,12 @@ class EpistemicGraphIndex:
                 attempt_started = time.monotonic()
                 before_disk = _disk_vault_freshness(self.vault_root)
                 before = _recall_projection_identity(self.vault_root, disk_freshness=before_disk)
+                # The registry checkpoint naming exactly the bytes this walk saw:
+                # the lineage a behind publication stands on, sampled with the
+                # resolver that is proved against the same bytes below. None
+                # outside `_publishing_behind()`, which rules a behind
+                # publication out.
+                lineage = self._live_checkpoint_naming(before) if _PUBLISH_BEHIND.get() else None
                 resolver = find_module.recall_resolver_snapshot(
                     self.vault_root, freshness=before_disk
                 )
@@ -4045,14 +4363,18 @@ class EpistemicGraphIndex:
                 )
                 if resolver_versions is None:
                     # The supplied freshness identity did not actually name the
-                    # resolver bytes (for example after a coarse-metadata edit).
-                    # Clear the page cache before retrying. Class C, first
-                    # admitted cause.
+                    # resolver bytes: a write landed between the walk and this
+                    # proof, or a coarse-metadata edit. Clear the page cache
+                    # before retrying. Classified exactly as movement across a
+                    # pass: Class C, scoped to the paths it names, only when the
+                    # registry's history does not explain the difference.
                     self._mark_unavailable()
-                    projection_moved = True
-                    unexplained_unscoped = True
                     retarget = True
-                    moved_cause = "the supplied freshness identity did not name the resolver bytes"
+                    classify(
+                        "the supplied freshness identity did not name the resolver bytes",
+                        # Only its policy half is read; no second walk.
+                        _recall_projection_identity(self.vault_root, disk_freshness=before_disk),
+                    )
                     # The *recall* resolver stays. Every read of it revalidates
                     # the projection identity and, for the graph's bounded
                     # repair, the exact live checkpoint, so a stale entry can
@@ -4082,24 +4404,7 @@ class EpistemicGraphIndex:
                     and self._source_versions_current(resolver_versions)
                 ):
                     superseded = False
-                    live_checkpoint = (
-                        freshness.recall_checkpoint(self.vault_root, "vault")
-                        if freshness.recall_is_live(self.vault_root, "vault")
-                        else None
-                    )
-                    checkpoint = (
-                        live_checkpoint
-                        if live_checkpoint is not None
-                        and _availability_freshness_value(before)
-                        == _availability_freshness_value(
-                            (
-                                live_checkpoint.triple,
-                                live_checkpoint.policy_version,
-                                live_checkpoint.access_policy_fingerprint,
-                            )
-                        )
-                        else None
-                    )
+                    checkpoint = self._live_checkpoint_naming(before)
                     # A stable direct-disk rebuild remains authoritative even
                     # when a watcher registry missed the edit that triggered
                     # it.  Publishing without an event checkpoint makes public
@@ -4115,10 +4420,16 @@ class EpistemicGraphIndex:
                         # marker and confirming it: Class C, second cause --
                         # unless the registry recorded that movement.
                         retarget = True
-                        classify(
-                            "the recall projection moved after the availability "
-                            "marker was written"
-                        )
+                        if (
+                            classify(
+                                "the recall projection moved after the availability "
+                                "marker was written",
+                                after_identity,
+                            )
+                            == "recorded"
+                            and behind()
+                        ):
+                            return {**report, "behind": 1}
                     elif freshness.external_pending(self.vault_root):
                         # `_mark_available`'s first false-term. The pass itself
                         # proved nothing stale — identity, membership and source
@@ -4159,11 +4470,13 @@ class EpistemicGraphIndex:
                     # second admitted cause -- unless the registry recorded it.
                     retarget = True
                     if after_identity != before:
-                        classify("the recall projection identity moved across the pass")
+                        cause = "the recall projection identity moved across the pass"
                     elif after_membership != resolver_membership:
-                        classify("the recall membership moved across the pass")
+                        cause = "the recall membership moved across the pass"
                     else:
-                        classify("the resolver source versions moved across the pass")
+                        cause = "the resolver source versions moved across the pass"
+                    if classify(cause, after_identity) == "recorded" and behind():
+                        return {**report, "behind": 1}
             exhausted = (
                 "epistemic graph rebuild did not stabilize after "
                 f"{attempts} attempts in {time.monotonic() - started:.1f}s"
@@ -4386,6 +4699,117 @@ class EpistemicGraphIndex:
         if unexplained:
             return "unrecorded", frozenset(unexplained)
         return "recorded", None
+
+    def _live_checkpoint_naming(
+        self, identity: tuple[tuple[int, int, str], str, str]
+    ) -> freshness.RecallFreshnessCheckpoint | None:
+        """The live recall checkpoint whose identity is `identity`, else None."""
+        if not freshness.recall_is_live(self.vault_root, "vault"):
+            return None
+        live = freshness.recall_checkpoint(self.vault_root, "vault")
+        if _availability_freshness_value(identity) != _availability_freshness_value(
+            (live.triple, live.policy_version, live.access_policy_fingerprint)
+        ):
+            return None
+        return live
+
+    def _prepare_behind_build(
+        self,
+        resolver: vault_module.WikilinkResolver,
+        lineage: freshness.RecallFreshnessCheckpoint | None,
+        versions: dict[str, GraphSourceSignature] | None,
+    ) -> bool:
+        """Turn this private pass into a graph behind `lineage` by recorded movement.
+
+        Every row is a function of its page's bytes and `resolver`. When every
+        row's resolver entry agrees with `resolver` except rows for pages the
+        resolver never held -- created while the pass ran -- dropping those rows
+        leaves every topology input a pass at `lineage` would have derived, and
+        the queued movement converges it like any deferral. A retitle or a
+        vanished page the pass saw cannot be put back that way: a drain widens a
+        queued page by the title and existence its row stores, so a stale edge
+        would be published. Those return False and the pass re-targets.
+
+        Only with a lineage the walk's bytes match, so the registry can say what
+        moved since; the caller passes None outside `_publishing_behind()`. Only
+        with the source versions the resolver was proved against, which bind
+        each row to the bytes it was derived from.
+        """
+        if lineage is None or versions is None:
+            return False
+        conn = self._connect()
+        try:
+            created = self._created_rows_only(conn, resolver)
+            if created is None:
+                return False
+            with conn:
+                for rel in sorted(created):
+                    self._drop_own_rows(conn, rel)
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = ?", (_AVAILABILITY_FRESHNESS_KEY,)
+                )
+                conn.executemany(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    (
+                        (_READ_BARRIER_KEY, "unavailable"),
+                        ("schema_version", str(SCHEMA_VERSION)),
+                        (_RECALL_CHECKPOINT_KEY, _checkpoint_value(lineage)),
+                    ),
+                )
+        finally:
+            conn.close()
+        self._behind_build = _BehindBuild(lineage, frozenset(created), versions)
+        return True
+
+    def _created_rows_only(
+        self, conn: sqlite3.Connection, resolver: vault_module.WikilinkResolver
+    ) -> set[str] | None:
+        """The rows for pages `resolver` never held, or None if any other row disagrees.
+
+        `_indexed_pages_differing` names a row whose title or existence differs
+        from the resolver's entry, and an indexed page with no row. Only the
+        first kind for a page outside the resolver is a create. One case it
+        cannot see: a resolver page deleted before the pass read it has no row
+        and no file the walk admits, and is checked here by its absence.
+        """
+        differing = self._indexed_pages_differing(conn, resolver)
+        created = {rel for rel in differing if rel.removesuffix(".md") not in resolver.full_paths}
+        rows = {
+            str(path)
+            for (path,) in conn.execute("SELECT path FROM graph_nodes WHERE kind = 'file'")
+        }
+        prefix = kb_prefix()
+        vanished = [
+            rel
+            for no_ext in resolver.full_paths
+            if (rel := f"{no_ext}.md").startswith(prefix)
+            and rel not in rows
+            and not os.path.lexists(self.vault_root / rel)
+        ]
+        if created != differing or vanished:
+            # Content-free counts, like every line here: the reason a recorded
+            # pass re-targeted rather than publishing behind.
+            log.info(
+                "graph rebuild cannot publish behind disagreeing_rows=%d vanished=%d",
+                len(differing - created),
+                len(vanished),
+            )
+            return None
+        return created
+
+    @staticmethod
+    def _drop_own_rows(conn: sqlite3.Connection, rel: str) -> None:
+        """Remove what the pass derived from `rel`'s own bytes, and nothing more.
+
+        Not `_delete_path`: edges other pages authored toward `rel` stay, because
+        they derive from those pages' bytes under a resolver that never held
+        `rel`, exactly as a pass that never read it would have left them.
+        """
+        conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
+        conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
+        conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
+        conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
+        conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,))
 
     def _rebuild_all_pass(
         self,
@@ -5438,9 +5862,10 @@ class EpistemicGraphIndex:
         """Put `scope` on the durable graph queue; False means it did not land.
 
         The one seam every deferral that claims durable per-path coverage goes
-        through -- the incremental bail-outs, adoption residue, and the
-        external-pending fence -- so "the queue owns this repair" means the same
-        thing at each of them and cannot quietly stop meaning it at one.
+        through -- the incremental bail-outs, adoption residue, the
+        external-pending fence, and a behind publication -- so "the queue owns
+        this repair" means the same thing at each of them and cannot quietly
+        stop meaning it at one.
 
         False is the caller's signal to fall back to a whole-vault rebuild: work
         that was neither queued nor rebuilt is lost, and losing it silently is
@@ -5798,7 +6223,7 @@ class EpistemicGraphIndex:
             graph_sync.register_rebuild(
                 self.vault_root,
                 graph_checkpoint,
-                lambda checkpoint: _rebuild_outcome(self, checkpoint),
+                lambda checkpoint: _registered_rebuild_outcome(self, checkpoint),
                 state_root=self._mutation_coordinator.state_root,
             )
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "deferred": 1}
@@ -9374,12 +9799,14 @@ class GraphDispatchResult:
         return self.code in _WHOLE_VAULT_ATTEMPT_CODES
 
 
-#: Dispatch codes that mean a whole-vault pass ran for the marker (published or
-#: lost) or another owner's pass is running. A busy boundary and an unavailable
-#: epoch are not whole-vault passes.
+#: Dispatch codes that mean a whole-vault pass ran for the marker (published,
+#: published behind, or lost) or another owner's pass is running. A busy
+#: boundary and an unavailable epoch are not whole-vault passes. A closed set of
+#: this module's own dispatch codes, not a vocabulary.
 _WHOLE_VAULT_ATTEMPT_CODES = frozenset(
     {
         "graph_rebuild_completed",
+        "graph_rebuild_published_behind",
         "graph_convergence_deferred",
         "graph_convergence_failed",
         "graph_rebuild_in_progress",
@@ -9454,11 +9881,18 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
                     "deferred", "graph_epoch_unavailable", checkpoint
                 )
             index = EpistemicGraphIndex(root, mutation_coordinator=coordinator)
-        if checkpoint is None:
-            index.rebuild_all()
-        else:
-            _rebuild_outcome(index, checkpoint)
-        code = "graph_rebuild_completed"
+        # The drain owns the debt, so a pass that saw only recorded movement may
+        # pay it by publishing behind: the queue it leaves is the drain's own.
+        try:
+            with _publishing_behind():
+                if checkpoint is None:
+                    behind = bool(index.rebuild_all().get("behind"))
+                else:
+                    _rebuild_outcome(index, checkpoint)
+                    behind = False
+        except graph_sync.GraphRepairQueued:
+            behind = True
+        code = "graph_rebuild_published_behind" if behind else "graph_rebuild_completed"
     except OpError:
         # The durable marker is the retry handle.  Do not re-enter owner state
         # after failing to acquire the canonical boundary merely to decorate
@@ -9496,7 +9930,7 @@ def _registered_or_failure(
             bound_index: EpistemicGraphIndex | None = index,
             bound_coordinator: mutation_lock.VaultMutationCoordinator = mutation_coordinator,
         ) -> graph_sync.GraphBuildOutcome:
-            return _rebuild_outcome(
+            return _registered_rebuild_outcome(
                 bound_index
                 or EpistemicGraphIndex(vault_root, mutation_coordinator=bound_coordinator),
                 required,
@@ -9703,7 +10137,7 @@ def schedule_background_rebuild(
             from .foreground_activity import background_scope
 
             with foreground_priority.cancellable(shutdown):
-                with background_scope(vault_root):
+                with background_scope(vault_root), _publishing_behind():
                     EpistemicGraphIndex(
                         vault_root, mutation_coordinator=mutation_coordinator
                     ).rebuild_all()
@@ -10140,8 +10574,20 @@ def _rebuild_outcome(
     index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
 ) -> graph_sync.GraphBuildOutcome:
     with _logged_whole_vault_rebuild(checkpoint.generation):
-        index._rebuild_all_off_boundary()
+        report = index._rebuild_all_off_boundary()
+    if report.get("behind"):
+        # Published, but behind: covering the checkpoint would tell every waiter
+        # the graph converged. Pending is the truth, and the drain owns the rest.
+        raise graph_sync.GraphRepairQueued()
     return graph_sync.GraphBuildOutcome.covering(checkpoint)
+
+
+def _registered_rebuild_outcome(
+    index: EpistemicGraphIndex, checkpoint: graph_sync.GraphSyncCheckpoint
+) -> graph_sync.GraphBuildOutcome:
+    """The builder a registered rebuild runs; its waiters can be told "queued"."""
+    with _publishing_behind():
+        return _rebuild_outcome(index, checkpoint)
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> GraphDispatchResult:

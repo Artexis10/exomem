@@ -5034,6 +5034,8 @@ class LeaseManager:
         def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
             from . import graph_sync
 
+            if isinstance(error, graph_sync.GraphRepairQueued):
+                return graph_sync.committed_graph_queued(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildInProgress):
                 return graph_sync.committed_graph_pending(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildRegistrationError):

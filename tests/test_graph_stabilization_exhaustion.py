@@ -89,7 +89,11 @@ def _refuse_the_availability_marker(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _move_the_resolver_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Class C: the supplied freshness identity does not name the resolver bytes."""
+    """The supplied freshness identity does not name the resolver bytes.
+
+    Class C only with `_registry_behind_the_disk`: this cause is classified like
+    movement across a pass, and a patched proof leaves nothing unexplained.
+    """
     monkeypatch.setattr(
         EpistemicGraphIndex, "_resolver_source_versions", lambda *_args, **_kwargs: None
     )
@@ -98,7 +102,7 @@ def _move_the_resolver_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 def _move_the_resolver_identity_on_the_first_attempt_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Class C on attempt 1; every later attempt resolves its source versions."""
+    """The resolver cause on attempt 1; every later attempt resolves its source versions."""
     real = EpistemicGraphIndex._resolver_source_versions
     attempts = 0
 
@@ -221,6 +225,7 @@ def test_class_c_exhaustion_keeps_its_type_and_its_single_mark(
 ) -> None:
     """Regression: the fix must not widen Class C into the publication classifier."""
     _move_the_resolver_identity(monkeypatch)
+    _registry_behind_the_disk(monkeypatch)
     epoch_probe = tmp_path / "epoch-probe-root"
     clock_before = freshness.mark_external_pending(epoch_probe)
 
@@ -258,6 +263,7 @@ def test_the_message_names_the_class_and_the_resolver_identity_cause(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _move_the_resolver_identity(monkeypatch)
+    _registry_behind_the_disk(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
         EpistemicGraphIndex(vault)._rebuild_all_locked()
@@ -314,6 +320,7 @@ def test_a_mixed_run_reports_the_cause_of_the_class_it_actually_raises(
     in exactly the mixed failure this message exists to explain.
     """
     _move_the_resolver_identity_on_the_first_attempt_only(monkeypatch)
+    _registry_behind_the_disk(monkeypatch)
     _refuse_the_availability_marker(monkeypatch)
 
     with pytest.raises(epistemic_graph.GraphProjectionMoved) as raised:
