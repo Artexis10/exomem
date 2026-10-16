@@ -3469,10 +3469,11 @@ def test_tier2_append_detects_concurrent_change_without_losing_bytes(
     assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
-    tmp_path: Path,
+    tmp_path: Path, newline: str
 ) -> None:
-    source = _source("A").rstrip("\n")
+    source = _source("A").rstrip("\n").replace("\n", newline)
     page = _write(tmp_path, _PAGE, source)
     preview = append_module.append_to_file(
         tmp_path,
@@ -3489,7 +3490,7 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
         semantic_transition_token=preview.transition_token,
         today=dt.date(2026, 7, 14),
     )
-    after = page.read_text(encoding="utf-8")
+    after = page.read_bytes()
 
     replay = append_module.append_to_file(
         tmp_path,
@@ -3502,8 +3503,8 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
     assert replay.semantic is not None
     assert replay.semantic["mutated"] is False
     assert replay.semantic["lifecycle_state"] == "committed_replay"
-    assert page.read_text(encoding="utf-8") == after
-    assert after.count("Appended once.") == 1
+    assert page.read_bytes() == after
+    assert after.count(b"Appended once.") == 1
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(
