@@ -1,0 +1,33 @@
+{
+  "about": "Cases on which cellctl's room rule (capacity.snapshot_reserve_bytes, capacity.pool_takes and k8s_client._general_node) and the agent-removal preflight's copy of it (infra/ansible/roles/k3s/tasks/remove_preflight.yml) must agree, at the role's and cellctl's defaults. infra/cellctl/tests/test_planned_move.py checks cellctl against them, and tests/test_hosted_node_pool_contract.py checks the playbook.",
+  "cases": [
+    {
+      "name": "the default size sets the reserve",
+      "moving_gib": 4,
+      "other_claims_gib": [],
+      "nodes": [
+        {"name": "spare", "free_gib": 20},
+        {"name": "short", "free_gib": 18},
+        {"name": "cordoned", "free_gib": 100, "unschedulable": true},
+        {"name": "not-ready", "free_gib": 100, "ready": false},
+        {"name": "tainted", "free_gib": 100, "taints": [{"key": "example.com/maintenance", "effect": "NoExecute"}]},
+        {"name": "soft-tainted", "free_gib": 20, "taints": [{"key": "example.com/maintenance", "effect": "PreferNoSchedule"}]},
+        {"name": "dedicated", "free_gib": 100, "labels": {"exomem.io/dedicated-cell": "aaaaaaaaaaaaaaaa"}},
+        {"name": "dedicated-by-taint", "free_gib": 100, "taints": [{"key": "exomem.io/dedicated-cell", "effect": "PreferNoSchedule"}]}
+      ],
+      "reserve_bytes": 17179869184,
+      "takes_the_moving_cell": ["soft-tainted", "spare"]
+    },
+    {
+      "name": "a larger cell elsewhere sets the reserve",
+      "moving_gib": 4,
+      "other_claims_gib": [8],
+      "nodes": [
+        {"name": "spare", "free_gib": 36},
+        {"name": "short", "free_gib": 35}
+      ],
+      "reserve_bytes": 34359738368,
+      "takes_the_moving_cell": ["spare"]
+    }
+  ]
+}

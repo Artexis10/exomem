@@ -6,7 +6,8 @@ name: Cloud k3s-link rehearsal
 # files it exercises change: the role's defaults (the K3s version pin, MTU
 # and CIDR), the flannel template, the re-save helper, the K3s image pin, the
 # ansible-core pin in tool-versions.env, and the harness. The whole harness
-# directory: its CLI imports every module, and its lockfile pins them all.
+# directory: its CLI imports every module, and its lockfile pins them all,
+# with cellctl's own dependencies, so cellctl's pyproject and lockfile too.
 on:
   pull_request:
     paths:
@@ -16,6 +17,9 @@ on:
       - "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
       - "infra/tool-versions.env"
       - "infra/cloud-rehearsal/**"
+      # The rehearsal installs cellctl by path from its lockfile.
+      - "infra/cellctl/pyproject.toml"
+      - "infra/cellctl/uv.lock"
       - ".github/workflows/cloud-k3s-link.yml"
   workflow_dispatch:
 
