@@ -197,7 +197,8 @@ class RelationRegistry:
 
 def traversable_resolution_status(status: str | None) -> bool:
     """Whether a selected relation resolution supplies an authored graph fact."""
-    # These are closed resolver outcomes; deprecated facts remain traversable.
+    # Deprecated facts remain traversable; unregistered and out-of-scope ones do not.
+    # nosemgrep: ep-word-membership -- the closed outcomes that `resolve()` above emits.
     return status in {"core", "alias", "extension", "deprecated"}
 
 

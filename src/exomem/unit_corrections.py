@@ -11,7 +11,7 @@ from typing import Any
 from . import epistemic_graph, find, freshness, memory_refs, relation_registry, request_budget
 from .governance import egress
 
-# These are closed relation-schema families whose authored facts inform a claim.
+# nosemgrep: ep-word-set -- closed relation-schema families whose authored facts inform a claim.
 CORRECTIVE_FAMILIES = frozenset(
     {"contradiction", "refinement", "support", "supersession", "resolution", "answer"}
 )

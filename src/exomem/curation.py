@@ -165,6 +165,7 @@ _UPDATE_RECORD_FIELDS = frozenset(
     {"collection", "item_key", "changes", "why", "expected_container_hash", "expected_item_version"}
 )
 _EDIT_FIELDS = frozenset({"path", "why", "operation"})
+# nosemgrep: ep-word-set -- the observe-unit leaf's request fields, fixed by its schema.
 _OBSERVE_UNIT_FIELDS = frozenset({"path", "why", "observation"})
 _SUPERSEDE_FIELDS = frozenset(
     {
