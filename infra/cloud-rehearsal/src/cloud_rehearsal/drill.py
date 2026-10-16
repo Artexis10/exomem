@@ -169,6 +169,8 @@ def _iso(value: Any) -> Any:
 @dataclass
 class DrillReport:
     run_id: str
+    # The k3s-link rehearsal writes the same report under its own schema.
+    schema: str = SCHEMA
     started_at: str = field(default_factory=lambda: _now().isoformat())
     finished_at: str | None = None
     inputs: dict[str, Any] = field(default_factory=dict)
@@ -188,7 +190,7 @@ class DrillReport:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema": SCHEMA,
+            "schema": self.schema,
             "run_id": self.run_id,
             "started_at": self.started_at,
             "finished_at": self.finished_at,

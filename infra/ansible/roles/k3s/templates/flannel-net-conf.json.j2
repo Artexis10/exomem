@@ -1,0 +1,4 @@
+{#- Managed by the k3s role (move-cloud-cells-to-local-storage task 6.5). The keys
+    K3s writes itself, plus the VXLAN MTU; K3s uses a flannel-conf file as is. -#}
+{{ {"Network": k3s_cluster_cidr, "EnableIPv4": true, "EnableIPv6": false, "IPv6Network": "::/0",
+    "Backend": {"Type": "vxlan", "MTU": k3s_flannel_mtu | int}} | to_nice_json }}

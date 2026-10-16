@@ -3,6 +3,8 @@
 # name only that address, accept the traffic.
 [Interface]
 ListenPort = {{ k3s_wireguard_port }}
+# Declared, not derived from the route: k3s_flannel_mtu must fit inside it.
+MTU = {{ k3s_wireguard_mtu }}
 PostUp = wg set %i private-key /etc/wireguard/{{ k3s_wireguard_interface }}.key
 {% if inventory_hostname in k3s_wireguard_hosts %}
 Address = {{ private_node_ip }}/32

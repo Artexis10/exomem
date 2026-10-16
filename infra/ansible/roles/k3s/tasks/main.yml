@@ -40,6 +40,45 @@
     group: exomem-operators
     mode: "0750"
 
+# Flannel reads this only when K3s starts, and keeps an existing flannel.1
+# whatever its MTU, so a change recreates the device (handlers/main.yml).
+- name: Install the flannel network configuration
+  ansible.builtin.template:
+    src: flannel-net-conf.json.j2
+    dest: "{{ k3s_flannel_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k3s_flannel_conf
+  notify: Recreate the flannel device
+  when: k3s_flannel_mtu is not none
+
+# Read on every run, so a run that failed after the configuration changed, or
+# lost its notification, still recreates the device. Absent before K3s first
+# starts flannel; K3s then creates it from the configuration.
+- name: Read the running flannel device and subnet MTU
+  ansible.builtin.command:
+    argv: [/usr/bin/cat, /sys/class/net/flannel.1/mtu, /run/flannel/subnet.env]
+  register: k3s_flannel_running
+  changed_when: false
+  failed_when: false
+  when: k3s_flannel_mtu is not none
+
+- name: Recreate a flannel device that runs at another MTU
+  ansible.builtin.debug:
+    msg: >-
+      flannel on {{ inventory_hostname }} reads {{ k3s_flannel_running.stdout_lines | join(', ') }};
+      recreating it at {{ k3s_flannel_pod_mtu }}.
+  register: k3s_flannel_drift
+  changed_when: true
+  notify: Recreate the flannel device
+  when:
+    - k3s_flannel_mtu is not none
+    - k3s_flannel_running.rc == 0
+    - >-
+      k3s_flannel_running.stdout_lines[0] != k3s_flannel_pod_mtu | string
+      or ('FLANNEL_MTU=' ~ k3s_flannel_pod_mtu) not in k3s_flannel_running.stdout_lines
+
 - name: Install required K3s kernel settings
   ansible.builtin.copy:
     src: 99-exomem-k3s.conf

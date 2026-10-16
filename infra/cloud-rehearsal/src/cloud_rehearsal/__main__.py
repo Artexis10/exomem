@@ -26,7 +26,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import build, drill, images, infra, platform, substrate, tls
+from . import build, drill, images, infra, k3s_link, platform, substrate, tls
 from .http import Resolver
 from .report import Report, StageFailed, failure_record, guarded, stage
 from .scenarios import Context, close_clients, post_checks, ready_matches_pods, run_steps
@@ -77,6 +77,15 @@ def _parser() -> argparse.ArgumentParser:
     drill_parser.add_argument("--report", type=Path, default=Path("local-storage-drill-report.json"))
     drill_parser.add_argument("--workdir", type=Path, default=None, help="scratch directory (default: a new temporary one)")
     drill_parser.add_argument("--keep", action="store_true", help="leave the cluster running for inspection")
+    link_parser = sub.add_parser(
+        "k3s-link",
+        help="the flannel MTU (6.5) and agent-token rotation (5.7) rehearsal on a K3s server and one agent",
+    )
+    link_parser.add_argument("--report", type=Path, default=Path("k3s-link-report.json"))
+    link_parser.add_argument("--workdir", type=Path, default=None, help="scratch directory (default: a new temporary one)")
+    link_parser.add_argument("--keep", action="store_true", help="leave the cluster running for inspection")
+    link_parser.add_argument("--label", default=None, help="a key=value label for every container, network and volume it creates")
+    link_parser.add_argument("--image-label", default=None, help="a key=value label for the image it builds")
     return parser
 
 
@@ -84,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
+    if args.command == "k3s-link":
+        return asyncio.run(k3s_link.run_link(args))
     return asyncio.run(_run(args))
 
 
