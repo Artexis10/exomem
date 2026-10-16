@@ -31,7 +31,9 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1317,8 +1319,44 @@ def _guarded_policy(vault_root: Path, code: str, detail: str) -> Policy:
     return dataclasses.replace(last_good, findings=(*last_good.findings, finding))
 
 
+#: The policy each vault answered with, for the rest of one read request.
+_REQUEST_POLICIES: ContextVar[dict[str, Policy] | None] = ContextVar(
+    "exomem_request_policies", default=None
+)
+
+
+@contextmanager
+def request_policy_snapshot() -> Iterator[None]:
+    """Answer every `load` inside one read request from its first `load`.
+
+    One read takes several release decisions, and each one used to load and
+    re-validate the policy. The request decides against one policy instead,
+    as if it had been served a moment earlier. Only a read may open this
+    scope: a request that changes governance must see its own change.
+    """
+    if _REQUEST_POLICIES.get() is not None:
+        yield
+        return
+    token = _REQUEST_POLICIES.set({})
+    try:
+        yield
+    finally:
+        _REQUEST_POLICIES.reset(token)
+
+
 def load(vault_root: Path) -> Policy:
     """Load policy behind a non-creating seqlock-style authoring guard."""
+    snapshot = _REQUEST_POLICIES.get()
+    if snapshot is None:
+        return _load_guarded(vault_root)
+    key = str(governance_root(Path(vault_root)))
+    policy = snapshot.get(key)
+    if policy is None:
+        policy = snapshot[key] = _load_guarded(vault_root)
+    return policy
+
+
+def _load_guarded(vault_root: Path) -> Policy:
     vault_root = Path(vault_root)
     key = str(governance_root(vault_root))
     for _attempt in range(3):

@@ -156,6 +156,57 @@ class ExomemFastMCP(FastMCP):
             reset_transport(token)
 
 
+class RefusalFloorMiddleware(Middleware):
+    """Release a restricted direct-read refusal only after its disclosure floor.
+
+    It runs outermost, so FastMCP's error handling and logging, the call trace
+    and the authorization re-check all happen inside the floor.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        from .governance import projection_timing
+
+        async with projection_timing.surface_refusal_floor():
+            return await call_next(context)
+
+
+class _CodedRefusalLogLine(logging.Filter):
+    """Log a tool's coded refusal as one line, without its traceback.
+
+    FastMCP logs every exception a tool raises with its full traceback. A
+    refusal with a stable code is no fault, and rendering its traceback cost
+    more than the call and grew with the depth of the refusal's cause chain.
+    An exception without a code keeps its traceback.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        error = record.exc_info[1] if record.exc_info else None
+        if error is None:
+            return True
+        try:
+            from . import cli_ops
+
+            code = cli_ops.leaf_contract_code(error)
+        except Exception:  # noqa: BLE001 - an unclassifiable error keeps its traceback
+            return True
+        if code is None:
+            return True
+        record.msg = f"{record.getMessage()} ({code})"
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+def _install_coded_refusal_log_line() -> None:
+    from fastmcp.server import server as fastmcp_server
+
+    # The logger that FastMCP's `call_tool` logs a tool's exception on.
+    logger = fastmcp_server.logger
+    if not any(isinstance(item, _CodedRefusalLogLine) for item in logger.filters):
+        logger.addFilter(_CodedRefusalLogLine())
+
+
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
@@ -580,6 +631,8 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         icons=server_icons(),
         lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
     )
+    _install_coded_refusal_log_line()
+    mcp.add_middleware(RefusalFloorMiddleware())
     mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
     # The call-trace middleware runs in its content-free form for a cloud
     # cell too (as `hosted=True` does), so no `query=` is logged (D1.2).

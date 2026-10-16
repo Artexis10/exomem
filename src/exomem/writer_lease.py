@@ -6700,7 +6700,9 @@ def _restricted_refusal_floor(
     read and decided first. Padding every refusal that a restricted caller
     receives to one floor removes that difference. A success returns at once,
     notices included. The restriction is asked only after a refusal, so a
-    success never pays for the question.
+    success never pays for the question. Behind an MCP or REST surface the
+    surface waits, after its own handling of the refusal; elsewhere this
+    thread waits.
     """
 
     @wraps(function)
@@ -6711,12 +6713,16 @@ def _restricted_refusal_floor(
             or not isinstance(injected[0], (str, os.PathLike))
         ):
             return function(command, *injected, **kwargs)
+        from .governance import policy
+
         started_at = time.perf_counter()
-        try:
-            return function(command, *injected, **kwargs)
-        except Exception as error:
-            _complete_restricted_refusal(Path(injected[0]), started_at, error)
-            raise
+        # A direct read changes no governance, so it decides under one policy load.
+        with policy.request_policy_snapshot():
+            try:
+                return function(command, *injected, **kwargs)
+            except Exception as error:
+                _complete_restricted_refusal(Path(injected[0]), started_at, error)
+                raise
 
     return wrapped
 
@@ -6742,12 +6748,19 @@ def _complete_restricted_refusal(
         traceback.clear_frames(chained.__traceback__)
         chained = chained.__cause__ or chained.__context__
     padding_started = time.perf_counter()
-    overrun = projection_timing.pad_to_refusal_floor(started_at)
-    # Owner-only ledger span: a fixed label and a 0/1 flag, never caller or vault data.
+    work_ms = (padding_started - started_at) * 1000.0
+    deferred = projection_timing.defer_refusal_floor(started_at)
+    if not deferred:
+        projection_timing.pad_to_refusal_floor(started_at)
+    # Owner-only ledger span of fixed labels and counts, never caller or vault data.
     call_spans.record_span(
         "command.refusal_floor",
         (time.perf_counter() - padding_started) * 1000.0,
-        {"overrun": int(overrun)},
+        {
+            "work_ms": math.ceil(work_ms),
+            "overrun": int(work_ms > projection_timing.RESTRICTED_REFUSAL_FLOOR_MS),
+            "deferred": int(deferred),
+        },
     )
 
 
