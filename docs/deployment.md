@@ -800,41 +800,53 @@ replica before leaving it. Session and auth-generation reads are always direct t
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
 
-### Retire the collection store fence before a downgrade
+### Export the vault to files before a downgrade
 
-While a vault has a collection store fence, the coordinator refuses the lease to
-every writer that does not offer the store capability. A file-mode writer, such
-as a release from before the store, cannot write that vault. The operator retires
-the fence so that file-mode writers get the lease again. The retire is only the
-coordinator step of a downgrade. It does not export, move or delete a collection,
-and it does not change the vault's store marker or machine-local state.
-
-Only the operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, can
-retire the fence. The writer credential that the service holds gets HTTP 401.
-
-Retire the fence only after the vault's store collections are files again. A
-retire on a vault that still routes collections to the store makes those
-collections unavailable on every host, and this release has no command that
-undoes it.
-
-This release ships no export command that turns store collections back into
-files. Retire the fence only on a vault that has no store marker: check that the
-file `Knowledge Base/_Collections/mode.json` is absent from every host's copy of
-the vault.
+A release from before the collection store cannot open a vault whose collections
+live in the store. Before a downgrade, the owner exports the vault: the export
+turns every store collection back into its file layout and then retires the
+store. Only the owner can export, with the service stopped on every host and the
+operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 
 1. Stop the Exomem service on every host that serves the vault.
-2. Read the fence with the writer credential:
-   `curl -s -H "Authorization: Bearer $EXOMEM_WRITER_LEASE_TOKEN" http://127.0.0.1:8770/v1/vaults/main/collection-store-fence`
-3. Note the `store_id` and `generation` values in the response.
-4. Retire the fence with the operator credential and the noted values:
-   `curl -s -X POST -H "Authorization: Bearer $EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN" -H "Content-Type: application/json" -d '{"expected_generation": <generation>, "capability": "collections-store-v1", "store_id": "<store_id>"}' http://127.0.0.1:8770/v1/vaults/main/collection-store-fence/retire`
-5. If the response to step 4 is lost, run step 4 again.
-6. If the coordinator answers HTTP 409, start again at step 2.
-7. If the coordinator answers HTTP 404, upgrade the coordinator, then start again at step 2.
-8. Start the Exomem services.
+2. Preview the export: `exomem collections export --vault <vault> --dry-run`
+3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
+4. Note the `plan_id` value in the preview.
+5. Apply it: `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
+6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
+7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
+8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
+9. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local` with the operator credential.
+10. Install the older release on every host, then start the Exomem services.
 
-The retire answers `{"capability": "collections-store-v1", "enrolled": false,
-"store_id": null, "generation": <generation>}`.
+The services then read every collection from its files.
+
+The preview blocks the whole vault while any one collection cannot leave the
+store, and names the collection and the reason:
+
+- The store created the collection, so file mode never held it. This rule
+  stands until the owner decides whether rollback must cover such collections.
+- The rendered files exceed a file-mode bound: 2,000 item files, 512 KB in one
+  item, 8 MB in one collection or 2 MB in one log.
+- A value or a held correction has no file form.
+- A person changed a store view since the store published it. Restore the
+  view's bytes, or wait for the release that classifies view edits.
+
+A collection that the store never wrote keeps its files byte for byte. The
+export renders a collection that the store wrote from its rows, and records one
+content-free checkpoint in `Knowledge Base/log.md` that names the store
+transitions it summarizes. Inspection then reports `acknowledged_gap` for that
+collection.
+
+After it verifies that file mode reads every collection as the store served it,
+the export retires the coordinator's store fence through the operator-only
+`POST /v1/vaults/<id>/collection-store-fence/retire`. Then it renames
+`Knowledge Base/_Collections/mode.json` to `mode.json.exported-<utc>`, renames
+the replica and the live store to `collections.sqlite.exported-<utc>`, and
+removes the store's state compatibility descriptors. No host adopts the renamed
+files; they stay as evidence of the export. An apply that stops after the fence
+retire only finishes these renames when it runs again, so no host is left with a
+retired fence beside a marker that still routes collections.
 
 The retire and the lease revocation are one coordinator transaction. The lease
 holder at that moment loses its fencing token, so a store writer that opened
@@ -861,10 +873,11 @@ that enrolment.
 The coordinator keeps every retired generation. The fence read reports
 `enrolled: false` with the newest retired generation, or 0 for a vault that was
 never enrolled. A later enrolment, such as the owner's first
-`exomem collections create` on a vault without a store marker, takes the next
-generation. Run that enrolment with a release that has the retire, because an
-older release cannot read a retired fence. An enrolment request based on an
-older generation gets HTTP 409.
+`exomem collections create` or `exomem collections migrate --apply` on an
+exported vault, takes the next generation with a new store identity. Run that
+enrolment with a release that has the retire, because an older release cannot
+read a retired fence. An enrolment request based on an older generation gets
+HTTP 409.
 
 ### Durable-session cutover and rollback
 

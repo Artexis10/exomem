@@ -146,6 +146,8 @@ def _require_stageable(root):
         return None
     with closing(connection.open_reader(path)) as reader:
         intent = authority.pending_create(reader)
+    if intent is not None and intent["kind"] == authority.EXPORT:
+        raise admission.export_pending()
     if intent is not None and intent["kind"] != authority.MIGRATE:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT",
                                    "a collection create is still pending; finish it before migrating")
