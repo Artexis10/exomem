@@ -31,6 +31,11 @@ jobs:
   # tiers plus the latency file partition the previous lean suite exactly.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
+    # The release PR changes only version strings, the changelog and the
+    # regenerated Cloud archives, and `release-evidence` requires a green full
+    # run at its base revision, so the release PR runs no test job. Lint,
+    # build (packages, Cloud archives, privacy), specs and capabilities still run.
+    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -133,6 +138,7 @@ jobs:
 
   harness-tests:
     name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -211,6 +217,7 @@ jobs:
 
   windows-held-filesystem:
     name: Windows held filesystem (native NTFS)
+    if: *not-release-pr
     runs-on: windows-latest
     timeout-minutes: 12
     steps:
@@ -305,6 +312,7 @@ jobs:
 
   tui:
     name: terminal UI (textual, headless + snapshots)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -321,6 +329,7 @@ jobs:
 
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -547,6 +556,7 @@ jobs:
 
   onboarding:
     name: onboarding (wheel path)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -626,6 +636,8 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
       - name: Validate public build inputs before packaging
         run: python scripts/validate-public-artifacts.py --repository
       - name: Prove the pinned pre-v4 binary is externally fenced
@@ -768,6 +780,31 @@ jobs:
           echo "dispatch one and let it finish green first: gh workflow run ci.yml --ref main" >&2
           echo "then re-run this job (docs/release.md, release flow)" >&2
           exit 1
+
+  # A dispatched or scheduled full run is a superset of the push run at the
+  # same revision: the same jobs plus the full tier and py3.11. The push run is
+  # cancelled so the same proof does not take the shared job slots twice.
+  # Best effort: an API error must not turn the full run's evidence red.
+  cancel-superseded-push-run:
+    name: cancel the push run this full run supersedes
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel unfinished push runs of this workflow at this revision
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          runs=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=push&head_sha=$GITHUB_SHA&per_page=20" \
+            --jq ".workflow_runs[] | select(.status != \"completed\" and .id != $GITHUB_RUN_ID) | .id")
+          for run in $runs; do
+            gh run cancel "$run"
+            echo "cancelled push run $run at $GITHUB_SHA"
+          done
 
   # Engineering-practices quality check (https://github.com/Artexis10/engineering-practices):
   # fails on dead code a pull request adds and posts the Quality report. It informs
