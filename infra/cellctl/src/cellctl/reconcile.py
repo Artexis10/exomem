@@ -97,6 +97,9 @@ from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
 
+# Engine names are a value of the comma-separated cell variable, so a name holds no comma.
+_MEDIA_ENGINE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
+
 # D4 amendment (2026-10-05): a pass follows the last one after the fast
 # interval while anything is in transition, and after the idle interval once
 # the fleet has settled. A NOTIFY wakes the loop at once either way.
@@ -397,10 +400,17 @@ class ClusterConfig:
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
+    # serve-cloud-artifact-handles: one switch for every cell, so a cell created
+    # later needs no edit. The list stays as the canary that precedes it.
+    artifact_broker_all_cells: bool = False
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
     media_engine_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Engines every cell runs, including a cell created later. The operator sets an engine
+    # here only after it is on in each existing cell through the selection above, so the
+    # default changes no existing cell's render. An empty default renders as before.
+    media_engine_fleet_default: tuple[str, ...] = ()
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -425,20 +435,26 @@ class ClusterConfig:
             or len(cell_ids) > 1024
             or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
-            or (cell_ids and not self.artifact_broker_url)
+            or ((cell_ids or self.artifact_broker_all_cells) and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
         for engine, cell_ids in self.media_engine_cell_ids.items():
             if (
                 not isinstance(engine, str)
-                # Engine names are a value of the comma-separated cell variable.
-                or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", engine)
+                or not _MEDIA_ENGINE_NAME.fullmatch(engine)
                 or not isinstance(cell_ids, tuple)
                 or len(cell_ids) > 1024
                 or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
                 or len(set(cell_ids)) != len(cell_ids)
             ):
                 raise ValueError("a media engine selection maps lower-case engine names to unique base32 cell IDs")
+        default = self.media_engine_fleet_default
+        if (
+            not isinstance(default, tuple)
+            or any(not isinstance(engine, str) or not _MEDIA_ENGINE_NAME.fullmatch(engine) for engine in default)
+            or len(set(default)) != len(default)
+        ):
+            raise ValueError("a media engine fleet default is a list of unique lower-case engine names")
 
     def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
         if cell_id in self.dedicated_cell_ids:
@@ -454,11 +470,17 @@ class ClusterConfig:
         return self.resources, {}
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
-        return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
+        selected = self.artifact_broker_all_cells or cell_id in self.artifact_broker_cell_ids
+        return self.artifact_broker_url if selected else ""
 
     def media_engines_for_cell(self, cell_id: str) -> str:
-        """The value of the cell's media engine switch; "" when no engine selects it."""
-        return ",".join(sorted(engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids))
+        """The value of the cell's media engine switch; "" when nothing selects an engine for it.
+
+        The cell's own entries and the fleet default form one sorted set, so the same set
+        renders the same value however it is spelled and never re-renders a running cell.
+        """
+        own = {engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids}
+        return ",".join(sorted(own | set(self.media_engine_fleet_default)))
 
 
 class ClusterGateway:
@@ -857,7 +879,8 @@ def _compute_render_digest(
         material["artifact_broker_url"] = endpoint
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
-        # Only a selected cell's digest moves, so a canary restarts one cell.
+        # Only a cell whose engine set changes sees its digest move: a canary restarts
+        # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on

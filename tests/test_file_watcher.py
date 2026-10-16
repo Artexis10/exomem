@@ -1168,7 +1168,7 @@ def test_seed_replays_suppressed_self_write(
             rel = target.relative_to(vault).as_posix()
             file_watcher.register_self_delete(vault, [rel])
             watcher._record(target, deleted=True)
-        assert watcher._drain() == ([], [], [], 0, False)
+        assert watcher._drain() == ([], [], [], 0, False, False)
     finally:
         release_seed.set()
         seed_thread.join(timeout=2.0)

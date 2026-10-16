@@ -155,9 +155,16 @@ cellctl:
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
   # Media engine -> the cells it is switched on in (cloud-multimodal-processing
-  # D7), e.g. {"documents": ["<cell id>"], "ocr": ["<cell id>"]}. Every engine
-  # is off in a cell no entry names. A change restarts only the cells it names.
+  # D7), e.g. {"documents": ["<cell id>"], "ocr": ["<cell id>"]}. A cell no entry
+  # names runs none of these engines, unless mediaEngineFleetDefault names them.
+  # A change restarts only the cells whose engine set changes. The schema accepts
+  # only the engine names the runtime knows.
   mediaEngineCellIds: {}
+  # Engines every cell runs, including a cell created later, e.g. ["documents", "ocr"].
+  # Set an engine here only after mediaEngineCellIds already names every existing cell
+  # for it: the default then changes no existing cell's render and restarts no pod.
+  # Empty keeps every engine off in a cell that mediaEngineCellIds does not name.
+  mediaEngineFleetDefault: []
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"
@@ -242,12 +249,16 @@ cells:
     - 100.64.0.0/10
     - 169.254.0.0/16
 
-# Stage the broker before activating explicit cells with its verified Service IP.
+# Stage the broker before activating cells with its verified Service IP.
+# `cellIds` lists the cells that receive it, such as a canary. `allCells` gives
+# it to every cell, including each cell created later, and works beside the
+# list. Turn `allCells` on only after the broker has served the listed cells.
 artifactBroker:
   enabled: false
   image: ""
   endpoint: ""
   cellIds: []
+  allCells: false
   publicKeySecretName: exomem-artifact-broker-public-key
   publicKeySecretKey: public-key
   resources:

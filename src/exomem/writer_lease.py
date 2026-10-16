@@ -1911,6 +1911,36 @@ class CollectionStoreFenceState:
 
 
 @dataclass(frozen=True)
+class RetiredCollectionStoreFence:
+    """The newest retired store fence and the head the coordinator recorded for it.
+
+    Generation 0, with no store and no head, means the vault's fence was never retired.
+    """
+
+    store_id: str | None
+    generation: int
+    collection_store_head: CollectionStoreHead | None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> RetiredCollectionStoreFence:
+        # nosemgrep: ep-word-set -- the closed field names of the coordinator's retired-fence response.
+        if not isinstance(data, Mapping) or set(data) != {"store_id", "generation", "collection_store_head"}:
+            raise ValueError("retired collection store fence fields are invalid")
+        generation, head = data["generation"], data["collection_store_head"]
+        if type(generation) is not int or generation < 0:
+            raise ValueError("retired collection store fence generation is invalid")
+        if generation == 0:
+            if data["store_id"] is not None or head is not None:
+                raise ValueError("a never-retired fence names no store")
+            return cls(None, 0, None)
+        store_id = _collection_store_uuid(data["store_id"])
+        head = None if head is None else CollectionStoreHead.from_json(head)
+        if head is not None and head.store_id != store_id:
+            raise ValueError("retired collection store head names another store")
+        return cls(store_id, generation, head)
+
+
+@dataclass(frozen=True)
 class LeaseRecord:
     holder: str | None
     expires_at: float | None
@@ -2294,6 +2324,20 @@ class LeaseCoordinatorClient:
             if state.enrolled or state.generation != expected_generation:
                 raise ValueError("collection store fence retire result is inconsistent")
             return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def retired_collection_store_fence(self) -> RetiredCollectionStoreFence:
+        """The newest retired store fence with its recorded head, on a route only this release calls."""
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence/retired",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence/retired",
+        )
+        try:
+            return RetiredCollectionStoreFence.from_json(payload)
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 

@@ -3,7 +3,8 @@
 `EXOMEM_MEDIA_ENGINES` holds the comma-separated engines this deployment runs. Unset,
 a Cloud cell runs none and every other install runs all of them, which keeps a
 personal install's behaviour. cellctl renders the variable into the cells an operator
-selects, so an engine turns on one cell at a time.
+selects, so an engine turns on one cell at a time, and into every cell for an engine
+the operator has made the fleet default.
 
 A media kind whose extractor needs no engine (plain text, email, calendar) runs on
 the standard library and is never switched off.

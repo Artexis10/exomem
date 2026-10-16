@@ -66,6 +66,10 @@ spec:
               value: "true"
             - name: EXOMEM_CLOUD_ARTIFACT_CELL_IDS
               value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
+            {{- if .Values.artifactBroker.allCells }}
+            - name: EXOMEM_CLOUD_ARTIFACT_ALL_CELLS
+              value: "true"
+            {{- end }}
             - name: EXOMEM_CLOUD_ARTIFACT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

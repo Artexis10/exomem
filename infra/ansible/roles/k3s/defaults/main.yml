@@ -148,6 +148,11 @@ k3s_local_storage_topology_key: topology.topolvm.io/node
 # -e when the platform's values override the concurrency.
 k3s_local_backup_concurrency_per_node: 2
 k3s_local_default_cell_gib: 4
+# The hold an hourly snapshot backup records on a cell's StatefulSet
+# (cellctl's state.SNAPSHOT_BACKUP; infra/cellctl/tests/test_planned_move.py
+# checks the two agree). The removal ignores only this hold on a cell that
+# left nothing but a retained volume on the agent.
+k3s_snapshot_backup_hold: snapshot-backup
 k3s_remove_headroom: 5
 k3s_remove_pod_procs_argv:
   - /usr/bin/find

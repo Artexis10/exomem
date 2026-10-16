@@ -268,17 +268,30 @@ def _apply_and_crash(environment, database, cut, released):
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
     capability.RELEASED = released
 
+    from exomem.collection_store import owner, takeover
+
     def die(*args, **kwargs):
         os._exit(73)
 
-    if cut == "before-install":
-        from exomem.collection_store import takeover
+    def after(original):
+        def run(*args, **kwargs):
+            original(*args, **kwargs)
+            os._exit(73)
+        return run
 
-        takeover.replace_live = die
-    elif cut == "before-fence":
-        admission._store_fence = die
-    else:
-        admission._install_marker = die
+    client = writer_lease.LeaseCoordinatorClient
+    {"before-install": lambda: setattr(takeover, "replace_live", die),  # after the seal
+     "after-install": lambda: setattr(takeover, "replace_live", after(takeover.replace_live)),
+     "before-fence": lambda: setattr(admission, "_store_fence", die),
+     "after-fence-cas": lambda: setattr(client, "transition_collection_store_fence",
+                                        after(client.transition_collection_store_fence)),
+     "before-publication": lambda: setattr(admission, "_publish_current_epoch", die),
+     # Between the replica publication and the lease renewal that records its head.
+     "after-publication": lambda: setattr(admission, "_publish_current_epoch",
+                                          after(admission._publish_current_epoch)),
+     "before-marker": lambda: setattr(admission, "_install_marker", die),
+     "before-fork": lambda: setattr(owner, "record_fork", die),
+     "before-staging": lambda: setattr(migration, "_stage", die)}[cut]()
     with coordinator(database), library_scope():
         cli._collections_main(["migrate", "--vault", environment["EXOMEM_VAULT_PATH"], "--apply"])
     os._exit(0)
@@ -387,24 +400,54 @@ def test_a_write_after_a_cutover_stops_before_its_fence_cut_reaches_the_store(en
         service.stop()
 
 
-def test_a_file_changed_outside_the_lease_after_the_fence_cut_is_never_admitted(env, capsys, tmp_path):
-    """A resumed cutover that installs the marker over an import whose files changed after
-    the fence cut, which no writer inside the lease could have made."""
+ORIGINAL = "Knowledge Base/Records/Work/Items/Original.md"
+
+
+def edit_by_hand(root):
+    """A writer outside the writer lease changes an imported item file, as a sync client or editor would."""
+    item = root / ORIGINAL
+    item.write_text(item.read_text().replace("Authored body", "Edited by hand"))
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def stored_body(root, key):
+    """The body the live store holds for one Work item."""
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        return reader.execute("SELECT body FROM items WHERE collection_id=? AND item_key=?", (CID, key)).fetchone()[0]
+
+
+def foreign_evidence(root):
+    """The digests of the replicas a publication kept aside as ``.foreign-*`` evidence."""
+    return sorted(sha256(path) for path in (root / "Knowledge Base/_Collections").glob(".foreign-*"))
+
+
+@pytest.mark.parametrize("cut", ["before-install", "after-install", "after-fence-cas", "after-publication"])
+def test_a_file_changed_outside_the_lease_after_the_fence_cut_supersedes_the_unadmitted_store(
+        env, capsys, tmp_path, cut):
+    """A cutover that admits an import whose files changed after the fence cut, which no writer inside
+    the lease could have made, or that stays refused until the owner restores the files by hand; or a
+    supersede cut at any step that does not converge, or drops the superseded store's replica."""
     root = legacy_vault(env)
     crash_apply(tmp_path, "before-marker")
-    item = root / "Knowledge Base/Records/Work/Items/Original.md"
-    imported = item.read_bytes()
-    item.write_text(item.read_text().replace("Authored body", "Edited by hand"))
-    assert migrate(root, "apply") == 1
-    refusal = capsys.readouterr().err
-    assert migration.STALE in refusal and WORK in refusal
-    assert authority.read_marker(root) is None
     with closing(connection.open_reader(connection.store_path(root))) as reader:
-        assert authority.pending_create(reader)["kind"] == authority.MIGRATE
-    # The repair the refusal names: the imported bytes back, and the apply resumes.
-    item.write_bytes(imported)
+        superseded = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    published = sha256(root / "Knowledge Base/_Collections/collections.sqlite")
+    assert (fence().enrolled, fence().generation, fence().store_id) == (True, 1, superseded)
+    edit_by_hand(root)
+    crash_apply(tmp_path, cut)  # the apply that supersedes the store, cut at one step
+    capsys.readouterr()
+
     assert migrate(root, "apply") == 0
+
     assert printed(capsys)["status"] == "marker_admitted"
+    routed = marker(root)
+    assert routed["store_id"] != superseded and routed["collection_store_fence"]["generation"] == 2
+    assert (fence().enrolled, fence().generation, fence().store_id) == (True, 2, routed["store_id"])
+    assert foreign_evidence(root) == [published]
+    assert stored_body(root, KEY) == "Edited by hand\n"
 
 
 def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_importing_again(
@@ -658,6 +701,133 @@ def test_a_writer_without_a_store_runtime_stays_fenced_while_an_s1_migration_is_
     with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
         append_to_work(root, "a write while the migration is pending")
     assert migrate(root, "apply") == 0
+
+S1_RELEASED = MIGRATE | {capability.RECORDS_SUMMARY_V1}
+
+
+def live_head(root):
+    """The live store's instance and head."""
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        instance = reader.execute("SELECT value FROM store_meta WHERE key='instance_id'").fetchone()[0]
+        return instance, chain.verify_store_chain(reader)
+
+
+def summary_titles(root):
+    return [row["title"] for row in call(root, "record_memory", action="query", collection=DAILY)["rows"]]
+
+
+@pytest.mark.parametrize("cut", ["before-publication", "after-publication", "before-marker"])
+def test_an_s1_migration_whose_files_changed_after_publication_restores_its_store_and_migrates_again(
+        s1, capsys, tmp_path, cut):
+    """An apply on an S1 vault that admits an import whose files changed after it published its store,
+    or stays refused until the owner restores the files by hand; or a restore that drops the summary
+    rows or head, forks although nothing of the migrated store left this host, or keeps the
+    coordinator's head on the abandoned import, which every host then refuses to serve."""
+    root = s1
+    instance, head = live_head(root)
+    enrolled = fence()
+    crash_apply(tmp_path, cut, released=S1_RELEASED)
+    edit_by_hand(root)
+    capsys.readouterr()
+
+    assert migrate(root, "apply") == 0
+
+    applied = printed(capsys)
+    reached = cut != "before-publication"  # the migrated store reached the replica or the coordinator
+    assert (applied["status"], applied["restored"]["forked"]) == ("marker_admitted", reached)
+    routed = marker(root)
+    assert {entry["collection_id"] for entry in routed["collections"]} == {DAILY, *MIGRATED}
+    assert (fence().store_id, fence().generation) == (enrolled.store_id, enrolled.generation)
+    tenure, _ = live_head(root)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert chain.head_relation(reader, *head) == "ancestor"
+    recorded = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).status().collection_store_head
+    assert recorded.instance_id == tenure and (tenure != instance) == reached
+    assert stored_body(root, KEY) == "Edited by hand\n"
+    service = start_service(root)
+    try:
+        assert summary_titles(root) == ["Summary row"]
+    finally:
+        service.stop()
+
+
+def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys, tmp_path):
+    """A restore killed after it put the superseded store back but before it continued it as a new
+    tenure, after which every apply refuses behind the coordinator's head on the abandoned import."""
+    root = s1
+    _, head = live_head(root)
+    crash_apply(tmp_path, "before-marker", released=S1_RELEASED)
+    edit_by_hand(root)
+    crash_apply(tmp_path, "before-fork", released=S1_RELEASED)
+    assert live_head(root)[1] == head  # restored, not yet continued
+    from test_collection_store_s1_gate import _until
+
+    service = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        # Until the fork, takeover refuses the migration's replica, so the restored store commits nothing.
+        _until(lambda: service.manager.status().get("collection_store", {}).get("status") in {
+            "admitted", "sync_pending"}, seconds=30)
+        assert service.manager.status()["collection_store"]["status"] == "sync_pending"
+    finally:
+        with suppress(OpError):
+            service.stop()
+    wait_out_the_lease()
+    capsys.readouterr()
+
+    assert migrate(root, "apply") == 0
+
+    applied = printed(capsys)
+    assert (applied["status"], applied["restored"]["forked"]) == ("marker_admitted", True)
+    assert stored_body(root, KEY) == "Edited by hand\n"
+    service = start_service(root)
+    try:
+        assert summary_titles(root) == ["Summary row"]
+    finally:
+        service.stop()
+
+
+def refuse_ledger_round_trip(original):
+    """The import proof as it fails for one collection whose rendered rows do not parse back."""
+    def drift(captured, *args):
+        if captured.manifest.collection_id == LEDGER_ID:
+            legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
+        return original(captured, *args)
+    return drift
+
+
+@pytest.mark.parametrize("stop", ["blocked", "killed"])
+def test_a_restored_store_that_served_a_write_before_its_migration_went_live_migrates_again(
+        s1, capsys, monkeypatch, tmp_path, stop):
+    """A restore that finished while the new migration never went live (its proof blocked, or the
+    apply was killed), after which the restored store served a write: every later apply then reads
+    the abandoned migration as an unfinished restore and refuses it as unprovable, for good."""
+    root = s1
+    crash_apply(tmp_path, "before-publication", released=S1_RELEASED)
+    edit_by_hand(root)
+    if stop == "blocked":
+        with monkeypatch.context() as patched:
+            patched.setattr(legacy_import, "_prove_round_trip", refuse_ledger_round_trip(legacy_import._prove_round_trip))
+            assert migrate(root, "apply") == 1  # restored, then the new staging's proof blocks
+    else:
+        crash_apply(tmp_path, "before-staging", released=S1_RELEASED)  # restored, then killed
+    wait_out_the_lease()
+    service = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Later row"},
+                    item_key=OTHER, why="a write after the restore")["outcome"] == "committed"
+    finally:
+        service.stop()
+    capsys.readouterr()
+
+    assert migrate(root, "apply") == 0
+
+    assert printed(capsys)["status"] == "marker_admitted"
+    assert stored_body(root, KEY) == "Edited by hand\n"
+    service = start_service(root)
+    try:
+        assert sorted(summary_titles(root)) == ["Later row", "Summary row"]
+    finally:
+        service.stop()
 
 
 def test_a_service_never_finishes_a_migration_its_owner_left_unfinished(s1, monkeypatch, tmp_path):

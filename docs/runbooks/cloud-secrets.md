@@ -262,6 +262,12 @@ that run, as in steps 4 to 6 of
 step 6's first-selection credentials. Otherwise the server's next start stops
 with `cred/passwd newer than datastore`.
 
+The cluster's CAs are not in the secret matrix. K3s generates them and keeps
+them in its datastore, encrypted with the server token. Each etcd snapshot
+holds them too, so the escrowed server token recovers them. After a lost agent
+disk, [Rotate the client CA](cloud-dedicated-host.md#rotate-the-client-ca)
+replaces the client CA, and its new key stays in the same place.
+
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
 

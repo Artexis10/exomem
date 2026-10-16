@@ -51,3 +51,27 @@ Transport SHALL be default-off and activated only with a compatible gateway, bro
 - **WHEN** a configured broker cannot serve a valid handle
 - **THEN** the file reports failure with no claimed stored path or hash
 - **AND** ordinary recall remains available
+
+### Requirement: One fleet switch can activate transport for every cell
+
+After the broker has served an explicitly listed set of cells, an operator MAY activate transport for every cell by one fleet switch. The switch SHALL select every existing cell and every cell created later. The cell render, network and admission policy, and gateway grant issuance SHALL all select cells from it. With the switch off, selection SHALL be exactly the explicit list.
+
+#### Scenario: A cell is created after the switch is on
+- **WHEN** a cell is created while the fleet switch is on and the cell is not listed
+- **THEN** its runtime receives the broker URL and the single broker egress rule with no per-cell edit
+- **AND** the gateway signs grants for it
+
+#### Scenario: The switch is turned on beside a list
+- **WHEN** the switch is turned on while some cells are already listed
+- **THEN** only the cells not already listed re-render and restart
+- **AND** each listed cell keeps its render digest, environment and network policy
+
+#### Scenario: The switch is off
+- **WHEN** the fleet switch is off
+- **THEN** only listed cells receive the broker URL and egress rule
+- **AND** every other cell keeps its render digest, environment and zero-egress policy
+
+#### Scenario: The switch does not widen the edge
+- **WHEN** the fleet switch is on
+- **THEN** admission accepts, for any cell, only the exact broker egress rule on TCP 8767 and refuses any wider egress
+- **AND** the broker accepts only cell runtime pods, never backup or restore Job pods

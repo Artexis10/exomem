@@ -231,13 +231,13 @@ for a seeded Hetzner-class cell would rehearse the move between classes.
 
 ## Private-link rehearsal (k3s-link)
 
-`move-cloud-cells-to-local-storage` tasks 6.5 (flannel MTU) and 5.7 (agent-token
-rotation). It runs a K3s server with embedded etcd and one agent, with no cell
-images, in about ten minutes. It needs privileged Docker and `uvx`, but no
-`sudo`, so it also runs on a workstation. On a runner, dispatch the
-`Cloud k3s-link rehearsal` workflow. A pull request runs it when the k3s role's
-defaults, its flannel template or re-save helper, the K3s image pin, the
-ansible-core pin or this harness changes.
+`move-cloud-cells-to-local-storage` tasks 6.5 (flannel MTU), 5.7 (agent-token
+rotation) and 5.8 (client-CA rotation). It runs a K3s server with embedded etcd
+and one agent, with no cell images, in about ten minutes. It needs privileged
+Docker and `uvx`, but no `sudo`, so it also runs on a workstation. On a runner,
+dispatch the `Cloud k3s-link rehearsal` workflow. A pull request runs it when
+the k3s role's defaults, its flannel template, re-save helper or client-CA
+helper, the K3s image pin, the ansible-core pin or this harness changes.
 
 ```
 cd infra/cloud-rehearsal
@@ -245,7 +245,11 @@ uv run --frozen exomem-cloud-rehearsal k3s-link --report k3s-link-report.json
 ```
 
 `--label` and `--image-label` add a `key=value` label to every container,
-network and volume it creates, and to the image it builds.
+network and volume it creates, and to the image it builds. That image is
+Alpine with `iputils-ping` and `openssl`. It runs the ping pods, and the k3s
+role's client-CA helper, which the K3s image has no `openssl` for. The helper
+runs in the server's network namespace, on the server's data volume and with
+the server's own `k3s` binary.
 
 The pinned ansible-core renders the k3s role's flannel configuration and the
 values the checks expect from the role's own template and defaults. It uses the
@@ -260,7 +264,9 @@ It does not exercise the role's handler that recreates `flannel.1`. Both nodes
 start with the flannel configuration present, and a container restart also
 recreates the node's network namespace, so no old device survives a restart.
 
-The checks run in order. A failed 6.5 check blocks only the later 6.5 checks:
+The checks run in order. A failed 6.5 check blocks only the later 6.5 checks.
+A failed 5.7 or 5.8 check blocks the later 5.8 checks. The client-CA rotation
+runs on the agent token that 5.7 rotates, as the runbook requires:
 
 1. **6.5:** a ping with fragmentation forbidden crosses the agent's link at
    1400 bytes and fails at 1450, in both directions.
@@ -280,6 +286,22 @@ The checks run in order. A failed 6.5 check blocks only the later 6.5 checks:
 7. **5.7:** the agent moves to token B, loses its kubelet client certificate,
    and restarts. It must get a new certificate and run its pod again. With
    its certificate it would rejoin on that alone.
+8. **5.8:** the check copies the agent's kubelet client certificate, key and
+   node password, which a lost disk holds. With them, three requests get 200.
+   The API server returns the agent's own Node. The supervisor issues a
+   kube-proxy certificate, and a kubelet certificate, which also needs the
+   node password.
+9. **5.8:** the role's client-CA helper loads a new client CA. The server
+   restarts, then the agent as soon as the server is ready. The agent first
+   loses its client keys, as the runbook directs for the host whose disk left
+   custody. Both nodes must be Ready, the server must serve the CA the helper
+   made, and the agent must hold it. The check records each restart's time to
+   Ready.
+10. **5.8:** the three requests of check 8 get 401 with the copied
+    certificate. With the certificate the agent got after the rotation, on a
+    new key, they get 200. Check 6 shows that the disk's agent token gets 401.
+11. **5.8:** a new pod that the scheduler places on the agent runs, and
+    `kubectl exec` reaches it through the agent's kubelet.
 
 The report (`exomem-k3s-link-rehearsal-report-v1`) records each check's
 evidence and the rendered configuration. Exit 0 means every check passed, 1

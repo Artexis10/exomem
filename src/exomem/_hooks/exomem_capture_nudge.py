@@ -347,6 +347,30 @@ def _codex_call_output_succeeded(output: object) -> bool:
     return True
 
 
+def _refused_with_envelope(content: object) -> bool:
+    """Whether a Claude tool result holds the `{"success": false}` error envelope.
+
+    MCP answers a coded refusal as normal tool content, so the result carries no
+    `is_error`. Only the parsed envelope shows that the call was refused.
+    """
+    if isinstance(content, dict):
+        return content.get("success") is False
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        return False
+    for text in texts:
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return True
+    return False
+
+
 def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     """Return (assistant_text, tool calls) for the latest turn from the JSONL
     transcript. Walks backward, stopping at the human message that began the turn
@@ -446,7 +470,9 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
         elif role == "user" or typ == "user":
             blocks = _content_blocks(msg)
             for b in blocks:
-                if b.get("type") == "tool_result" and b.get("is_error") is True:
+                if b.get("type") == "tool_result" and (
+                    b.get("is_error") is True or _refused_with_envelope(b.get("content"))
+                ):
                     failed_tool_ids.add(str(b.get("tool_use_id") or ""))
             if any(b.get("type") == "text" for b in blocks) and not any(
                 b.get("type") == "tool_result" for b in blocks
