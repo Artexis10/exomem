@@ -141,11 +141,13 @@ def current_version(conn, projection) -> int | None:
     return None if row is None else row[0]
 
 
-def classify(writer, projection, raw: bytes, *, refusal: tuple = ()) -> Classification:
+def classify(writer, projection, raw: bytes, *, refusal: tuple = (), edit_back: bool = True) -> Classification:
     """Classify a view's bytes: the stamp rules of §16 A2 first, then the §6 rows.
 
     The caller holds a read snapshot or the mutation. ``refusal`` carries a leaf refusal
-    edit-back met when it applied these bytes, which holds them as invalid.
+    edit-back met when it applied these bytes, which holds them as invalid. Without the
+    edit-back release (``edit_back`` False), a store validates as it did before edit-back:
+    without the Planning graph or the stored row, so such an edit waits on disk.
     """
     conn = writer.connection
     try:
@@ -188,9 +190,9 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = ()) -> Classifi
     found = Classification(None, stamp, current, current)
     try:
         if projection["kind"] == "item":
-            found = _item_change(writer, projection, frontmatter, body, found)
+            found = _item_change(writer, projection, frontmatter, body, found, edit_back)
         else:
-            found = _manifest_change(writer, projection, frontmatter, body, found)
+            found = _manifest_change(writer, projection, frontmatter, body, found, edit_back)
     except collections.CollectionError as error:
         return Classification(INVALID, stamp, current, current, issues=_refused(error))
     if refusal and found.code is None:
@@ -223,13 +225,16 @@ def _changes(old: Mapping, values: Mapping) -> tuple[dict, list]:
             sorted(set(old) - set(values)))
 
 
-def _item_change(writer, projection, frontmatter, body, found):
+def _item_change(writer, projection, frontmatter, body, found, edit_back):
     row, manifest, declared = writer._collection(projection["collection_id"])
     key, values, body = _view_values(writer, manifest, projection["row_id"], frontmatter, body)
     before = writer._item(manifest.collection_id, key)
     old = json.loads(before["values_json"])
     if values == old and body == before["body"]:
         return Classification(SAME, found.stamp, found.base, found.current)
+    if not edit_back:
+        writer._validate(manifest, declared, key, values, operation="update", validate_graph=False)
+        return found
     changes, deleted = _changes(old, values)
     operation = "update"
     if (declared.kind == "intended" and changes and not deleted and body == before["body"]
@@ -246,7 +251,7 @@ def _item_change(writer, projection, frontmatter, body, found):
     })
 
 
-def _manifest_change(writer, projection, frontmatter, body, found):
+def _manifest_change(writer, projection, frontmatter, body, found, edit_back):
     row, manifest, _ = writer._collection(projection["collection_id"])
     stored = writer.connection.execute(
         "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
@@ -257,7 +262,7 @@ def _manifest_change(writer, projection, frontmatter, body, found):
     if _parsed_view(text, found.stamp) == _parsed_view(stored, found.stamp):
         return Classification(SAME, found.stamp, found.base, found.current)
     proposed = collections.parse_manifest_bytes(writer.root, projection["path"], text.encode())
-    if proposed.collection_id != manifest.collection_id:
+    if proposed.collection_id != manifest.collection_id and edit_back:  # before edit-back, such an edit waited
         raise collections.CollectionError("RESERVED_RECORD_FIELD", "a system field of the view changed")
     from . import summary
 

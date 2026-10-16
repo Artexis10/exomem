@@ -61,8 +61,10 @@ deleted view (`VIEW_DELETED`), or a view stamped by another store
 (`VIEW_FOREIGN`). Each finding names the read-only view under the collection's
 `Held/` directory, with `meta.held_id` and `meta.code`. The category is part of
 the default attention surface, and it lists only corrections you may read.
-Read the held view and its diagnostics first. Then resume a Records
-`VIEW_CONFLICT` through `record_memory(action="update", held=...)`, discard the
-correction with a reason, or ask the owner to save a valid edit of the view,
-which resolves the correction. Discarding an invalid view that is still in
-place renders the view from the store again.
+Read the held view and its diagnostics first. A `VIEW_CONFLICT` or
+`VIEW_FOREIGN` correction holds bytes that the view no longer shows. Resume a
+Records `VIEW_CONFLICT` through `record_memory(action="update", held=...)`, or
+discard either with a reason; a later edit of the view never resolves them. A
+`VIEW_INVALID` edit kept in place or a `VIEW_DELETED` view is resolved when the
+owner saves a valid edit of the view, or when you discard it. Discarding an
+invalid view that is still in place renders the view from the store again.

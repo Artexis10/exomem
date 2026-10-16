@@ -147,6 +147,26 @@ def test_a_planning_hierarchy_violation_is_held_not_applied(store):
     assert "projection" not in inspected and "coverage" not in inspected
 
 
+def test_without_the_edit_back_release_a_hierarchy_violation_waits_on_disk(store, monkeypatch):
+    """Defect: with edit-back unreleased, a Planning edit that breaks the hierarchy is held and its
+    view rendered again, where a store before edit-back left it waiting on disk."""
+    from exomem import vault
+
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {VIEWS})
+    create(store, "planning")
+    receipt = store.append_record(CID, item={"title": "Child"}, item_key=KEY, why="capture")
+    path = store.root / receipt["affected_paths"][0]
+    frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
+    frontmatter.update(status="planned", commitment="committed", horizon="week")  # committed, with no parent
+    edited = ("---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n" + body).encode()
+    path.write_bytes(edited)
+    store.reconcile_views()
+    store.reconcile_views()
+    assert holds(store) == [] and path.read_bytes() == edited
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?",
+                                    (receipt["affected_paths"][0],)).fetchone() == ("pending",)
+
+
 def test_a_manifest_view_edit_becomes_a_revise(store):
     """Defect: an edit of the manifest view is ignored, or bypasses the revise rules."""
     create(store)

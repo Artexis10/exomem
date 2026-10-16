@@ -872,7 +872,8 @@ class CollectionWriter:
             # Edit-back settled other bytes; these wait for their own settled observation.
             batch.pending = True
             return False
-        found = edit_back.classify(self, projection, raw, refusal=observed.refusal if observed else ())
+        found = edit_back.classify(self, projection, raw, refusal=observed.refusal if observed else (),
+                                   edit_back=batch.edit_back)
         code = found.code
         if code == edit_back.SAME and batch.edit_back:
             batch.accept(path, digest)
