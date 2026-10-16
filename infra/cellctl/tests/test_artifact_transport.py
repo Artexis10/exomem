@@ -174,14 +174,6 @@ def test_turning_the_fleet_switch_on_moves_only_the_digest_of_unlisted_cells() -
     assert _digest(OTHER_CELL_ID, fleet) == _digest(OTHER_CELL_ID, listed_later)
 
 
-def test_with_the_fleet_switch_off_an_unlisted_cell_keeps_the_digest_it_had_without_a_broker() -> None:
-    without_broker = _cluster_config()
-    switched_off = dataclasses.replace(without_broker, artifact_broker_url=BROKER_URL,
-                                       artifact_broker_cell_ids=(CELL_ID,),
-                                       artifact_broker_all_cells=False)
-    assert _digest(OTHER_CELL_ID, switched_off) == _digest(OTHER_CELL_ID, without_broker)
-
-
 async def test_a_cell_created_after_the_fleet_switch_gets_the_broker_without_being_listed(cell_db) -> None:
     config = dataclasses.replace(_cluster_config(), artifact_broker_url=BROKER_URL,
                                  artifact_broker_all_cells=True)

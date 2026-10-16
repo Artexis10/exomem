@@ -1929,6 +1929,21 @@ def test_artifact_broker_selected_cell_edge_and_admission(k3s: K3sCluster) -> No
     dns_result = _exec_py(k3s.name, specs[0].namespace, "artifact-client",
                           "import socket; socket.setdefaulttimeout(3); socket.gethostbyname('kubernetes.default.svc.cluster.local')", check=False)
     assert dns_result.returncode != 0
+    # The fleet switch gives the unlisted cell the same edge: its runtime reaches
+    # the broker, and a Job pod in its namespace still does not.
+    fleet = _render_platform("templates/cellctl.yaml", "templates/artifact-broker.yaml",
+                             settings=(*settings, "--set", "artifactBroker.allCells=true"))
+    _apply_server_side(k3s.name, [doc for doc in fleet if doc["kind"] != "Deployment"])
+    unlisted = CellManifestSpec(cell_id=specs[1].cell_id, image=image, replicas=1, read_only=False,
+                                artifact_broker_url=endpoint)
+    _apply_server_side(k3s.name, list(render_network_policies(unlisted)))
+    unlisted_job = _probe_pod("artifact-job-client", unlisted.namespace, image,
+                              labels={**clients[1]["metadata"]["labels"], "exomem.io/cell-job": "backup"})
+    _apply_server_side(k3s.name, [unlisted_job])
+    _wait_pods_ready(k3s.name, unlisted.namespace, "artifact-job-client")
+    _wait_for(lambda: _tcp_probe(k3s.name, unlisted.namespace, "artifact-client", "10.43.0.25", 8767),
+              timeout=30, description="unlisted runtime to broker under the fleet switch")
+    assert not _tcp_probe(k3s.name, unlisted.namespace, "artifact-job-client", "10.43.0.25", 8767)
     disabled = _render_platform("templates/cellctl.yaml")
     _apply_server_side(k3s.name, [doc for doc in disabled if doc["kind"] == "ValidatingAdmissionPolicy"])
     _wait_for(lambda: "exomem-cellctl-scope" in _dry_run(selected).stderr, timeout=30,
