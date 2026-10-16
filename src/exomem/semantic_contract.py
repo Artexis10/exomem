@@ -24,6 +24,7 @@ from . import (
     activation,
     activation_manifest,
     call_spans,
+    foreground_priority,
     freshness,
     lifecycle_statuses,
     memory_refs,
@@ -3236,7 +3237,11 @@ def _build_corpus_context_with_census(
             )
             completed = flight.done.is_set()
             if not completed:
-                completed = flight.done.wait(timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS)
+                # Any thread may own the flight, a bulk pass included.
+                with foreground_priority.awaiting_bulk():
+                    completed = flight.done.wait(
+                        timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
+                    )
             if not completed:
                 raise OpError(
                     "MUTATION_WARMING",

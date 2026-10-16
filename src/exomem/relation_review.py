@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    call_spans,
     lifecycle_statuses,
     memory_schema,
     relation_registry,
@@ -3883,23 +3884,25 @@ def commit_prepared_creation_draft(
             commit_point=False,
         )
         with vault.vault_creation_lock(root, "semantic-creation"):
-            attempt = _attempt(
-                root,
-                path=path,
-                source=source,
-                draft_id=identity,
-                operation=operation,
-                commit_auxiliaries=auxiliaries,
-                commit_disposition=relation_disposition,
-                commit_reason=reason,
-                draft_token_hash=token_hash,
-                predecessor_path=predecessor_path,
-                predecessor_content_hash=predecessor_content_hash,
-                reuse=reuse,
-            )
-            _record_prevalidated_commit_outcome(
-                "unavailable" if reuse is None else attempt.prevalidated_outcome
-            )
+            # A fixed phase label; its one field names the outcome, a count.
+            with call_spans.span("commit.relation_review_attempt", {}) as measured:
+                attempt = _attempt(
+                    root,
+                    path=path,
+                    source=source,
+                    draft_id=identity,
+                    operation=operation,
+                    commit_auxiliaries=auxiliaries,
+                    commit_disposition=relation_disposition,
+                    commit_reason=reason,
+                    draft_token_hash=token_hash,
+                    predecessor_path=predecessor_path,
+                    predecessor_content_hash=predecessor_content_hash,
+                    reuse=reuse,
+                )
+                outcome = "unavailable" if reuse is None else attempt.prevalidated_outcome
+                measured[outcome] = 1
+            _record_prevalidated_commit_outcome(outcome)
             validation = attempt.validation
             result, record = _commit_plan(
                 attempt,

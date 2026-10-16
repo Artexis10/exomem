@@ -314,9 +314,15 @@ def _record_recall_event(
 
 def _begin_replacement(key: tuple[str, str]) -> tuple[threading.Lock, int]:
     """Fence events while one scope's replacement walk runs off-lock."""
+    from . import foreground_priority
+
     with _lock:
         replacement_lock = _replacement_locks.setdefault(key, threading.Lock())
-    replacement_lock.acquire()
+    if not replacement_lock.acquire(blocking=False):
+        # A whole-vault rebuild holds it across a walk that yields to
+        # foreground work, and an inline rebuild on a command thread can meet it.
+        with foreground_priority.awaiting_bulk():
+            replacement_lock.acquire()
     with _lock:
         epoch = _replacement_epochs.get(key, 0) + 1
         _replacement_epochs[key] = epoch

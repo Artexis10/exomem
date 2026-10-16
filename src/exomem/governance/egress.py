@@ -5254,10 +5254,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
                 result = dict(result)
                 result.pop("revision_history")
     artifact_scan_demand = _ArtifactScanDemand()
-    result = _withheld_cross_check(
-        vault_root, result, _artifact_scan_demand=artifact_scan_demand,
-        _current_parent_binding=parent_binding,
-    )
+    # Fixed phase labels, timing only: the cross-check, the artifact gate (its
+    # own `egress.artifact_gate`) and the scrub.
+    with call_spans.span("egress.cross_check"):
+        result = _withheld_cross_check(
+            vault_root, result, _artifact_scan_demand=artifact_scan_demand,
+            _current_parent_binding=parent_binding,
+        )
     from ..collection_store import governance as canonical_governance
 
     inspection_evidence = canonical_governance._inspection_evidence(result)
@@ -5270,11 +5273,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             or artifact_scan_demand.required):
         result = gate_artifact_references(vault_root, result, scan_all=scan_all)
     if hasattr(result, "content") and hasattr(result, "structured_content"):
-        cleaned, blocked = _scrub_tool_result(result, vault_root)
+        with call_spans.span("egress.scrub"):
+            cleaned, blocked = _scrub_tool_result(result, vault_root)
         if blocked:
             _record_credential_block()
         return cleaned
-    cleaned, blocked = scrubber.scrub_value(result)
+    with call_spans.span("egress.scrub"):
+        cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
@@ -5433,8 +5438,11 @@ def postfilter_error(
 
     def _clean(value: Any) -> Any:
         nonlocal blocked
-        cleaned = gate.gate_payload(value, scan_strings=True)
-        cleaned, hit = scrubber.scrub_value(cleaned)
+        # The same fixed labels as `postfilter`, aggregated across values.
+        with call_spans.span("egress.artifact_gate"):
+            cleaned = gate.gate_payload(value, scan_strings=True)
+        with call_spans.span("egress.scrub"):
+            cleaned, hit = scrubber.scrub_value(cleaned)
         blocked = blocked or hit
         return cleaned
 

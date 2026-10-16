@@ -444,6 +444,7 @@ def build_row(
     client_version = log_client_version(client_version)
     arg_names, args, args_truncated = _argument_shape(arguments or {})
     targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
+    shaped_spans = _shaped_spans(spans)
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "sequence": sequence,
@@ -493,7 +494,7 @@ def build_row(
         # contention and left 21 seconds unattributed. These are the spans that
         # would have named them. Empty for an uninstrumented path -- absence
         # means "nothing reported", never "nothing happened".
-        "spans": _clip_spans(spans),
+        "spans": shaped_spans[:_MAX_SPANS],
         # What the request deadline cost this call, when it cost anything.
         # `None` on every unbudgeted row, so "the budget was not reached" and
         # "there was no budget" are the same absence — which is correct: both
@@ -508,6 +509,10 @@ def build_row(
             access, outcome, released_items, arguments or {}, committed_targets or ()
         ),
     }
+    if len(shaped_spans) > _MAX_SPANS:
+        # A partial `spans` says so. Absent when nothing was dropped, so every
+        # complete row keeps the shape it has always had.
+        row["spans_truncated"] = len(shaped_spans) - _MAX_SPANS
     from .activation_result import project_block
 
     observation = project_block(activation_result)
@@ -520,11 +525,19 @@ def build_row(
 #: Phases kept in one row. The producer already bounds distinct names per call;
 #: this is the independent bound, because the row is hash-chained and an
 #: unbounded field would let one pathological call dominate the ledger file.
+#: Not raised to the producer's bound: rotation keeps `ROTATE_KEEP_ROWS_DEFAULT`
+#: rows within `ROTATE_BYTES_DEFAULT`, about 4 KB a row, and 32 spans that carry
+#: fields already fill that. A row that drops spans counts them instead.
 _MAX_SPANS = 32
 
 
 def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """Normalize reported phases into a bounded, canonical shape.
+    """Normalize reported phases into a bounded, canonical shape (`_shaped_spans`)."""
+    return _shaped_spans(spans)[:_MAX_SPANS]
+
+
+def _shaped_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Every well-formed reported phase in canonical shape, slowest first.
 
     Slowest first, so truncation drops what matters least. Rebuilt field by
     field rather than passed through, because these rows are hashed: an
@@ -554,7 +567,7 @@ def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             row["fields"] = fields
         shaped.append(row)
     shaped.sort(key=lambda item: item["ms"], reverse=True)
-    return shaped[:_MAX_SPANS]
+    return shaped
 
 
 #: Named integer measurements one span may carry beside its duration. Bounded
