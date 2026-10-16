@@ -72,7 +72,7 @@ def test_a_hand_commit_to_another_file_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
     files = [
-        {"filename": "CHANGELOG.md", "patch": "@@\n+## 1.3.0\n"},
+        {"filename": ".release-please-manifest.json", "patch": "@@\n-1\n+2\n"},
         {"filename": "scripts/e2e_product_loop.py", "patch": "@@\n-old\n+new\n"},
     ]
 
@@ -114,3 +114,12 @@ def test_a_versioned_file_without_a_diff_is_refused(
 
     assert status == 1
     assert "no diff to verify" in errors
+
+
+def test_a_listing_without_the_manifest_bump_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    status, errors = _check(tmp_path, [], capsys)
+
+    assert status == 1
+    assert ".release-please-manifest.json: the release PR does not change it" in errors

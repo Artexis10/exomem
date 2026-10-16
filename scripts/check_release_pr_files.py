@@ -21,8 +21,10 @@ import json
 import sys
 from pathlib import Path
 
+#: release-please bumps its manifest in every release PR.
+_MANIFEST = ".release-please-manifest.json"
 #: Files release-please itself writes besides the configured extra files.
-_RELEASE_PLEASE_FILES = frozenset({".release-please-manifest.json", "CHANGELOG.md"})
+_RELEASE_PLEASE_FILES = frozenset({_MANIFEST, "CHANGELOG.md"})
 #: The directory that release-please.yml's sync-cloud-artifacts job commits.
 _REGENERATED_CLOUD_PACKAGES = "plugins/cloud/generated/"
 #: release-please's generic updater rewrites only lines that carry this marker.
@@ -43,6 +45,9 @@ def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
     managed = _RELEASE_PLEASE_FILES | {entry["path"] for entry in extra}
     generic = {entry["path"] for entry in extra if entry.get("type") == "generic"}
     problems = []
+    if not any(file["filename"] == _MANIFEST for file in files):
+        # An empty or partial listing is an unexpected state, not a clean PR.
+        problems.append(f"{_MANIFEST}: the release PR does not change it")
     for file in files:
         for path in filter(None, (file["filename"], file.get("previous_filename"))):
             if not (path in managed or path.startswith(_REGENERATED_CLOUD_PACKAGES)):
