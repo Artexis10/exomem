@@ -185,26 +185,39 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = ()) -> Classifi
     return found
 
 
-def _item_change(writer, projection, frontmatter, body, found):
+def _view_values(writer, manifest, row_id: int, frontmatter, body: str) -> tuple[str, dict, str]:
+    """The item key, declared values and authored body an item view's bytes carry.
+
+    Refuses a changed system field. The managed presentation block is not authored body.
+    """
     from .legacy_import import _body
 
-    row, manifest, declared = writer._collection(projection["collection_id"])
     key, schema_version = writer.connection.execute(
-        "SELECT item_key,schema_version FROM items WHERE row_id=?", (projection["row_id"],)).fetchone()
-    before = writer._item(manifest.collection_id, key)
+        "SELECT item_key,schema_version FROM items WHERE row_id=?", (row_id,)).fetchone()
     profile = record_formats.profile_for(manifest.semantic_profile)
     system = {"type": profile.item_type, "collection_id": manifest.collection_id,
               profile.item_id_property: key, "schema_version": schema_version}
     if any(frontmatter.get(name) != value for name, value in system.items()):
         raise collections.CollectionError("RESERVED_RECORD_FIELD", "a system field of the view changed")
     values = {name: record_formats._json_value(value) for name, value in frontmatter.items()
-              if name not in {*system, "exomem_view"}}
-    body = _body(manifest, values, body)
+              if name not in system and name != "exomem_view"}
+    return key, values, _body(manifest, values, body)
+
+
+def _changes(old: Mapping, values: Mapping) -> tuple[dict, list]:
+    """The fields an edit sets and the fields it deletes, relative to ``old``."""
+    return ({name: value for name, value in values.items() if name not in old or old[name] != value},
+            sorted(set(old) - set(values)))
+
+
+def _item_change(writer, projection, frontmatter, body, found):
+    row, manifest, declared = writer._collection(projection["collection_id"])
+    key, values, body = _view_values(writer, manifest, projection["row_id"], frontmatter, body)
+    before = writer._item(manifest.collection_id, key)
     old = json.loads(before["values_json"])
     if values == old and body == before["body"]:
         return Classification(SAME, found.stamp, found.base, found.current)
-    changes = {name: value for name, value in values.items() if name not in old or old[name] != value}
-    deleted = sorted(set(old) - set(values))
+    changes, deleted = _changes(old, values)
     operation = "update"
     if (declared.kind == "intended" and changes and not deleted and body == before["body"]
             and set(changes) <= planning.TRIAGE_FIELDS):
@@ -241,6 +254,29 @@ def _manifest_change(writer, projection, frontmatter, body, found):
         "manifest_text": text, "expected_manifest_hash": manifest.manifest_version.hash,
         "expected_container_hash": writer._container(row),
     })
+
+
+def resumed_update(writer, held, manifest, before) -> dict:
+    """The Records update a held ``VIEW_CONFLICT`` correction resumes: the owner's edit, rebased.
+
+    The update carries only what the held save changed from the row version it was based on,
+    so resuming never reverts a later change to a field the owner did not touch. Only a
+    stale-buffer save resumes; other corrections are resolved by discarding them or by a later
+    valid edit of the view. The caller's guards and field overrides still apply.
+    """
+    from . import typed_storage
+
+    try:
+        frontmatter, body, _ = vault.parse_frontmatter(held["held_bytes"].decode(), strict=True)
+        base, base_body = typed_storage.version_values(writer.connection, before["row_id"], held["base_row_version"])
+    except (UnicodeError, ValueError, TypeError, typed_storage.TypedStorageError):
+        frontmatter = None
+    if held["code"] != CONFLICT or not isinstance(frontmatter, Mapping):
+        raise records._held_not_found()
+    key, values, body = _view_values(writer, manifest, before["row_id"], frontmatter, body)
+    changes, deleted = _changes(base, values)
+    return {"action": "update", "item_key": key, "changes": changes, "delete_fields": deleted,
+            "body": None if body == base_body else body}
 
 
 @dataclass(frozen=True)

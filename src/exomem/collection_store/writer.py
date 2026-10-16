@@ -2344,9 +2344,12 @@ class CollectionWriter:
             before = self._item(manifest.collection_id, key)
             if before is None:
                 raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-            resumed = self._held(manifest.collection_id, held)
+            resumed = self._held(manifest.collection_id, held, corrections=True)
             if resumed:
                 candidate = resumed["candidate"]
+                if resumed["kind"] == "view-correction":
+                    # A held stale-buffer save resumes as its bytes over the current row.
+                    candidate = edit_back.resumed_update(self, resumed, manifest, before)
                 if candidate["action"] != "update" or candidate["item_key"] != key:
                     raise records._held_not_found()
                 if changes is not None and not isinstance(changes, Mapping):
@@ -2407,6 +2410,8 @@ class CollectionWriter:
                     manifest, declared, key, final, before=old_values, operation=operation
                 )
             except collections.CollectionError as error:
+                if resumed and resumed["kind"] == "view-correction":
+                    raise  # the correction keeps the owner's exact bytes; a refusal never rewrites them
                 result = self._hold(
                     manifest,
                     error,

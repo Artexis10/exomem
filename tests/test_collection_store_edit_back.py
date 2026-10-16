@@ -291,13 +291,12 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
     inspected = owner(root, "record_memory", action="inspect", collection=CID)
     assert "VIEW_CONFLICT" in {diagnostic["code"] for diagnostic in inspected["diagnostics"]}
     held = inspected["coverage"]["held_refs"][0]["held_id"]
-    attention = owner(root, "review_memory", mode="attention", categories=["collection_view_corrections"])
+    attention = owner(root, "review_memory", mode="attention")  # the default union
     assert held in json.dumps(attention)
     until(lambda: path.read_bytes() == rendered)  # the view shows the store again
     owner(root, "record_memory", action="discard", collection=CID, held=held, why="a stale buffer")
     assert owner(root, "record_memory", action="inspect", collection=CID)["projection"]["held_view_corrections"] == 0
-    assert held not in json.dumps(owner(root, "review_memory", mode="attention",
-                                        categories=["collection_view_corrections"]))
+    assert held not in json.dumps(owner(root, "review_memory", mode="attention"))
     assert counted(root, "Served") == 7 and len(store_rows(root, edits)) == 1
 
 
@@ -342,3 +341,71 @@ def test_attention_for_a_withheld_view_correction_equals_attention_without_it(se
           ["held_view_corrections"] == 1)
     assert queue(_external()) == absent and absent[0] == ([], None)
     assert "VIEW_CONFLICT" in json.dumps(queue(owner_principal(surface="mcp"))[1])
+
+
+def test_a_held_stale_buffer_save_resumes_as_the_owners_edit_over_the_current_row(store):
+    """Defect: a held VIEW_CONFLICT cannot be resumed, resuming reverts the newer row, or a refused
+    resume drops the owner's bytes."""
+    receipt, path = appended(store, count=1)
+    store.reconcile_views()
+    stale = path.read_bytes().replace(b"title: One", b"title: Owner")
+    agent = store.update_record(CID, item_key=KEY, changes={"count": 2}, why="agent",
+                                expected_container_hash=receipt["after_container_hash"],
+                                expected_item_version=receipt["after_item_hash"])
+    path.write_bytes(stale)
+    passes(store, 0.0, SETTLED)
+    [(held, code, raw)] = holds(store)
+    assert (code, raw) == ("VIEW_CONFLICT", stale)
+    with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.update_record(CID, item_key=KEY, held=held, changes={"count": "bad"}, why="resume",
+                            expected_container_hash=agent["after_container_hash"],
+                            expected_item_version=agent["after_item_hash"])
+    assert holds(store) == [(held, "VIEW_CONFLICT", stale)]
+    store.update_record(CID, item_key=KEY, held=held, why="keep the owner's title",
+                        expected_container_hash=agent["after_container_hash"],
+                        expected_item_version=agent["after_item_hash"])
+    assert holds(store) == []
+    assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0]) == {
+        "count": 2, "title": "Owner"}
+
+
+def test_an_edit_inside_the_managed_presentation_block_is_not_adopted(store):
+    """Defect: text typed into the generated presentation block becomes the item's authored body."""
+    text = manifest_text().removesuffix("---\n") + "item_presentation:\n  version: 1\n  title: title\n  summary: [count]\n---\n"
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    receipt = store.append_record(CID, item={"title": "One", "count": 1}, item_key=KEY, why="capture",
+                                  body="Authored line\n")
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    assert b"- **Count:** 1\n" in rendered
+    path.write_bytes(rendered.replace(b"- **Count:** 1\n", b"- **Count:** 99\n"))
+    before = txns(store)
+    passes(store, 0.0, SETTLED)
+    assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
+    assert store.connection.execute("SELECT body FROM items").fetchone() == ("Authored line\n",)
+
+
+def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store):
+    """Defect: the store's own render is taken for an edit, or every pass reads every view again."""
+    receipt, path = appended(store, count=1)
+    store.reconcile_views()
+    rendered, before = path.read_bytes(), txns(store)
+    passes(store, 0.0, SETTLED, 60.0, 60.0 + SETTLED)
+    assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
+    assert store.connection.execute("SELECT state,stat_identity IS NOT NULL FROM projection_state WHERE path=?",
+                                    (receipt["affected_paths"][0],)).fetchone() == ("current", 1)
+
+
+def test_views_render_no_file_mode_audit_marker_or_head(store):
+    """Defect: a store view carries a file-mode audit marker or a migrated manifest's audit head,
+    which no store write keeps current and an edit of the view would carry back."""
+    from exomem import record_formats
+
+    legacy = record_formats.render_manifest_audit_head(manifest_text(), f"{7:024x}", semantic_profile="records",
+                                                       reader_version=1)
+    assert "record_audit" in legacy
+    store.create_collection(manifest_path(), legacy, why="a migrated manifest", scaffold=False)
+    receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    assert b"exomem-record-audit" not in (store.root / receipt["affected_paths"][0]).read_bytes()
+    manifest = get_page.get_page(store.root, path=manifest_path()).frontmatter
+    assert "record_audit" not in manifest and manifest["exomem_view"]["v"] == 1
