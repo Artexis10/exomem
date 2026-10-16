@@ -834,19 +834,20 @@ store, and names the collection and the reason:
 
 A collection that the store never wrote keeps its files byte for byte. The
 export renders a collection that the store wrote from its rows, and records one
-content-free checkpoint in `Knowledge Base/log.md` that names the store
+content-free checkpoint in the activity log, `log.md`, that names the store
 transitions it summarizes. Inspection then reports `acknowledged_gap` for that
 collection.
 
 After it verifies that file mode reads every collection as the store served it,
 the export retires the coordinator's store fence through the operator-only
 `POST /v1/vaults/<id>/collection-store-fence/retire`. Then it renames
-`Knowledge Base/_Collections/mode.json` to `mode.json.exported-<utc>`, renames
-the replica and the live store to `collections.sqlite.exported-<utc>`, and
-removes the store's state compatibility descriptors. No host adopts the renamed
-files; they stay as evidence of the export. An apply that stops after the fence
-retire only finishes these renames when it runs again, so no host is left with a
-retired fence beside a marker that still routes collections.
+`<knowledge base folder>/_Collections/mode.json` (`Knowledge Base` by default)
+to `mode.json.exported-<utc>`, renames the replica and the live store to
+`collections.sqlite.exported-<utc>`, and removes the store's state compatibility
+descriptors. No host adopts the renamed files; they stay as evidence of the
+export. An apply that stops after the fence retire only finishes these renames
+when it runs again, so no host is left with a retired fence beside a marker that
+still routes collections.
 
 The retire and the lease revocation are one coordinator transaction. The lease
 holder at that moment loses its fencing token, so a store writer that opened
