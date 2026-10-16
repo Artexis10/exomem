@@ -348,6 +348,8 @@ def held_item_key(candidate_json: str) -> str | None:
 
     A refused write and a view correction both record the item they would change here.
     """
+    if not isinstance(candidate_json, str):
+        raise ValueError("held candidate is unreadable")
     candidate = json.loads(candidate_json)
     key = candidate.get("item_key") if isinstance(candidate, dict) else ()
     if key is not None and not isinstance(key, str):

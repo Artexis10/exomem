@@ -264,7 +264,7 @@ def test_a_held_view_edit_of_a_withheld_item_is_absent(vault, tmp_path):
     assert _as(vault, _external(), lambda: _call(vault, "get", path=held_path)) == withheld
 
 
-@pytest.mark.parametrize("candidate", ["[1]", "not json"])
+@pytest.mark.parametrize("candidate", ["[1]", "not json", None])
 def test_a_hold_whose_item_cannot_be_read_is_withheld_from_all_but_the_owner(vault, candidate):
     """Such a hold could follow any item; the collection must still list, read and count."""
     with pytest.raises(collections.CollectionError) as refused:
