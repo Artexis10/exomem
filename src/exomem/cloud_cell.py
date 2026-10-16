@@ -11,6 +11,7 @@ into `os.environ` for these names directly.
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -30,8 +31,23 @@ GATEWAY_CLIENT_HEADER = "x-exomem-oauth-client"
 #: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`; neither name starts
 #: with `mcp-param-`, the one prefix the gateway forwards from a caller.
 GATEWAY_CONTEXT_HEADER = "x-exomem-client-context"
+#: The gateway names the authenticated OAuth grant with its stable UUID here.
+#: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`, never from clientInfo.
+#: This content-free, owner-private actor metadata grants no authority.
+GATEWAY_APP_ID_HEADER = "x-exomem-app-id"
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def canonical_app_id(value: object) -> str | None:
+    """The gateway's canonical UUID, or unknown; never interpret a client name."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return value if str(parsed) == value else None
 
 
 class CloudConfigError(RuntimeError):

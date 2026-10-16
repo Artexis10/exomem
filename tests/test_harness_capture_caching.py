@@ -157,11 +157,13 @@ def test_second_contract_query_on_a_pinned_revision_runs_no_new_git_subprocesses
     first_show = contracts._git_show(root, head, "artifact.txt")
     first_ancestor = contracts._git_applicable(root, head, head)
     first_ls = contracts._git(root, "ls-tree", "-r", "--name-only", head, check=False).stdout
+    first_introductions = contracts._git_receipt_introduction_revisions(root, head, "artifact.txt")
     after_first = len(calls)
 
     second_show = contracts._git_show(root, head, "artifact.txt")
     second_ancestor = contracts._git_applicable(root, head, head)
     second_ls = contracts._git(root, "ls-tree", "-r", "--name-only", head, check=False).stdout
+    second_introductions = contracts._git_receipt_introduction_revisions(root, head, "artifact.txt")
     new_calls = calls[after_first:]
 
     assert new_calls == [], (
@@ -172,6 +174,7 @@ def test_second_contract_query_on_a_pinned_revision_runs_no_new_git_subprocesses
     assert second_show == first_show == b"pinned bytes\n"
     assert second_ancestor is first_ancestor is True
     assert second_ls == first_ls
+    assert second_introductions == first_introductions == (head,)
 
 
 def test_pinned_predicate_rejects_shapes_that_are_not_object_immutable() -> None:
@@ -255,9 +258,8 @@ def test_pinned_predicate_rejects_shapes_that_are_not_object_immutable() -> None
     assert pinned(
         (
             "log",
-            "--full-history",
+            "--no-walk=unsorted",
             "--format=",
-            "--max-count=128",
             "--name-status",
             "--find-renames=1%",
             "--follow",

@@ -142,6 +142,28 @@ def _client(*, hold_started_at: str | None, jobs: dict, pods: list) -> ClusterCl
     return client
 
 
+def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition() -> None:
+    from cellctl.storage_config import DEFAULT_STORAGE, LEGACY_CLASS
+
+    client = _client(hold_started_at=None, jobs={}, pods=[])
+    client._storage_config = DEFAULT_STORAGE
+    claim = NS(
+        metadata=NS(name="cell-data", namespace=NAMESPACE, uid="claim-a", resource_version="42"),
+        spec=NS(storage_class_name=LEGACY_CLASS, volume_name="pv-a"),
+        status=NS(phase="Bound", capacity={"storage": "20Gi"}, conditions=[NS(type="FileSystemResizePending", status="True")]),
+    )
+    volume = NS(
+        metadata=NS(name="pv-a"),
+        spec=NS(claim_ref=NS(uid="claim-a"), storage_class_name=LEGACY_CLASS, csi=NS(volume_handle="volume-a")),
+    )
+    client._core = _Core([], pvcs=[claim], pvs=[volume])
+    observed = client.observe(CELL_ID, NAMESPACE)
+    assert observed.pvc_uid == "claim-a"
+    assert observed.pvc_resource_version == "42"
+    assert observed.pvc_capacity_bytes == 20 * 1024**3
+    assert observed.pvc_resize_pending
+
+
 def test_a_finished_job_from_an_earlier_hold_is_not_this_holds_result() -> None:
     # The live 3.10 regression: the previous hold's succeeded backup and
     # restore Jobs were still inside their TTL and got read back as the new

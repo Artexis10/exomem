@@ -343,6 +343,17 @@ class ClusterClient:
 
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
+        pvc_version = getattr(pvc.metadata, "resource_version", None) if pvc and pvc.metadata else None
+        raw_capacity = (getattr(pvc.status, "capacity", None) or {}).get("storage") if pvc and pvc.status else None
+        try:
+            pvc_capacity = int(quantity(str(raw_capacity))) if raw_capacity is not None else None
+        except (ValueError, ArithmeticError):
+            pvc_capacity = None
+        # Kubernetes defines these conditions while controller or filesystem expansion is incomplete.
+        resize_pending = any(
+            condition.type in {"Resizing", "FileSystemResizePending"} and condition.status == "True"
+            for condition in (getattr(pvc.status, "conditions", None) or [])
+        ) if pvc and pvc.status else False
         pvc_volume_id = None  # the underlying Hetzner volume id (PV spec.csi.volumeHandle), not the PV's own K8s name
         pv_claim_ref_uid = None
         pv_storage_class = None
@@ -456,6 +467,9 @@ class ClusterClient:
             pvc_bound=pvc_bound,
             pvc_volume_id=pvc_volume_id,
             pvc_uid=pvc_uid,
+            pvc_resource_version=pvc_version,
+            pvc_capacity_bytes=pvc_capacity,
+            pvc_resize_pending=resize_pending,
             pv_claim_ref_uid=pv_claim_ref_uid,
             pv_storage_class=pv_storage_class,
             pvc_storage_class=pvc_storage_class,

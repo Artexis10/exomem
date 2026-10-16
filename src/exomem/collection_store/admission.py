@@ -218,7 +218,8 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                             prepared = _recover_create(writer)
                         else:
                             prepared = _prepare_new(writer, manifest_path, manifest_text, why=why,
-                                                    request_id=request_id, scaffold=scaffold)
+                                                    request_id=request_id, scaffold=scaffold,
+                                                    fence_client=fence_client)
                     finally:
                         # A rejected prepare cannot revoke admission; a durable intent must gate reports.
                         runtime = manager._collection_store
@@ -229,19 +230,24 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
         return _resume_locked(session, fence_client, preparation_token=token)
 
 
-def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold):
+def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client):
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     expected = authority.read_marker(writer.root)
     old = None if expected is None else authority.parse_marker(writer.root, expected)
     manifest = collections.parse_manifest_bytes(writer.root, manifest_path, manifest_text.encode())
     if old is not None and old["version"] != 2:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
+    if old is None:
+        # A first cut lands on the generation after the fence's newest retired one; an
+        # enrolled fence makes no cut, so its basis stays the first generation as before.
+        basis = fence_client.collection_store_fence()
+        fence = {"capability": writer_lease.COLLECTION_STORE_CAPABILITY,
+                 "generation": 1 if basis.enrolled else basis.generation + 1}
     target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
               "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
               "collections": ([] if old is None else old["collections"]) + [authority.marker_entry(
                   manifest.collection_id, manifest.path, sid, manifest.semantic_profile, manifest.storage.source, manifest.storage.strategy)],
-              "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}
-              if old is None else old["collection_store_fence"]}
+              "collection_store_fence": fence if old is None else old["collection_store_fence"]}
     authority.parse_marker(writer.root, json.dumps(target))
     authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
@@ -712,6 +718,17 @@ def adoption_required():
         f"coordinator replaced; continuing it is the owner's offline step: run {ADOPTION_COMMAND}")
 
 
+def unenrolled(fence):
+    """The refusal for a routed vault whose coordinator holds no store fence: never enrolled, or retired."""
+    if fence.generation == 0:
+        return adoption_required()
+    return CollectionStoreError(
+        "COLLECTION_STORE_RETIRED",
+        f"the coordinator retired this vault's collection store at fence generation {fence.generation}, so "
+        "the store marker on this host is stale; this host serves the vault again once its export to files "
+        "reaches this host")
+
+
 def enrollment_required():
     """The refusal for a summary create that needs the coordinator's operator fence cut."""
     return CollectionStoreError(
@@ -994,11 +1011,14 @@ def _store_fence(fence_client, fence, target, *, initial):
 
     ``initial`` says the caller's marker basis may make that first cut: a create that
     replaces no marker, or a copied vault whose marker carries the first generation.
+    The cut lands on the generation after the fence's newest retired one (0 if never
+    enrolled), so a marker minted before a retire never binds the next enrolment.
     """
     if not fence.enrolled:
-        if not initial or fence.generation != 0:
+        if not initial or target["collection_store_fence"]["generation"] != fence.generation + 1:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "initial fence basis differs")
-        fence = fence_client.transition_collection_store_fence(expected_generation=0, store_id=target["store_id"])
+        fence = fence_client.transition_collection_store_fence(
+            expected_generation=fence.generation, store_id=target["store_id"])
     return _require_fence(fence, target)
 
 

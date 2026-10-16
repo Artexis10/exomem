@@ -73,6 +73,33 @@ async def test_tenant_can_have_only_one_non_deleted_cell(cell_db: CellDatabase) 
         await owner.close()
 
 
+async def test_paid_resize_notifies_and_only_controller_can_write_capacity_proof(cell_db: CellDatabase) -> None:
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    tenant = await insert_tenant(owner, "paid-volume")
+    await owner.execute("INSERT INTO exomem_cloud_cells(cell_id,tenant_id,desired_state) VALUES($1,$2,'running')", "abcdefghijklmnop", tenant)
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    controller = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        notifications: list[str] = []
+        await owner.add_listener("exomem_cloud_cells", lambda *args: notifications.append(args[-1]))
+        before = await owner.fetchval("SELECT generation FROM exomem_cloud_cells WHERE cell_id='abcdefghijklmnop'")
+        await app.execute("UPDATE exomem_cloud_cells SET storage_gib=20 WHERE cell_id='abcdefghijklmnop'")
+        assert await owner.fetchval("SELECT generation FROM exomem_cloud_cells WHERE cell_id='abcdefghijklmnop'") == before + 1
+        assert notifications == ["abcdefghijklmnop"]
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await app.execute("UPDATE exomem_cloud_cells SET observed_storage_capacity_bytes=21474836480 WHERE cell_id='abcdefghijklmnop'")
+        await controller.execute("UPDATE exomem_cloud_cells SET observed_storage_pvc_uid='claim-a',observed_storage_pvc_version='42',observed_storage_capacity_bytes=21474836480,observed_storage_generation=$1,observed_storage_at=now() WHERE cell_id='abcdefghijklmnop'", before + 1)
+        row = await owner.fetchrow("SELECT * FROM exomem_cloud_cells WHERE cell_id='abcdefghijklmnop'")
+        assert row["observed_storage_capacity_bytes"] == 20 * 1024**3
+        assert row["generation"] == before + 1
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await controller.execute("UPDATE exomem_cloud_cells SET storage_gib=30 WHERE cell_id='abcdefghijklmnop'")
+    finally:
+        await owner.close()
+        await app.close()
+        await controller.close()
+
+
 async def test_gateway_role_cannot_write_desired_state(cell_db: CellDatabase) -> None:
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
     try:
