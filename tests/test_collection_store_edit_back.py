@@ -76,6 +76,16 @@ def test_an_invalid_save_is_held_once_and_stays_in_place(store):
     assert path.read_bytes() == invalid  # PROVISIONAL O2: kept in place until discarded
 
 
+def test_an_invalid_view_waiting_to_be_held_does_not_spin_the_store_thread(store):
+    """Defect: between settling and being held, an invalid view asks for a pass at once, every pass."""
+    _, path = appended(store, count=1)
+    path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: broken"))
+    runner = passes(store, 0.0)
+    assert runner.run(store, now=SETTLED) == pytest.approx(HELD - SETTLED)
+    assert holds(store) == []
+    assert runner.run(store, now=HELD) > 0 and [code for _, code, _ in holds(store)] == ["VIEW_INVALID"]
+
+
 def test_a_deleted_view_is_held_and_rendered_again(store):
     """Defect: a deleted view is silently rendered again, so its owner never learns no delete exists."""
     receipt, path = appended(store)

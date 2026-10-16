@@ -310,12 +310,15 @@ def observe(writer, paths=None) -> list[Observation]:
     from . import authority
 
     with writer.read_snapshot():
-        cursor = writer.connection.execute(
-            "SELECT * FROM projection_state WHERE kind IN ('item','manifest') ORDER BY path")
+        if paths is None:
+            cursor = writer.connection.execute(
+                "SELECT * FROM projection_state WHERE kind IN ('item','manifest') ORDER BY path")
+        else:
+            cursor = writer.connection.execute(
+                "SELECT * FROM projection_state WHERE kind IN ('item','manifest') AND path IN "
+                "(SELECT value FROM json_each(?)) ORDER BY path", (json.dumps(sorted(paths)),))
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
-        if paths is not None:
-            rows = [row for row in rows if row["path"] in paths]
         admitted = {cid: authority.projection_eligible(writer, {"collection_id": cid})
                     for cid in {row["collection_id"] for row in rows}}
     found = []
@@ -358,6 +361,10 @@ class _Seen:
     digest: str | None
     since: float
     invalid_since: float | None = None
+    retry: float | None = None  # a settled view waits until then: invalid, not yet held, or refused
+
+    def due(self) -> float:
+        return self.since + SETTLE_SECONDS if self.retry is None else max(self.since + SETTLE_SECONDS, self.retry)
 
 
 class EditBack:
@@ -393,7 +400,7 @@ class EditBack:
             seen = self._seen.get(observation.path)
             if seen is None or seen.digest != observation.digest:
                 self._seen[observation.path] = _Seen(observation.digest, now, seen.invalid_since if seen else None)
-            elif now - seen.since >= SETTLE_SECONDS:
+            elif now >= seen.due():
                 settled.append((observation, seen))
         if own:
             mutate(writer.record_view_observations, own)
@@ -403,7 +410,7 @@ class EditBack:
             except (collections.CollectionError, connection.CollectionStoreError):
                 # One view the store cannot act on now must not starve the others; it is retried a pass later.
                 logger.warning("a collection view edit could not be applied; retrying later", exc_info=True)
-                seen.since = now + FULL_PASS_SECONDS - SETTLE_SECONDS
+                seen.retry = now + FULL_PASS_SECONDS
                 continue
             if acted:
                 self._seen.pop(observation.path, None)
@@ -411,7 +418,7 @@ class EditBack:
 
     def wait(self, now: float) -> float:
         """Seconds until a pass is due: the next full pass, or a changed view that may have settled."""
-        deadlines = [self._next_full, *(seen.since + SETTLE_SECONDS for seen in self._seen.values())]
+        deadlines = [self._next_full, *(seen.due() for seen in self._seen.values())]
         return max(0.0, min(deadlines) - now)
 
     def _act(self, writer, observation, seen, now, mutate) -> bool:
@@ -434,6 +441,7 @@ class EditBack:
         if found.code == INVALID:
             seen.invalid_since = seen.invalid_since if seen.invalid_since is not None else seen.since
             if now - seen.invalid_since < INVALID_SECONDS:
+                seen.retry = seen.invalid_since + INVALID_SECONDS
                 return False
         mutate(writer.reconcile_views, paths={observation.path: observation})
         return True
@@ -478,10 +486,10 @@ def _findings(writer):
                 continue
             for held, path, code in writer.connection.execute(
                     "SELECT held_id,view_path,code FROM held_candidates WHERE collection_id=? AND kind='view-correction' "
-                    f"AND held_id IN ({','.join('?' for _ in ids)}) ORDER BY held_id", (cid, *ids)):
+                    "AND held_id IN (SELECT value FROM json_each(?)) ORDER BY held_id", (cid, json.dumps(ids))):
                 findings.append(AuditFinding(
                     category="collection_view_corrections", path=path, severity="warn",
-                    detail=f"{code}: an edit of a collection view is held; resume or discard it with record_memory",
+                    detail=f"{code}: an owner edit of a collection view is held for review",
                     meta={"collection_id": cid, "held_id": held, "code": code},
                 ))
     return findings
