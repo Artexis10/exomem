@@ -77,6 +77,11 @@ jobs:
       - name: Check the cellctl lockfile
         working-directory: infra/cellctl
         run: uv lock --check
+      # The rehearsal takes cellctl by path, so a cellctl dependency change
+      # leaves its lockfile stale; its own workflows do not run on cellctl.
+      - name: Check the cloud rehearsal lockfile
+        working-directory: infra/cloud-rehearsal
+        run: uv lock --check
       - name: Fast suite
         working-directory: infra/cellctl
         run: |

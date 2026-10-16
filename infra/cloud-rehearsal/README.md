@@ -175,7 +175,7 @@ K3s-in-Docker adaptations are detected, applied only where needed, and each one 
 ## Local-storage node-loss drill
 
 `move-cloud-cells-to-local-storage` task 4, with the rehearsal evidence for
-tasks 2.3, 2.4, 2.9 and 2.10. It needs privileged Docker, loop devices and `sudo`
+tasks 2.3, 2.4, 2.9, 2.10, and the planned move of 6.4 and 7.3. It needs privileged Docker, loop devices and `sudo`
 for `losetup` and `modprobe`, so it runs on a GitHub runner: dispatch the
 `Cloud rehearsal` workflow with `mode` set to `local-storage-drill`.
 
@@ -185,7 +185,8 @@ uv run --frozen exomem-cloud-rehearsal local-storage-drill --report local-storag
 ```
 
 It runs a K3s server with embedded etcd and two agents, each with its own
-loop-device `cells` volume group. TopoLVM, the snapshot controller, the cell
+loop-device `cells` volume group, and a third agent for the planned move.
+TopoLVM, the snapshot controller, the cell
 classes and cellctl come from one render of the platform chart with
 `cellStorage.local.enabled`. The control database holds cellctl's fixture
 schema, and cells are seeded as rows.
@@ -203,6 +204,11 @@ The checks run in order, each on the state the one before leaves:
 6. **2.10:** a filler file beside the first cell's vault takes it past 80% use.
    Its next backup grows it online from 4 to 8 GiB, the drill's cap. Filled
    again, it stays at 8 GiB and cellctl raises `storage-growth-blocked`.
+7. **6.4 and 7.3:** agent B is cordoned, a note is written to the first cell,
+   and the cell is marked for a planned move. cellctl takes a stopped backup
+   on agent B, retains the old volume and restores onto agent C. The cell
+   serves there with the note, its row records the new volume, and it is
+   accepted. The restore waits while only the cordoned agent B has a pool.
 
 The report (`exomem-local-storage-drill-report-v1`) records each check's
 evidence, the measured recovery point and recovery time, and the backup upload
@@ -212,7 +218,16 @@ failed, and 2 the drill itself failed.
 The agents share the runner's kernel, where device-mapper names are global,
 so two `cells/pool0` pools cannot be active at once. Agent B therefore gets
 its volume group only after agent A's disk is destroyed, as replacement
-capacity. The report lists this and every other adaptation.
+capacity. In check 7, agent C gets its volume group only after the move's
+backup succeeded and agent B's pool was deactivated, with the second cell
+stopped first. The report lists this and every other adaptation.
+
+The drill does not move a cell between classes, as the migration from Hetzner
+volumes (task 7.3) does: it has no Hetzner CSI driver, and its cellctl runs
+with the local class as the domain. P3's coexistence configuration (task 7.7)
+has the Hetzner class, on K3s's local-path provisioner, but no agent with a
+local pool. That configuration with a storage-labelled agent and a move check
+for a seeded Hetzner-class cell would rehearse the move between classes.
 
 ## Private-link rehearsal (k3s-link)
 
