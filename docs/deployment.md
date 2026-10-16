@@ -830,6 +830,11 @@ that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover. After
 the new release has migrated the store, roll back only to a release at or after
 the one that migrated it.
 
+If you run 0.119.0 on a store that an earlier release wrote, 0.119.0 cannot back
+it up: its backup refuses with `COLLECTION_STORE_SCHEMA_PENDING`. In step 1, back
+up the store with the release that you ran before 0.119.0, then upgrade straight
+to the release after 0.119.0.
+
 To upgrade a vault with a collection store to a release that changes its schema:
 
 1. With the release that you run now, back up the store: `exomem collections backup --vault <vault> --to <file outside the vault>`.
@@ -837,10 +842,6 @@ To upgrade a vault with a collection store to a release that changes its schema:
 3. Read a store collection, for example with `record_memory` and `action: inspect`.
 
 The read answers with the collection.
-
-If you run 0.119.0, its backup refuses with `COLLECTION_STORE_SCHEMA_PENDING`,
-and the store is still at schema 10. Take the backup in step 1 with the release
-that you ran before 0.119.0, then upgrade straight to the release after 0.119.0.
 
 The backup in step 1 is a copy at the earlier schema. It does not make a rollback
 safe, because restoring it loses every store write after the upgrade.
