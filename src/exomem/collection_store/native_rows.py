@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import struct
 from collections.abc import Mapping
 from io import BytesIO
@@ -17,6 +16,7 @@ from .typed_storage import _ABSENT, TypedStorageError, canonical_json
 
 # Closed escape wire: reserved prefix plus canonical JSON, disjoint from scalar frames.
 ESCAPE_PREFIX = b"\xff\x01"
+_json_string = json.encoder.encode_basestring
 
 
 def encoded_equal(left: tuple, right: tuple) -> bool:
@@ -95,6 +95,13 @@ def _json_value(payload: bytes, *, max_bytes: int):
         raise TypedStorageError("invalid native JSON value") from error
 
 
+def _text(cell: str, max_bytes: int) -> str:
+    # An ASCII string's UTF-8 length is its length, so most cells skip encoding.
+    if (len(cell) if cell.isascii() else len(cell.encode("utf-8"))) > max_bytes:
+        raise TypedStorageError("native text exceeds the decoding budget")
+    return cell
+
+
 def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_bytes: int):
     if type(max_bytes) is not int or max_bytes < 0:
         raise TypedStorageError("native decoding requires a byte budget")
@@ -107,9 +114,7 @@ def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_byte
     try:
         match codec:
             case Codec.TEXT if type(cell) is str:
-                if len(cell.encode("utf-8")) > max_bytes:
-                    raise TypedStorageError("native text exceeds the decoding budget")
-                return cell
+                return _text(cell, max_bytes)
             case Codec.NUMBER:
                 return native_numbers.decode(cell, digit_budget=max_bytes)
             case Codec.BOOLEAN if type(cell) is int and cell in (0, 1):
@@ -227,22 +232,6 @@ def _selected_masks(layout, masks, values):
     return result
 
 
-def _selected_size(value) -> int:
-    """Canonical JSON bytes of one selected value, a TemporalView counting its full spelling."""
-    if isinstance(value, native_temporal.TemporalView):
-        return value.text_bytes + 2
-    if value is None:
-        return 4
-    if type(value) is bool:
-        return 4 if value else 5
-    if type(value) is int:
-        return len(str(value))
-    if type(value) is str:
-        # The canonical serializer uses this same non-ASCII JSON string encoder.
-        return len(json.encoder.encode_basestring(value).encode("utf-8"))
-    return len(canonical_json(value).encode("utf-8"))
-
-
 def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_bytes: int, check,
                             semantic_fields=frozenset()):
     """Share one bounded physical decoder across an admitted scalar scan."""
@@ -269,12 +258,14 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
     slots = []
     for index, (ordinal, name) in enumerate(selected):
         codec, semantic = layout.codecs[ordinal], name in semantic_fields
-        days = native_temporal.instant_days(metadata[ordinal]) if semantic and codec is Codec.DATETIME else None
+        inline, accept = (native_temporal.instant_days(metadata[ordinal]) if semantic and codec is Codec.DATETIME
+                          else (None, None))
+        # A name's charge includes its colon and one separating comma; the decoder starts one byte up for the first.
         slots.append((name, 4 + masks.index(ordinal // MASK_BITS), 1 << (ordinal % MASK_BITS),
-                      len(canonical_json(name).encode("utf-8")) + 1, cells_at + index,
-                      codec is Codec.NUMBER, codec is Codec.TEXT, days, (codec, metadata[ordinal], selection[name], semantic)))
-    low, high, view_type, prefix = native_numbers.LOW, native_numbers.HIGH, native_temporal.TemporalView, ESCAPE_PREFIX
-    string_json = json.encoder.encode_basestring
+                      len(canonical_json(name).encode("utf-8")) + 2, cells_at + index,
+                      codec is Codec.NUMBER, codec is Codec.TEXT, inline,
+                      (codec, metadata[ordinal], selection[name], semantic, accept)))
+    plain, prefix, view_type = native_numbers.plain, ESCAPE_PREFIX, native_temporal.TemporalView
     single_mask = mask_bounds[0][1] if len(mask_bounds) == 1 else 0
 
     def decode(row):
@@ -292,33 +283,30 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
                     raise TypedStorageError("invalid native missing mask")
         if extent > max_bytes:
             return None
-        result, remaining, separator = {}, extent - 2, 0
-        for name, mask_at, missing_bit, name_bytes, at, number, text, days, shared in slots:
+        result, remaining = {}, extent - 1
+        for name, mask_at, missing_bit, name_bytes, at, number, text, inline, shared in slots:
             cell = row[at]
             if row[mask_at] & missing_bit:
                 if cell is not None:
                     raise TypedStorageError("missing native field has a payload")
                 continue
-            # The inline sizes below are _selected_size's int, str and TemporalView rules.
-            if number and type(cell) is int and low <= cell <= high:
-                # native_numbers.decode returns an in-band INTEGER cell itself, so skip its dispatch.
-                value, size = cell, len(str(cell))
-            elif text and type(cell) is str and cell.isascii() and len(cell) <= extent:
-                # decode_cell returns an in-budget TEXT cell itself; ASCII text and its JSON count one byte a character.
-                value, size = cell, len(string_json(cell))
-            elif days is not None and (type(cell) is int or type(cell) is bytes and not cell.startswith(prefix)):
-                value = days(cell, extent)
-                size = value.text_bytes + 2 if type(value) is view_type else _selected_size(value)
+            # Each shortcut runs the owner's own rule for its common cell; everything else goes to the shared decoders.
+            if inline is not None and type(cell) is not str and (value := inline(cell, extent)) is not None:
+                pass  # an instant whose format this scan accepted; an escape has no frame's version byte
+            elif number and plain(cell):
+                value = cell  # native_numbers.decode returns a plain cell itself
+            elif text and type(cell) is str and cell.isascii():
+                value = _text(cell, extent)  # ASCII cannot fail to encode, so decode_cell's UnicodeError wrap never applies
             else:
-                codec, field_metadata, tree, semantic = shared
+                codec, field_metadata, tree, semantic, accept = shared
                 escaped = type(cell) is bytes and cell.startswith(prefix)
                 if cell is None:
                     value = None
+                elif accept is not None and not escaped:
+                    value = accept(cell, extent)
                 elif semantic and not escaped:
                     value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
                                                     field_metadata, max_bytes=extent, day_only=True)
-                elif number and type(cell) is float and math.isfinite(cell) and low <= cell <= high:
-                    value = cell
                 elif not escaped:
                     # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
                     value = decode_cell(codec, cell, field_metadata, max_bytes=extent)
@@ -326,12 +314,26 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
                     if len(cell) - len(prefix) > extent:
                         raise TypedStorageError("native JSON exceeds its measured values extent")
                     value = selected_cell(codec, cell, field_metadata, tree, max_bytes=max_bytes, check=check)
-                size = _selected_size(value)
-            remaining -= name_bytes + size + separator
+            # Canonical JSON bytes of the value; a TemporalView counts its full spelling.
+            kind = type(value)
+            if kind is int:
+                size = len(str(value))
+            elif kind is view_type:
+                size = value.text_bytes + 2
+            elif kind is str:
+                # The canonical serializer uses this same non-ASCII JSON string encoder; ASCII JSON is a byte a character.
+                encoded = _json_string(value)
+                size = len(encoded) if encoded.isascii() else len(encoded.encode("utf-8"))
+            elif value is None:
+                size = 4
+            elif kind is bool:
+                size = 4 if value else 5
+            else:
+                size = len(canonical_json(value).encode("utf-8"))
+            remaining -= name_bytes + size
             if remaining < 0:
                 raise TypedStorageError("native values exceed the decoding budget")
             result[name] = value
-            separator = 1
         return result
 
     return ",".join(columns), decode

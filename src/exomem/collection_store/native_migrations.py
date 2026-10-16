@@ -19,10 +19,6 @@ from .native_operands import FileRole
 from .native_projections import NativeProjectionPlan
 
 
-def _raw(conn):
-    return conn.connection if isinstance(conn, index_migrations.AccountedWriter) else conn
-
-
 def _candidate(conn, cid):
     row = conn.execute("SELECT generation,plan_json FROM query_projection_mappings "
                        "WHERE collection_id=? AND state='building'", (cid,)).fetchone()
@@ -40,8 +36,25 @@ def fail(conn, plan, diagnostic=None):
     return "failed"
 
 
+def _template(conn, cid):
+    """The declared query intent a conversion carries: a building or ready plan, else the current one that failed.
+
+    A first build that failed on a stored row, such as one over the JSON index cell limit, still matches
+    the current declaration, and the native pair can hold that row. A declaration that never normalized
+    has no plan to match.
+    """
+    plan = _candidate(conn, cid) or index_migrations.ready_plan(conn, cid)
+    if plan is None:
+        row = conn.execute("SELECT m.generation,m.plan_json FROM query_projection_mappings m JOIN collections c "
+                           "ON c.collection_id=m.collection_id AND c.query_plan_hash=m.plan_hash "
+                           "WHERE m.collection_id=? AND m.state='failed' ORDER BY m.generation DESC LIMIT 1",
+                           (cid,)).fetchone()
+        plan = None if row is None else index_migrations._plan(cid, *row, connection=conn)
+    return plan
+
+
 def _begin(conn, cid, fields, *, identity="uuid16"):
-    template = _candidate(conn, cid) or index_migrations.ready_plan(conn, cid)
+    template = _template(conn, cid)
     if template is None:
         raise typed_storage.TypedStorageError("native migration requires declared query intent")
     pending = conn.execute("SELECT generation,layout_json FROM typed_encoding_mappings "
@@ -72,32 +85,90 @@ def _begin(conn, cid, fields, *, identity="uuid16"):
     return plan
 
 
+def _value_bound(tag, kind, length):
+    """One typed-v1 value cell's canonical text bound, or None when its stored kind does not match its tag."""
+    if tag in (typed_storage.MISSING, typed_storage.NULL):
+        return 0 if kind == "null" else None
+    if tag in (typed_storage.BOOLEAN, typed_storage.INT64):
+        return 32 if kind == "integer" else None
+    if tag == typed_storage.FLOAT:
+        return 32 if kind == "blob" and length == 8 else None
+    if tag == typed_storage.STRING:
+        return 6 * length + 2 if kind == "text" else None
+    # Decoding accepts only exact digits; a JSON cell's bound holds once _extent proves it canonical.
+    if tag in (typed_storage.BIGINT, typed_storage.JSON):
+        return length if kind == "text" else None
+    return None
+
+
+def _canonical(raw, table, name, row_id):
+    """Stream one stored JSON cell against its canonical spelling without hydrating it."""
+    import ijson
+
+    from .native_json import canonical_events
+
+    with raw.blobopen(table, name, row_id, readonly=True) as source, \
+            raw.blobopen(table, name, row_id, readonly=True) as comparison:
+        try:
+            for _ in canonical_events(source, max_bytes=len(source), check=lambda: None,
+                                      comparison=comparison, byte_length=len(source)):
+                pass
+        except (typed_storage.TypedStorageError, ijson.JSONError):
+            return False
+    return True
+
+
 def _extent(conn, source, row_id):
     """Inspect lengths before fetching values, including the source proof's key and body."""
-    raw = _raw(conn)
+    raw = native_metadata.sqlite_connection(conn)
     with raw.blobopen("items", "item_key", row_id, readonly=True) as key, \
             raw.blobopen("items", "body", row_id, readonly=True) as body:
         size = len(key) + len(body)
     if source is None:
         with raw.blobopen("items", "values_json", row_id, readonly=True) as values:
             return size + len(values)
-    # Typed-v1 cells bound canonical reconstruction conservatively, before fetching them.
-    names = (*source.value_columns, "r")
-    types = conn.execute(f"SELECT {','.join('typeof(' + name + ')' for name in names)} "
-                         f"FROM {source.current_relation} WHERE row_id=?", (row_id,)).fetchone()
-    if types is None:
+    count = len(source.fields)
+    # A tag is fetched only when stored as an integer; every other cell is sized through its blob handle.
+    columns = ",".join(f"CASE WHEN typeof(t{i})='integer' THEN t{i} END,typeof(t{i}),typeof(v{i}),typeof(k{i})"
+                       for i in range(count))
+    row = conn.execute(f"SELECT {columns},typeof(r) FROM {source.current_relation} WHERE row_id=?",
+                       (row_id,)).fetchone()
+    if row is None:
         raise typed_storage.TypedStorageError("source typed row is absent")
-    for name, kind in zip(names, types, strict=True):
-        if kind in ("text", "blob"):
-            with raw.blobopen(source.current_table, name, row_id, readonly=True) as cell:
-                size += 6 * len(cell)
-        elif kind != "null":
-            size += 32
-    return size + 32 * len(source.fields) + len(
-        typed_storage.canonical_json(source.fields).encode())
+
+    def cell(name, kind):
+        """The escape bound (one stored byte can render as six) and the stored length of one cell."""
+        if kind not in ("text", "blob"):
+            return (0 if kind == "null" else 32), None
+        with raw.blobopen(source.current_table, name, row_id, readonly=True) as handle:
+            return 6 * len(handle), len(handle)
+
+    loose = tight = size + 32 * count + len(typed_storage.canonical_json(source.fields).encode())
+    proofs = []
+    for i in range(count):
+        tag, tag_kind, value_kind, key_kind = row[4 * i:4 * i + 4]
+        charge, length = cell(f"v{i}", value_kind)
+        charge += cell(f"t{i}", tag_kind)[0] + cell(f"k{i}", key_kind)[0]
+        bound = _value_bound(tag, value_kind, length)
+        loose += charge
+        # The sort key is never reconstructed; an unknown tag or a mismatched kind keeps the escape bound.
+        tight += charge if bound is None else 32 + bound
+        if bound is not None and tag == typed_storage.JSON:
+            proofs.append(f"v{i}")
+    charge, length = cell("r", row[-1])
+    loose += charge
+    tight += length if row[-1] == "text" else charge
+    if row[-1] == "text":
+        proofs.append("r")
+    # The escape bound stands unless it alone refuses the row. A non-canonical JSON cell could re-spell
+    # its numbers larger before parity rejects it, so the tag-aware bound needs each JSON cell streamed
+    # as canonical first, and only a row in that band pays for the stream.
+    if loose <= index_migrations._MAX_BATCH_BYTES or tight > index_migrations._MAX_BATCH_BYTES:
+        return loose
+    return tight if all(_canonical(raw, source.current_table, name, row_id) for name in proofs) else loose
 
 
-def _copy_one(conn, plan, source, row_id, scope):
+def _copy_one(conn, plan, source, row_id):
     version, key, schema_version, raw, body, payload = conn.execute(
         "SELECT row_version,item_key,schema_version,values_json,body,payload_hash FROM items WHERE row_id=?",
         (row_id,)).fetchone()
@@ -105,7 +176,7 @@ def _copy_one(conn, plan, source, row_id, scope):
     canonical = typed_storage.canonical_json(values)
     if (raw is not None and canonical != raw) or tokens.payload_hash(schema_version, key, values, body) != payload:
         raise typed_storage.TypedStorageError("source row does not match its canonical payload hash")
-    parameters = plan.parameters(conn, row_id, key, version, values, scope=scope)
+    parameters = plan.parameters(conn, row_id, key, version, values)
     conn.execute(plan.upsert, parameters)
     layout = replace(plan.layout, current=plan.table_name)
     decoded = typed_storage.current_values(conn, layout, row_id)
@@ -146,7 +217,6 @@ def migrate_batch(conn, cid, fields, *, limit=128):
     last = conn.execute("SELECT last_row_id FROM typed_encoding_mappings WHERE collection_id=? AND generation=?",
                         (cid, plan.layout.generation)).fetchone()[0]
     remaining_rows, remaining_bytes = limit, index_migrations._MAX_BATCH_BYTES
-    scope = native_metadata.WriteScope(conn)
     for catchup in (False, True):
         where = "(t.row_id IS NULL OR t.row_version<>i.row_version)" if catchup else "i.row_id>?"
         parameters = (cid,) if catchup else (cid, last)
@@ -170,7 +240,7 @@ def migrate_batch(conn, cid, fields, *, limit=128):
                 _begin(conn, cid, fields, identity="utf8")
                 return "building"
             try:
-                _copy_one(conn, plan, source, row_id, scope)
+                _copy_one(conn, plan, source, row_id)
             except sqlite3.OperationalError as error:
                 if error.sqlite_errorcode != sqlite3.SQLITE_ERROR:
                     raise
