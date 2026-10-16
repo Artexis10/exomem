@@ -800,6 +800,23 @@ replica before leaving it. Session and auth-generation reads are always direct t
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
 
+### A release that changes the collection store's schema
+
+A release can change the schema of the live collection store. The first service
+on that release that holds the writer lease migrates the store before it serves
+the store's collections. The migration keeps every row and the store head, so
+the coordinator's recorded head and the vault replica still match it.
+
+Until that writer has migrated the store, store reads on that host refuse with
+`COLLECTION_STORE_SCHEMA_PENDING`. File collections and knowledge writes are not
+affected. In a handoff, the earlier release's worker keeps the lease and serves
+until it stops, and the new worker migrates the store once it acquires the lease.
+
+A release from before the schema change cannot open a migrated store. Its writer
+then gets no lease on a vault with a collection store fence, so every write on
+that host refuses with `WRITER_LEASE_REQUIRED`. After an upgrade has migrated the
+store, roll back only to a release at or after the one that migrated it.
+
 ### Retire the collection store fence before a downgrade
 
 While a vault has a collection store fence, the coordinator refuses the lease to

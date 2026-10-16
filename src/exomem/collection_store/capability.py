@@ -37,7 +37,8 @@ def records_summary_disabled(root) -> bool:
     path = connection.store_path(root)
     if not path.exists():
         return False
-    with closing(connection.open_reader(path)) as reader:
+    # store_meta keeps this key in every schema version, so a store awaiting its writer's migration answers too.
+    with closing(connection.open_reader(path, pending_schema=True)) as reader:
         return reader.execute("SELECT 1 FROM store_meta WHERE key=?", (DISABLED_KEY,)).fetchone() is not None
 
 
