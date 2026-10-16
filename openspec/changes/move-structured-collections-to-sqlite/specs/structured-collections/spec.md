@@ -569,6 +569,11 @@ Append and targeted update for `markdown-log` and `markdown-items` collections S
 - **WHEN** mutations target different vault roots
 - **THEN** collection serialization does not introduce a global cross-vault lock
 
+#### Scenario: A curation Records step on a store collection refuses before approval
+- **WHEN** a curation or episode Records step (`append-record` or `update-record`) is prepared, applied or resumed for a collection that the vault's marker routes to the collection store, including a step sealed before the migration
+- **THEN** it refuses with `CURATION_RECORDS_STORE_UNSUPPORTED` before any approval and writes nothing: no plan is sealed, and the store and the collection's views are unchanged
+- **AND** a caller from whom the collection is withheld gets the refusal that a missing collection gives
+
 ### Requirement: Idempotent append and conflict-safe update
 The substrate SHALL make exact append retries idempotent where a stable item identity is available. When a caller omits the item identity and every field of the manifest's declared natural key is present in the validated values, the substrate SHALL derive the identity deterministically from the collection identity and the natural-key serialisation the read path already uses, and stamp it explicitly like any other item key; an explicit identity SHALL still win, and a payload that lacks a natural-key field SHALL receive a random identity as before. Reusing one identity with different content SHALL refuse as an identity conflict. An append whose derived or supplied identity differs from an existing item's while its serialised natural key equals that item's SHALL refuse as a natural-key conflict naming every such existing item; the store's natural-key uniqueness constraint SHALL enforce this. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching. A mutation carrying a transport request identity SHALL record that identity and its terminal receipt in the same transaction as the write; a retry with the same identity SHALL return the recorded receipt without writing, and the same identity with a different request SHALL refuse. Both profiles SHALL inherit these rules through the shared mechanics.
 

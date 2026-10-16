@@ -14,6 +14,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .. import memory_refs
 from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
 
@@ -89,6 +90,83 @@ def selected_writer(vault_root, selector):
         return None
     authority.require_selected(writer.connection, marker, entry, root=vault_root)
     return writer
+
+
+#: What a caller hears about a store collection in a process that does not serve the store.
+UNSERVED = "this collection lives in the collection store, which only the running Exomem service serves"
+#: What it hears when this process serves the store but the operation runs on files alone.
+UNSUPPORTED = "this collection lives in the collection store, and this operation does not run on the store yet"
+MARKER_UNREADABLE = ("the collection store's authority marker is unreadable, so no collection here can be "
+                     "told apart from one the store owns")
+
+
+def store_notice(vault_root, authorize_path):
+    """Who may learn that the store owns a collection this call cannot reach: a test over manifest paths.
+
+    The vault's owner may, so an unavailable C stays in its inventory, and so may a caller
+    whose release covers the path. Anyone else hears that the collection is absent, so a
+    withheld collection's existence never leaks. A None path (a selector by identity
+    under an unreadable marker) is visible to the owner alone.
+    """
+    from ..governance import raw_protection
+    from ..governance.principal import effective_principal
+
+    who = effective_principal()
+    # An unavailable C must remain visible in its owner's inventory; this grants a notice, never view bytes.
+    owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(vault_root, who)
+    return lambda path: owner or (path is not None and authorize_path(path))
+
+
+def require_file_collection(vault_root, selector, *, authorize_path):
+    """Refuse a file-mode mutation of a collection that the vault's marker routes to the store.
+
+    Every file-mode writer resolves its collection through the mutation resolver, which
+    calls this first, so a write never lands in a routed collection's generated views.
+    Reads keep resolving those views off the store thread on purpose, so this check
+    belongs to mutation resolution alone.
+    """
+    from . import authority
+
+    root = Path(vault_root)
+    writer = bound_writer(root)
+    if writer is not None:
+        marker = authority.routing_marker(writer)
+        if marker is not None and authority.selected_entry(root, marker, selector) is not None:
+            # No production caller reaches this: route() sends a routed selector to the store thread, whose dispatch() writes it.
+            raise collections.CollectionError(
+                "COLLECTION_STORE_ROUTE_REQUIRED", "a store collection is written only by its store writer")
+        return
+    try:
+        raw = authority.read_marker(root)
+        marker = None if raw is None else authority.parse_marker(root, raw)
+    except CollectionStoreError as error:
+        # Which collections the store owns is unknown, so none can be written as a file.
+        _refuse(root, _selector_path(root, selector), authorize_path, error.code, MARKER_UNREADABLE)
+    if marker is None:
+        return
+    entry = authority.selected_entry(root, marker, selector)
+    if entry is None:
+        return
+    from .runtime import served
+
+    _refuse(root, entry["manifest_path"], authorize_path, "COLLECTION_STORE_UNAVAILABLE",
+            UNSUPPORTED if served(root) else UNSERVED)
+
+
+def _selector_path(root, selector):
+    """The manifest path a selector spells, or None when it names a collection by identity."""
+    if isinstance(selector, collections.CollectionManifest):
+        return selector.path
+    raw = str(selector).strip()
+    if memory_refs.parse_memory_ref(raw) or memory_refs.normalize_id(raw):
+        return None
+    return collections._reference_key(root, raw)
+
+
+def _refuse(root, path, authorize_path, code, message):
+    if store_notice(root, authorize_path)(path):
+        raise collections.CollectionError(code, message)
+    raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
 
 
 def selected_projection_writer(vault_root, path):

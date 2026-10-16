@@ -62,6 +62,9 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
+#: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
+# nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
+_COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
 # The compatibility flag `allow_records` admits only episode-owned private leaves.
 _EPISODE_STEP_KINDS = RECORDS_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 MAX_STEPS: Final[int] = 64
@@ -256,6 +259,15 @@ class CurationError(ValueError):
 
 def _error(code: str, reason: str) -> CurationError:
     return CurationError(code, reason)
+
+
+def _records_store_unsupported() -> CurationError:
+    """A Records leaf writes files; a collection the store owns refuses it before any seal or approval."""
+    return _error(
+        "CURATION_RECORDS_STORE_UNSUPPORTED",
+        "a Records leaf cannot write a collection-store collection yet: record the item with "
+        "record_memory append, then set the candidate's disposition to deferred",
+    )
 
 
 def canonical_json(value: Any) -> str:
@@ -1321,12 +1333,20 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
         elif kind in RECORDS_STEP_KINDS:
             from . import record_governance
             from . import records as records_module
+            from . import structured_collections as collections
 
             # The Records owner's own gates, in the order `record_memory`
             # applies them: a released collection, then the records profile.
-            manifest = record_governance.require_records_profile(
-                record_governance.resolve_collection_for_mutation(vault_root, args["collection"])
-            )
+            try:
+                resolved = record_governance.resolve_collection_for_mutation(
+                    vault_root, args["collection"]
+                )
+            except collections.CollectionError as error:
+                # Raised only to a caller who may know the collection; others hear it is absent.
+                if error.code == "COLLECTION_STORE_UNAVAILABLE":
+                    raise _records_store_unsupported() from error
+                raise
+            manifest = record_governance.require_records_profile(resolved)
             if kind == RECORDS_STEP_KIND:
                 appended = records_module.prepare_append(
                     vault_root,
@@ -1624,7 +1644,7 @@ def _binding_blockers(
     release filter: a hash-bound path it withholds is read as unreadable, so
     the list is exactly the one a deleted path gives. An expected absence is
     still decided on disk; a withheld file there is never absent."""
-    blockers: list[dict[str, Any]] = []
+    blockers, store_owned = _records_store_blockers(vault_root, plan, keep)
     for name, expected in plan["registry_ids"].items():
         if current_registries.get(name) != expected:
             blockers.append(
@@ -1634,7 +1654,10 @@ def _binding_blockers(
                     "reason": "registry identity changed",
                 }
             )
-    for item in plan["binding_manifest"]:
+    for index, item in enumerate(plan["binding_manifest"]):
+        if index in store_owned:
+            # Its bound files are the store's generated views; the store blocker says why it cannot run.
+            continue
         manifest = item.get("effect_before")
         if isinstance(manifest, list) and manifest:
             for expected_item in manifest:
@@ -1682,6 +1705,51 @@ def _binding_blockers(
                 {"code": "CURATION_BINDING_STALE", "path": path, "reason": "content hash changed"}
             )
     return blockers
+
+
+def _records_store_blockers(
+    vault_root: Path, plan: Mapping[str, Any], keep: Callable[[str], bool] | None
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """The Records items whose collection the vault's marker now routes to the store.
+
+    A leaf sealed before a migration still names a file collection, and no curation
+    step writes the store, so it refuses here, before any approval. The marker and
+    `keep` decide through the one rule the Records writer applies: a caller `keep`
+    withholds the collection from finds no blocker here, and its bound pages read as
+    missing below, as a deleted collection's do.
+    """
+    from . import structured_collections as collections
+    from .collection_store.preview import require_file_collection
+
+    blockers: list[dict[str, Any]] = []
+    owned: set[int] = set()
+    for index, item in enumerate(plan["binding_manifest"]):
+        prepared = item.get("prepared") or {}
+        if item.get("kind") not in RECORDS_STEP_KINDS or not isinstance(
+            prepared.get("collection_id"), str
+        ):
+            continue
+        try:
+            require_file_collection(
+                vault_root, prepared["collection_id"], authorize_path=keep or (lambda _path: True)
+            )
+        except collections.CollectionError as error:
+            if error.code == "COLLECTION_NOT_FOUND":
+                continue
+            refusal = (
+                _records_store_unsupported()
+                if error.code == "COLLECTION_STORE_UNAVAILABLE"
+                else _error(error.code, error.reason)
+            )
+            blockers.append(
+                {
+                    "code": refusal.code,
+                    "path": str(prepared.get("manifest_path") or ""),
+                    "reason": refusal.reason,
+                }
+            )
+            owned.add(index)
+    return blockers, owned
 
 
 def _bound_hash(vault_root: Path, path: str, keep: Callable[[str], bool] | None) -> str | None:
@@ -2560,6 +2628,16 @@ def _execute_next(
         raise _error("CURATION_OUTCOME_UNCERTAIN", "run evidence is invalid")
     next_item = _next_step(plan, reconstructed)
     if next_item is None:
+        failed_step = reconstructed.get("failed_step")
+        if failed_step is not None:
+            # The run stopped on a refusal that committed nothing: a retry hears that refusal
+            # again, never a replay of a run that did not complete.
+            codes = [
+                receipt["error_code"]
+                for receipt in reconstructed["receipts"]
+                if receipt.get("step_id") == failed_step and receipt.get("outcome") == "failed"
+            ]
+            raise _error(codes[-1], f"curation step {failed_step!r} was refused and did not commit")
         return _compensation_phase(
             {**reconstructed, "outcome": "replayed", "mutated": False},
             compensation=compensation,
@@ -3236,13 +3314,19 @@ class CurationStore:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable") from error
 
-    def _write_json(self, path: Path, value: Any, *, create_only: bool) -> None:
+    def _write_json(
+        self, path: Path, value: Any, *, create_only: bool, commit_point: bool = False
+    ) -> None:
+        """Write one run artifact. Bookkeeping (approval, state, a failed receipt) is no
+        commit: a leaf refused after it must answer with its own code, uncommitted. Only
+        a plan seal and a receipt for a committed leaf mark the command committed."""
         self._assert_safe(path)
         content = canonical_json(value)
         try:
             batch_atomic_write(
                 [PlannedWrite(path=path, content=content, create_only=create_only)],
                 vault_root=self.vault_root,
+                commit_point=commit_point,
             )
         except (BatchWriteError, OSError, ValueError) as error:
             code = "CURATION_PLAN_COLLISION" if create_only else "CURATION_STORE_WRITE_FAILED"
@@ -3457,7 +3541,12 @@ class CurationStore:
             if canonical_json_bytes(self._read_json(path)) == canonical_json_bytes(receipt):
                 return path
             raise _error("CURATION_OUTCOME_UNCERTAIN", "a competing receipt exists")
-        self._write_json(path, dict(receipt), create_only=True)
+        self._write_json(
+            path,
+            dict(receipt),
+            create_only=True,
+            commit_point=receipt.get("outcome") in _COMMITTED_OUTCOMES,
+        )
         return path
 
     def write_state(self, run_identity: str, state: Mapping[str, Any]) -> None:
@@ -3522,7 +3611,7 @@ class CurationStore:
             )
             if not common_valid:
                 return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
-            if outcome in {"committed", "recovered-committed"}:
+            if outcome in _COMMITTED_OUTCOMES:
                 if approval is None or set(receipt) != {
                     "version",
                     "attempt",

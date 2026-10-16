@@ -1253,14 +1253,11 @@ def discover_collections_with_errors(
         return stored, store_errors
     trash_root = kb / TRASH_SUBPATH
     authorize = authorize_path or (lambda _path: True)
-    notice_owner = False
+    notice = None
     if writer is None and (marker is not None or marker_error is not None):
-        from .governance import raw_protection
-        from .governance.principal import effective_principal
+        from .collection_store.preview import MARKER_UNREADABLE, UNSERVED, store_notice
 
-        who = effective_principal()
-        # An unavailable C must remain visible in its owner's inventory; this grants a notice, never view bytes.
-        notice_owner = raw_protection.is_owner(who) and raw_protection.has_unrestricted_access(root, who)
+        notice = store_notice(root, authorize)
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
     candidates = []
@@ -1271,21 +1268,18 @@ def discover_collections_with_errors(
             continue
         entry = None if marker is None else authority.selected_entry(root, marker, safe[1])
         if marker_error is not None or entry is not None:
-            if writer is None and (notice_owner or authorize(safe[1])):
+            if notice is not None and notice(safe[1]):
                 # A routed manifest is the store's generated view, never a file collection,
                 # and only the service that serves the store can read it. Its profile comes
                 # from a marker checked against canon, never from that editable view.
                 # Without canon, an unknown profile keeps every affected sweep partial.
                 if marker_error is None and store_error is None:
-                    code, message = "COLLECTION_STORE_UNAVAILABLE", (
-                        "this collection lives in the collection store, which only the running Exomem service serves")
+                    code, message = "COLLECTION_STORE_UNAVAILABLE", UNSERVED
                 elif marker_error is None:
                     # A valid marker still separates A/B from C when C's canonical state is unavailable.
                     code, message = store_error.code, str(store_error)
                 else:
-                    code, message = marker_error.code, (
-                        "the collection store's authority marker is unreadable, so no collection here can be "
-                        "told apart from one the store owns")
+                    code, message = marker_error.code, MARKER_UNREADABLE
                 unreadable.append(UnreadableManifest(
                     safe[1], code, message,
                     entry.get("semantic_profile") if entry is not None and profiles_verified else None))
