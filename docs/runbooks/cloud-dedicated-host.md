@@ -795,10 +795,11 @@ the API server refuses that agent's kubelet. Do steps 4 to 6 without a pause.
 
 8. Present the everyday operator certificate again, as in step 1.
 9. Issue a new everyday operator certificate, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
-10. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key: `ssh exomem-admin@<server> 'sudo rm -rf <directory>'`.
+10. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key, and the local copy of the step 2 snapshot, which scheduled pruning never removes: `ssh exomem-admin@<server> 'sudo rm -rf <directory> /var/lib/rancher/k3s/server/db/snapshots/<name>'`.
 
-Expected result: step 1 lists the nodes. Step 2 logs the snapshot's name, as
-`Snapshot <name> saved.` Step 3 prints the SHA-256 fingerprints of the old and
+Expected result: step 1 lists the nodes. Step 2 logs `Snapshot <name> saved.`
+twice with the same name: once for the local copy and once for the S3 copy. One
+line means the S3 upload failed and only the local copy exists. Step 3 prints the SHA-256 fingerprints of the old and
 the new client CA, and the directory that keeps the old pair. Step 4 prints
 `ok`, and step 7 shows every node Ready within a few minutes. Step 8 prints
 `error: You must be logged in to the server (Unauthorized)`: the API server
@@ -812,8 +813,11 @@ If the server does not start in step 4, read its log:
 `sudo journalctl -u k3s`. If K3s cannot start on the new client CA, restore
 etcd from the snapshot of step 2, as in
 [cloud-node-loss.md](cloud-node-loss.md#restore-etcd-from-an-older-snapshot).
-Set `SNAPSHOT` to the name that step 2 printed. The restore brings back the old
-client CA and loses only what changed after step 2. The agents have not
+Set `SNAPSHOT` to the name that step 2 printed. If step 2 printed its line only
+once, restore the local copy instead: run the restore without `--etcd-s3` and its key options, with
+`--cluster-reset-restore-path=/var/lib/rancher/k3s/server/db/snapshots/<name>`.
+The restore brings back the old client CA and loses only what changed after
+step 2. The agents have not
 restarted yet, so they still hold certificates from the old client CA.
 
 To undo the rotation after step 7, load the old pair again, then repeat steps
