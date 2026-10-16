@@ -56,7 +56,7 @@ def test_published_event_is_held_until_postcommit_registration(
     watcher._flush()
 
     assert fanout == [[target]]
-    assert watcher._drain() == ([], [], [], 0, False)
+    assert watcher._drain() == ([], [], [], 0, False, False)
     assert freshness.external_pending(vault) is False
 
 
