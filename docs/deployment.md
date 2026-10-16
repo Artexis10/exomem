@@ -819,8 +819,8 @@ undoes it.
 
 This release ships no export command that turns store collections back into
 files. Retire the fence only on a vault that has no store marker: check that the
-file `Knowledge Base/_Collections/mode.json` is absent from every host's copy of
-the vault.
+file `<knowledge base folder>/_Collections/mode.json` (`Knowledge Base` by
+default) is absent from every host's copy of the vault.
 
 1. Stop the Exomem service on every host that serves the vault.
 2. Read the fence with the writer credential:
