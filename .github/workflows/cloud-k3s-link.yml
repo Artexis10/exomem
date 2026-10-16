@@ -4,8 +4,9 @@ name: Cloud k3s-link rehearsal
 # agent-token rotation on a disposable K3s server and agent, about ten
 # minutes. A pull request reruns it only when the K3s it rehearses or the
 # files it exercises change: the role's defaults (the K3s version pin, MTU
-# and CIDR), the flannel template, the re-save helper, the K3s image pin and
-# the mode itself.
+# and CIDR), the flannel template, the re-save helper, the K3s image pin, the
+# ansible-core pin in tool-versions.env, and the harness. The whole harness
+# directory: its CLI imports every module, and its lockfile pins them all.
 on:
   pull_request:
     paths:
@@ -13,7 +14,8 @@ on:
       - "infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2"
       - "infra/ansible/roles/k3s/files/exomem-k3s-resave-bootstrap.sh"
       - "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
-      - "infra/cloud-rehearsal/src/cloud_rehearsal/k3s_link.py"
+      - "infra/tool-versions.env"
+      - "infra/cloud-rehearsal/**"
       - ".github/workflows/cloud-k3s-link.yml"
   workflow_dispatch:
 

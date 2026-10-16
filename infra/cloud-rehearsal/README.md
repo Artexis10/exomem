@@ -221,8 +221,8 @@ rotation). It runs a K3s server with embedded etcd and one agent, with no cell
 images, in about ten minutes. It needs privileged Docker and `uvx`, but no
 `sudo`, so it also runs on a workstation. On a runner, dispatch the
 `Cloud k3s-link rehearsal` workflow. A pull request runs it when the k3s role's
-defaults, its flannel template or re-save helper, the K3s image pin or this mode
-changes.
+defaults, its flannel template or re-save helper, the K3s image pin, the
+ansible-core pin or this harness changes.
 
 ```
 cd infra/cloud-rehearsal
@@ -233,10 +233,10 @@ uv run --frozen exomem-cloud-rehearsal k3s-link --report k3s-link-report.json
 network and volume it creates, and to the image it builds.
 
 The pinned ansible-core renders the k3s role's flannel configuration and the
-values the checks expect from the role's own template and defaults. The role
-leaves `k3s_flannel_mtu` unset until its rollout commit, so the rehearsal sets
-it to the smallest dedicated link the role declares (`k3s_vswitch_mtu`,
-`k3s_wireguard_mtu`), the value that commit sets. The run
+values the checks expect from the role's own template and defaults. It uses the
+role's `k3s_flannel_mtu` once it is set. While it is unset, before the rollout
+commit, the rehearsal uses the smallest dedicated link the role declares
+(`k3s_vswitch_mtu`, `k3s_wireguard_mtu`), the value that commit sets. The run
 stops before any node starts if the K3s image does not report the role's
 `k3s_version`. The Docker network runs at the Hetzner Cloud network's 1450
 bytes, and the agent lowers its interface to a vSwitch's 1400.

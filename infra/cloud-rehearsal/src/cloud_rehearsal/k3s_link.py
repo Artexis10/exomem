@@ -129,9 +129,9 @@ def render_role(workdir: Path) -> tuple[dict[str, Any], Path]:
     rendered by the pinned ansible-core from the role's template and defaults,
     so that no MTU or CIDR in this module is a copy of the role's.
 
-    The role leaves k3s_flannel_mtu unset until its rollout commit sets it to
-    the smallest dedicated link, so the rehearsal sets that from the role's own
-    link MTUs."""
+    The rehearsal uses the role's k3s_flannel_mtu once it is set. While it is
+    unset, before the rollout commit, it uses the smallest dedicated link the
+    role declares, which is the value that commit sets."""
 
     conf, values, play = workdir / "flannel-net-conf.json", workdir / "role-values.json", workdir / "render-role.yml"
     play.write_text(yaml.safe_dump([{
@@ -140,7 +140,9 @@ def render_role(workdir: Path) -> tuple[dict[str, Any], Path]:
         "tasks": [
             {"ansible.builtin.include_vars": {"file": str(ROLE / "defaults/main.yml")}},
             {"ansible.builtin.set_fact": {"k3s_role_default_flannel_mtu": "{{ k3s_flannel_mtu }}"}},
-            {"ansible.builtin.set_fact": {"k3s_flannel_mtu": "{{ [k3s_vswitch_mtu, k3s_wireguard_mtu] | min | int }}"}},
+            {"ansible.builtin.set_fact": {"k3s_flannel_mtu": (
+                "{{ k3s_role_default_flannel_mtu if k3s_role_default_flannel_mtu is not none"
+                " else [k3s_vswitch_mtu, k3s_wireguard_mtu] | min }}")}},
             {"ansible.builtin.template": {"src": str(ROLE / "templates/flannel-net-conf.json.j2"),
                                           "dest": str(conf), "mode": "0644"}},
             {"ansible.builtin.copy": {"dest": str(values), "mode": "0644", "content": (

@@ -155,14 +155,26 @@ VXLAN's 50 bytes.
 4. Converge the server, with the inventory and variables of [Add the host](#add-the-host): `infra/scripts/ansible_with_sops.sh --inventory infra/ansible/inventory.yml "${fleet_vars[@]}" -- --limit exomem-alpha`.
 5. If the cluster has agents, converge one canary agent, then each other agent, one at a time. End the same command with `-- --limit 'exomem-alpha,<agent>'`: an agent's run needs the server's facts from the same run, and the server reports no change.
 6. On each node, read the MTU: `ssh exomem-admin@<node> 'cat /sys/class/net/flannel.1/mtu; grep FLANNEL_MTU /run/flannel/subnet.env'`.
-7. If the cluster has agents, restart the pods that run on the pod network, so that they take the new MTU. In each of `kube-system`, `exomem-platform`, `exomem-cloud` and `exomem-edge`, run `kubectl rollout restart deployment --namespace <namespace>`, then the same for `daemonset` and `statefulset`. Then restart each cell in turn: `kubectl --namespace exo-cell-<id> delete pod cell-0`.
+7. Only if the cluster has agents, and outside the 02:00–05:00 UTC backup window, restart the platform workloads that run on the pod network, so that they take the new MTU. Workloads on the host network keep the host's MTU and are skipped:
+
+   ```bash
+   for namespace in kube-system exomem-platform exomem-cloud exomem-edge; do
+     kubectl get deployments,daemonsets,statefulsets --namespace "$namespace" -o json \
+       | jq -r '.items[] | select(.spec.template.spec.hostNetwork != true) | "\(.kind | ascii_downcase)/\(.metadata.name)"' \
+       | xargs -r kubectl rollout restart --namespace "$namespace"
+   done
+   ```
 
 Expected result: each run reports "Require flannel.1 and new pods at the
 configured MTU" as passed, and step 6 prints `1350` and `FLANNEL_MTU=1350` on
 every node. A pod that started before its node's run keeps the old MTU until it
 restarts, which matters only for traffic to a pod on another node. With the
 server as the only node, which is production until an agent token is
-selected, no pod traffic crosses nodes, so step 7 has nothing to do.
+selected, no pod traffic crosses nodes, so skip step 7.
+
+Cells take the new MTU when cellctl next recreates their pods, for example at
+the next cell image release. Do not delete a cell's pod by hand: that bypasses
+cellctl's holds and its backup window.
 
 If a run fails at that check, run the same command again. Every run reads each
 node's `flannel.1`, and recreates it while it runs at another MTU.
@@ -441,8 +453,10 @@ server token, then run step 4 again:
 
 ```bash
 sops decrypt --extract '["token"]' infra/secrets/escrow/k3s-server-token.v1.sops.json \
-  | ssh exomem-admin@<server> 'read -r token; test -n "$token" && sudo k3s token rotate --new-token "$token"'
+  | ssh exomem-admin@<server> "sudo sh -c 'read -r t; test -n \"\$t\" && exec k3s token rotate --new-token \"\$t\"'"
 ```
+
+The token reaches the root shell on stdin, so sudo logs only the script text.
 
 If step 4 reports that `k3s token rotate` failed and the token is unchanged,
 run step 4 again.
@@ -467,6 +481,6 @@ certificate and the node password also get a new kubelet certificate.
 Expiry is therefore no remedy: until a removed host's certificate expires, it
 can get other new certificates, and a host still in the cluster renews its own. Only a
 rotation of the cluster's client CA closes the exposure, and this runbook does
-not cover it yet. The host firewall admits port 6443 only from the other
-inventoried nodes' private addresses, which limits who can use these
-credentials.
+not cover it yet. The host firewall's rules admit port 6443 from the
+private network only for the other inventoried nodes' addresses, which limits
+who outside the cluster can use these credentials.
