@@ -273,9 +273,9 @@ not `/var/lib/tang`, `systemctl cat tangd@.service` shows it.
 ## Replace a failed disk
 
 `site.yml` reports a degraded array but does not repair it. cellctl emails
-`cell-array-degraded` while any md array on a dedicated host has a failed
-member, or fewer active members than it requires. The email names no host:
-`kubectl -n exomem-cloud logs deployment/cellctl | grep cell-array-degraded`
+`cell-array-degraded` while any md array on a dedicated host is inactive, has a
+failed member, or has fewer active members than it requires. The email names no
+host: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-array-degraded`
 lists the nodes. After the provider swaps the disk, run these steps on the
 host. `<new>` and `<surviving>` are whole disks, for example `/dev/nvme1n1` and
 `/dev/nvme0n1`.

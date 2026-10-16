@@ -1897,12 +1897,13 @@ def test_each_node_is_read_from_its_running_pod_and_a_pod_that_is_down_leaves_it
     assert none == {}
 
 
-def test_a_pod_that_drips_its_page_is_cut_off_at_the_deadline_and_its_node_reads_unreadable(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("phase", ["head", "body"])
+def test_a_pod_that_drips_its_response_is_cut_off_at_the_bound_and_its_node_reads_unreadable(
+    phase: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The socket timeout restarts with every byte, so a pod sending a byte every
-    # 0.2 s would hold the pass for as long as the page lasts (10 s here, minutes
-    # for a real one) while the liveness probe counts down.
+    # A socket timeout restarts with every byte, so a pod sending one every
+    # 0.2 s would hold the pass for as long as its head or page lasts (10 s here,
+    # minutes for a real one) while the liveness probe counts down.
     import http.server
     import threading
     import time
@@ -1912,9 +1913,12 @@ def test_a_pod_that_drips_its_page_is_cut_off_at_the_deadline_and_its_node_reads
 
     class Drip(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
-            self.send_response(200)
-            self.send_header("Content-Length", "50")
-            self.end_headers()
+            if phase == "head":
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Pad: ")
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", "50")
+                self.end_headers()
             try:
                 for _ in range(50):
                     self.wfile.write(b"#")
@@ -1934,7 +1938,7 @@ def test_a_pod_that_drips_its_page_is_cut_off_at_the_deadline_and_its_node_reads
         def list_namespaced_pod(self, namespace, label_selector):
             return NS(items=[pod])
 
-    monkeypatch.setattr(k8s_client, "METRICS_DEADLINE", 0.6)
+    monkeypatch.setattr(k8s_client, "METRICS_TIMEOUT", 0.6)
     client = k8s_client.ClusterClient.__new__(k8s_client.ClusterClient)
     client._core = Core()
     started = time.monotonic()

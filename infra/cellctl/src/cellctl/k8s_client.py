@@ -7,10 +7,10 @@ library. decide.py never sees it; reconcile.py is the only caller.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
-import time
 from datetime import datetime
 
 import httpx
@@ -72,15 +72,36 @@ API_REQUEST_TIMEOUT = (5, 30)
 
 # Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
 # pod (about 5 KB from node-exporter's mdadm collector, tens of KB from TopoLVM).
-# One call reads every pod inside METRICS_DEADLINE seconds of wall clock, with no
-# socket wait longer than METRICS_TIMEOUT, and takes at most METRICS_MAX_BYTES from
-# a pod. A pod past any of these is an unreadable node, never a clean one. The
-# deadline is checked between socket waits, so a call can overrun it by one
-# METRICS_TIMEOUT. Only a server that drips its response headers can hold it
-# longer; the two pinned servers send theirs in one write.
-METRICS_DEADLINE = 10.0
+# Every pod is read at once, each inside METRICS_TIMEOUT seconds of wall clock for
+# its connect, response head and body together, so one call takes that long at
+# most. A socket timeout would restart with every byte a pod drips. A pod that
+# misses the bound, or sends more than METRICS_MAX_BYTES, is an unreadable node,
+# never a clean one.
 METRICS_TIMEOUT = 3.0
 METRICS_MAX_BYTES = 256 * 1024
+
+
+async def _read_metrics(targets: dict[str, str], port: int, scraped: dict[str, str]) -> None:
+    """Fills `scraped` with the page of each node in `targets` (node -> pod IP)
+    that answered in time; the others are left out."""
+
+    async def read(client: httpx.AsyncClient, node: str, address: str) -> None:
+        try:
+            async with asyncio.timeout(METRICS_TIMEOUT):
+                async with client.stream("GET", f"http://{address}:{port}/metrics") as response:
+                    response.raise_for_status()
+                    body = b""
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) > METRICS_MAX_BYTES:
+                            raise ValueError("metrics page too large")
+            scraped[node] = body.decode("utf-8")
+        except (httpx.HTTPError, ValueError, TimeoutError):
+            pass
+
+    # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
+    async with httpx.AsyncClient(trust_env=False, timeout=None) as client:
+        await asyncio.gather(*(read(client, node, address) for node, address in targets.items()))
 
 
 def _bound_requests(api_client: k8s.ApiClient) -> None:
@@ -194,26 +215,14 @@ class ClusterClient:
         answer leaves its node out: an unreadable node, never a clean one. A
         failed pod listing raises. The chart grants `list` on pods."""
 
-        deadline = time.monotonic() + METRICS_DEADLINE
+        targets = {
+            pod.spec.node_name: pod.status.pod_ip
+            for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items
+            if pod.status.phase == "Running" and not pod.metadata.deletion_timestamp
+            and pod.spec.node_name and pod.status.pod_ip
+        }
         scraped: dict[str, str] = {}
-        with httpx.Client(trust_env=False) as client:
-            for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items:
-                node, address = pod.spec.node_name, pod.status.pod_ip
-                if pod.status.phase != "Running" or pod.metadata.deletion_timestamp or not node or not address:
-                    continue
-                if time.monotonic() >= deadline:
-                    break
-                try:
-                    with client.stream("GET", f"http://{address}:{port}/metrics", timeout=METRICS_TIMEOUT) as response:
-                        response.raise_for_status()
-                        body = b""
-                        for chunk in response.iter_bytes():
-                            body += chunk
-                            if len(body) > METRICS_MAX_BYTES or time.monotonic() >= deadline:
-                                raise ValueError("metrics page too large or too slow")
-                    scraped[node] = body.decode("utf-8")
-                except (httpx.HTTPError, ValueError):
-                    continue
+        asyncio.run(_read_metrics(targets, port, scraped))
         return scraped
 
     def observe_import_jobs(self, namespace: str, import_id: str):
