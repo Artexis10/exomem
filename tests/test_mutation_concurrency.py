@@ -49,6 +49,9 @@ def _add_command():
     return next(command for command in commands.COMMANDS if command.name == "add")
 
 
+# The retry phase commits one capture per wave, so its runtime is twenty serial
+# real captures: about 0.5 s each on Linux and 3 s each on the Windows NTFS runner.
+@pytest.mark.timeout(180)
 def test_twenty_concurrent_real_captures_leave_complete_vault_state(
     vault: Path, source_schema
 ) -> None:
@@ -107,9 +110,7 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert not thread.is_alive()
         pending = set(range(20))
         results: dict[int, dict] = {}
-        deadline = time.monotonic() + 45.0
         while pending:
-            assert time.monotonic() < deadline, "concurrent retry waves did not make progress"
             with ThreadPoolExecutor(max_workers=20) as retry_pool:
                 futures = {
                     number: retry_pool.submit(capture, number, synchronize=False, retry=True)
@@ -117,13 +118,15 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
                 }
                 for number, future in futures.items():
                     try:
-                        remaining = deadline - time.monotonic()
-                        assert remaining > 0, "concurrent retry waves did not make progress"
-                        results[number] = future.result(timeout=remaining)
+                        results[number] = future.result(timeout=_HOLD_SECONDS)
                     except OpError as error:
                         assert error.code == "MUTATION_BUSY"
                         assert error.details.get("committed") is False
-            pending.difference_update(results)
+            # Every wave starts with the boundary free, so its first acquirer
+            # commits. Progress is a count per wave, not a wall-clock total.
+            committed = pending & results.keys()
+            assert committed, "a concurrent retry wave committed nothing"
+            pending -= committed
 
     paths = [result["path"] for result in results.values()]
     assert len(paths) == len(set(paths)) == 20
