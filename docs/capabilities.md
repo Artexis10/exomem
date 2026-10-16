@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 32
-- Tier 1 commands: 28
+- Product commands: 33
+- Tier 1 commands: 29
 - Tier 2 commands: 4
-- Registry-generated MCP commands: 32
-- REST commands: 31
-- CLI commands: 31
+- Registry-generated MCP commands: 33
+- REST commands: 32
+- CLI commands: 32
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -44,6 +44,7 @@ See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
 | activate_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation, trigger, initiator | Compile authorized context for a human turn or agent task refresh. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose | Read a page or exact semantic unit selected by recall or known ref. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault folders; read-only. |
+| viewer_map | 1 | MCP, REST, CLI | read | no | - | viewer_map | max_nodes, max_edges, purpose | Return a bounded global map of admitted current graph pages. Read-only. |
 | remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Remember a durable conclusion as compiled governed knowledge. |
 | edit_memory | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, operation*, validate_only, identity_decision, response_detail | Edit an existing memory page with an auditable reason. |
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, verdict, check_by, id, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, response_detail | Validate or mutate one semantic unit on a compiled memory page. |
@@ -53,7 +54,7 @@ See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a sourced note; read-only. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, raw_protection, response_detail | Preserve text as append-only proof. |
 | preserve_artifacts | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, files*, adoption, transcriptions, raw_protection, response_detail | Preserve client file handles as append-only Evidence. |
-| transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation, lane, response_detail | Prepare binary transfer when client file handles are unavailable. |
+| transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation, lane, artifact, expected_sha256, response_detail | Prepare binary transfer when client file handles are unavailable. |
 | process_media | 1 | MCP, REST, CLI | write | no | - | - | path, paths, operation, response_detail | Reconcile governed media, inspect status, or retry after remediation. |
 | review_memory | 1 | MCP, REST, CLI | write | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, continuation, query, sources, suggested_title, tag, key, value, path, state, ref, detail, legacy_sample_limit, family, response_detail | Review memory health, provenance, drift, or source backlog. |
 | review_item_context | 1 | MCP, REST, CLI | read | no | ref | review_item_context | ref*, expected_fingerprint, max_body_chars, max_related_pages, max_graph_nodes, max_graph_edges, max_history, max_evolution_versions, continuation | Read one review item's target, provenance, relations and history. |

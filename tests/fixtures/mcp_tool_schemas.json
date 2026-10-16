@@ -3623,7 +3623,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived token/URL; stores nothing.",
+    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3635,6 +3635,14 @@
           "default": "evidence",
           "description": "Upload target: source (raw) or evidence (proof); token-bound. Ignored for downloads.",
           "type": "string"
+        },
+        "artifact": {
+          "type": "string",
+          "description": "Vault-relative stored original or its custody page for download."
+        },
+        "expected_sha256": {
+          "type": "string",
+          "description": "Optional assertion of the original version to recover."
         },
         "response_detail": {
           "default": "compact",
@@ -3844,6 +3852,29 @@
         "ref",
         "action"
       ],
+      "type": "object"
+    }
+  },
+  "viewer_map": {
+    "description": "Return a bounded global map of admitted current graph pages. Read-only.\n\nRank pages by admitted incoming cross-page edges, then graph node key.\nInclude isolated pages and collapse semantic-unit endpoints to their pages.\nRelation vocabulary retains source instance and definition identities.\n\nComplete scans report exact eligible totals even when drawing is capped.\nPartial scans report observed counts, unknown exact totals and provisional\nranking. Missing, stale, unproven or incompatible snapshots are unavailable.\nNo interactive request builds or proves a cold graph snapshot.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_nodes": {
+          "default": 200,
+          "description": "Drawing cap, from 1 to 200. Default 200.",
+          "type": "integer"
+        },
+        "max_edges": {
+          "default": 400,
+          "description": "Drawing cap, from 0 to 400. Default 400.",
+          "type": "integer"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Optional declared purpose under the existing disclosure policy."
+        }
+      },
       "type": "object"
     }
   }

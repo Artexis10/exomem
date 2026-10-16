@@ -146,3 +146,68 @@ as preserved.
 - **WHEN** an agent on a client with no file handle, no local attach and no code-execution egress is asked to keep an attached file
 - **THEN** guidance directs it to tell the user the original was not preserved and how to upload it
 - **AND** it does not save only a transcription as though custody were complete
+
+### Requirement: Supported clients recover preserved originals
+
+Exomem SHALL recover an admitted original from canonical artifact storage without
+requiring its external source. Delivery SHALL use a supported native consumable
+file when available, or authenticated HTTPS with existing identity and governance.
+A user SHALL be able to open the HTTPS fallback in an ordinary browser and
+download the permitted original without supplying a hidden authorization header.
+The contract SHALL apply to stored multimodal originals, including images, audio,
+video, documents and datasets. Transcripts, previews and extracted text SHALL NOT
+substitute for original container bytes. Transfer memory and payload size SHALL
+remain bounded; unsupported native payloads SHALL use the supported HTTPS path.
+A new bearer download grant SHALL name one artifact version and retain its issuing
+principal, session and expiry. Complete-byte delivery SHALL meet the current
+full-byte disclosure decision and active-session check. It SHALL NOT broaden the
+caller's authority, expose credentials through logs or referrers, or require a
+separate account or artifact store.
+
+#### Scenario: The external original is unavailable
+
+- **WHEN** an admitted client retrieves a preserved original after its external source disappears
+- **THEN** the client consumes the stored bytes with the preserved SHA-256, size and media identity
+- **AND** the result identifies the original rather than substituting a transcription or derivative
+
+#### Scenario: A client supports native consumable files
+
+- **WHEN** the authenticated client supports a documented native file-output interface
+- **THEN** Exomem delivers the admitted original through that interface
+- **AND** acceptance proves client consumption rather than only resource-reference or URL creation
+
+#### Scenario: A client needs HTTPS delivery
+
+- **WHEN** native file delivery is unavailable and the client supports secure HTTPS retrieval
+- **THEN** Exomem supplies an authenticated route or a short-lived grant for the exact artifact version
+- **AND** a client that cannot supply login credentials receives no broader session credential
+
+#### Scenario: A user opens the fallback link
+
+- **WHEN** the user opens the returned HTTPS link in an ordinary browser
+- **THEN** the existing authenticated session or exact-artifact grant permits the download
+- **AND** the flow requires no separate account or manually supplied bearer header
+
+#### Scenario: A large audio or video original needs fallback delivery
+
+- **WHEN** the stored original exceeds the client's supported native payload
+- **THEN** a supported bounded HTTPS transfer returns its original container bytes and media identity
+- **AND** it does not return a transcript or preview as the recovered original
+
+#### Scenario: Download authority no longer permits the bytes
+
+- **WHEN** authority is absent, expired, revoked, foreign or bound to another artifact version
+- **THEN** the transfer releases no bytes and reveals no forbidden artifact existence
+- **AND** the canonical original remains unchanged
+
+#### Scenario: A recovered original produces a preserved derivative
+
+- **WHEN** a client consumes an original, creates a derivative and preserves it through the existing writer
+- **THEN** the derivative retains provenance to the original and its content hash
+- **AND** both original and derivative remain independently recoverable under their own disclosure decisions
+
+#### Scenario: A client cannot consume any supported delivery path
+
+- **WHEN** neither native file delivery nor secure HTTPS retrieval is available
+- **THEN** Exomem reports that client path as unsupported or unverified
+- **AND** it does not report a minted URL as a completed transfer

@@ -201,8 +201,10 @@ def _start_operator(ctx: Context, snapshot: str, volume_path: str) -> str:
          "--no-cache", INOTIFY_PACKAGE], timeout=900)
     shutil.copy(Path(__file__).with_name("restore_abort_observer.py"), context / "observer.py")
     k3s = yaml.safe_load((images.REPO_ROOT / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+    # This rehearsal's observer dependencies and operator run on x86 only.
+    binary = k3s["k3s_binaries"]["x86_64"]
     ctx.report.stages["operator_restore_abort"]["operator_k3s"] = {
-        "version": k3s["k3s_version"], "sha256": k3s["k3s_sha256_amd64"],
+        "version": k3s["k3s_version"], "sha256": binary["sha256"],
     }
     # Only install the break-glass OpenSSL CLI if the source image lacks it.
     # The remaining names are the fixed CLI dependencies of the shipped run.
@@ -215,8 +217,8 @@ def _start_operator(ctx: Context, snapshot: str, volume_path: str) -> str:
         "&& rm -rf /var/lib/apt/lists/*; fi; "
         "for tool in bash openssl python3 base64 sha256sum awk date seq od tr cut grep tail wc install cp; "
         "do command -v \"$tool\" >/dev/null || exit 1; done\n"
-        f"ADD --checksum=sha256:{k3s['k3s_sha256_amd64']} --chmod=0755 "
-        f"{k3s['k3s_release_url_amd64']} /usr/local/bin/k3s\n"
+        f"ADD --checksum=sha256:{binary['sha256']} --chmod=0755 "
+        f"{binary['url']} /usr/local/bin/k3s\n"
         "COPY extra /opt/restore-observer\nCOPY observer.py /opt/restore-observer/observer.py\n"
     )
     tag = f"{build.CELL_REPOSITORY}:{stack.run_id}-restore-operator"

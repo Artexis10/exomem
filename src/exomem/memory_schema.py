@@ -1050,6 +1050,8 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         # when a directed extension refines symmetric ``relates_to``: loading
         # the emitted proposal would silently inherit the parent's direction.
         value["direction"] = item.direction
+        if item.presentation_role is not None:
+            value["presentation_role"] = item.presentation_role
         scope = {}
         if item.projects:
             scope["projects"] = sorted(item.projects)

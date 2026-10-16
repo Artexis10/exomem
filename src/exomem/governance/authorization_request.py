@@ -120,6 +120,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "suggest_relations",
         "transfer_artifact",
         "triage_memory",
+        "viewer_map",  # The registered graph read uses graph_context's credential rule.
     }
 )
 _GOVERNANCE_OPERATIONS = frozenset(
