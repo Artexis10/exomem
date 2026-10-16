@@ -383,10 +383,10 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
 
     Declines, leaving the whole-vault route to the caller, unless the
     checkpoint is path-scoped, ahead of the acknowledgement, fits one drain,
-    no external change is pending, and this process has not already run a
-    covering drain for this generation. True when it ran the drain,
-    acknowledged or not: a cover that did not acknowledge is escalated on the
-    next pass, not retried.
+    no external change is pending, and this process has not already queued a
+    cover for this generation. True once the checkpoint is queued, whatever
+    its drain did: queued receipts are the ordinary drain's, and a cover that
+    did not acknowledge is escalated on the next pass, not retried.
     """
     from . import deferred_index, freshness, graph_sync, index_sync
 
@@ -408,13 +408,17 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
             return False
         before = _acknowledged_label(vault_root)
         deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
-        index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
-        # Spent only once the drain ran: a cover that raised before it stays
-        # eligible for the next pass.
+        # Spent once queued: from here the queue owns the repair. A cover
+        # that raised before this stays eligible for the next pass.
         _covered_generation[key] = generation
     except Exception:  # noqa: BLE001 - the graph stays unavailable, so the signal stays
-        log.warning("graph drain: covering drain failed", exc_info=True)
+        log.warning("graph drain: covering drain could not queue its checkpoint", exc_info=True)
         return False
+    try:
+        index_sync.drain_graph_work(vault_root, limit=DRAIN_LIMIT, paths=rels)
+    except Exception:  # noqa: BLE001 - the ordinary drain retries the queued receipts
+        log.warning("graph drain: covering drain failed; its paths stay queued", exc_info=True)
+        return True
     log.info(
         "graph drain: drained the unacknowledged checkpoint as one batch generation=%d "
         "acknowledged_before=%s acknowledged_after=%s checkpoint_paths=%d",
@@ -535,7 +539,7 @@ def _whole_vault_hold(vault_root: Path, not_before: float, held_since: float | N
 
 
 def _stall_seconds() -> float:
-    """How long a no-progress streak lasts before it may ask for a whole-vault rebuild.
+    """How long queued work may stay stuck on an unreadable graph before whole-vault.
 
     The whole backoff ladder, ceiling included: 5+10+20+40+80+120 = 275 s with
     the shipped constants. Wall time rather than a pass count, because write
@@ -562,12 +566,13 @@ def _run_owned(vault_root: Path) -> None:
     interval = IDLE_POLL_SECONDS
     # The no-progress backoff (0.0 after progress), the earliest moment the next
     # whole-vault attempt may start, the first debt signal the next whole-vault
-    # attempt is being held for (None while nothing is held), and when the
-    # current no-progress streak began (read only while `backoff` is above 0.0).
+    # attempt is being held for (None while nothing is held), and the first
+    # no-progress pass that found per-path work stuck behind an unreadable
+    # graph (None until one does, and again after any other pass).
     backoff = 0.0
     not_before = 0.0
     held_since: float | None = None
-    stalled_since = 0.0
+    stalled_since: float | None = None
     while not _stop.is_set():
         signalled = _DEBT.wait(timeout=interval)
         if _stop.is_set():
@@ -635,7 +640,7 @@ def _run_owned(vault_root: Path) -> None:
             # become a busy loop.
             now = time.monotonic()
             if backoff <= 0.0:
-                stalled_since = now
+                stalled_since = None
             backoff = min(MAX_RETRY_SECONDS, RETRY_SECONDS if backoff <= 0.0 else backoff * 2)
             interval = backoff
             if whole_vault:
@@ -643,16 +648,20 @@ def _run_owned(vault_root: Path) -> None:
                 # rebuild already in flight, or a write landing mid-pass -- is
                 # retried on the backoff alone, never on a write's signal.
                 not_before = now + backoff
-            elif (
-                now - stalled_since >= _stall_seconds()
-                and _queue_pending(vault_root)
-                and _availability_pending(vault_root)
+            # The availability arm stays out while receipts are queued, so a
+            # queue that can never drain -- an epoch that never admits per-path
+            # repair, a refusal that persists -- would leave the graph
+            # unreadable for good. Once per-path work has been stuck behind an
+            # unreadable graph for the whole backoff ladder, hand it to the
+            # whole-vault route. Only that time counts: a readable graph, an
+            # empty queue or a whole-vault attempt starts the count again.
+            if whole_vault or not (
+                _queue_pending(vault_root) and _availability_pending(vault_root)
             ):
-                # The availability arm stays out while receipts are queued, so
-                # a queue that can never drain -- an epoch that never admits
-                # per-path repair, a refusal that persists -- would leave the
-                # graph unreadable for good. Once the streak has lasted the
-                # whole backoff ladder, hand it to the whole-vault route.
+                stalled_since = None
+            elif stalled_since is None:
+                stalled_since = now
+            elif now - stalled_since >= _stall_seconds():
                 _request_full_rebuild(vault_root, cause="queue_stalled")
 
 

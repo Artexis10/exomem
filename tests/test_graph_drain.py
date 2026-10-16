@@ -323,24 +323,27 @@ def test_a_queue_that_cannot_drain_backs_off_instead_of_spinning(
     assert backoff == sorted(backoff), f"expected backoff to grow, got {backoff}"
 
 
+@pytest.mark.parametrize("readable_for", [0.0, 400.0])
 def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_the_ladder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable_for: float
 ) -> None:
     """A queue that never drains still converges, but not inside a write storm.
 
     The availability arm stays out while receipts are queued, because the queue
     owns that repair. A queue that can never drain would then leave the graph
-    unreadable forever, so the loop asks for a whole-vault rebuild once the
-    no-progress streak has lasted the whole backoff ladder. Write signals cut
-    each backoff wait short, so the bound is wall time, not a count of passes:
-    a burst of transient refusals must not buy a whole-vault pass.
+    unreadable forever, so the loop asks for a whole-vault rebuild once queued
+    work has been stuck behind an unreadable graph for the whole backoff
+    ladder. Write signals cut each backoff wait short, so the bound is wall
+    time, not a count of passes: a burst of transient refusals must not buy a
+    whole-vault pass. Time the graph stayed readable does not count either.
 
     Simulated time: each wait returns at the next write signal, 0.2 s apart,
     or at its own timeout when that comes first.
     """
     now = [1000.0]
     signal_every = 0.2
-    horizon = now[0] + 400.0
+    unreadable_from = now[0] + readable_for
+    horizon = unreadable_from + 400.0
     stop = threading.Event()
 
     def wait(timeout: float | None = None) -> bool:
@@ -362,30 +365,27 @@ def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_
     monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
     monkeypatch.setattr(graph_drain, "_requeue_quarantined", lambda _root: None)
     monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
-    monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
-    attempts: list[float] = []
+    monkeypatch.setattr(
+        graph_drain, "_availability_pending", lambda _root: now[0] >= unreadable_from
+    )
+    monkeypatch.setattr(graph_drain, "_work_once", lambda _root: 0)
     requests: list[float] = []
     # The requested marker stands from then on, as the real one does.
     monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: bool(requests))
-
-    def no_progress(_root: Path) -> int:
-        attempts.append(now[0])
-        return 0
 
     def request(_root: Path, **_kwargs: Any) -> bool:
         requests.append(now[0])
         return True
 
-    monkeypatch.setattr(graph_drain, "_work_once", no_progress)
     monkeypatch.setattr(graph_drain, "_request_full_rebuild", request)
 
     graph_drain._run_owned(tmp_path)
 
     # The ladder: 5 + 10 + 20 + 40 + 80, then the 120 s ceiling, makes 275 s.
     assert requests, "a queue that never drained never asked for a whole-vault rebuild"
-    stalled_for = requests[0] - attempts[0]
+    stalled_for = requests[0] - unreadable_from
     assert stalled_for >= 275.0, f"whole-vault requested {stalled_for:.1f}s into the stall"
-    assert stalled_for < 275.0 + signal_every * 2, (
+    assert stalled_for < 275.0 + signal_every * 3, (
         f"whole-vault requested {stalled_for:.1f}s into the stall, well after the ladder"
     )
     assert len(requests) == 1, f"{len(requests)} whole-vault requests for one stall"
@@ -701,6 +701,61 @@ def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
 
     assert graph_drain._work_once(vault) == 1
     assert deferred_index.graph_full_rebuild_pending(vault) is not None
+
+    graph_drain._work_once(vault)
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert graph_sync.acknowledged_generation(vault) == committed.generation
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_cover_whose_drain_raises_leaves_its_paths_to_the_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    real_barrier: None,
+) -> None:
+    """Once the cover has queued the checkpoint, the queue owns the repair.
+
+    A drain that raises after that -- a busy store, say -- leaves receipts the
+    ordinary drain retries. Escalating in the same pass spent a whole-vault
+    rebuild on work that was already queued.
+    """
+    vault = _published_vault(tmp_path)
+    created = vault / "Knowledge Base/Notes/Insights/c.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(epistemic_graph, "graph_scheduling_enabled", lambda: False)
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, _page("C", "C is a new plain claim."))],
+            vault_root=vault,
+        )
+    committed = graph_sync.read_checkpoint(vault)
+    assert committed is not None
+    # A drain that publishes without acknowledging empties the queue.
+    real_coverage = EpistemicGraphIndex._drained_graph_checkpoint
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            EpistemicGraphIndex,
+            "_drained_graph_checkpoint",
+            lambda self, _batch: real_coverage(self, []),
+        )
+        index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert not EpistemicGraphIndex(vault).available()
+
+    real_drain = index_sync.drain_graph_work
+    failures: list[int] = []
+
+    def fails_once(root: Path, **kwargs: Any) -> int:
+        if not failures:
+            failures.append(1)
+            raise sqlite3.OperationalError("database is locked")
+        return real_drain(root, **kwargs)
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", fails_once)
+
+    graph_drain._work_once(vault)
+    assert failures == [1]
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert deferred_index.list_graph_paths(vault) == ["Knowledge Base/Notes/Insights/c.md"]
 
     graph_drain._work_once(vault)
     assert deferred_index.graph_full_rebuild_pending(vault) is None
