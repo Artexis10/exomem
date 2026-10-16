@@ -137,6 +137,12 @@ class ExomemFastMCP(FastMCP):
                             self.name,
                             mode,
                         )
+                        # stdio has no `/health` route: the open pipe is its
+                        # liveness. Activate now, not on the lifespan fallback
+                        # timer, whose burst lands inside client queries.
+                        activation = getattr(self, "_exomem_local_runtime_activation", None)
+                        if activation is not None:
+                            activation.start()
                         await self._mcp_server.run(
                             read_stream,
                             write_stream,
