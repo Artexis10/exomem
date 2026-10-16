@@ -15,8 +15,9 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
-from contextlib import closing
+from contextlib import closing, suppress
 
 import pytest
 from record_fixtures import LEDGER_COLLECTION_PATH, copy_dataset_fixture, copy_x3_fixture
@@ -30,6 +31,7 @@ from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifes
 from exomem import __main__ as cli
 from exomem import record_formats, records, state_migration, state_paths, writer_lease
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
     authority,
@@ -40,6 +42,7 @@ from exomem.collection_store import (
     legacy_import,
     migration,
     preflight,
+    runtime,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
@@ -109,9 +112,8 @@ def vault_bytes(root, *, outside=None):
             and (outside is None or not path.is_relative_to(root / outside))}
 
 
-#: What a query row says about its representation, not its content: the concurrency token,
-#: which the store derives from its row version (design §3), and whether the file adapter
-#: derived a log row's key, which the store holds.
+#: The two query-row fields whose migration change the design's contract table records:
+#: the concurrency token (§8 C2) and a migrated log row's ``inferred`` flag (§8 C25).
 REPRESENTATION = ("item_version", "inferred")
 
 
@@ -249,12 +251,12 @@ def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection
     assert staging_directories(root) == [] and vault_bytes(root) == before
 
 
-def _apply_and_crash(environment, database, cut):
+def _apply_and_crash(environment, database, cut, released):
     """`migrate --apply` in a fresh interpreter that dies at ``cut``, as a killed process would."""
     os.environ.clear()
     os.environ.update(environment)
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
-    capability.RELEASED = MIGRATE
+    capability.RELEASED = released
 
     def die(*args, **kwargs):
         os._exit(73)
@@ -263,6 +265,8 @@ def _apply_and_crash(environment, database, cut):
         from exomem.collection_store import takeover
 
         takeover.replace_live = die
+    elif cut == "before-fence":
+        admission._store_fence = die
     else:
         admission._install_marker = die
     with coordinator(database), library_scope():
@@ -270,21 +274,78 @@ def _apply_and_crash(environment, database, cut):
     os._exit(0)
 
 
-def crash_apply(tmp_path, cut):
-    """Run one apply that dies at ``cut``, then wait out the dead owner's lease as an owner would."""
-    import multiprocessing
+def wait_out_the_lease():
+    """Wait until a failed owner's lease expires, as an owner retrying would."""
     import time
 
     from test_collection_store_s1_gate import _until
 
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    _until(lambda: (client.status().expires_at or 0) < time.time())
+
+
+def crash_apply(tmp_path, cut, released=MIGRATE):
+    """Run one apply that dies at ``cut``, then wait out the dead owner's lease."""
+    import multiprocessing
+
     spawn = multiprocessing.get_context("spawn")
     child = spawn.Process(target=_apply_and_crash, args=(
-        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut))
+        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, released))
     child.start()
     child.join(120)
     assert child.exitcode == 73
-    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
-    _until(lambda: (client.status().expires_at or 0) < time.time())
+    wait_out_the_lease()
+
+
+def append_to_work(root, title):
+    """A file write to a migrating collection, by the release that serves the vault."""
+    manifest = collections.load_manifest(root, root / WORK)
+    written = records.append_record(root, WORK, item={"title": title}, why="a write while the store is unadmitted",
+                                    expected_container_hash=record_formats.load_adapter(root, manifest).read().snapshot)
+    stop_writer()
+    return written["item_key"]
+
+
+@pytest.mark.parametrize("stop", ["refused", "killed"])
+def test_a_write_after_a_cutover_stops_before_its_fence_cut_reaches_the_store(env, capsys, monkeypatch, tmp_path, stop):
+    """A cutover that publishes its store, stops before the fence cut while files are still
+    canonical, and on retry admits the stale import, losing a write made in between."""
+    root = legacy_vault(env)
+    if stop == "refused":
+        with monkeypatch.context() as outage:
+            outage.setattr(writer_lease.LeaseCoordinatorClient, "transition_collection_store_fence",
+                           lambda *args, **kwargs: (_ for _ in ()).throw(OpError(
+                               "WRITER_COORDINATOR_UNAVAILABLE", "coordinator unavailable", "retry")))
+            assert migrate(root, "apply") == 1
+        wait_out_the_lease()
+    else:
+        crash_apply(tmp_path, "before-fence")
+    capsys.readouterr()
+    assert connection.store_path(root).exists() and authority.read_marker(root) is None
+    written = append_to_work(root, "Written while the store waited")
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["rebuilt_because"], applied["changed"]) == (
+        "marker_admitted", migration.BASIS_CHANGED, [WORK])
+    service = start_service(root)
+    try:
+        assert written in rows(root, CID)
+    finally:
+        service.stop()
+
+
+def test_a_file_changed_outside_the_lease_after_the_fence_cut_is_never_admitted(env, capsys, tmp_path):
+    """A resumed cutover that installs the marker over an import whose files changed after
+    the fence cut, which no writer inside the lease could have made."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-marker")
+    item = root / "Knowledge Base/Records/Work/Items/Original.md"
+    item.write_text(item.read_text().replace("Authored body", "Edited by hand"))
+    assert migrate(root, "apply") == 1
+    assert migration.STALE in capsys.readouterr().err
+    assert authority.read_marker(root) is None
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader)["kind"] == authority.MIGRATE
 
 
 def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_importing_again(
@@ -294,6 +355,11 @@ def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_im
     root = legacy_vault(env)
     crash_apply(tmp_path, "before-marker")
     assert connection.store_path(root).exists() and authority.read_marker(root) is None
+    # Another owner step's preview names the unfinished migration that its apply would meet.
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, "operator")
+        assert cli._collections_main(["adopt-local", "--vault", str(root), "--why", "check", "--dry-run"]) == 1
+    assert "unfinished migration" in capsys.readouterr().err
     imports = []
     monkeypatch.setattr(legacy_import, "import_legacy_collection",
                         lambda *args, **kwargs: imports.append(args) or pytest.fail("imported again"))
@@ -321,6 +387,23 @@ def test_a_crash_before_the_store_is_published_discards_its_staging(env, capsys,
     applied = printed(capsys)
     assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.INTERRUPTED)
     assert staging_directories(root) == []
+
+
+def test_staging_whose_basis_lacks_a_field_is_rebuilt(env, capsys):
+    """An apply that crashes on, or trusts, staging prepared by a release that recorded less."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    (directory,) = staging_directories(root)
+    with closing(sqlite3.connect(directory / "staging.sqlite", isolation_level=None)) as staging:
+        (raw,) = staging.execute("SELECT value FROM store_meta WHERE key='migration_basis'").fetchone()
+        basis = json.loads(raw)
+        for entry in basis["collections"].values():
+            del entry["legacy_events"]
+        staging.execute("UPDATE store_meta SET value=? WHERE key='migration_basis'", (json.dumps(basis),))
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.NO_BASIS)
 
 
 def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
@@ -411,6 +494,30 @@ def test_a_store_write_after_prepare_forces_a_fresh_copy(s1, capsys):
         service.stop()
 
 
+def test_a_service_never_finishes_a_migration_its_owner_left_unfinished(s1, monkeypatch, tmp_path):
+    """A serving S1 store that completes a pending migration on its own, without the owner's
+    recheck of the files the migration imported."""
+    from test_collection_store_s1_gate import _until
+
+    root = s1
+    before = authority.read_marker(root)
+    crash_apply(tmp_path, "before-marker", released=MIGRATE | {capability.RECORDS_SUMMARY_V1})
+    ticks = []
+    tick = runtime.StoreServer._create_tick
+    # Only a synchronisation point: the assertions below read the vault, not the calls.
+    monkeypatch.setattr(runtime.StoreServer, "_create_tick", lambda server: ticks.append(server) or tick(server))
+    service = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: sum(server.runtime is not None for server in ticks) >= 2)
+    finally:
+        # A service that never admitted the store has no head to hand off; its lease expires.
+        with suppress(OpError):
+            service.stop()
+    assert authority.read_marker(root) == before
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader)["kind"] == authority.MIGRATE
+
+
 def test_every_migration_step_refuses_while_the_release_keeps_it_dark(env, capsys, monkeypatch):
     """A release that has not enabled collections-migrate-v1 still moving a vault out of files,
     or touching the lease, the fence or the state directory first."""
@@ -487,3 +594,20 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_c
         capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
     assert started.returncode != 0
     assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
+
+
+NESTED = "Knowledge Base/Records/Work/Items/Nested/_collection.md"
+
+
+def test_a_dry_run_blocks_collections_whose_marker_entries_would_overlap(env, capsys):
+    """A dry run that calls a vault migratable although two of its collections would share one
+    ownership namespace in the marker, which the apply then refuses."""
+    root = legacy_vault(env)
+    nested = root / NESTED
+    (nested.parent / "Items").mkdir(parents=True)
+    nested.write_text(manifest_text("records").replace(CID, "77777777-7777-4777-8777-777777777777")
+                      .replace("title: Work", "title: Nested"))
+    assert migrate(root, "dry-run") == 1
+    blocked = {row["path"]: row["blocker"]["code"] for row in printed(capsys)["collections"]
+               if row["status"] == "blocked"}
+    assert blocked == dict.fromkeys((NESTED, WORK), "COLLECTION_STORE_MARKER_CONFLICT")

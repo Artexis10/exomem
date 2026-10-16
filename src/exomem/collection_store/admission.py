@@ -634,6 +634,8 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     """
     require_owner(vault_root, "adopt-local")
     root = Path(vault_root).resolve()
+    # The apply would refuse at the store; the preview says so instead of reporting a sync state.
+    _require_no_pending_migration(root)
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
         if sealed["preview"]["state"] == "in_sync":
@@ -743,6 +745,23 @@ ADOPTION_COMMAND = ("exomem collections adopt-local --why REASON --dry-run, then
                     "instead of --dry-run, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
 
 
+def migration_pending():
+    """The refusal for a store an unfinished migration owns: only the owner's apply finishes it."""
+    return CollectionStoreError(
+        "COLLECTION_STORE_LEASE_REQUIRED",
+        "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`")
+
+
+def _require_no_pending_migration(root):
+    """Refuse an owner step on a store an unfinished migration owns, at its preview as at its apply."""
+    path = connection.store_path(root)
+    if path.exists():
+        with closing(connection.open_reader(path)) as reader:
+            intent = authority.pending_create(reader)
+        if intent is not None and intent["kind"] == authority.MIGRATE:
+            raise migration_pending()
+
+
 def adoption_required():
     """The refusal for a routed vault whose coordinator never enrolled its store (a copy or a new coordinator)."""
     return CollectionStoreError(
@@ -838,10 +857,11 @@ def _routed_store(session):
                         and authority.intent_status(session.root, reader, intent) == "pending"):
                     # The serving store thread resumes it, so the same request succeeds later.
                     raise connection.busy("a collection create is still publishing; retry shortly")
-                # A marker that changed under the intent never resolves by retrying.
-                raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", (
-                    "create recovery owns this store; resume that create" if intent["kind"] == authority.CREATE
-                    else "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`"))
+                if intent["kind"] == authority.MIGRATE:
+                    raise migration_pending()
+                # A marker that changed under the create never resolves by retrying.
+                raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
+                                           "create recovery owns this store; resume that create")
     raw = authority.read_marker(session.root)
     if raw is None:
         raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no collection here routes to a store")

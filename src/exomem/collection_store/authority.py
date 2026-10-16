@@ -263,9 +263,10 @@ def required_state_compatibility_ids(root):
 
 
 def _intent_collection(entry):
-    if (not isinstance(entry, dict) or set(entry) != {"collection_id", "manifest_path", "source_path", "txn_id"}
+    # A migration's entry keeps the collection's file basis until its marker is installed.
+    if (not isinstance(entry, dict) or set(entry) != {"collection_id", "manifest_path", "source_path", "txn_id", "basis"}
             or not all(isinstance(entry[name], str) and entry[name]
-                       for name in ("collection_id", "manifest_path", "source_path"))
+                       for name in ("collection_id", "manifest_path", "source_path", "basis"))
             or type(entry["txn_id"]) is not int or entry["txn_id"] < 1):
         _invalid()
     return entry

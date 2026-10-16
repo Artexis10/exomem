@@ -140,9 +140,26 @@ def candidates(root):
         pending.extend(group)
     rows.extend(_row(manifest.path, manifest, status="skipped", reason="a dataset keeps file authority")
                 for manifest in pending if not legacy_import.importable(manifest))
+    staying = [_ownership(manifest) for manifest in pending if not legacy_import.importable(manifest)]
+    if marker is not None and marker["version"] == 2:
+        staying.extend(marker["collections"])
     pending = sorted((manifest for manifest in pending if legacy_import.importable(manifest)),
                      key=lambda found: found.path)
-    return rows, pending, store_ids
+    # Each migrated collection becomes a marker entry; entries may not share an ownership
+    # namespace with each other or with a routed or dataset collection, as the apply refuses.
+    overlapping = {manifest.path for manifest in pending
+                   if any(authority._overlap(_ownership(manifest), other) for other in staying)
+                   or any(authority._overlap(_ownership(manifest), _ownership(peer))
+                          for peer in pending if peer is not manifest)}
+    rows.extend(_row(manifest.path, manifest, status="blocked", blocker={
+        "code": "COLLECTION_STORE_MARKER_CONFLICT", "reason": "collection ownership namespaces overlap"})
+        for manifest in pending if manifest.path in overlapping)
+    return rows, [manifest for manifest in pending if manifest.path not in overlapping], store_ids
+
+
+def _ownership(manifest):
+    return {"manifest_path": manifest.path, "source_path": manifest.storage.source,
+            "layout": manifest.storage.strategy}
 
 
 def report(rows, store_ids) -> dict:

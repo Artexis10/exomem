@@ -1084,9 +1084,14 @@ class StoreServer:
             return IMPORT_IDLE_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
-                if authority.pending_create(reader) is None:
-                    self.pending_create = None
-                    return IMPORT_IDLE_SECONDS
+                intent = authority.pending_create(reader)
+            if intent is None:
+                self.pending_create = None
+                return IMPORT_IDLE_SECONDS
+            if intent["kind"] != authority.CREATE:
+                # Only the owner's `exomem collections migrate --apply` finishes a migration: it
+                # first rechecks each collection's files against the basis it imported.
+                return IMPORT_IDLE_SECONDS
             with principal.library_scope():
                 result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)
         except Exception:  # noqa: BLE001 - the create stays pending and is retried

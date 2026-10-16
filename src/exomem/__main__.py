@@ -2281,7 +2281,9 @@ def _collections_main(argv: list[str]) -> int:
                 result = admission.migrate_route(
                     Path(args.vault), step="dry-run" if args.dry_run else "prepare" if args.prepare else "apply")
             print(json.dumps(result, sort_keys=True))
-            if result.get("verdict") == "blocked":
+            # Unlike create, an apply short of an installed marker exits nonzero, so a script that
+            # starts the service after it never serves a half-migrated vault.
+            if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"):
                 return 1
         elif args.command == "create":
             import hashlib
