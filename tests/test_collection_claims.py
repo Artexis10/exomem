@@ -1667,7 +1667,7 @@ def test_bootstrap_teaches_routing_candidates_and_collection_confirmation(
     assert "one" in candidate and "confirmation" in candidate
     assert "exactly dated" in candidate and "sources" in candidate
     assert "collection creation" in envelope.CONFIRM_REQUIRED
-    assert "collections automatically" in envelope.FOUNDER_GATE
+    assert "Automatic collections stay refused" in envelope.FOUNDER_GATE
 
 
 def test_mcp_facing_collection_claims_journey(
