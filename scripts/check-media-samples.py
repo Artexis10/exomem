@@ -4,8 +4,8 @@ Usage: python check-media-samples.py <samples directory> <engines>
 
 `<engines>` is the comma-separated engines this image ships, such as
 `documents,ocr`. Every kind in the media registry whose engine the image ships, or
-which needs no engine, must have a sample. Each sample must extract to text that a
-keyword search for the phrase `expected.json` gives for it finds.
+which needs no engine, must have a sample. Each sample must extract to text in which
+find's lexical presence check finds the phrase `expected.json` gives for it.
 
 The Cloud image build runs this with networking off. It is the proof that the image
 reads each format it serves (`cloud-multimodal-processing`, "Cloud engines are
