@@ -37,6 +37,33 @@ def test_artifact_transport_settings_load_without_discovery(monkeypatch) -> None
     assert config.artifact_broker_cell_ids == (CELL_ID,)
 
 
+def _broker_environment(monkeypatch) -> None:
+    monkeypatch.setenv("CELLCTL_B2_BUCKET_NAME", "bucket")
+    monkeypatch.setenv("CELLCTL_B2_ENDPOINT", "https://s3.example")
+    monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_URL", BROKER_URL)
+
+
+def test_the_fleet_switch_loads_from_the_environment(monkeypatch) -> None:
+    _broker_environment(monkeypatch)
+    monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_ALL_CELLS", "true")
+    config = main.build_cluster_config()
+    assert config.artifact_broker_all_cells is True
+    assert config.artifact_broker_cell_ids == ()
+
+
+def test_the_fleet_switch_is_off_when_the_environment_omits_it(monkeypatch) -> None:
+    _broker_environment(monkeypatch)
+    assert main.build_cluster_config().artifact_broker_all_cells is False
+
+
+@pytest.mark.parametrize("value", ["1", "yes"])
+def test_the_fleet_switch_refuses_a_value_that_is_not_a_json_boolean(monkeypatch, value: str) -> None:
+    _broker_environment(monkeypatch)
+    monkeypatch.setenv("CELLCTL_ARTIFACT_BROKER_ALL_CELLS", value)
+    with pytest.raises(ValueError):
+        main.build_cluster_config()
+
+
 @pytest.mark.parametrize("endpoint", [
     "http://broker.exomem-cloud.svc:8767", "https://10.43.0.25:8767",
     "http://10.43.0.25:80", "http://8.8.8.8:8767", "http://127.0.0.1:8767",
@@ -61,6 +88,11 @@ def test_artifact_transport_refuses_invalid_activation_lists(cell_ids) -> None:
 def test_artifact_transport_requires_endpoint_before_cell_activation() -> None:
     with pytest.raises(ValueError, match="artifact broker"):
         dataclasses.replace(_cluster_config(), artifact_broker_cell_ids=(CELL_ID,))
+
+
+def test_the_fleet_switch_requires_the_endpoint_before_it_activates_any_cell() -> None:
+    with pytest.raises(ValueError, match="artifact broker"):
+        dataclasses.replace(_cluster_config(), artifact_broker_all_cells=True)
 
 
 def test_selected_runtime_gets_only_the_broker_endpoint_and_network_edge() -> None:
@@ -117,5 +149,57 @@ async def test_reconcile_adds_transport_only_to_the_selected_cell(cell_db) -> No
             else:
                 assert "EXOMEM_CLOUD_ARTIFACT_BROKER_URL" not in env
                 assert policy["egress"] == []
+    finally:
+        await connection.close()
+
+
+OTHER_CELL_ID = "bbbbbbbbbbbbbbbb"
+
+
+def _digest(cell_id: str, config: reconcile.ClusterConfig) -> str:
+    row = CellRow(cell_id=cell_id, tenant_id=tenant_uuid(cell_id), storage_gib=10,
+                  rollout_priority=1, desired_state="running", desired_image=None, generation=1)
+    return reconcile._compute_render_digest(row, config, _secrets_config())
+
+
+def test_turning_the_fleet_switch_on_moves_only_the_digest_of_unlisted_cells() -> None:
+    canary = dataclasses.replace(_cluster_config(), artifact_broker_url=BROKER_URL,
+                                 artifact_broker_cell_ids=(CELL_ID,))
+    fleet = dataclasses.replace(canary, artifact_broker_all_cells=True)
+    # A listed cell keeps its pod: the switch adds nothing to what it already renders.
+    assert _digest(CELL_ID, fleet) == _digest(CELL_ID, canary)
+    # An unlisted cell restarts once, onto the render a listed cell would get.
+    assert _digest(OTHER_CELL_ID, fleet) != _digest(OTHER_CELL_ID, canary)
+    listed_later = dataclasses.replace(canary, artifact_broker_cell_ids=(CELL_ID, OTHER_CELL_ID))
+    assert _digest(OTHER_CELL_ID, fleet) == _digest(OTHER_CELL_ID, listed_later)
+
+
+def test_with_the_fleet_switch_off_an_unlisted_cell_keeps_the_digest_it_had_without_a_broker() -> None:
+    without_broker = _cluster_config()
+    switched_off = dataclasses.replace(without_broker, artifact_broker_url=BROKER_URL,
+                                       artifact_broker_cell_ids=(CELL_ID,),
+                                       artifact_broker_all_cells=False)
+    assert _digest(OTHER_CELL_ID, switched_off) == _digest(OTHER_CELL_ID, without_broker)
+
+
+async def test_a_cell_created_after_the_fleet_switch_gets_the_broker_without_being_listed(cell_db) -> None:
+    config = dataclasses.replace(_cluster_config(), artifact_broker_url=BROKER_URL,
+                                 artifact_broker_all_cells=True)
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    try:
+        await _seed_cell(cell_db, CELL_ID, CELL_ID)
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=datetime(2026, 1, 1, tzinfo=UTC))
+        await _seed_cell(cell_db, OTHER_CELL_ID, OTHER_CELL_ID)
+        await reconcile.reconcile_once(connection, cluster, FakeB2(), FakeHetznerVolumeProvider(),
+                                       _secrets_config(), config, now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC))
+        for cell_id in (CELL_ID, OTHER_CELL_ID):
+            namespace = "exo-cell-" + cell_id
+            pod = cluster.applied[(namespace, "StatefulSet", "cell")]["spec"]["template"]["spec"]
+            env = {entry["name"]: entry.get("value") for entry in pod["containers"][0]["env"]}
+            policy = cluster.applied[(namespace, "NetworkPolicy", "runtime-ingress")]["spec"]
+            assert env["EXOMEM_CLOUD_ARTIFACT_BROKER_URL"] == BROKER_URL
+            assert policy["egress"][0]["ports"] == [{"protocol": "TCP", "port": 8767}]
     finally:
         await connection.close()

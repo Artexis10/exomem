@@ -2,11 +2,12 @@
 
 # Cloud artifact transport rollout
 
-This procedure activates file-handle preservation for explicitly selected Cloud
-cells. The gateway signs short-lived grants; the internal broker fetches only the
-authorized public HTTPS descriptors; the runtime stages the bytes and uses the
-existing Sources/Evidence writers. The broker is not a custody store. This runbook
-implements `serve-cloud-artifact-handles`; it does not authorize a live rollout.
+This procedure activates file-handle preservation for selected Cloud cells: a
+list of cells first, then every cell by one switch. The gateway signs short-lived
+grants; the internal broker fetches only the authorized public HTTPS descriptors;
+the runtime stages the bytes and uses the existing Sources/Evidence writers. The
+broker is not a custody store. This runbook implements
+`serve-cloud-artifact-handles`; it does not authorize a live rollout.
 
 ## Release and key prerequisites
 
@@ -86,6 +87,37 @@ activate the reviewer. The live rollout belongs to its named owner and the
 reviewed source/image/chart prerequisites; source verification alone is not live
 acceptance.
 
+## Enable the broker for every cell
+
+Do this after the broker has served the listed cells, as the previous section
+describes. `artifactBroker.allCells` gives the broker to every existing cell and
+to each cell created later, so a new tenant needs no edit. Keep `cellIds` as
+set: it stays valid beside the switch. A listed cell keeps its pod. Only the
+cells that are not listed restart, once. The chart renders as before while
+`allCells` is `false`.
+
+The gateway signs grants only for the cells it selects. The gateway image must
+read `EXOMEM_CLOUD_ARTIFACT_ALL_CELLS`, which the chart sets from `allCells`. An
+older gateway image ignores it and signs for the listed cells only.
+
+1. Check that the `exomem-artifact-broker` Deployment is Ready and `/health/ready` answers.
+2. Check that a listed cell preserved a real client attachment, which qualifies the broker.
+3. Check that the gateway image to deploy reads `EXOMEM_CLOUD_ARTIFACT_ALL_CELLS`.
+4. Set `artifactBroker.allCells` to `true` in the private operator values.
+5. Deploy the platform chart and the compatible cellctl and gateway images by the normal release path.
+6. List the cell pods with `kubectl get pods -A -l 'app.kubernetes.io/name=exomem-cell,!exomem.io/cell-job' -o custom-columns=NAMESPACE:.metadata.namespace,STARTED:.status.startTime`.
+7. Check that only cells outside `cellIds` restarted, and that each listed cell kept its start time.
+8. Pick one newly covered cell. Read its `cell` StatefulSet and check that `EXOMEM_CLOUD_ARTIFACT_BROKER_URL` is the broker endpoint.
+9. Read that cell's `runtime-ingress` NetworkPolicy and check that its one egress rule reaches the broker pod on TCP 8767.
+10. Operator step: attach a synthetic file in a real client to a tenant on a newly covered cell.
+11. Ask the client to preserve the file, then read it back and compare its size and SHA-256 with the original.
+
+Expect step 11 to return the stored path, size and SHA-256 of the attached file.
+A real client is required because only a client can produce an attachment handle;
+a test call cannot prove the gateway signs for the cell. If step 8 or step 9
+fails, set `allCells` to `false` and deploy. Cells then return to the explicit
+list and render as before.
+
 ## Acceptance and rollback
 
 Use isolated synthetic files for write probes. Before a live native attachment
@@ -105,7 +137,8 @@ Bounded transport failures must report file failure without a stored path/hash
 or direct-network fallback. Directory Submit/Publish remains held for review.
 
 To roll back, disable `cloudGateway.artifactTransportEnabled` first and wait for
-current transfers/grants to finish (grants live at most 60 seconds). Empty
+current transfers/grants to finish (grants live at most 60 seconds). Set
+`artifactBroker.allCells` to `false` if it is on, empty
 `artifactBroker.cellIds`, then wait for the selected runtime's endpoint and
 8767 edge to disappear and verify its zero-egress policy. Keep the broker
 enabled while the controller restores that policy, then disable the broker.
