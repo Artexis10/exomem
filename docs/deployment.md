@@ -823,12 +823,14 @@ To finish the migration:
 1. Keep the Exomem service stopped on every host that serves the vault.
 2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
 3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
-4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait until the vault replica reaches this host, then run step 2 again.
+4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
 5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
 6. If the apply reports `COLLECTION_STORE_MIGRATION_STALE`, put back the files of each collection that it names, then run step 2 again.
 7. Start the Exomem services.
 
 The apply reports `marker_admitted` when the migration is finished.
+
+The apply never adopts a replica itself. The service adopts the vault replica when it starts, so step 4 starts it once on this host.
 
 `status: restored` means that the restore finished but could not hand back its
 lease. `COLLECTION_STORE_SYNC_PENDING` means that the coordinator's head or the
