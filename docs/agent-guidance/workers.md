@@ -28,7 +28,7 @@ the orchestrator role owns the shared checkout and the merge button for as long
 as they hold it; a second actor doing the same thing concurrently races on
 uncommitted work and pushes to `main` at the same time. That is equally true of
 two Claude sessions, two Codex sessions, or one of each — and it is why this
-repo's own CLAUDE.md opens with the shared-checkout rule.
+repo's own AGENTS.md opens with the shared-checkout rule.
 
 Codex CLI is a peer, not a lesser tool. It has its own MCP servers configured,
 including exomem itself, and it drives merges and releases perfectly well. An

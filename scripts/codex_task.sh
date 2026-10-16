@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Codex worker lane runner — see "Codex worker protocol" in CLAUDE.md.
+# Codex worker lane runner — see "Codex worker protocol" in docs/agent-guidance/workers.md.
 #
 #   codex_task.sh template                          print a TASK.md brief template
 #   codex_task.sh start <lane> <brief-file> [--profile <name>]
