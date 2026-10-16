@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_SURFACE_CONTRACT = REPO_ROOT / "src" / "exomem" / "tool_surface_contract.json"
 CHATGPT_PLUGIN_CONTRACT = (

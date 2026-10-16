@@ -15,6 +15,8 @@ from epistemic.projectors.base import (
 from epistemic.projectors.exomem_vault import VaultProjector
 from epistemic.snapshot import FieldDeclaration
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT = REPO_ROOT / "benchmarks" / "epistemic" / "fixtures" / "vault"
 

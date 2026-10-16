@@ -53,7 +53,10 @@ INSTALL_SERVICE_SH = ROOT / "scripts" / "install-service.sh"
 TRANSITION_TOOL = ROOT / "scripts" / "service-transition-receipt.py"
 PWSH = shutil.which("pwsh")
 
-pytestmark = pytest.mark.skipif(PWSH is None, reason="pwsh is not available")
+pytestmark = [
+    pytest.mark.skipif(PWSH is None, reason="pwsh is not available"),
+    pytest.mark.reads_repository_docs,
+]
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 

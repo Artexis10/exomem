@@ -16,6 +16,8 @@ from _nag_governance_helpers import overdue_prediction, scratch_page
 
 from exomem import commands, envelope, prominence
 
+pytestmark = pytest.mark.reads_repository_docs
+
 FAMILY = "prediction_window"
 FAMILY_REF = f"exomem://review/family/{FAMILY}"
 QUIET_WHY = "too_frequent: fires more than it helps in this vault"

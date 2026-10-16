@@ -18,6 +18,8 @@ from exomem.edit_operations import (
     public_edit_operation_schema,
 )
 
+pytestmark = pytest.mark.reads_repository_docs
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "hosted_v5_contributions" / "personal_baselines.json"
 

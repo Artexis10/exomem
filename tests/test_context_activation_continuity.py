@@ -18,7 +18,7 @@ from membench.utility import context_activation_continuity as continuity
 
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.reads_repository_docs]
 
 #: Re-pinned when corpus v5 relabelled the corpus (the digest covers `corpus_id`);
 #: the cases, checks and scorer source are unchanged.

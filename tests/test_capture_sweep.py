@@ -15,6 +15,8 @@ import pytest
 
 from exomem import capture_sweep
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
