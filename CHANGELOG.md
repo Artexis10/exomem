@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.120.0](https://github.com/Artexis10/exomem/compare/v0.119.0...v0.120.0) (2026-10-16)
+
+
+### Features
+
+* **cloud:** fit flannel to the private link, rehearse agent-token rotation and record WireGuard keys ([#1787](https://github.com/Artexis10/exomem/issues/1787)) ([2717266](https://github.com/Artexis10/exomem/commit/2717266b89958e5f0a097cf63a1e6b2f2edcb6ca))
+* **cloud:** move a healthy cell to a new claim through a fresh stopped backup ([#1790](https://github.com/Artexis10/exomem/issues/1790)) ([22b6c2f](https://github.com/Artexis10/exomem/commit/22b6c2f9d8ab6b06a7248604a9a35538ea153b1e))
+
+
+### Bug Fixes
+
+* **collections:** let an upgraded writer migrate a store an earlier release wrote ([#1794](https://github.com/Artexis10/exomem/issues/1794)) ([9b3c252](https://github.com/Artexis10/exomem/commit/9b3c25244f1fd96d2e22e0ddfbea013b6fb26497))
+
 ## [0.119.0](https://github.com/Artexis10/exomem/compare/v0.118.0...v0.119.0) (2026-10-16)
 
 
