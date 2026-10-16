@@ -1,0 +1,489 @@
+"""The declared offline migration of file collections into the store, `exomem collections migrate`.
+
+OpenSpec move-structured-collections-to-sqlite P1b.3 and P1b.3b, design §10 and §16 A5.
+Each case drives what an owner runs: the CLI with the service stopped and the operator
+credential, against the real coordinator app in process, on a generated legacy vault
+(both built-ins, both layouts, held files, ``ok``, ``gap`` and ``acknowledged_gap``
+chains and a dataset that stays in files). The migration release fence is turned on only
+in this temporary state, as the GA release would.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+from contextlib import closing
+
+import pytest
+from record_fixtures import LEDGER_COLLECTION_PATH, copy_dataset_fixture, copy_x3_fixture
+from test_collection_store_legacy import _event, _rewrite
+from test_collection_store_legacy_import import _held
+from test_collection_store_preflight import ledger
+from test_collection_store_s1_gate import OLDER, _older, coordinator
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service, call
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+
+from exomem import __main__ as cli
+from exomem import record_formats, records, state_migration, state_paths, writer_lease
+from exomem import structured_collections as collections
+from exomem.collection_store import (
+    admission,
+    authority,
+    capability,
+    chain,
+    connection,
+    custody,
+    legacy_import,
+    migration,
+    preflight,
+)
+from exomem.collection_store.connection import CollectionStoreError
+from exomem.governance.principal import library_scope
+from exomem.init import init_vault
+
+OPERATOR = "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
+MIGRATE = frozenset({capability.COLLECTIONS_MIGRATE_V1})
+WORK = manifest_path("records")
+PLANNING = manifest_path("planning")
+LEDGER_ID = "5e9d1e2f-8f0a-4b6c-9d21-6f0f4a2b7c31"
+X3_ID = "9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8"
+X3 = "Knowledge Base/Records/Health/X3/_collection.md"
+MIGRATED = {CID: WORK, OTHER: PLANNING, LEDGER_ID: LEDGER_COLLECTION_PATH, X3_ID: X3}
+
+
+def _append_log(root, lines):
+    log = root / "Knowledge Base/log.md"
+    log.write_text(log.read_text() + "".join(line + "\n" for line in lines))
+
+
+def legacy_vault(root):
+    """A file-mode vault as P1b.1 generates them: every shape the migration must carry."""
+    init_vault(root)
+    ledger(root)  # Records items, filename recipe, real writer history: an `ok` chain
+    copy_x3_fixture(root)  # Records log layout
+    copy_dataset_fixture(root)  # stays in files
+    # Records items with a held file and a `gap` chain: its last event names another manifest.
+    work = root / WORK
+    work.parent.mkdir(parents=True)
+    work.write_text(manifest_text("records"))
+    manifest = collections.load_manifest(root, work)
+    (work.parent / "Items").mkdir()
+    (work.parent / "Items/Original.md").write_text(
+        record_formats.render_markdown_item(manifest, {"title": "One", "count": 3}, KEY, "Authored body\n"))
+    _held(work, 1, {"action": "append", "item": {"title": "Held"}})
+    work.write_text(record_formats.render_manifest_audit_head(
+        work.read_text(), f"{3:024x}", semantic_profile="records", reader_version=1))
+    manifest = collections.load_manifest(root, work)
+    current = record_formats.load_adapter(root, manifest).read().snapshot
+    events = [_event(manifest, number) for number in (1, 2, 3)]
+    events[-1] = _rewrite(events[-1], after_container_hash=current, after_manifest_hash="f" * 64)
+    _append_log(root, reversed(events))
+    # Planning items with an acknowledged gap: a rebaseline over an earlier event.
+    planning = root / PLANNING
+    planning.parent.mkdir(parents=True)
+    planning.write_text(manifest_text("planning").replace(CID, OTHER))
+    (planning.parent / "Items").mkdir()
+    planning.write_text(record_formats.render_manifest_audit_head(
+        planning.read_text(), f"{0x102:024x}", semantic_profile="planning", reader_version=2))
+    manifest = collections.load_manifest(root, planning)
+    rebaseline = records._lifecycle_audit_body(
+        transition_id=f"{0x102:024x}", parent_id=f"{0x101:024x}", operation="rebaseline", manifest=manifest,
+        before_manifest_hash=manifest.manifest_version.hash, after_manifest_hash=manifest.manifest_version.hash,
+        before_container_hash="1" * 64, after_container_hash=record_formats.load_adapter(root, manifest).read().snapshot,
+        payload_hash="2" * 64, why="acknowledge invented gap", continuity=False,
+        acknowledged_gap_codes=("current-container-mismatch",), gap_fingerprint="3" * 64,
+        checkpoint_snapshot_hash="4" * 64)
+    _append_log(root, [rebaseline, _rewrite(_event(manifest, 1), transition_id=f"{0x101:024x}")])
+    stop_writer()
+    return root
+
+
+def vault_bytes(root, *, outside=None):
+    """Every vault file's digest, optionally leaving out one subtree."""
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*")) if path.is_file()
+            and (outside is None or not path.is_relative_to(root / outside))}
+
+
+#: What a query row says about its representation, not its content: the concurrency token,
+#: which the store derives from its row version (design §3), and whether the file adapter
+#: derived a log row's key, which the store holds.
+REPRESENTATION = ("item_version", "inferred")
+
+
+def rows(root, collection):
+    """Each row's content by its key, as the dispatcher answers a query through its profile's tool."""
+    tool = "plan_memory" if collection == PLANNING else "record_memory"
+    return {row["record_id"]: {name: value for name, value in row.items() if name not in REPRESENTATION}
+            for row in call(root, tool, action="query", collection=collection)["rows"]}
+
+
+def stop_writer():
+    """Stop this process's writer, as an owner stops the service before an offline apply."""
+    manager = writer_lease._MANAGERS.pop(writer_lease.LeaseConfig.from_env(), None)
+    if manager is not None:
+        manager.close()
+
+
+def migrate(root, step, *, operator=True):
+    """`exomem collections migrate --<step>`, the operator credential set only in the apply shell."""
+    with pytest.MonkeyPatch.context() as shell:
+        if operator:
+            shell.setenv(OPERATOR, "operator")
+        return cli._collections_main(["migrate", "--vault", str(root), f"--{step}"])
+
+
+def printed(capsys):
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def marker(root):
+    return authority.parse_marker(root, authority.read_marker(root))
+
+
+def fence():
+    return writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).collection_store_fence()
+
+
+def staging_directories(root):
+    return list(state_paths.vault_state_dir(root).glob(migration.STAGING_PREFIX + "*"))
+
+
+def start_service(root):
+    service = Service(root, writer_lease.start_server_lifecycle())
+    from test_collection_store_s1_gate import _until
+
+    _until(lambda: service.manager.status().get("collection_store", {}).get("status") == "admitted")
+    return service
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    """A lease-configured shell over the real coordinator, with the migration fence on."""
+    root = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
+    monkeypatch.delenv(OPERATOR, raising=False)
+    monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
+    monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
+    monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
+    for name, value in {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "migrate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-service"),
+        "EXOMEM_WRITER_LEASE_PREFERRED": "1",
+        # Short, so that a crash test waits out a dead owner's lease in seconds.
+        "EXOMEM_WRITER_LEASE_TTL": "3",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(capability, "RELEASED", MIGRATE)
+    with coordinator(tmp_path / "coordinator.sqlite"), library_scope():
+        yield root
+
+
+def test_offline_migrate_routes_every_records_and_planning_collection_without_changing_a_vault_byte(
+        env, capsys):
+    """A migration that rewrites or loses a vault file, routes a collection that did not prove,
+    blesses a gap, leaves the vault unfenced against old writers or without its compatibility
+    descriptor, or serves rows that differ from the files it read."""
+    root = legacy_vault(env)
+    before = vault_bytes(root)
+    expected = {cid: rows(root, path) for cid, path in MIGRATED.items()}
+    report = preflight.preflight(root)
+    statuses = {row["collection_id"]: row["legacy_audit_status"] for row in report["collections"]
+                if row["status"] == "ready"}
+    assert report["verdict"] == "migratable" and set(statuses) == set(MIGRATED)
+    assert {statuses[CID], statuses[OTHER], statuses[LEDGER_ID]} == {"gap", "acknowledged_gap", "ok"}
+    assert migrate(root, "prepare", operator=False) == 0 and printed(capsys)["staging"] == "retained"
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["staging"]) == ("marker_admitted", "carried_forward")
+    routed = marker(root)
+    assert routed["default_authority"] == "file" and routed["version"] == 2
+    assert {entry["collection_id"]: entry["manifest_path"] for entry in routed["collections"]} == MIGRATED
+    assert {entry["layout"] for entry in routed["collections"]} == {"markdown-items", "markdown-log"}
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        chain.verify_store_chain(reader)
+        assert dict(reader.execute("SELECT collection_id,legacy_audit_status FROM collections")) == statuses
+        assert reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0] == routed["store_id"]
+        assert reader.execute("SELECT 1 FROM store_meta WHERE key=?", (authority.PENDING_CREATE,)).fetchone() is None
+    found = fence()
+    assert (found.enrolled, found.generation, found.store_id) == (True, 1, routed["store_id"])
+    assert {"collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID} <= set(
+        state_migration.recorded_descriptor_ids(root))
+    assert vault_bytes(root, outside="Knowledge Base/_Collections") == before
+    assert staging_directories(root) == []
+    service = start_service(root)
+    try:
+        assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == expected
+        assert call(root, "record_memory", action="inspect", collection=CID)["audit"]["status"] == "gap"
+    finally:
+        service.stop()
+
+
+def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection_and_check(
+        env, capsys, monkeypatch):
+    """A migration that publishes a store, a marker or a fence cut although one collection's
+    round trip failed, or that does not say which collection and which check."""
+    root = legacy_vault(env)
+    before = vault_bytes(root)
+    original = legacy_import._prove_round_trip
+
+    def drift(captured, *args):
+        if captured.manifest.collection_id == LEDGER_ID:
+            legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
+        return original(captured, *args)
+
+    monkeypatch.setattr(legacy_import, "_prove_round_trip", drift)
+    assert migrate(root, "apply") == 1
+    report = printed(capsys)
+    blocked = {row["path"]: row for row in report["collections"] if row["status"] == "blocked"}
+    assert report["verdict"] == "blocked" and list(blocked) == [LEDGER_COLLECTION_PATH]
+    assert blocked[LEDGER_COLLECTION_PATH]["blocker"]["check"] == "b"
+    assert not connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert (fence().enrolled, fence().generation) == (False, 0)
+    assert staging_directories(root) == [] and vault_bytes(root) == before
+
+
+def _apply_and_crash(environment, database, cut):
+    """`migrate --apply` in a fresh interpreter that dies at ``cut``, as a killed process would."""
+    os.environ.clear()
+    os.environ.update(environment)
+    records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
+    capability.RELEASED = MIGRATE
+
+    def die(*args, **kwargs):
+        os._exit(73)
+
+    if cut == "before-install":
+        from exomem.collection_store import takeover
+
+        takeover.replace_live = die
+    else:
+        admission._install_marker = die
+    with coordinator(database), library_scope():
+        cli._collections_main(["migrate", "--vault", environment["EXOMEM_VAULT_PATH"], "--apply"])
+    os._exit(0)
+
+
+def crash_apply(tmp_path, cut):
+    """Run one apply that dies at ``cut``, then wait out the dead owner's lease as an owner would."""
+    import multiprocessing
+    import time
+
+    from test_collection_store_s1_gate import _until
+
+    spawn = multiprocessing.get_context("spawn")
+    child = spawn.Process(target=_apply_and_crash, args=(
+        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut))
+    child.start()
+    child.join(120)
+    assert child.exitcode == 73
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    _until(lambda: (client.status().expires_at or 0) < time.time())
+
+
+def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_importing_again(
+        env, capsys, monkeypatch, tmp_path):
+    """A cutover that stops between publishing the store and installing the marker, then on
+    retry imports the files a second time or stays stuck with the store unrouted."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-marker")
+    assert connection.store_path(root).exists() and authority.read_marker(root) is None
+    imports = []
+    monkeypatch.setattr(legacy_import, "import_legacy_collection",
+                        lambda *args, **kwargs: imports.append(args) or pytest.fail("imported again"))
+    assert migrate(root, "apply") == 0
+    resumed = printed(capsys)
+    assert (resumed["status"], resumed["staging"], imports) == ("marker_admitted", "resumed", [])
+    assert {entry["collection_id"] for entry in marker(root)["collections"]} == set(MIGRATED)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert sorted(cid for (cid,) in reader.execute(
+            "SELECT collection_id FROM txns WHERE operation='legacy_import' AND legacy_event_json IS NULL")) == sorted(MIGRATED)
+    assert staging_directories(root) == []
+
+
+def test_a_crash_before_the_store_is_published_discards_its_staging(env, capsys, tmp_path):
+    """A cutover that stops before its store goes live, then leaves a fence cut, a store or a
+    marker behind, or later publishes the half-sealed staging it left."""
+    root = legacy_vault(env)
+    before = vault_bytes(root)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    crash_apply(tmp_path, "before-install")
+    assert not connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert (fence().enrolled, fence().generation) == (False, 0) and vault_bytes(root) == before
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.INTERRUPTED)
+    assert staging_directories(root) == []
+
+
+def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
+    """Carrying a prepared import forward although its collection changed since, which loses
+    the write from the store that becomes canonical."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    manifest = collections.load_manifest(root, root / WORK)
+    written = records.append_record(root, WORK, item={"title": "Written after prepare"},
+                                    why="a write while the standby pre-imports",
+                                    expected_container_hash=record_formats.load_adapter(root, manifest).read().snapshot)
+    stop_writer()
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    # Only the written collection changed: the activity-log line the write added leaves the others' basis.
+    assert (applied["rebuilt_because"], applied["changed"]) == (migration.BASIS_CHANGED, [WORK])
+    service = start_service(root)
+    try:
+        assert written["item_key"] in rows(root, CID)
+    finally:
+        service.stop()
+
+
+@pytest.fixture
+def s1(env, tmp_path, monkeypatch, capsys):
+    """The legacy vault after S1 enrolled a summary collection, with a row written by the service."""
+    monkeypatch.setattr(capability, "RELEASED", MIGRATE | {capability.RECORDS_SUMMARY_V1})
+    root = legacy_vault(env)
+    (tmp_path / "daily.md").write_text(DAILY_TEXT)
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, "operator")
+        assert cli._collections_main(["create", "--vault", str(root), "--manifest-path", DAILY_PATH,
+                                      "--manifest-file", str(tmp_path / "daily.md"), "--why", "summary"]) == 0
+    service = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Summary row"},
+                    item_key=KEY, why="first row")["outcome"] == "committed"
+    finally:
+        service.stop()
+    capsys.readouterr()
+    return root
+
+
+def test_an_s1_store_keeps_its_summary_rows_head_and_fence(s1, capsys):
+    """Publishing a fresh store over the vault's live S1 store, which drops its summary
+    collection, forks its head or moves its fence, so other hosts diverge."""
+    root = s1
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        head = chain.verify_store_chain(reader)
+    enrolled = fence()
+    assert migrate(root, "prepare", operator=False) == 0 and migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["staging"]) == ("marker_admitted", "carried_forward")
+    routed = marker(root)
+    assert {entry["collection_id"] for entry in routed["collections"]} == {DAILY, *MIGRATED}
+    assert (fence().generation, fence().store_id) == (enrolled.generation, enrolled.store_id) == (
+        routed["collection_store_fence"]["generation"], routed["store_id"])
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert chain.head_relation(reader, *head) == "ancestor"
+    service = start_service(root)
+    try:
+        assert [row["title"] for row in call(root, "record_memory", action="query", collection=DAILY)["rows"]] == [
+            "Summary row"]
+    finally:
+        service.stop()
+
+
+def test_a_store_write_after_prepare_forces_a_fresh_copy(s1, capsys):
+    """Swapping in a store copied before a later store write, which loses that write."""
+    root = s1
+    assert migrate(root, "prepare", operator=False) == 0
+    service = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "After prepare"},
+                    item_key=OTHER, why="a store write after prepare")["outcome"] == "committed"
+    finally:
+        service.stop()
+    capsys.readouterr()
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.LIVE_CHANGED)
+    service = start_service(root)
+    try:
+        assert sorted(row["title"] for row in call(root, "record_memory", action="query", collection=DAILY)["rows"]) == [
+            "After prepare", "Summary row"]
+    finally:
+        service.stop()
+
+
+def test_every_migration_step_refuses_while_the_release_keeps_it_dark(env, capsys, monkeypatch):
+    """A release that has not enabled collections-migrate-v1 still moving a vault out of files,
+    or touching the lease, the fence or the state directory first."""
+    root = legacy_vault(env)
+    monkeypatch.setattr(capability, "RELEASED", frozenset())
+    for step in ("dry-run", "prepare", "apply"):
+        assert migrate(root, step) == 1
+        assert capability.MIGRATION_UNAVAILABLE in capsys.readouterr().err
+    with pytest.raises(CollectionStoreError, match=capability.MIGRATION_UNAVAILABLE):
+        migration.cutover(None, None, None)
+    assert staging_directories(root) == [] and not connection.store_path(root).exists()
+    assert (fence().enrolled, fence().generation) == (False, 0)
+
+
+def test_a_coordinator_without_the_store_fence_names_the_release_to_upgrade_to(tmp_path, monkeypatch):
+    """A preflight that takes an older coordinator's silence for collections-store-v1 support,
+    or refuses without naming the release that serves it (ruled N3)."""
+    from io import BytesIO
+
+    from starlette.testclient import TestClient
+
+    from exomem.lease_coordinator import create_app
+
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
+    monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
+    root = legacy_vault(tmp_path / "vault")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://localhost")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "migrate")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "service")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOKEN", "lease")
+    app = create_app(database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator")
+    # An older coordinator: the same app before it served the store-fence route.
+    app.router.routes = [route for route in app.router.routes
+                         if "collection-store-fence" not in getattr(route, "path", "")]
+    with closing(TestClient(app)) as transport:
+        def urlopen(request, timeout):
+            response = transport.request(request.method, request.full_url, content=request.data,
+                                         headers=dict(request.header_items()))
+            if response.status_code != 200:
+                import urllib.error
+
+                raise urllib.error.HTTPError(request.full_url, response.status_code, "absent", {}, BytesIO())
+            return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        with library_scope(), pytest.raises(CollectionStoreError) as refused:
+            preflight.preflight(root)
+    from importlib.metadata import version
+
+    assert refused.value.code == preflight.UPGRADE_REQUIRED
+    assert f"upgrade it to Exomem {version('exomem')}" in str(refused.value)
+
+
+def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_copy(env, capsys, tmp_path, monkeypatch):
+    """The supported launcher handing a migrated vault, including its log-layout collection,
+    to a store-blind older release that would write its files as if they were canonical."""
+    from exomem.service_manager import WorkerRuntime
+
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0
+    assert {entry["layout"] for entry in marker(root)["collections"]} == {"markdown-items", "markdown-log"}
+    copy = tmp_path / "copy"
+    shutil.copytree(root, copy)
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "fresh-state"))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(copy))
+    runtime = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
+    target = asyncio.run(runtime.inspect({"python": OLDER, "version": _older()}))
+    with pytest.raises(ValueError, match="does not support required state compatibility"):
+        runtime.migration_required(target)
+    started = subprocess.run(
+        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
+         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
+        capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
+    assert started.returncode != 0
+    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr

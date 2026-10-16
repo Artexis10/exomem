@@ -207,6 +207,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "collection-publication",
         "collection-snapshot",
         "collection-audit-spool",
+        "collection-migration",
         "connector-boundary",
         "consolidation-tree",
         "deferred-index-store",

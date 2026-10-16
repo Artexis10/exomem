@@ -7,6 +7,10 @@ as ``governance.projection_runtime`` keeps for projected serving: every host run
 one release answers the same, so a vault restored on another host behaves as it did.
 No environment variable, caller argument or vault state turns it on. Slice rollback
 records a per-vault disable in the store that can only narrow it.
+
+``collections-migrate-v1`` is the same kind of fence for moving existing file Records and
+Planning collections into the store (OpenSpec move-structured-collections-to-sqlite
+P1b.3). It stays off until the GA gate (P3.6) adds it to ``RELEASED``.
 """
 
 from __future__ import annotations
@@ -18,8 +22,11 @@ from . import connection
 
 RECORDS_SUMMARY_V1 = "records-summary-v1"
 UNAVAILABLE = "RECORDS_SUMMARY_UNAVAILABLE"
+COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
+MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 
-#: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1.
+#: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1; P3.6 adds
+#: COLLECTIONS_MIGRATE_V1.
 RELEASED: frozenset[str] = frozenset()
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
@@ -78,3 +85,17 @@ def require_records_summary_route(vault_root, writer, action, values) -> None:
         summary = manifest.view_mode == "summary"
     if summary:
         require_records_summary(vault_root)
+
+
+def require_collections_migrate() -> None:
+    """Refuse every migration step while the release keeps collections-migrate-v1 off.
+
+    It prevents an unreleased migration from moving a vault's collections out of files,
+    which only the reverse export (P1b.4) could undo. Firing wrongly costs nothing: it is
+    a release constant, the same on every host, and file collections keep working.
+    """
+    if COLLECTIONS_MIGRATE_V1 not in RELEASED:
+        raise connection.CollectionStoreError(
+            MIGRATION_UNAVAILABLE,
+            f"moving file collections into the store is unavailable: this release has not enabled "
+            f"{COLLECTIONS_MIGRATE_V1}")

@@ -736,7 +736,7 @@ def projection_route(vault_root, path):
     return server
 
 def _durable_create(root):
-    """The marker entry of a create left pending on disk, or None when there is none or it cannot be read.
+    """The marker entries a pending intent left on disk, or None when there is none or it cannot be read.
 
     File collections route through here too, so a store that cannot be read must leave
     them on their file route rather than refuse them.
@@ -750,8 +750,8 @@ def _durable_create(root):
             intent = authority.pending_create(reader)
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
-    return None if intent is None else {"collection_id": intent["collection_id"],
-                                        "manifest_path": intent["manifest_path"]}
+    return None if intent is None else [{"collection_id": entry["collection_id"], "manifest_path": entry["manifest_path"]}
+                                        for entry in intent["collections"]]
 
 
 def _creating(root, selector):
@@ -767,7 +767,7 @@ def _creating(root, selector):
     if pending is None and server is not None and server.session is None:
         # Not open yet, as after a restart: a create left pending is only on disk so far.
         pending = _durable_create(root)
-    return pending is not None and authority.selected_entry(root, {"collections": [pending]}, selector) is not None
+    return pending is not None and authority.selected_entry(root, {"collections": pending}, selector) is not None
 
 
 def summary_create(root, arguments):
@@ -820,8 +820,8 @@ def served_create(vault_root, arguments):
             # create's until this thread's create tick resumes it, so this request ends
             # without a fresh checkout and says so.
             lend.resume = False
-            server.pending_create = {"collection_id": result["collection_id"], "manifest_path":
-                                     collections._reference_key(root, arguments["manifest_path"])}
+            server.pending_create = [{"collection_id": result["collection_id"], "manifest_path":
+                                      collections._reference_key(root, arguments["manifest_path"])}]
             result = {**result, "warnings": [*result.get("warnings", ()), (
                 f"collection_publication_pending ({result.get('reason')}): the collection is created and "
                 "the service is finishing its publication; until then store requests refuse as "
@@ -903,7 +903,7 @@ class StoreServer:
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
-        self.pending_create = None  # the marker entry a served create left pending, until it finishes
+        self.pending_create = None  # the marker entries a served create left pending, until it finishes
         self._requests = deque()
         self._closed = False
         self._condition = threading.Condition()

@@ -5,7 +5,9 @@ Records or Planning collection is captured with the legacy reader, imported into
 unpublished staging store in private scratch under the vault's state directory, and
 put through the round-trip proof (a)-(f). The preflight writes no vault file, no live
 store and no marker, and the scratch goes with the call. It migrates nothing: applying
-belongs to the declared offline migration (P1b.3).
+belongs to the declared offline migration (P1b.3, ``migration.py``), which reuses these
+steps. Where writer coordination is configured, it first probes the coordinator's store
+fence (ruled N3).
 """
 
 from __future__ import annotations
@@ -14,10 +16,13 @@ import datetime as dt
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 
-from .. import state_paths, vault
+from .. import state_paths, vault, writer_lease
 from .. import structured_collections as collections
+from ..cli_ops import OpError
 from . import admission, authority, connection, legacy, legacy_import
 
 #: Seconds for the whole preflight: one audit scan plus every collection's capture and proof.
@@ -28,6 +33,40 @@ _ACTOR = "collections-store-preflight"
 _REFUSALS = (*legacy._INPUT_FAILURES, vault.PathGuardError, collections.CollectionError)
 _DEADLINE = {"code": "COLLECTION_PREFLIGHT_DEADLINE",
              "reason": "the preflight deadline elapsed before this collection was checked"}
+UPGRADE_REQUIRED = "COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED"
+
+
+def _running_release() -> str:
+    try:
+        return metadata.version("exomem")
+    except metadata.PackageNotFoundError:
+        return "the release running here (its installed version is unrecorded)"
+
+
+def coordinator_capability(fence_client=None) -> dict:
+    """Probe the coordinator's collection-store fence route explicitly (ruled N3).
+
+    A coordinator that silently ignores an extra acquire field proves nothing, so this
+    reads the fence itself, in single-host and multi-host topologies alike. A coordinator
+    without the route refuses with the release to upgrade it to: this one, which serves
+    ``collections-store-v1``. That prevents a store that no coordinator fence protects
+    from old writers; a false refusal costs an owner one coordinator upgrade.
+    """
+    if fence_client is None:
+        config = writer_lease.LeaseConfig.from_env()
+        if not config.enabled:
+            return {"status": "not_configured"}
+        fence_client = writer_lease.LeaseCoordinatorClient(config)
+    try:
+        fence = fence_client.collection_store_fence()
+    except OpError as error:
+        if error.code != "WRITER_COORDINATOR_CONTRACT_ABSENT":
+            raise
+        raise connection.CollectionStoreError(
+            UPGRADE_REQUIRED,
+            f"the writer-lease coordinator does not serve the {writer_lease.COLLECTION_STORE_CAPABILITY} "
+            f"store fence; upgrade it to Exomem {_running_release()}, the release running here") from error
+    return {"status": "supported", "capability": fence.capability, "enrolled": fence.enrolled}
 
 
 def _blocker(error) -> dict:
@@ -59,6 +98,19 @@ def preflight(vault_root) -> dict:
     """
     admission.require_owner(vault_root, "the collections-store preflight")
     root = Path(vault_root).resolve()
+    try:
+        coordinator = coordinator_capability()
+    except OpError as error:
+        # An outage leaves the collections' answer standing; only the coordinator's is unknown.
+        coordinator = {"status": "unavailable", "code": error.code}
+    rows, pending, store_ids = candidates(root)
+    if pending:
+        rows.extend(_prove_all(root, pending))
+    return {**report(rows, store_ids), "dry_run": True, "coordinator": coordinator}
+
+
+def candidates(root):
+    """Rows for every blocked or skipped file collection, the ones to prove, and the marker's store ids."""
     raw = authority.read_marker(root)
     marker = None if raw is None else authority.parse_marker(root, raw)
 
@@ -90,49 +142,74 @@ def preflight(vault_root) -> dict:
                 for manifest in pending if not legacy_import.importable(manifest))
     pending = sorted((manifest for manifest in pending if legacy_import.importable(manifest)),
                      key=lambda found: found.path)
-    if pending:
-        rows.extend(_prove_all(root, pending))
+    return rows, pending, store_ids
+
+
+def report(rows, store_ids) -> dict:
     rows.sort(key=lambda row: row["path"])
     blocked = [row["path"] for row in rows if row["status"] == "blocked"]
     ready = [row for row in rows if row["status"] == "ready"]
-    return {"mode": "collections-store", "dry_run": True,
+    return {"mode": "collections-store",
             "verdict": "blocked" if blocked else "migratable" if ready else "nothing_to_migrate",
             "blocked": blocked, "collections": rows, "store_collections": len(store_ids)}
 
 
+def import_context(actor=_ACTOR):
+    return legacy_import.ImportContext(
+        actor, dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), uuid.uuid4().hex)
+
+
 def _prove_all(root, manifests) -> list[dict]:
-    context = legacy_import.ImportContext(
-        _ACTOR, dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), uuid.uuid4().hex)
-    rows = []
     with tempfile.TemporaryDirectory(prefix="collections-preflight-",
                                      dir=state_paths.ensure_vault_state_dir(root)) as scratch, \
             connection.staging_store(Path(scratch) / "staging.sqlite") as staging:
-        spool = Path(scratch) / "audit"
-        spool.mkdir(mode=0o700)
-        with legacy.LegacyAuditSpool(spool, deadline=time.monotonic() + DEADLINE_SECONDS) as audit:
+        return prove_into(root, manifests, staging, Path(scratch), import_context())
+
+
+@contextmanager
+def scanned(root, scratch, manifests):
+    """One audit spool that scanned the vault, or ``None`` and a blocked row for every collection.
+
+    The spool lives in the private directory ``scratch`` and goes with the context.
+    """
+    with legacy.LegacyAuditSpool(Path(scratch), deadline=time.monotonic() + DEADLINE_SECONDS) as audit:
+        blocker = None
+        try:
+            audit.scan(root)
+        except TimeoutError:
+            blocker = _DEADLINE
+        except _REFUSALS as error:
+            # Without the audit census no collection can be proved.
+            blocker = _blocker(error)
+            blocker["reason"] = "the vault's audit history could not be read: " + blocker["reason"]
+        if blocker is not None:
+            yield None, [_row(manifest.path, manifest, status="blocked", blocker=blocker) for manifest in manifests]
+        else:
+            yield audit, None
+
+
+def prove_into(root, manifests, staging, scratch, context, *, record=None) -> list[dict]:
+    """Capture, import and prove each collection into ``staging``, one committed transaction each.
+
+    ``record(captured, result)`` runs inside a ready collection's transaction, so what it
+    writes commits with that collection's import.
+    """
+    with scanned(root, scratch, manifests) as (audit, blocked):
+        if audit is None:
+            return blocked
+        rows = []
+        for index, manifest in enumerate(manifests):
             try:
-                audit.scan(root)
+                rows.append(_prove_one(root, manifest, staging, audit, context, record))
             except TimeoutError:
-                return [_row(manifest.path, manifest, status="blocked", blocker=_DEADLINE)
-                        for manifest in manifests]
-            except _REFUSALS as error:
-                # Without the audit census no collection can be proved.
-                blocker = _blocker(error)
-                blocker["reason"] = "the vault's audit history could not be read: " + blocker["reason"]
-                return [_row(manifest.path, manifest, status="blocked", blocker=blocker)
-                        for manifest in manifests]
-            for index, manifest in enumerate(manifests):
-                try:
-                    rows.append(_prove_one(root, manifest, staging, audit, context))
-                except TimeoutError:
-                    # The spool is spent: this and every later collection is unchecked, not clean.
-                    rows.extend(_row(later.path, later, status="blocked", blocker=_DEADLINE)
-                                for later in manifests[index:])
-                    break
-    return rows
+                # The spool is spent: this and every later collection is unchecked, not clean.
+                rows.extend(_row(later.path, later, status="blocked", blocker=_DEADLINE)
+                            for later in manifests[index:])
+                break
+        return rows
 
 
-def _prove_one(root, manifest, staging, audit, context) -> dict:
+def _prove_one(root, manifest, staging, audit, context, record=None) -> dict:
     try:
         captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
     except TimeoutError:
@@ -144,6 +221,8 @@ def _prove_one(root, manifest, staging, audit, context) -> dict:
     staging.execute("BEGIN IMMEDIATE")
     try:
         result = legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context)
+        if record is not None:
+            record(captured, result)
     except TimeoutError:
         staging.execute("ROLLBACK")
         raise

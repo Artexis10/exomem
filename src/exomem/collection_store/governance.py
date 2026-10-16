@@ -1185,7 +1185,8 @@ class OperationAuthorization:
                 owners = {entry["collection_id"]}
             entries = {cid: collection_authority.selected_entry(self.root, marker, cid) for cid in owners}
             intent = collection_authority.pending_create(self.conn)
-            if intent is not None and intent["collection_id"] in owners and entries[intent["collection_id"]] is None:
+            if intent is not None and any(entries[cid] is None for cid in
+                                          collection_authority.intent_collection_ids(intent) & owners):
                 return ()
             owners = {cid for cid, entry in entries.items() if entry is not None}
             for cid in owners:

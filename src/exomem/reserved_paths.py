@@ -73,6 +73,7 @@ _COLLECTION_AUDIT_SPOOL_RE = re.compile(
     r"^\.exomem-collection-audit-[0-9a-f]{32}\.sqlite(?:-(?:wal|shm|journal))?$",
     re.ASCII,
 )
+_COLLECTION_MIGRATION_RE = re.compile(r"^\.exomem-collection-migration-[0-9a-f]{32}$", re.ASCII)
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
@@ -594,6 +595,14 @@ _REGISTRY = (
         "collection_store.legacy",
         StatePlacement.TARGET_ADJACENT,
         leaf_patterns=(_COLLECTION_AUDIT_SPOOL_RE,),
+    ),
+    InternalStateDescriptor(
+        "collection-migration",
+        "collection_store.migration",
+        StatePlacement.TARGET_ADJACENT,
+        # Bounded recovery scratch: the one retained migration staging directory beside
+        # the live store it becomes. A new prepare replaces it; a finished cutover removes it.
+        component_tree_patterns=(_COLLECTION_MIGRATION_RE,),
     ),
 )
 
