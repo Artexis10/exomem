@@ -752,6 +752,35 @@ jobs:
     # test pins the count, so the full-CI stampede cannot return.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'release-please--branches--main' }}
     steps:
+      - name: Check out the release checker at the release base
+        # The base revision, so a release PR cannot edit its own check.
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: |
+            scripts/check_release_pr_files.py
+            release-please-config.json
+          sparse-checkout-cone-mode: false
+      - name: Require that the release PR changes only what release-please writes
+        # The release PR runs no test job, which is sound only while its diff
+        # is release-please's own work (scripts/check_release_pr_files.py).
+        # `shell: bash` adds pipefail; a failed API call must refuse.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if test "$HEAD_REPO" != "$GH_REPO"; then
+            echo "a release PR must come from $GH_REPO, not $HEAD_REPO" >&2
+            exit 1
+          fi
+          gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[] | tojson' \
+            > "$RUNNER_TEMP/pr-files.jsonl"
+          python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl"
       - name: Require a green full run on main at the release base
         env:
           GH_TOKEN: ${{ github.token }}
@@ -779,41 +808,6 @@ jobs:
           echo "dispatch one and let it finish green first: gh workflow run ci.yml --ref main" >&2
           echo "then re-run this job (docs/release.md, release flow)" >&2
           exit 1
-      - name: Require that the release PR changes only release-managed files
-        # The release PR runs no test job, which is sound only while its diff
-        # is release-please's own edits and the Cloud packages that
-        # release-please.yml's sync job regenerates. Anything else must land
-        # through its own pull request, which runs the test jobs.
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if test "$HEAD_REPO" != "$GH_REPO"; then
-            echo "a release PR must come from $GH_REPO, not $HEAD_REPO" >&2
-            exit 1
-          fi
-          # The configured extra files are read from main, so the set lives in
-          # release-please-config.json alone.
-          extra=$(gh api "repos/$GH_REPO/contents/release-please-config.json?ref=$BASE_SHA" --jq .content \
-            | base64 -d | jq -r '.packages[]."extra-files"[] | if type == "string" then . else .path end')
-          managed=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md $extra)
-          unmanaged=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)' \
-            | while read -r path; do
-                case "$path" in plugins/cloud/generated/*) continue ;; esac
-                printf '%s\n' "$managed" | grep -qxF -- "$path" || echo "$path"
-              done)
-          if test -n "$unmanaged"; then
-            echo "the release PR changes files that release-please does not manage:" >&2
-            echo "$unmanaged" >&2
-            echo "land them through their own pull request, which runs the test jobs" >&2
-            exit 1
-          fi
-          echo "the release PR changes only release-managed files"
 
   # A dispatched or scheduled full run is a superset of the push run at the
   # same revision: the same jobs plus the full tier and py3.11. The push run is
