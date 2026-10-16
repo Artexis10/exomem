@@ -2080,9 +2080,16 @@ def op_bootstrap(
             "original_recovery": {
                 "tool": "transfer_artifact",
                 "when": "recover a stored original through a desktop/personal endpoint",
-                "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
-                "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
-                "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
+                # The tool description already carries these, so compact leaves them to it.
+                **(
+                    {
+                        "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
+                        "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
+                        "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
+                    }
+                    if profile != "compact"
+                    else {}
+                ),
                 "cloud": "outbound delivery is unavailable",
             },
         },

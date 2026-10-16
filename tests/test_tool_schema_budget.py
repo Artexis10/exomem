@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TOTAL_BUDGET = 90_000
 
 #: Per-tool ceilings in bytes. Their sum is deliberately under TOTAL_BUDGET.
-# The bounded viewer uses spare per-tool headroom; the total budget stays unchanged.
+# The bounded viewer and original recovery use spare per-tool headroom; the total budget stays unchanged.
 TOOL_CEILINGS: dict[str, int] = {
     "edit_memory": 6600,
     "remember": 5100,
@@ -36,7 +36,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "connect_memory": 4300,
     "episode_memory": 4300,
     "record_memory": 4275,
-    "ask_memory": 4125,
+    "ask_memory": 4025,
     "schema_memory": 4000,
     "observe_memory": 3850,
     "maintain_memory": 3725,
@@ -44,7 +44,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "capture_source": 3325,
     "review_memory": 3250,
     "activate_context": 3000,
-    "triage_memory": 3100,
+    "triage_memory": 2990,
     "govern_memory": 3100,
     "plan_memory": 2275,
     "preserve_artifacts": 2300,
@@ -54,11 +54,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "review_item_context": 1300,
     "bootstrap": 1100,
-    "query_dataset": 1375,
+    "query_dataset": 1265,
     "process_media": 1025,
-    "transfer_artifact": 900,
+    "transfer_artifact": 1330,
     "browse_memory": 850,
-    "compile_source": 825,
+    "compile_source": 715,
     "read_media": 625,
     "coordination_status": 600,
     "viewer_map": 3325,
