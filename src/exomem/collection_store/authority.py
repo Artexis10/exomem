@@ -211,6 +211,43 @@ def owned_entry(root, marker, path):
     return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 
+VIEW_PATH = "COLLECTION_VIEW_PATH"
+
+
+def refuse_view_paths(root, paths, refusal):
+    """Raise ``refusal(code, reason)`` when the vault's mode marker gives a store collection any of ``paths``.
+
+    The file tools call this. Only the marker is read, so a vault without one opens no
+    store and keeps its file behaviour. Each caller decides a withheld path before this,
+    so a withheld view answers exactly as a missing path does.
+    """
+    try:
+        owned = _marker_owns_any(root, paths)
+    except CollectionStoreError as error:
+        # A marker that cannot place the paths refuses them: a view never leaves its store unseen.
+        raise refusal(error.code, error.reason) from None
+    if owned:
+        raise refusal(VIEW_PATH, (
+            "this path holds the views of a store collection; change its items with "
+            "record_memory or plan_memory, because the file tools never move, trash or "
+            "restore a collection view"))
+
+
+def _marker_owns_any(root, paths):
+    # Marker validation keeps every owned region under the knowledge base folder.
+    paths = [path for path in paths if collections._reference_key(Path(root), path) is not None]
+    if not paths:
+        return False
+    try:
+        raw = read_marker(root)
+    except (held_fs.HeldFsError, OSError) as error:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+    if raw is None:
+        return False
+    marker = parse_marker(root, raw)
+    return any(owned_entry(root, marker, path) is not None for path in paths)
+
+
 def upgraded_marker(root, conn, marker):
     """Derive ownership only from the validated current canonical declarations."""
     entries = []

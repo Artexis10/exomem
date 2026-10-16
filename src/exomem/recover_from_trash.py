@@ -243,6 +243,14 @@ def recover_from_trash(
                 f"{curated!r}. Pass `allow_curated=true` to override."
             ),
         )
+    from .collection_store import authority as collection_authority
+
+    # Decided before the existence check below, so it cannot tell a withheld view from none.
+    collection_authority.refuse_view_paths(
+        vault_root,
+        (restore_rel, *(f"{restore_rel.rstrip('/')}/{item.relative_path}" for item in trash_tree)),
+        RecoverError,
+    )
 
     try:
         reserved_paths.inspect_generic_path(vault_root, restore_rel)

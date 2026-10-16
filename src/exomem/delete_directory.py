@@ -151,6 +151,13 @@ def delete_directory(
             code=code,
             reason="directory could not be acquired through the generic boundary",
         ) from None
+    from .collection_store import authority as collection_authority
+
+    collection_authority.refuse_view_paths(
+        vault_root,
+        (rel_path, *(f"{rel_path}/{item.relative_path}" for item in tree)),
+        DeleteDirectoryError,
+    )
     files = [abs_path / item.relative_path for item in tree]
     if files and not recursive:
         raise DeleteDirectoryError(

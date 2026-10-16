@@ -1,0 +1,219 @@
+"""Title-bearing collection view paths: the file tools refuse them, and no surface leaks a withheld one.
+
+Each surface test observes one path as the same restricted caller twice, before the
+secret row exists and once the row is withheld, and requires the same answer. The
+owner's answer shows that the surface does expose the view to a reader who may see it.
+"""
+
+import json
+
+import pytest
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_collection_store_writer import store as store
+from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
+
+from exomem import structured_collections as collections
+from exomem.collection_store import authority
+from exomem.collection_store.preview import preview_store
+from exomem.governance.principal import owner_principal, request_scope
+
+WORK = "Knowledge Base/Records/Work"
+ITEMS = f"{WORK}/Items"
+OPEN = f"{ITEMS}/Open plan.md"
+SECRET = f"{ITEMS}/Acquire Northwind.md"
+SECRET_ITEM = {"title": "Acquire Northwind"}
+SECRET_HOLD = {**SECRET_ITEM, "tags": ["secret"], "count": "many"}
+TARGET = "Knowledge Base/Notes/target.md"
+
+
+@pytest.fixture
+def vault(store):
+    """A store collection that names its views by title, a marker routing it, and a policy.
+
+    The policy withholds the secret row from the external audience by its reference,
+    which the view's bytes do not carry, so only the item's own authorization withholds
+    it. A hold is its own subject: it keeps its candidate's tags but not the reference.
+    """
+    text = manifest_text().replace(
+        "    count:", "    tags: {type: array, items: {type: string}}\n    count:")
+    text = text.replace("storage:\n", "item_filename:\n  version: 1\n  fields: [title]\nstorage:\n")
+    store.create_collection(manifest_path(), text, why="create")
+    store.append_record(CID, item={"title": "Open plan"}, item_key=KEY, why="capture")
+    sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    marker = authority.marker_path(store.root)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1,
+        "collections": [{"collection_id": CID, "manifest_path": manifest_path(),
+                         "authority": "store", "store_id": sid,
+                         "source_path": ITEMS, "layout": "markdown-items"}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\ntags: [secret]\n")
+    write_rule(store.root, ceiling=0)
+    target = store.root / TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text("---\ntype: insight\nstatus: active\n---\n\nTarget.\n")
+    return store
+
+
+def _call(vault, name, **arguments):
+    """One answer through the dispatcher; a refusal is the text the caller receives."""
+    try:
+        return _through_dispatcher(vault.root, name, **arguments)
+    except ValueError as error:
+        return str(error)
+
+
+def _as(vault, who, observe):
+    with preview_store(vault.root, vault.handle), request_scope(who):
+        return observe()
+
+
+def _add_secret(vault):
+    vault.append_record(CID, item=SECRET_ITEM, item_key=OTHER, body="See [[Notes/target]].\n", why="capture")
+
+
+def _files(vault):
+    return sorted(path.relative_to(vault.root).as_posix() for path in (vault.root / WORK).rglob("*"))
+
+
+def test_file_tools_answer_a_withheld_view_as_missing_and_refuse_a_released_one(vault):
+    def observe():
+        return [_call(vault, "delete", path=SECRET, confirm=True),
+                _call(vault, "move_file", old_path=SECRET, new_path="Knowledge Base/Notes/moved.md")]
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    views = _files(vault)
+    assert _as(vault, _external(), observe) == absent == [f"NOT_FOUND: path does not exist: {SECRET}"] * 2
+    released = _as(vault, _external(), lambda: [
+        _call(vault, "delete", path=OPEN, confirm=True),
+        _call(vault, "move_file", old_path=OPEN, new_path="Knowledge Base/Notes/moved.md")])
+    assert [str(answer).split(":")[0] for answer in released] == ["COLLECTION_VIEW_PATH"] * 2
+    assert "record_memory" in released[0]
+    assert _files(vault) == views
+
+
+def test_the_owner_file_tools_refuse_view_paths_from_the_marker_without_a_store(vault):
+    """No store is bound, as when a file tool runs outside the store thread: the marker alone decides."""
+    plain, trashed = "Knowledge Base/Notes/plain.md", "Knowledge Base/Notes/trashed.md"
+    for note in (plain, trashed):
+        (vault.root / note).write_text("Plain note.\n")
+    with request_scope(owner_principal()):
+        _call(vault, "delete", path=trashed, confirm=True)
+        in_trash = next((vault.root / "Knowledge Base/_trash").rglob("*trashed.md")).relative_to(vault.root)
+        views = _files(vault)
+        refusals = [
+            _call(vault, "delete", path=OPEN, confirm=True),
+            _call(vault, "delete", path=WORK, confirm=True, recursive=True),
+            _call(vault, "move_file", old_path=plain, new_path=f"{ITEMS}/plain.md"),
+            _call(vault, "recover_from_trash", trash_path=in_trash.as_posix(), restore_path=f"{ITEMS}/trashed.md"),
+        ]
+    assert [str(answer).split(":")[0] for answer in refusals] == ["COLLECTION_VIEW_PATH"] * 4
+    assert _files(vault) == views
+
+
+def test_file_tools_keep_file_collections_and_open_no_store_without_a_marker(tmp_path, monkeypatch):
+    from exomem import commands, records
+    from exomem.collection_store import connection
+
+    for name in ("load_store_libraries", "open_reader", "open_writer"):
+        monkeypatch.setattr(connection, name, lambda *a, **kw: pytest.fail("a file tool opened the store"))
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    (root / "Knowledge Base/log.md").write_text("# Log\n")
+    records.create_collection(root, manifest_path(), manifest_text(), why="create")
+    item = records.append_record(root, CID, item={"title": "Open plan"}, item_key=KEY, why="capture")
+    page = item["affected_paths"][0]
+    moved = "Knowledge Base/Notes/moved.md"
+    with request_scope(owner_principal()):
+        commands.op_move_file(root, old_path=page, new_path=moved, update_wikilinks=False)
+        trashed = commands.op_delete(root, path=moved, confirm=True)
+        commands.op_recover_from_trash(root, trash_path=trashed["trash_path"], restore_path=page)
+    assert (root / page).is_file() and not (root / moved).exists()
+
+
+def test_listing_and_counts_omit_a_withheld_view(vault):
+    def observe():
+        return (_call(vault, "list_directory", path=ITEMS),
+                _call(vault, "list_directory", path="Knowledge Base/Records", recursive=True),
+                _call(vault, "overview", path="Knowledge Base/Records")["totals"])
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    assert _as(vault, _external(), observe) == absent
+    assert SECRET in str(_as(vault, owner_principal(), observe))
+
+
+def test_inbound_links_omit_a_withheld_view(vault):
+    def observe():
+        return _call(vault, "list_inbound_links", target=TARGET)
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    assert _as(vault, _external(), observe) == absent
+    assert SECRET in str(_as(vault, owner_principal(), observe))
+
+
+def test_a_withheld_view_title_does_not_resolve_a_writers_link(vault):
+    def write(name):
+        result = _call(vault, "create_file", path=f"Knowledge Base/Inbox/{name}.md", content="See [[Acquire Northwind]].\n")
+        return (vault.root / f"Knowledge Base/Inbox/{name}.md").read_text(), result["warnings_count"]
+
+    absent = _as(vault, _external(), lambda: write("before"))
+    _add_secret(vault)
+    assert _as(vault, _external(), lambda: write("after")) == absent
+    assert SECRET.removesuffix(".md") in _as(vault, owner_principal(), lambda: write("owner"))[0]
+
+
+def test_reading_a_withheld_view_refuses_as_a_missing_path(vault):
+    def observe():
+        return [_call(vault, "get", path=SECRET), _call(vault, "get", path=SECRET, include_raw=True)]
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    assert _as(vault, _external(), observe) == absent
+    assert SECRET in str(_as(vault, owner_principal(), observe))
+
+
+def test_a_withheld_held_view_is_absent_from_its_collection_listing(vault):
+    """Reading it is covered in `test_projected_page_cannot_drop_canonical_restricted_tags`."""
+    def observe():
+        return _call(vault, "list_directory", path=WORK, recursive=True)
+
+    absent = _as(vault, _external(), observe)
+    with pytest.raises(collections.CollectionError) as refused:
+        vault.append_record(CID, item=SECRET_HOLD, item_key=OTHER, why="capture")
+    assert _as(vault, _external(), observe) == absent
+    assert refused.value.details["held"]["path"] in str(_as(vault, owner_principal(), observe))
+
+
+def test_inventory_counts_omit_a_withheld_row_and_its_hold(vault):
+    def observe():
+        return _call(vault, "record_memory", action="inspect")["collections"]
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    with pytest.raises(collections.CollectionError):
+        vault.append_record(CID, item={**SECRET_HOLD, "title": "Hold Northwind"},
+                            item_key="33333333-3333-4333-8333-333333333333", why="capture")
+    assert _as(vault, _external(), observe) == absent
+    owner = _as(vault, owner_principal(), observe)
+    assert (owner[0]["committed"], owner[0]["held"]) == (2, 1)
+
+
+def test_a_sync_conflict_copy_of_a_withheld_view_is_absent(vault):
+    copy = f"{ITEMS}/Acquire Northwind.sync-conflict-20261016-101500-ABCDEFG.md"
+
+    def observe():
+        return [_call(vault, "list_directory", path=ITEMS), _call(vault, "get", path=copy)]
+
+    absent = _as(vault, _external(), observe)
+    _add_secret(vault)
+    # The copy carries the row's own stamp and bytes, which is how a sync client makes one.
+    (vault.root / copy).write_bytes((vault.root / SECRET).read_bytes())
+    assert _as(vault, _external(), observe) == absent
