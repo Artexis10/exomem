@@ -985,13 +985,17 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     from exomem import request_budget
     from exomem.collection_store.writer import CollectionWriter
 
-    entered, release = threading.Event(), threading.Event()
+    release, completed = threading.Event(), threading.Event()
+    leaf_calls = 0
     append = CollectionWriter.append_record
 
     def delayed(writer, *args, **kwargs):
-        entered.set()
+        nonlocal leaf_calls
+        leaf_calls += 1
         assert release.wait(5), "test did not release the accepted mutation"
-        return append(writer, *args, **kwargs)
+        result = append(writer, *args, **kwargs)
+        completed.set()
+        return result
 
     monkeypatch.setattr(CollectionWriter, "append_record", delayed)
     arguments = dict(action="append", collection=CID, item={"title": "Late committed"},
@@ -1001,7 +1005,6 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     try:
         with pytest.raises(OpError) as pending:
             call(service.root, "record_memory", **arguments)
-        assert entered.is_set()
         assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
         assert pending.value.as_public_dict()["status"] == "uncertain"
         assert pending.value.as_public_dict()["committed"] is None
@@ -1009,9 +1012,11 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
     finally:
         request_budget.reset_current(token)
         release.set()
+    assert completed.wait(5), "the accepted mutation did not complete without a retry"
     first = call(service.root, "record_memory", **arguments)
     assert first["outcome"] == "committed"
     assert call(service.root, "record_memory", **arguments) == first
+    assert leaf_calls == 1
     assert titles(service.root, CID) == ["Canonical", "Late committed"]
 
 
