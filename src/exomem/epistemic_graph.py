@@ -5810,7 +5810,8 @@ class EpistemicGraphIndex:
             graph_values = dict(
                 snapshot.execute(
                     "SELECT key, value FROM graph_meta WHERE key IN "
-                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint')"
+                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', ?)",
+                    (_RESOLVER_TOPOLOGY_KEY,),
                 )
             )
             predecessor = graph_checkpoint.generation - 1
@@ -5840,6 +5841,17 @@ class EpistemicGraphIndex:
                     # daemon would pay a whole-vault rebuild for this page.
                     # The fallback below queues it, and one per-path drain
                     # republishes.
+                    #
+                    # Only with the stored topology current, too. A drain that
+                    # rewrote a retitled page only as affected acknowledged
+                    # without widening on its old title; the stale fingerprint
+                    # it left fails closed at the next topology-changing write,
+                    # and this late refresh is that write.
+                    live_topology = self._resident_resolver_topology()
+                    if live_topology is None:
+                        return fallback("resolver_snapshot_unavailable")
+                    if live_topology != graph_values.get(_RESOLVER_TOPOLOGY_KEY):
+                        return fallback("stored_topology_fingerprint_mismatch")
                     log.info(
                         "graph incremental refresh found its generation already "
                         "acknowledged generation=%s acknowledged=%s",
@@ -6193,19 +6205,33 @@ class EpistemicGraphIndex:
         return stored == expected
 
     def _registry_records_disk(
-        self, entries: dict[str, freshness.FileSignature], path: Path
+        self,
+        entries: dict[str, freshness.FileSignature],
+        path: Path,
+        *,
+        admitted: bool | None = None,
     ) -> bool:
         """Whether `entries`, a recall registry map, holds `path` as the disk has it.
 
         `path` is spelled under the vault's own root, as the registry keys it.
-        The registry never lists a page recall does not admit, and the graph
-        holds no rows for one, so such a page matches by its absence. Raises
-        `OSError` when an admitted page cannot be statted.
+        A page recall does not admit now, or a deleted one, matches only when
+        the registry does not list it either. `admitted` is the caller's
+        `is_recall_candidate` answer when it already has one. Raises `OSError`
+        when an admitted page cannot be statted.
         """
-        exists = os.path.lexists(path)
-        if exists and not recall_policy.is_recall_candidate(self.vault_root, path):
-            return True
-        return entries.get(str(path)) == (freshness.stat_signature(path) if exists else None)
+        if admitted is None:
+            admitted = recall_policy.is_recall_candidate(self.vault_root, path)
+        if not admitted:
+            return str(path) not in entries
+        return entries.get(str(path)) == freshness.stat_signature(path)
+
+    def _resident_resolver_topology(self) -> str | None:
+        """The topology fingerprint of the resident resolver at the live checkpoint, or None."""
+        live = freshness.live_recall_checkpoint(self.vault_root, "vault")
+        if live is None:
+            return None
+        resolver = find_module.recall_resolver_snapshot_at_checkpoint(self.vault_root, live)
+        return None if resolver is None else _resolver_topology_fingerprint(resolver)
 
     def _registry_describes(
         self, entries: dict[str, freshness.FileSignature], paths: Iterable[Path]
@@ -6260,7 +6286,7 @@ class EpistemicGraphIndex:
                 exists = os.path.lexists(path)
                 admitted = exists and recall_policy.is_recall_candidate(self.vault_root, path)
                 try:
-                    if not self._registry_records_disk(entries, path):
+                    if not self._registry_records_disk(entries, path, admitted=admitted):
                         return None
                 except OSError:
                     return None
@@ -6555,14 +6581,14 @@ class EpistemicGraphIndex:
                 # `GRAPH_SYNC_LINEAGE_CONFLICT`, raised at the *next* write
                 # rather than here.
                 nonlocal published, withheld, coverage
-                if not (
-                    self._source_versions_current(indexed_versions)
-                    and self._registry_describes(recorded, batch)
-                ):
-                    # A page this pass indexed moved under it, or the disk moved
-                    # past the resolver's checkpoint after the check above: those
-                    # rows are stale, so nothing here may land.
+                if not self._source_versions_current(indexed_versions):
+                    # A page this pass indexed moved under it: those rows are
+                    # stale, so nothing here may land.
                     raise _DrainPublicationMoved
+                if not self._registry_describes(recorded, batch):
+                    # The check that soundness rests on: a page can change after
+                    # the early check above and before the pass reads it.
+                    raise _DrainPublicationMoved("bytes_ahead_at_publish")
                 # Read at commit time, not before the pass: the coverage claim
                 # has to be about the generation that is committed now, not
                 # the one that was committed when the drain started.
@@ -6630,11 +6656,16 @@ class EpistemicGraphIndex:
                     indexed_versions=indexed_versions,
                     before_commit=publish_drain,
                 )
-            except _DrainPublicationMoved:
+            except _DrainPublicationMoved as moved:
                 # The pass rolled back with it, so nothing is half-applied and
                 # no receipt is cleared. The queue still holds this work and
                 # the next drain repairs it against the projection that moved.
-                log.info("deferred graph drain did not publish; projection moved under the pass")
+                if moved.args:
+                    log.info("deferred graph drain outcome=%s queued=%d", moved.args[0], len(paths))
+                else:
+                    log.info(
+                        "deferred graph drain did not publish; projection moved under the pass"
+                    )
                 return {**report, "moved": 1}
             if published:
                 self._note_graph_published()
@@ -10002,7 +10033,13 @@ def upsert_after_write(
                     mutation_coordinator,
                 )
             acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
-            if acknowledged and acknowledged.covers(required):
+            # A late refresh that queued instead of its no-op ran no rebuild and
+            # left the graph unavailable, so a standalone caller still converges.
+            if (
+                acknowledged
+                and acknowledged.covers(required)
+                and not (acknowledged_batch and report.get("queued"))
+            ):
                 return GraphDispatchResult("completed", "graph_rebuild_completed", required)
             return _join_registered_standalone(
                 vault_root,

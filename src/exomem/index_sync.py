@@ -1123,12 +1123,6 @@ def _drain_graph_work(
         # through the checkpoint's own full-scope marker.
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
         return 0
-    if report.get("moved"):
-        # Nothing landed, and not by any page's fault. Replaying each receipt
-        # alone would derive the same pages ahead of the write's own refresh,
-        # and one receipt cannot acknowledge a wider checkpoint.
-        deferred_index.rotate_graph_receipts(vault_root, receipts)
-        return 0
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]

@@ -46,6 +46,7 @@ from typing import Any
 
 import pytest
 from test_graph_replay_currency import _assert_matches_a_fresh_rebuild
+from test_records_recall_graph import _manifest as _records_manifest
 
 from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
 from exomem import find as find_module
@@ -1175,10 +1176,10 @@ def _publish_with_a_resident_resolver(root: Path, pages: dict[str, str]) -> None
     )
 
 
-def _commit_before_its_fanout(root: Path, rel: str, text: str) -> None:
-    """A canonical batch whose bytes and graph receipt land; its fan-out has not run yet."""
+def _commit_before_its_fanout(root: Path, pages: dict[str, str]) -> None:
+    """A canonical batch whose bytes and graph receipts land; its fan-out has not run yet."""
     vault_module.batch_atomic_write(
-        [vault_module.PlannedWrite(root / rel, text)],
+        [vault_module.PlannedWrite(root / rel, text) for rel, text in pages.items()],
         vault_root=root,
         post_commit_fanout=False,
     )
@@ -1222,7 +1223,7 @@ def test_a_drain_that_races_a_retitle_leaves_the_graph_a_rebuild_would_build(
         },
     )
     whole_vault_passes.clear()
-    _commit_before_its_fanout(vault, RETITLED, _titled("New Title", "A page renamed."))
+    _commit_before_its_fanout(vault, {RETITLED: _titled("New Title", "A page renamed.")})
 
     _drain_while_the_write_publishes(vault, monkeypatch, RETITLED)
     index_sync.upsert_after_write(vault, [vault / RETITLED])
@@ -1247,7 +1248,7 @@ def test_a_drain_that_races_a_create_converges_without_a_whole_vault_pass(
         vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
     )
     whole_vault_passes.clear()
-    _commit_before_its_fanout(vault, CREATED, _titled("Fresh Title", "A new page."))
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
 
     _drain_while_the_write_publishes(vault, monkeypatch, CREATED)
     index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
@@ -1274,7 +1275,7 @@ def test_a_write_whose_create_a_drain_acknowledged_first_rebuilds_nothing(
         vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
     )
     whole_vault_passes.clear()
-    _commit_before_its_fanout(vault, CREATED, _titled("Fresh Title", "A new page."))
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
     assert index_sync.publish_corpus_delta(vault, changed=[vault / CREATED])
     index_sync.drain_graph_work(vault)
     checkpoint = graph_sync.read_checkpoint(vault)
@@ -1288,6 +1289,167 @@ def test_a_write_whose_create_a_drain_acknowledged_first_rebuilds_nothing(
     assert EpistemicGraphIndex(vault).available()
     assert not EpistemicGraphIndex(vault).reads_suspended()
     _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_standalone_late_refresh_that_cannot_prove_its_no_op_still_converges(
+    vault: Path,
+) -> None:
+    """A standalone caller has no envelope for pending, so it is never left queued.
+
+    The resolver was evicted after the drain acknowledged, so the late refresh
+    cannot prove the stored topology and queues its pages. The dispatch then
+    reported the rebuild completed while the graph stayed unavailable.
+    """
+    _publish_with_a_resident_resolver(
+        vault, {CREATE_LINKER: _titled("Create Linker", "Cites [[Fresh Title]].")}
+    )
+    _commit_before_its_fanout(vault, {CREATED: _titled("Fresh Title", "A new page.")})
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / CREATED])
+    index_sync.drain_graph_work(vault)
+    assert EpistemicGraphIndex(vault).available()
+    find_module.unload_ram_caches()
+
+    index_sync.upsert_after_write(vault, [vault / CREATED], created_paths=[vault / CREATED])
+
+    assert EpistemicGraphIndex(vault).available(), "a standalone caller was left with a queue"
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+AFFECTED = "Knowledge Base/Notes/Insights/queue-affected.md"
+AFFECTED_LINKER = "Knowledge Base/Notes/Insights/queue-affected-linker.md"
+TARGET = "Knowledge Base/Notes/Insights/queue-target.md"
+
+
+def test_a_late_refresh_does_not_trust_a_drain_that_left_the_topology_unowned(
+    vault: Path,
+) -> None:
+    """An acknowledged generation is not enough when the drain did not own its topology.
+
+    The write creates a target and retitles a page that cites it. A drain of
+    the target alone rewrites that page as affected, stores its new title and
+    acknowledges the generation, but never widens on the old title, so the
+    old title's linker keeps an edge a rebuild drops. The stale stored
+    topology is meant to fail closed at the next topology-changing write,
+    which is this write's own late refresh.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            AFFECTED: _titled("Old X", "Cites [[Y Title]]."),
+            AFFECTED_LINKER: _titled("X Linker", "Cites [[Old X]]."),
+        },
+    )
+    _commit_before_its_fanout(
+        vault,
+        {
+            TARGET: _titled("Y Title", "A new target."),
+            AFFECTED: _titled("New X", "Cites [[Y Title]]."),
+        },
+    )
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / TARGET, vault / AFFECTED])
+    index_sync.drain_graph_work(vault, paths={TARGET})
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    assert _acknowledged(vault) == int(checkpoint.generation)
+
+    index_sync.upsert_after_write(
+        vault, [vault / TARGET, vault / AFFECTED], created_paths=[vault / TARGET]
+    )
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_page_edited_between_the_drain_s_check_and_its_read_lands_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proof at publish is the one that holds: a page can change after the first check.
+
+    An editor outside the writers' boundary retitles a queued page after the
+    drain checked it and before the pass read it. The pass then derives the
+    new title under the resolver from before it. Those rows must not land
+    before the registry records the edit.
+    """
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            RETITLED: _titled("Old Title", "A page about to be renamed."),
+            OLD_LINKER: _titled("Old Linker", "Cites [[Old Title]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[New Title]]."),
+        },
+    )
+    deferred_index.add_graph_receipts(vault, [RETITLED])
+    real_pass = EpistemicGraphIndex._refresh_paths_pass
+    edited: list[int] = []
+
+    def edit_then_pass(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not edited:
+            edited.append(1)
+            (vault / RETITLED).write_text(
+                _titled("New Title", "A page renamed."), encoding="utf-8"
+            )
+        return real_pass(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(EpistemicGraphIndex, "_refresh_paths_pass", edit_then_pass)
+        index_sync.drain_graph_work(vault)
+
+    assert edited
+    assert deferred_index.list_graph_paths(vault) == [RETITLED], (
+        "rows derived from bytes the registry had not recorded landed"
+    )
+    freshness.on_files_changed(vault, changed=[vault / RETITLED])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_one_unrecorded_edit_does_not_hold_back_the_rest_of_its_batch(vault: Path) -> None:
+    """A page the registry has not recorded waits; the batch's recorded pages drain.
+
+    The unrecorded page is the only one the resolver has not seen. Each
+    receipt then drains alone under the same proof, so its batch neighbours
+    do not wait for the watcher with it.
+    """
+    (vault / PAGE_A).write_text(_page("A", "A is revised against [[queue-b]]."), encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[vault / PAGE_A])
+    (vault / PAGE_B).write_text(_page("B", "B changes where no event saw it."), encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [PAGE_A, PAGE_B])
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_B]
+    freshness.on_files_changed(vault, changed=[vault / PAGE_B])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_manifest_whose_admission_flipped_unrecorded_lands_nothing(vault: Path) -> None:
+    """A page recall no longer admits is described only once the registry drops it too.
+
+    A collection manifest is admitted by its bytes, so an edit can flip it out
+    of recall with no policy change. Until the registry records that edit, the
+    resolver still holds the manifest as a page.
+    """
+    manifest = "Knowledge Base/Records/Health/_collection.md"
+    (vault / manifest).parent.mkdir(parents=True)
+    (vault / manifest).write_text(_records_manifest(), encoding="utf-8")
+    _seed_live_freshness(vault)
+    EpistemicGraphIndex(vault).rebuild_all()
+    (vault / manifest).write_text("# A raw page now\n", encoding="utf-8")
+    deferred_index.add_graph_receipts(vault, [manifest])
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == [manifest]
+    freshness.on_files_changed(vault, changed=[vault / manifest])
+    index_sync.drain_graph_work(vault)
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
 
 
 def test_a_reprojection_of_the_last_written_batch_still_repairs_its_rows(vault: Path) -> None:

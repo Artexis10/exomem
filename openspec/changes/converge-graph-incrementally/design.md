@@ -430,14 +430,18 @@ topology change, and published stale edges as current. For a created page, the r
 found a row for a page it had created and rebuilt the whole vault.
 
 The drain therefore proves its batch against the registry map bound to its resolver's
-checkpoint, under the writers' boundary, before the pass and again at commit. A page
-whose stat signature that map does not record, a deleted page that it still lists, or a
-created page that it lacks, lands nothing and leaves the receipts queued. The proof
-reads one stat per batch page and copies the map once. Serializing the drain against
-the writer's fan-out was the alternative; it adds shared state and a liveness risk, and
-this proof needs neither. The cost is a drain that retries while one writer keeps
-rewriting the same pages. That retry is bounded by the queue's existing stall
-escalation.
+checkpoint, under the writers' boundary. It fails the batch for a page whose stat
+signature the map does not record, a deleted page that the map still lists, a created
+page that it lacks, and a page recall no longer admits that the map still lists. The
+proof runs twice. The check before the pass is an early exit. The check at publish is
+the one soundness rests on, because an editor outside the boundary can change a page
+after the first check and before the pass reads it. Each check reads one stat per batch
+page, and the map is copied once. A failed batch lands nothing, and each of its
+receipts then drains alone under the same proof, so an unrecorded page holds back only
+its own receipt. Serializing the drain against the writer's fan-out was the
+alternative; it adds shared state and a liveness risk, and this proof needs neither.
+The cost is a page that waits while one writer keeps rewriting it. That wait is bounded
+by the queue's existing stall escalation.
 
 The other order of the same race is a drain that runs after the publication. It
 acknowledges the write's generation before the write's graph step runs, and that step
@@ -447,3 +451,12 @@ checkpoint when its pages are exactly that checkpoint's batch and their rows alr
 reflect them, so the refresh's acknowledged no-op applies. The row proof is the replay
 currency proof. Without it, a reconcile reprojection of the last written batch would
 become a no-op and leave stale unit rows.
+
+An acknowledgement alone does not prove the edges. A drain of one queued page can
+rewrite a retitled page only as affected and acknowledge the generation without
+widening on the old title (task 8.9). It leaves the stored topology fingerprint stale,
+and the next topology-changing write fails closed on it. The late refresh is that
+write, so the no-op also requires the stored fingerprint to equal the resident
+resolver's at the live checkpoint. Otherwise the refresh takes the whole-vault repair
+that the stale fingerprint waits for. With no resident resolver it queues its pages,
+and a caller that cannot report pending still gets the rebuild it always got.

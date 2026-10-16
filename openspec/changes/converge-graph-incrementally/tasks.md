@@ -474,10 +474,10 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   pass (`existing_row_with_create`); a create a drain acknowledged first cost one
   whole-vault pass through the write's own dispatch (`caller_create_outside_delta`).
 - [x] 10.2 Under the writers' boundary, a drain proves every batch page against the
-  registry map bound to its resolver's checkpoint, before the pass and again at commit.
+  registry map bound to its resolver's checkpoint, before the pass and again at publish.
   A page that the map does not record as the disk has it lands nothing, and the drain
-  returns `moved` (`outcome=bytes_ahead_of_checkpoint`). The queue rotates a moved
-  batch's receipts and does not replay each receipt alone. A write's dispatch that finds
+  returns `moved` (`outcome=bytes_ahead_of_checkpoint`). Each receipt of a moved batch
+  then drains alone under the same proof (10.5). A write's dispatch that finds
   the graph readable takes the checkpoint when its pages are exactly that checkpoint's
   batch and the replay currency proof finds their rows current. The refresh's
   acknowledged no-op then applies. The checkpoint binding check is one helper that the
@@ -496,10 +496,28 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
 - [ ] 10.4 **Open, not fixed here.** 10.2 does not close 8.9. A drain still rewrites an
   affected page whose retitle the registry already records and that the batch did not
   queue, after a `DRAIN_LIMIT` truncation, a path-scoped drain, or a receipt queued
-  after the snapshot. A probe on 10.2 left the old title's linker with its edge to the
-  retitled page. Two whole-vault doors also remain on this race, both reproduced by a
+  after the snapshot. A probe on 10.5 still leaves the old title's linker with its edge
+  to the retitled page when only the queue repairs it. When that write's own late refresh
+  runs, it now takes a whole-vault pass instead (10.5). Two whole-vault doors also remain on this race, both reproduced by a
   probe on 10.2. First, a dispatch that finds its generation acknowledged while a later
   registry update left the marker stale registers a rebuild from the predecessor probe
   (`graph_sync_predecessor_mismatch`, or `graph_sync_predecessor_present_at_genesis` at
   generation 1). Second, a created page that a drain derived correctly but withheld
   still declines the write's refresh (`existing_row_with_create`).
+- [x] 10.5 Review corrections. The acknowledged no-op also requires the stored resolver
+  topology to equal the resident resolver's at the live checkpoint. A stale topology
+  falls back with `stored_topology_fingerprint_mismatch` (whole-vault), and no resident
+  resolver falls back with `resolver_snapshot_unavailable` (queued). The rule lives in
+  the refresh, which the dispatch route reaches. A standalone caller whose late refresh
+  queued registers and joins the rebuild; before, it was told `graph_rebuild_completed`
+  with the graph unavailable. The check at publish logs `outcome=bytes_ahead_at_publish`.
+  A page recall does not admit matches only when the registry does not list it either.
+  Each receipt of a moved batch drains alone again, so an unrecorded page no longer
+  holds its batch back. Evidence: five tests in `tests/test_graph_deferred_queue.py`,
+  each red with only its correction reverted. The retitled-affected-page late refresh
+  test kept the old title's linker edge on 10.2. The page-edited-after-the-check test
+  retired its receipt without the check at publish. The unrecorded-edit test held both
+  receipts. The standalone cold-resolver test left the graph unavailable. The
+  admission-flipped manifest test retired its receipt with the old rule for pages recall
+  does not admit. Scoped suites (the 10.3 set): 62 modules, 1930 passed, 26 skipped,
+  0 failed.
