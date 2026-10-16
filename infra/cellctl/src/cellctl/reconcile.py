@@ -1380,8 +1380,9 @@ async def _host_alerts(
         return
     memory.host_alerts_at = now
     try:
-        # The nodes that publish a pool are the dedicated hosts, the ones
-        # TopoLVM's node plugin and the array exporter are both scheduled onto.
+        # The nodes that publish a pool are the dedicated hosts, and the Cloud
+        # recovery agent (task 6.3) when it exists. That agent has no md array,
+        # so it must be left out of the array alert's nodes before it is built.
         observed = await asyncio.to_thread(cluster.local_capacity_inputs, local)
     except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
         logger.error("cellctl: the dedicated hosts could not be listed, so no host alert is read: %s", _describe_error(error))
@@ -1397,9 +1398,11 @@ async def _host_alerts(
 
     pool_scrapes = await scrape(local.thin_pool_selector, local.thin_pool_port)
     array_scrapes = await scrape(local.array_selector, local.array_port)
+    # Parsing is quadratic in a line's length, so it runs off the event loop.
     readings = (
-        (alerts.THIN_POOL_ALERT, alerts.thin_pool_states(expected, pool_scrapes, device_class=local.device_class)),
-        (alerts.ARRAY_ALERT, alerts.array_states(expected, array_scrapes)),
+        (alerts.THIN_POOL_ALERT, await asyncio.to_thread(
+            alerts.thin_pool_states, expected, pool_scrapes, device_class=local.device_class)),
+        (alerts.ARRAY_ALERT, await asyncio.to_thread(alerts.array_states, expected, array_scrapes)),
     )
     for alert, states in readings:
         bad = sorted(node for node, state in states.items() if state)

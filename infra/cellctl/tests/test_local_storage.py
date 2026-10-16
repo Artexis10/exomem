@@ -1661,6 +1661,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # node-exporter's real output for a clean pair of arrays and for one that has lost a member.
 ARRAYS_CLEAN = (FIXTURES / "node_exporter_mdadm_clean.txt").read_text(encoding="utf-8")
 ARRAYS_DEGRADED = (FIXTURES / "node_exporter_mdadm_degraded.txt").read_text(encoding="utf-8")
+ARRAYS_INACTIVE = (FIXTURES / "node_exporter_mdadm_inactive.txt").read_text(encoding="utf-8")
 
 
 def _pool_page(data: float, metadata: float, device_class: str = "thin") -> str:
@@ -1675,7 +1676,8 @@ def _pool_page(data: float, metadata: float, device_class: str = "thin") -> str:
 def _arrays_page(*, required: int, active: int, failed: int) -> str:
     return (f'node_md_disks_required{{device="md0"}} {required}\n'
             f'node_md_disks{{device="md0",state="active"}} {active}\n'
-            f'node_md_disks{{device="md0",state="failed"}} {failed}\n')
+            f'node_md_disks{{device="md0",state="failed"}} {failed}\n'
+            'node_md_state{device="md0",state="inactive"} 0\n')
 
 
 @pytest.mark.parametrize(("data", "metadata"), [(80.0, 1.0), (1.0, 80.0)], ids=["data", "metadata"])
@@ -1725,6 +1727,16 @@ def test_an_array_that_node_exporter_reports_with_a_failed_member_fires() -> Non
     from cellctl import alerts
 
     states = alerts.array_states(["agent-1"], {"agent-1": ARRAYS_DEGRADED})
+
+    assert alerts.host_alert_firing(states) is True
+
+
+def test_an_inactive_array_fires_although_it_reports_no_failed_or_missing_disk() -> None:
+    # An inactive array reports zero required, active and failed disks, so only
+    # its state shows it is down: a "resolved" email would be false.
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": ARRAYS_INACTIVE})
 
     assert alerts.host_alert_firing(states) is True
 
@@ -1883,3 +1895,55 @@ def test_each_node_is_read_from_its_running_pod_and_a_pod_that_is_down_leaves_it
 
     assert read == {"agent-1": ARRAYS_DEGRADED}
     assert none == {}
+
+
+def test_a_pod_that_drips_its_page_is_cut_off_at_the_deadline_and_its_node_reads_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The socket timeout restarts with every byte, so a pod sending a byte every
+    # 0.2 s would hold the pass for as long as the page lasts (10 s here, minutes
+    # for a real one) while the liveness probe counts down.
+    import http.server
+    import threading
+    import time
+    from types import SimpleNamespace as NS
+
+    from cellctl import alerts, k8s_client
+
+    class Drip(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
+            self.send_response(200)
+            self.send_header("Content-Length", "50")
+            self.end_headers()
+            try:
+                for _ in range(50):
+                    self.wfile.write(b"#")
+                    time.sleep(0.2)
+            except OSError:
+                pass  # the reader gave up, as it should
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Drip)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    pod = NS(metadata=NS(deletion_timestamp=None), spec=NS(node_name="agent-1"),
+             status=NS(phase="Running", pod_ip="127.0.0.1"))
+
+    class Core:
+        def list_namespaced_pod(self, namespace, label_selector):
+            return NS(items=[pod])
+
+    monkeypatch.setattr(k8s_client, "METRICS_DEADLINE", 0.6)
+    client = k8s_client.ClusterClient.__new__(k8s_client.ClusterClient)
+    client._core = Core()
+    started = time.monotonic()
+    try:
+        read = client.scrape_pod_metrics(LOCAL.metrics_namespace, LOCAL.array_selector, server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert time.monotonic() - started < 3
+    assert read == {}
+    assert alerts.host_alert_firing(alerts.array_states(["agent-1"], read)) is None

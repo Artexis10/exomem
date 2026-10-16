@@ -2,9 +2,11 @@
 {{- $metrics := include "exomem.cellMetrics" . | fromJson }}
 # Task 5.5: the cell array's health, for cellctl's cell-array-degraded alert. This
 # is node-exporter's mdadm collector alone, on the nodes TopoLVM's node plugin
-# runs on (the ones with the cell volume group, so the ones with the md array).
-# /proc/mdstat is not namespaced, so the container's own /proc shows the host's
-# arrays: no hostPath, no host network and no privilege.
+# runs on. A dedicated host has the md array there; a Cloud recovery agent (task
+# 6.3) has its volume group on one Cloud Volume and none, so cellctl must leave
+# it out of the alert's expected nodes. /proc/mdstat is not namespaced, so the
+# container's own /proc shows the host's arrays: no hostPath, no host network
+# and no privilege.
 # Prevents: a failed disk going unseen on a dedicated host, where the host has
 # no mail transport for mdmonitor. Costs when it fires wrongly: an email that
 # the array is degraded when it is not, and one pod of 10m CPU per such node.

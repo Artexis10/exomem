@@ -39,4 +39,4 @@ To bump any of them:
 5. Run the node-loss drill (task 4.1). Expect the snapshot and clone round trip to pass.
 6. For a node-exporter bump, update `cellStorage.arrayExporter.image`. Run the new image with
    `--collector.disable-defaults --collector.mdadm --path.procfs=<dir>`, with `mdstat` files from its own
-   `collector/fixtures/proc/mdstat`, and save its `/metrics` over the two fixtures. Expect the cellctl tests to pass.
+   `collector/fixtures/proc/mdstat`, and save its `/metrics` over the three fixtures. Expect the cellctl tests to pass.

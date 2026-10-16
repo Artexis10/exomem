@@ -113,6 +113,7 @@
 - [ ] 6.1 Add the private-link subnet to Terraform foundation (vSwitch for Hetzner), or the WireGuard configuration for another provider.
 - [ ] 6.2 Join the dedicated agent over the private link with the existing hardening, the CA-pinned agent token and the inter-node firewall. The k3s role waits until the agent's storage driver publishes its pool. Evidence: the join playbook output and published slots.
 - [ ] 6.3 Add the optional Terraform Cloud recovery agent, with its volume group on one Cloud volume under the same LUKS and Clevis layout, created and removed by variable. Evidence: plan/apply/destroy on a disposable stack.
+  - The agent publishes a pool but has no md array, so it must be excluded from the `cell-array-degraded` alert's expected nodes (`reconcile._host_alerts`), or carry an array. Otherwise that alert stays unknown and never resolves.
 - [ ] 6.4 Implement relocation in the agent-removal playbook for cells whose volumes the remaining nodes cannot reach: a fresh stopped backup, a restore, start after the restore succeeds, acceptance. Evidence: a removal of a disposable agent holding a seeded cell.
 - [ ] 6.5 Set the cluster's flannel MTU so that VXLAN fits the private link before the first dedicated join. Cloud nodes run flannel at 1400 over the 1450-byte Cloud network, so their VXLAN packets are 1450 bytes (1400 plus 50 bytes of overhead). A vSwitch carries at most 1400, and a default WireGuard interface 1420. Evidence: pod-to-pod traffic at full MTU between a Cloud node and the dedicated agent.
 - [ ] 6.6 Before the first production dedicated join, run the release gate on the full inventory with `--limit` set to the server, so that no agent needs to be reachable and nothing is pruned. A fleet with a WireGuard host would then need every peer's WireGuard public key carried in the inventory, because only a run on that peer reads its key today. Evidence: the gate's two passes on the server, with the agents unreached.
@@ -148,4 +149,5 @@
 ## 9. Production drill and closure
 
 - [ ] 9.1 Create a Cloud recovery agent with the dedicated-node label and taint, select a seeded test cell onto it, destroy the agent, and relocate the cell. Record the recovery point and recovery time.
+  - Exclude the agent from the `cell-array-degraded` alert's expected nodes first (task 6.3), or the alert stays unknown while it exists.
 - [ ] 9.2 Sync these deltas into canonical specs after `adopt-exomem-cloud-plain-cells` and `add-cloud-service-resource-policy` archive, then archive this change.

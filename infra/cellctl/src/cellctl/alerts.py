@@ -47,6 +47,7 @@ THIN_POOL_ALERT_PERCENT = 80.0
 # The metric and label names are protocol tokens that the two exporters document and version, not
 # vocabulary: TopoLVM 0.41.1 (docs/topolvm-node.md) and node-exporter 1.12.1 (collector/mdadm_linux.go).
 THIN_POOL_METRICS = ("topolvm_thinpool_data_percent", "topolvm_thinpool_metadata_percent")
+ARRAY_STATE = "node_md_state"
 ARRAY_DISKS = "node_md_disks"
 ARRAY_DISKS_REQUIRED = "node_md_disks_required"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
@@ -165,11 +166,12 @@ def thin_pool_states(
 
 
 def array_states(expected: Iterable[str], scrapes: Mapping[str, str]) -> dict[str, bool | None]:
-    """Task 5.5: per expected node, whether any md array has a failed member or
-    fewer active members than it requires. `scrapes` holds node-exporter's
-    mdadm `/metrics` text for each node that could be read. A node whose text
-    shows no array is None: a dedicated host always has one, so no array means
-    the reading is not to be trusted rather than that all is well."""
+    """Task 5.5: per expected node, whether any md array is inactive, has a
+    failed member, or has fewer active members than it requires. `scrapes`
+    holds node-exporter's mdadm `/metrics` text for each node that could be
+    read. A node whose text shows no array is None, never clean, so a node with
+    no array by design (the Cloud recovery agent, tasks 6.3 and 9.1) must not be
+    among the expected nodes."""
 
     states: dict[str, bool | None] = {}
     for node in expected:
@@ -183,7 +185,10 @@ def array_states(expected: Iterable[str], scrapes: Mapping[str, str]) -> dict[st
             required = _gauge(samples, ARRAY_DISKS_REQUIRED, device=device)
             active = _gauge(samples, ARRAY_DISKS, device=device, state="active")
             failed = _gauge(samples, ARRAY_DISKS, device=device, state="failed")
+            # An inactive array reports no required, active or failed disks at all.
+            inactive = _gauge(samples, ARRAY_STATE, device=device, state="inactive")
             verdicts.append(_any([
+                None if inactive is None else inactive > 0,
                 None if failed is None else failed > 0,
                 None if active is None or required is None else active < required,
             ]))
