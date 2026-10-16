@@ -1560,8 +1560,11 @@ def _dispatch_upsert_components(
             if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
                 components.append(IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled"))
             else:
-                semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
-                components.append(IndexComponentOutcome("embeddings", "deferred" if semantic_paths else "accepted", "deferred_durable" if semantic_paths else "no_eligible_paths"))
+                # A replay queues only paths whose publication is not current. An
+                # already-published path is done, as in the legacy deferring arm
+                # below, so only queued work may be reported as deferred.
+                queued = semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
+                components.append(IndexComponentOutcome("embeddings", "deferred" if queued else "accepted", "deferred_durable" if queued else "no_eligible_paths"))
         except Exception:  # noqa: BLE001 - other projections retain their outcomes
             log.warning("service semantic handoff failed", exc_info=True)
             components.append(IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed"))
