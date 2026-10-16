@@ -57,6 +57,8 @@ META_STORE_HEAD_HASH = "store_head_hash"
 META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
 META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
 META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
+# The digest of the pending intent row the last installed replica copy holds, absent when it held none.
+META_PUBLISHED_INTENT_SHA256 = "published_intent_sha256"
 META_REPLICA_DIVERGENCE = "replica_divergence"
 # "1" while a view carries another store instance's stamp; business writes refuse until adopt-local or reconcile.
 META_VIEW_DIVERGED = "diverged"
@@ -64,6 +66,8 @@ META_VIEW_DIVERGED = "diverged"
 META_ADOPTED_FOREIGN_REPLICA = "adopted_foreign_replica"
 # Digests of foreign evidence already reconciled into held corrections.
 META_RECONCILED_FOREIGN = "reconciled_foreign"
+# Per collection, the checkpoint an abandoned export left in the files: the next export's legacy parent.
+META_EXPORT_PARENTS = "export_legacy_parents"
 META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"

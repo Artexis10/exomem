@@ -44,9 +44,10 @@ _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
 CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 # The marker schema fixes this optional format ID; the coordinator still uses collections-store-v1.
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({
-    "collections-store-v1", "raw-protection-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-    CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+#: What a store-routed vault records, and what its reverse export retires.
+_COLLECTION_STORE_COMPATIBILITY_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
+_OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
+    "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
 })
 
 
@@ -267,7 +268,7 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
+        if (physical != set(_descriptor_ids()) or optional - _COLLECTION_STORE_COMPATIBILITY_IDS
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
@@ -276,12 +277,36 @@ def _require_collection_store_recovery(session, token) -> None:
             with closing(connection.open_reader(session.path)) as reader:
                 chain.verify_store_chain(reader)
                 intent = authority.pending_create(reader)
-                raw = intent["target_marker"] if intent is not None else authority.read_marker(session.root)
+                # An export's marker is the one it retires; a create or migration's, the one it installs.
+                raw = (authority.read_marker(session.root) if intent is None
+                       else intent["expected_marker"] if intent["kind"] == authority.EXPORT
+                       else intent["target_marker"])
                 marker = authority.parse_marker(session.root, raw)
                 sid = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
                 if marker["store_id"] != sid:
                     raise StateMigrationOfflineRequired("collection-store recovery identity differs")
         session.require(token)
+
+
+@contextmanager
+def _collection_store_manifest(vault_root: Path, authority_check: Callable[[], bool], action: str):
+    """Yield the complete state manifest under the migration lock, checking the caller's authority first."""
+
+    if not callable(authority_check):
+        raise StateMigrationOfflineRequired("collection-store authority is absent")
+    state_dir = state_paths.vault_state_dir(vault_root)
+    with _migration_lock(state_dir):
+        if authority_check() is not True:
+            raise StateMigrationOfflineRequired("collection-store authority is absent")
+        manifest = _load_manifest(state_dir, vault_root=vault_root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired(f"collection-store {action} requires complete state")
+        try:
+            yield state_dir, manifest
+        finally:
+            # Publication can succeed before a final durability check raises.
+            with _RESOLUTION_LOCK:
+                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
 
 
 def record_collection_store_compatibility(
@@ -294,15 +319,7 @@ def record_collection_store_compatibility(
     old-process exclusion; this seam establishes none of those boundaries.
     """
 
-    if not callable(authority_check):
-        raise StateMigrationOfflineRequired("collection-store authority is absent")
-    state_dir = state_paths.vault_state_dir(vault_root)
-    with _migration_lock(state_dir):
-        if authority_check() is not True:
-            raise StateMigrationOfflineRequired("collection-store authority is absent")
-        manifest = _load_manifest(state_dir, vault_root=vault_root)
-        if manifest is None or manifest["state"] != "complete":
-            raise StateMigrationOfflineRequired("collection-store enrollment requires complete state")
+    with _collection_store_manifest(vault_root, authority_check, "enrollment") as (state_dir, manifest):
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
         if (
             physical != set(_descriptor_ids())
@@ -312,15 +329,26 @@ def record_collection_store_compatibility(
             raise StateMigrationOfflineRequired("collection-store enrollment requires ready families")
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority was lost")
-        try:
-            required = {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
-            if required - optional:
-                manifest["descriptors"] = sorted(set(manifest["descriptors"]) | required)
-                _write_manifest(state_dir, manifest)
-        finally:
-            # Publication can succeed before a final durability check raises.
-            with _RESOLUTION_LOCK:
-                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
+        if _COLLECTION_STORE_COMPATIBILITY_IDS - optional:
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) | _COLLECTION_STORE_COMPATIBILITY_IDS)
+            _write_manifest(state_dir, manifest)
+
+
+def retire_collection_store_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool],
+) -> None:
+    """Drop the store's compatibility requirement once its export retired the vault's marker.
+
+    The reverse export calls this after the vault routes no collection to the store, so
+    that a release from before the store may open this state again. As with the
+    enrollment, the caller proves its mutation authority on each check and owns the
+    store custody and export intent; this seam removes only the two store IDs.
+    """
+
+    with _collection_store_manifest(vault_root, authority_check, "retirement") as (state_dir, manifest):
+        if _COLLECTION_STORE_COMPATIBILITY_IDS & set(manifest["descriptors"]):
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) - _COLLECTION_STORE_COMPATIBILITY_IDS)
+            _write_manifest(state_dir, manifest)
 
 
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:

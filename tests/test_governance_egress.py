@@ -2984,6 +2984,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             # The migration preflight runs only with dry_run=true.
             "collections-store": True,
             "collections-store-adopt-local": True,
+            # Preview unless `apply=true`, which only the offline owner runs.
+            "collections-store-export": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
