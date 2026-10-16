@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def test_promotion_corpus_is_deterministic_and_has_a_frequency_matched_twin() -> None:
     from epistemic.journeys.f28_promotion_replay import promotion_corpus

@@ -307,7 +307,7 @@
     "cellStorage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["domain", "local", "snapshotController"],
+      "required": ["domain", "local", "arrayExporter", "snapshotController"],
       "properties": {
         "domain": {"enum": ["hetzner", "local"]},
         "local": {
@@ -318,6 +318,14 @@
             "enabled": {"type": "boolean"},
             "backupConcurrencyPerNode": {"type": "integer", "minimum": 1},
             "maxCellGib": {"type": "integer", "minimum": 4}
+          }
+        },
+        "arrayExporter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image"],
+          "properties": {
+            "image": {"type": "string", "pattern": "^[^@\\s]+@sha256:[a-f0-9]{64}$"}
           }
         },
         "snapshotController": {

@@ -30,7 +30,7 @@ import math
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -377,6 +377,8 @@ def _pack_unit(
         {
             "unit_ref": unit.unit_ref,
             "fingerprint": unit.fingerprint,
+            "verdict": unit.verdict,
+            "check_by": unit.check_by,
             "form": unit.form,
             "category_raw": unit.category_raw,
             "category_key": unit.category_key,
@@ -783,6 +785,52 @@ def assemble_pack(
     )
 
     truncation: list[str] = []
+    from . import unit_corrections, working_set
+
+    original_paths = {_hit_parent_path(hit) for hit in hits}
+    parent_reads = find_module.UnitParentReads()
+    references = tuple(reference for hit in hits for reference in _selected_unit_refs(hit))
+    visible = unit_corrections.reader_view(vault_root, purpose) if references else None
+    tentative: dict[str, SemanticUnitHit] = {}
+    projected_bundles: dict[str, dict[str, Any]] = {}
+    projected_drops: dict[str, int] = {}
+
+    def admit_counterpart(candidate: dict[str, Any]) -> bool:
+        hit = parent_reads.exact(
+            vault_root, candidate["path"], candidate["unit_ref"], candidate["fingerprint"],
+            visible=visible,
+        )
+        if hit is None:
+            return False
+        held = parent_reads.parents[hit.parent_path]
+        unit = held.state.document.resolve_unit(hit.unit_ref).unit
+        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+        packed.update({key: candidate[key] for key in ("corrects", "relation", "family")})
+        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+        parent, _dropped_parent = _parent_context(held.page, held.state.parent_ref)
+        # Membership uses the prose actually emitted, not clipped-away source bytes.
+        prose_hit = replace(hit, content=packed["excerpt"], excerpt=packed["excerpt"])
+        if not working_set.hits_in_view([prose_hit], visible):
+            return False
+        bundle = {"unit": packed, "legacy_block": block, "parent": parent}
+        from .governance import egress
+
+        if isinstance(visible, egress.ReaderView):
+            bundle = visible.project_pack(bundle)
+        tentative[hit.unit_ref] = hit
+        projected_bundles[hit.unit_ref] = bundle
+        projected_drops[hit.unit_ref] = dropped + dropped_metadata
+        return True
+
+    discovered = unit_corrections.discover(
+        vault_root, references,
+        accept=admit_counterpart, keep=visible, deadline=deadline,
+    )
+    correction_refs = {row["unit_ref"]: row for row in discovered["units"]}
+    correction_paths = {row["path"] for row in discovered["units"]}
+    correction_parents = {row["path"]: projected_bundles[row["unit_ref"]]["parent"]
+                          for row in discovered["units"]}
+    hits = [*hits, *(tentative[reference] for reference in correction_refs)]
     # Group page/unit/mixed results by parent before applying max_hits. Repeated unit
     # hits from one parent therefore cannot starve lower-ranked parents.
     groups: list[dict[str, Any]] = []
@@ -822,7 +870,12 @@ def assemble_pack(
             if deadline is not None and _monotonic() >= deadline:
                 truncation.append(DEADLINE_TRUNCATION)
                 break
-            snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
+            held = parent_reads.parents.get(str(group["path"])) if group["path"] in correction_paths else None
+            snapshot = (
+                (held.page, held.state)
+                if held is not None and held.page is not None and held.state is not None
+                else _load_parent_snapshot(vault_root, str(group["path"]))
+            )
             if snapshot is None:
                 missing += 1  # a packed hit whose file is gone/unreadable — surface it.
                 continue
@@ -835,7 +888,8 @@ def assemble_pack(
 
     units_span = find_module._span(timings, "pack.units")
     with units_span:
-        claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+        claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars)
+                  for p in packed_pages if p.rel_path in original_paths}
         semantic_unit_map: dict[str, dict[str, Any]] = {}
         semantic_block_map: dict[str, list[dict]] = {}
         plans: list[_UnitPackPlan] = []
@@ -862,6 +916,7 @@ def assemble_pack(
             parent, dropped_provenance = _parent_context(
                 page, semantic_states[page.rel_path].parent_ref
             )
+            parent = correction_parents.get(page.rel_path, parent)
             plans.append(
                 _UnitPackPlan(
                     page=page,
@@ -869,7 +924,7 @@ def assemble_pack(
                     selected=selected,
                     fillers=[
                         unit for unit in units if id(unit) not in selected_ids
-                    ],
+                    ] if page.rel_path in original_paths else [],
                     dropped_provenance=dropped_provenance,
                 )
             )
@@ -888,8 +943,14 @@ def assemble_pack(
                 plan.omitted_reasons.add("pack-wide cap")
                 return
 
-            packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
-            block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+            if unit.unit_ref in correction_refs:
+                bundle = projected_bundles[unit.unit_ref]
+                packed, block = bundle["unit"], bundle["legacy_block"]
+                dropped = projected_drops[unit.unit_ref]
+                dropped_metadata = 0
+            else:
+                packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+                block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
             candidate_unit_map = {
                 **semantic_unit_map,
                 plan.page.rel_path: {
@@ -1003,6 +1064,7 @@ def assemble_pack(
         "contradictions": {"superseded": superseded, "tension": tension},
         "embeddings_available": embeddings_available,
         "truncation": truncation,
+        **({"correction_context": discovered["status"]} if references else {}),
     }
     if graph_enrich:
         # Parent loading can consume the reserve checked before assembly.

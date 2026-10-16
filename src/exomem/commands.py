@@ -880,9 +880,20 @@ def op_bootstrap(
     # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
     # a command the active surface cannot call, and a ceiling that vanished on a
     # reduced surface would be a ceiling nobody was told about.
+    from .governance.raw_protection import is_owner
+    from .vocabulary_authority import VocabularyAuthority
+
+    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
+    principal = principal_module.effective_principal()
+    # An unresolved caller or unavailable/v2 authority receives no affirmative v1 map.
+    promotion_classes = (
+        envelope_module.promotion_classes(owner=is_owner(principal))
+        if principal.resolved and authority_mode == "v1" else None
+    )
     engagement_policy["envelope"] = envelope_module.resolved(
         level=engagement_policy["level"],
         capture_gate=engagement_policy["contract"]["effective_capture"],
+        promotion_classes=promotion_classes,
     )
     active_descriptor = _active_bootstrap_descriptor()
     # Where the compact core points for the vocabulary workflow's full contract: it is
@@ -1083,7 +1094,8 @@ def op_bootstrap(
                 "semantic_decider": "active-agent-only",
                 "candidate": "structural_suggestions",
                 "mutation": "governed-curation-restructure_execution",
-                "relation_outside_curation": "link_acceptance",
+                **({"relation_outside_curation": promotion_classes["typed_edge"]}
+                   if promotion_classes is not None else {}),
             },
         }
     else:
@@ -1157,7 +1169,7 @@ def op_bootstrap(
             )
         ),
         "cadence": (
-            "At capture, review relevant pending vocabulary items with context. "
+            "At capture, review pending vocabulary items with context. "
             "Anchor a question on a source page/entity; "
             "relation_question uses both current endpoints. Record a typed decision before "
             "structural writes."
@@ -1248,16 +1260,12 @@ def op_bootstrap(
         "authority": {
             "contract_version": "v1",
             "scoped_delegation": False,
-            "rule": "Decision not permission; v1 writers retain confirmation.",
         },
     }
     if "schema_memory" in active_product_names:
         vocabulary_workflow_projection["page_status"] = vocabulary_operation(
             "schema_memory", {"subject": "statuses", "operation": "inspect"}
         )
-    from .vocabulary_authority import VocabularyAuthority
-
-    authority_mode = VocabularyAuthority(vault_root).runtime_status().mode
     if authority_mode != "v1":
         vocabulary_workflow_projection["authority"] = {
             "contract_version": authority_mode,
@@ -6524,7 +6532,11 @@ def op_activate_context(
         # rebuild) pause at their next unit while this runs, instead of taking the
         # GIL back after every SQLite call the request makes (5-15x per stage,
         # measured). Activation is read-only and never waits on bulk work.
-        with state_paths_module.resolution_scope(), foreground_priority.foreground():
+        with (
+            state_paths_module.resolution_scope(),
+            foreground_priority.foreground(),
+            working_set_runtime_module.defer_index_refreshes(),
+        ):
             if readiness_module.runtime_managed() and request_budget_module.current() is None:
                 bound_token = request_budget_module.set_current(
                     request_budget_module.RequestBudget(
@@ -7217,6 +7229,8 @@ def op_read_memory(
     include_raw: bool = False,
     unit_ref: str | None = None,
     purpose: str | None = None,
+    history_limit: int | None = None,
+    history_continuation: str | None = None,
 ) -> dict:
     """Read a page or exact semantic unit selected by recall or known ref.
 
@@ -7230,8 +7244,10 @@ def op_read_memory(
         include_history: Edit/supersession history.
         links: Inbound/outbound wikilinks.
         include_raw: Raw Markdown.
-        unit_ref: Exact recall unit ref; excludes page-only expansion flags.
+        unit_ref: Exact recall unit ref; history can include retained revisions.
         purpose: Declared purpose; governs visibility.
+        history_limit: Retained revisions per page, from 1 to 50.
+        history_continuation: Position from the previous revision_history envelope.
     """
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
@@ -7248,12 +7264,14 @@ def op_read_memory(
                 links=links,
                 include_raw=include_raw,
                 unit_ref=unit_ref,
+                history_limit=history_limit,
+                history_continuation=history_continuation,
             )
     if unit_ref is not None:
-        if frontmatter_only or include_history or links or include_raw:
+        if frontmatter_only or links or include_raw:
             raise ValueError(
                 "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
-                "frontmatter_only, include_history, links, or include_raw"
+                "frontmatter_only, links, or include_raw"
             )
         resolved_path = _resolve_memory_identifier(vault_root, path)
         try:
@@ -7323,8 +7341,15 @@ def op_read_memory(
                 out["evidence_version"] = provenance_module.evidence_version(page.content)
             except ValueError:
                 pass
+        if include_history:
+            from . import compiled_history
+
+            out["revision_history"] = compiled_history.read(
+                vault_root, path=page.path, unit_ref=unit_ref, limit=history_limit,
+                continuation=history_continuation,
+            )
         return out
-    return op_get(
+    result = op_get(
         vault_root,
         path=path,
         frontmatter_only=frontmatter_only,
@@ -7332,6 +7357,13 @@ def op_read_memory(
         links=links,
         include_raw=include_raw,
     )
+    if include_history and "content_hash" in result:
+        from . import compiled_history
+
+        result["revision_history"] = compiled_history.read(
+            vault_root, path=result["path"], limit=history_limit, continuation=history_continuation,
+        )
+    return result
 
 
 def op_browse_memory(
@@ -7627,6 +7659,8 @@ def op_observe_memory(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
+    reason: str | None = None,
+    target_fingerprints: dict[str, str] | None = None,
 ) -> dict:
     """Validate or mutate one semantic unit on a compiled memory page.
 
@@ -7654,6 +7688,9 @@ def op_observe_memory(
         relation_disposition: Semantic review disposition (existing page).
         relation_review_hash: Transition hash the reviewed-none covers.
         relation_review_reason: Audit reason for reviewed-none.
+        reason: Optional rationale retained with the prior interpretation.
+        target_fingerprints: Exact corrective target refs and current fingerprints.
+            Omit for ordinary page or heading relations; episode unit leaves echo them.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -7711,6 +7748,8 @@ def op_observe_memory(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
+            reason=reason,
+            target_fingerprints=target_fingerprints,
         )
         if result.get("mutated"):
             query_log.log_write_call(
@@ -7991,6 +8030,7 @@ _EpisodeProposalArgument = Annotated[
                                             "supersede",
                                             "append-record",
                                             "update-record",
+                                            "observe-unit",
                                         ]
                                     },
                                     "args": {"type": "object"},

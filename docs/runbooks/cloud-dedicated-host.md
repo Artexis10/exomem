@@ -278,8 +278,15 @@ sops decrypt --extract '["passphrase"]' \
   | ssh exomem-admin@100.64.0.40 'sudo cryptsetup open --key-file=- /dev/md/exomem-cells exomem_cells'
 ```
 
-K3s starts by itself once the volume group appears. A `site.yml` run does the
-same unlock.
+`exomem-cells-ready.service` waits for the `exomem_cells` mapping, then
+activates the `cells` volume group, and K3s starts after it. A `site.yml` run
+does the same unlock. Check the result:
+
+```bash
+ssh exomem-admin@100.64.0.40 'systemctl is-active exomem-cells-ready.service k3s-agent.service'
+```
+
+Expected result: the command prints `active` twice.
 
 ## Tang lost or replaced
 
@@ -335,10 +342,13 @@ not `/var/lib/tang`, `systemctl cat tangd@.service` shows it.
 
 ## Replace a failed disk
 
-`site.yml` reports a degraded array but does not repair it. Nothing alerts on
-it yet (OpenSpec task 5.5). After the provider swaps the disk, run these steps
-on the host. `<new>` and `<surviving>` are whole disks, for example
-`/dev/nvme1n1` and `/dev/nvme0n1`.
+`site.yml` reports a degraded array but does not repair it. cellctl emails
+`cell-array-degraded` while any md array on a dedicated host is inactive, has a
+failed member, or has fewer active members than it requires. The email names no
+host: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-array-degraded`
+lists the nodes. After the provider swaps the disk, run these steps on the
+host. `<new>` and `<surviving>` are whole disks, for example `/dev/nvme1n1` and
+`/dev/nvme0n1`.
 
 1. Identify the new disk and the surviving disk: `ls -l /dev/disk/by-id/` and `cat /proc/mdstat`.
 2. Copy the surviving disk's partition table onto the new disk. The `--replicate` value is the target:
@@ -357,12 +367,30 @@ on the host. `<new>` and `<surviving>` are whole disks, for example
 10. If the host list records the host's WireGuard key, step 9 stops and prints the new key. Record it as in [Add the host](#add-the-host), and run `site.yml` again.
 
 Expected result: `cat /proc/mdstat` shows every array rebuilding, then `[UU]`.
-After the last `site.yml` run, every peer holds the host's new public key and the tunnel is up.
+A `RESOLVED: cell-array-degraded` email follows within a few minutes of the
+rebuild finishing. After the last `site.yml` run, every peer holds the host's new public key and the tunnel is up.
 The removed disk held the old WireGuard key and the agent token
 (`/etc/rancher/k3s/config.yaml`) unencrypted. Unless the provider confirms
 that it destroyed the disk, [rotate the agent token](#rotate-the-agent-token).
 The rotation does not revoke the agent's kubelet client certificate, which the
 same disk held: see [What a lost disk still exposes](#what-a-lost-disk-still-exposes).
+
+## Thin pool at 80%
+
+cellctl emails `thin-pool-high` while the data use or the metadata use of any
+dedicated host's thin pool is at or above 80%. The email names no host. cellctl
+reads TopoLVM's `topolvm_thinpool_data_percent` and
+`topolvm_thinpool_metadata_percent` for the `thin` device class, once a minute.
+
+1. List the hosts that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep thin-pool-high`.
+2. Read the pool on that host: `sudo lvs --options lv_name,lv_size,data_percent,metadata_percent cells`.
+3. If `pool0` shows metadata use at or above 80%, grow its metadata: `sudo lvextend --poolmetadatasize +<size>G cells/pool0`.
+   The volume group keeps twice the metadata size free for this, and LVM stops at 15.81 GiB.
+4. If `pool0` shows data use at or above 80%, delete the cells you no longer need, as in [cloud-cell-deletion.md](cloud-cell-deletion.md).
+   The pool cannot grow, because it fills the array.
+
+Expected result: `lvs` shows both percentages below 80 for `pool0`, and a
+`RESOLVED: thin-pool-high` email follows within a few minutes.
 
 ## Remove the host
 

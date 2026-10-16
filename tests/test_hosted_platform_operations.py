@@ -22,6 +22,8 @@ from benchmark_capabilities import (
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+pytestmark = pytest.mark.reads_repository_docs
+
 ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
 

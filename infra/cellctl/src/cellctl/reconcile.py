@@ -262,6 +262,10 @@ class LoopMemory:
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
     growth_verdicts: dict[str, str] = field(default_factory=dict)
+    # Tasks 5.5 and 5.6: when the dedicated hosts were last read, and the
+    # (bad, unreadable) nodes each host alert last logged: the email names none.
+    host_alerts_at: datetime | None = None
+    host_alert_nodes: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
     # D4: when this process first saw each node absent from the API, until it
     # is seen present again. A restart restarts every clock.
     node_absent_since: dict[str, datetime] = field(default_factory=dict)
@@ -481,6 +485,7 @@ class ClusterGateway:
     ) -> CapacityObservation: ...  # pragma: no cover
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -1107,6 +1112,7 @@ async def reconcile_once(
     observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _host_alerts(cluster, cluster_config, now, memory)
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
@@ -1351,6 +1357,65 @@ async def _growth_alert(
     firing = alerts.growth_blocked(rows, observations, memory.growth_verdicts, storage=cluster_config.storage)
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.GROWTH_ALERT, firing, now)
+
+
+# The dedicated hosts change slowly and each read is a pod listing and one HTTP
+# request per node, so they are read at most this often, not on every pass.
+HOST_ALERT_INTERVAL = timedelta(minutes=1)
+
+
+async def _host_alerts(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, now: datetime, memory: LoopMemory
+) -> None:
+    """Tasks 5.5 and 5.6: one platform alert while a dedicated host's md array
+    has lost a member, and one while its thin pool's data or metadata use has
+    reached 80%. A host that cannot be read sends nothing (alerts.host_alert_firing).
+    Nothing is read where local storage is not configured, or with no receiver
+    to tell. The nodes go to the log, because the email names none."""
+
+    local = cluster_config.storage.local
+    if local is None or cluster_config.alert_delivery_secret is None:
+        return
+    if memory.host_alerts_at is not None and now - memory.host_alerts_at < HOST_ALERT_INTERVAL:
+        return
+    memory.host_alerts_at = now
+    try:
+        # The nodes that publish a pool are the dedicated hosts, and the Cloud
+        # recovery agent (task 6.3) when it exists. That agent has no md array,
+        # so it must be left out of the array alert's nodes before it is built.
+        observed = await asyncio.to_thread(cluster.local_capacity_inputs, local)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        logger.error("cellctl: the dedicated hosts could not be listed, so no host alert is read: %s", _describe_error(error))
+        return
+    expected = sorted(node for node, free in observed.free_bytes.items() if free is not None)
+
+    async def scrape(selector: str, port: int) -> dict[str, str]:
+        try:
+            return await asyncio.to_thread(cluster.scrape_pod_metrics, local.metrics_namespace, selector, port)
+        except Exception as error:  # noqa: BLE001 - every node then reads as unreadable
+            logger.error("cellctl: the host metrics pods could not be listed: %s", _describe_error(error))
+            return {}
+
+    pool_scrapes = await scrape(local.thin_pool_selector, local.thin_pool_port)
+    array_scrapes = await scrape(local.array_selector, local.array_port)
+    # Parsing is quadratic in a line's length, so it runs off the event loop.
+    readings = (
+        (alerts.THIN_POOL_ALERT, await asyncio.to_thread(
+            alerts.thin_pool_states, expected, pool_scrapes, device_class=local.device_class)),
+        (alerts.ARRAY_ALERT, await asyncio.to_thread(alerts.array_states, expected, array_scrapes)),
+    )
+    for alert, states in readings:
+        bad = sorted(node for node, state in states.items() if state)
+        unreadable = sorted(node for node, state in states.items() if state is None)
+        if (bad, unreadable) != memory.host_alert_nodes.get(alert, ([], [])):
+            memory.host_alert_nodes[alert] = (bad, unreadable)
+            if bad:
+                logger.warning("cellctl: %s on node(s): %s", alert, ", ".join(bad))
+            if unreadable:
+                logger.warning("cellctl: %s could not be read on node(s): %s", alert, ", ".join(unreadable))
+        firing = alerts.host_alert_firing(states)
+        if firing is not None:
+            await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
 
 
 async def _backup_age_alert(

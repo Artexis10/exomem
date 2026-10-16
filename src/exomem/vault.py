@@ -5761,16 +5761,22 @@ def _validate_batch_write_access(
     roles = vocabulary_auxiliaries.validate(
         vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
     )
-    lifecycle_admission = None
-    if "lifecycle-review" in roles.values():
+    # The sealed manifest schema fixes the two primary-bound auxiliary roles.
+    primary_bound_paths = {
+        path for path, role in roles.items()
+        if role == "lifecycle-review" or role == "compiled-history"
+    }
+    primary_admission = None
+    if primary_bound_paths:
         primary = next(
             write for write in full_plan
             if Path(os.path.abspath(write.path)) == vault_resolved / auxiliary_manifest.primary_path
         )
-        lifecycle_admission = vocabulary_auxiliaries.lifecycle_admission(
+        primary_admission = vocabulary_auxiliaries.primary_admission(
             vault_root, primary_path=auxiliary_manifest.primary_path,
             current_source=auxiliary_manifest.primary_before_source,
             proposed_source=primary.content, primary_guard=auxiliary_manifest.primary_guard,
+            require_identity="lifecycle-review" in roles.values(),
         )
     proposed_by_path = {}
     for write in full_plan:
@@ -5791,8 +5797,13 @@ def _validate_batch_write_access(
                     f"WRITE_REFUSED: {target} resolves outside the vault root"
                 ) from error
             if target == write.path:
-                if roles.get(rel) == "lifecycle-review" and lifecycle_admission is not None:
-                    if not lifecycle_admission(rel):
+                if roles.get(rel) == "compiled-history":
+                    from . import compiled_history
+
+                    compiled_history.validate_new_write(write, path=rel)
+                # Only owner-validated exact leaves inherit their bound primary's admission.
+                if rel in primary_bound_paths and primary_admission is not None:
+                    if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
                 else:
                     connector_boundary.require_write(

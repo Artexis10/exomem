@@ -80,6 +80,30 @@ Revision history SHALL use the canonical owner's storage and recovery boundary, 
 - **WHEN** a supported object accumulates many corrections and is restored through its supported portability path
 - **THEN** current reads and a bounded history page remain bounded, retained revision meanings survive, and measured write/storage amplification is reported separately
 
+### Requirement: Ordinary agents correct individual claims in their canonical home
+
+When a substantive correction is supported and authorized, the active agent SHALL identify affected claims, distinguish new events from corrected interpretations, and use existing governed writers without a correction-specific user nudge. It SHALL prefer a suitable existing note and stable semantic units over separate correction pages. It SHALL author justified verdicts and typed relationships, preserve evidence grades and history, and verify committed effects and current readback. Refutation, contradiction and qualification SHALL NOT implicitly supersede a unit or change its retrieval rank. Exact fragment identity SHALL follow `resolve-relation-fragment-targets`; an unresolved graph fallback SHALL NOT establish a corrected claim.
+
+The episode semantic-unit route SHALL use a thin typed adapter over observation validation and mutation with current parent and unit guards. Legacy and entity edits SHALL retain their existing writer authority, and Records SHALL retain their existing row owner. Compact context SHALL preserve verdicts and expose bounded admitted corrective counterparts through existing registry-selected relationships. The compiler SHALL NOT infer a correction from prose, omit historical uncertainty, or disclose withheld counterparts through content, lifecycle changes or counts.
+
+#### Scenario: A correction arrives without an authoring instruction
+- **WHEN** ordinary work reveals that an earlier proposition was unsupported and provides a supported corrected interpretation
+- **THEN** the active agent updates the affected units in their suitable existing home and authors justified verdicts and links
+- **AND** it verifies the result without a later prompt to use epistemic authoring
+- **AND** evidence of an assertion remains distinct from evidence that the asserted event happened
+
+#### Scenario: A corrective unit misses the initial retrieval window
+- **WHEN** a served unit has an admitted corrective counterpart outside the initial hit window
+- **THEN** bounded context can include that counterpart or its readable pointer through the existing graph owner
+- **AND** a refuted historical unit retains its verdict and standing rather than appearing as an unqualified current conclusion
+- **AND** an unavailable or withheld counterpart does not create visible evidence of a hidden correction
+
+#### Scenario: Two guarded revisions retain earlier meanings
+- **WHEN** the agent corrects one anchored unit twice through supported writers
+- **THEN** both prior meanings, reasons and available source bindings remain recoverable through bounded authorized history
+- **AND** the page change and its retained interpretation commit atomically
+- **AND** replay cannot restore an older interpretation or create another revision entry
+
 ### Requirement: Episode decomposition precedes destination selection
 
 At a supported substantive episode boundary the active agent SHALL consider the original input for durable observations, outcomes, entity creation/hydration, facets, relationships, Records events, expressed Planning changes, Source/Evidence preservation and structural-routing candidates before choosing write destinations. It SHALL first partition independently reusable objects by retrieval question, subject/domain, temporal episode and epistemic role. A currently open note is an inspected alternative, not a preferred default. A meaningful stable cluster SHALL receive a canonical home when it answers a distinct future question or supports independent continuation, while details within an existing cluster SHALL remain in scope rather than manufacture a new destination. Each candidate SHALL be resolved against current knowledge and receive an attributable disposition. Capture sweep SHALL NOT be the sole trigger or completeness check. No-op, uncertain, rejected, deferred and awaiting-authority outcomes SHALL be legitimate and distinct.
@@ -528,3 +552,53 @@ Capture guidance and the capture-sweep advisory SHALL recognise a stable, unique
 
 - **WHEN** the entity page is withheld from the caller by a governance scope
 - **THEN** no contact unit of it appears in any read, search or activation result for that caller
+
+### Requirement: Unit identity survives supported moves without changing meaning
+
+The unit-identity decision SHALL cover note rename, anchored wording changes and reparenting between notes.
+Supported moves SHALL preserve the intended unit's relations, evidence and retained interpretation history.
+Compatibility references SHALL resolve deterministically or report stale, ambiguous or unavailable state.
+The implementation SHALL NOT silently substitute another claim.
+This batch SHALL retain the parent UUID and anchor API, with fingerprints guarding content revisions.
+Raw copy-and-remove reparenting SHALL remain unsupported and SHALL NOT forward old references.
+A future independent unit UUID SHALL require a compatibility policy and atomic publication across both parents, including history, authorization and source bindings.
+
+#### Scenario: A corrected unit's note is renamed
+
+- **WHEN** an authorized writer renames a note containing a corrected anchored unit
+- **THEN** the unit keeps its identity, current content, relations and retained interpretations
+- **AND** an exact read reports its current parent citation
+
+#### Scenario: Raw reparenting leaves the old unit reference missing
+
+- **WHEN** a unit is copied into another note and removed from its original parent without a supported move contract
+- **THEN** an exact read through the old parent reports the unit missing
+- **AND** the implementation does not forward the reference or select the copied claim
+
+#### Scenario: Revision and ambiguity guards prevent claim substitution
+
+- **WHEN** an anchor changes, anonymous content changes or duplicate anchors prevent unique resolution
+- **THEN** exact reads report missing, stale or ambiguous state, respectively
+- **AND** full and selected resolution agree when the selected definitions are complete
+
+### Requirement: Compiler correction proof includes context sufficiency and resource use
+
+The acceptance journey SHALL exercise public writes, current compilation and selective parent expansion.
+The compiler SHALL serve the minimum sufficient connected units within its existing budgets, retaining verdicts, provenance and temporal state.
+Resource proof SHALL use the disk-backed SQLite owner and maintained instruments with a reproducible synthetic corpus.
+It SHALL report process RSS, defined cold and warm queries, bounded multi-hop traversal, incremental updates and index size.
+Each result SHALL identify its command, corpus, cache conditions and storage amplification.
+An optional Neo4j comparison SHALL NOT gate delivery of the core SQLite workflow.
+
+#### Scenario: A corrected claim reaches current context without its whole note
+
+- **WHEN** the initial retrieval selects an earlier claim and an admitted connected unit supplies its correction
+- **THEN** current context includes the relevant exact units, verdicts and provenance within the existing budget
+- **AND** the parent citation remains available without unconditional parent-body expansion
+- **AND** an exact read can expand bounded parent context when needed
+
+#### Scenario: A reproducible resource check covers the graph workflow
+
+- **WHEN** the maintained resource check runs on its declared synthetic corpus and cache conditions
+- **THEN** its report contains RSS, cold and warm query results, multi-hop results, incremental update results and index size
+- **AND** unavailable measurements remain explicit rather than reported as zero

@@ -12,6 +12,8 @@ from membench.schema import ExpectedAnswer, ExpectedRecord
 from membench.templates import registry
 from membench.templates.base import Template
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC = REPO_ROOT / "docs" / "memory-proof-benchmark.md"
 

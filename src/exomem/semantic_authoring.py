@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 7
+AUTHORING_CONTRACT_VERSION = 8
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 STATUS_CLASSIFICATION_RULE = (
@@ -282,6 +282,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "- tags: <comma-separated tags>",
             "- context: <context>",
             "- relations: <relation-type>: [[Target]]",
+            "- verdict: <epistemic outcome>",
+            "- check_by: <ISO revisit date>",
         ],
         "accepted_metadata_order": "flexible while rows remain leading",
         "canonical_metadata_order": [
@@ -290,11 +292,31 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "tags",
             "context",
             "relations",
+            "verdict",
+            "check_by",
         ],
         "metadata_rule": (
             "Metadata rows are optional and leading; the canonical writer emits category, "
-            "id, tags, context, then relations; category defaults to the governed kind "
+            "id, tags, context, relations, verdict and check_by; category defaults to the governed kind "
             "when omitted."
+        ),
+        "correction_rule": (
+            "Inspect affected claims and evidence. Distinguish attributed accounts from "
+            "established facts. Correct suitable existing units with guarded writers, justified "
+            "verdicts and exact links; verify current state. Refutation alone changes neither "
+            "lifecycle nor rank. Writers retain prior interpretations; request bootstrap with "
+            "profile=full for history guidance."
+        ),
+        "correction_detail": (
+            "Keep an anchored unit's identity when its wording changes. Preserve a false "
+            "historical proposition and author its verdict; add a distinct corrective unit "
+            "when useful. Refutation and contradiction do not imply supersession or reduce "
+            "rank. The semantic writer retains prior interpretations atomically. "
+            "Read revision_history with read_memory(include_history=true), optionally for "
+            "unit_ref, using history_limit and history_continuation. Existing history remains "
+            "the page's operation log. Entities and legacy pages use their existing edit owner; "
+            "Records use guarded row corrections and history. Corrections need no dated child, "
+            "special user nudge, or confirmation beyond the active engagement policy."
         ),
         "body_rule": (
             "After optional leading metadata, add a blank line and a substantive Markdown body."
@@ -448,12 +470,16 @@ def bootstrap_projection(
     ``contract`` stays the first positional parameter so existing callers that
     pass a contract positionally keep working; ``profile`` is keyword-only so it
     can never be mistaken for a positionally-passed contract. Full returns every
-    example. Compact and diagnostics remove only the rich example while retaining
+    example and explanatory correction detail. Compact and diagnostics omit those
+    details while retaining the actionable correction rule, its full-authoring route, and
     the complete core keys, aliases, open rule, selection guidance, and compact
     (role and domain) examples.
     """
     projection = contract.as_dict()
     if profile != "full":
+        rich = dict(projection["rich"])
+        rich.pop("correction_detail")
+        projection["rich"] = rich
         portable = dict(projection["portable_categories"])
         examples = {
             key: value
@@ -502,6 +528,7 @@ def render_tool_guidance(
             minimum["rule"],
             minimum["lifecycle_rule"],
             minimum["final_unit_rule"],
+            rich["correction_rule"],
             f"Under `{compact['canonical_section']}`, write `{compact['syntax']}` with one "
             f"primary {compact['category']['vocabulary']}-vocabulary category; "
             f"rich form is `{rich['heading_syntax']}` with a substantive body.",
@@ -637,6 +664,7 @@ def render_concise(
         f"{metadata}. {rich['metadata_rule']} Accepted metadata order is "
         f"{rich['accepted_metadata_order']}. {rich['body_rule']} "
         f"{rich['relation_rule']}\n"
+        f"- Epistemic corrections: {rich['correction_rule']} {rich['correction_detail']}\n"
         f"- Rich boundary: {rich['heading_boundary_rule']} `empty_rich_unit` means "
         f"{findings['empty_rich_unit']['when']}; "
         f"{findings['empty_rich_unit']['remediation']}\n"

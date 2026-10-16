@@ -33,6 +33,8 @@ from exomem.public_artifact_privacy import (
     scan_repository_inputs,
 )
 
+pytestmark = pytest.mark.reads_repository_docs
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 SYNTHETIC_FIXTURES = (
