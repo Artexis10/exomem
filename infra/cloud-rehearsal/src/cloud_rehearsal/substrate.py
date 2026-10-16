@@ -38,9 +38,12 @@ from . import images, tls
 from .infra import PG_DATABASE, PG_ROLES, Stack
 from .shell import run, wait_for
 
-SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate.git"
-# Substrate #224 supplies C5 and the ordinary CLI's pinned OAuth admission.
-SUBSTRATE_COMMIT = "544a7ef22c828ffd5b4e2cd588b5778401b6514b"
+# The full rehearsal and controller fixtures must use the same companion schema.
+_SUBSTRATE_CONTRACT = json.loads(
+    (images.REPO_ROOT / "infra/cellctl/tests/fixtures/substrate-contract.json").read_text(encoding="utf-8")
+)
+SUBSTRATE_REPOSITORY = f"https://github.com/{_SUBSTRATE_CONTRACT['repository']}.git"
+SUBSTRATE_COMMIT = _SUBSTRATE_CONTRACT["ref"]
 NODE_IMAGE = "node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 MCP_PATH = "/mcp"
 MCP_URL = f"https://{tls.MCP_HOST}{MCP_PATH}"
