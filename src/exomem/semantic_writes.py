@@ -1031,6 +1031,8 @@ class ExistingPreflight:
     # the token, lifecycle record and history hash this one to keep one basis.
     exact_before_source: str
     after_source: str
+    # `before.source_hash` stays logical: grandfathering matches it through the
+    # activation census, which reads with universal newlines. Bind to `before_hash`.
     before: semantic_contract.SemanticPageState
     after: semantic_contract.SemanticPageState
     grandfathered: bool
