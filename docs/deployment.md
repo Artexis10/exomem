@@ -804,10 +804,9 @@ could resurrect a revoked session.
 
 A release can change the schema of the live collection store. 0.119.0 changed
 it from 10 to 11, but 0.119.0 cannot migrate a store that an earlier release
-wrote. From the release after 0.119.0, the first service that holds the writer
-lease migrates the store before it serves the store's collections. The
-migration keeps every row and the store head, so the coordinator's recorded
-head still matches it.
+wrote. From 0.120.0, the first service that holds the writer lease migrates the
+store before it serves the store's collections. The migration keeps every row
+and the store head, so the coordinator's recorded head still matches it.
 
 Until a writer has migrated the store, the new release does not serve its
 collections:
@@ -830,37 +829,36 @@ lease back at once, not at its expiry. The service tries the migration again on
 the next use, at least 10 seconds later. A rollback to the earlier release is
 safe in that state.
 
-A release from before the schema change cannot open a migrated store. A release
-with the schema guard makes such a release refuse the vault before it opens the
-store. Each store schema from 11 on has a state compatibility ID, such as
-`collections-store-schema-11`. The service records that ID in the vault's state
-manifest before it migrates the store. It also records the ID when it admits a
-store that is already at that schema, as one that a release without the guard
-migrated. A failed migration removes the ID again.
+Releases 0.114.0 through 0.118.x read the store only up to schema 10, so they
+cannot open a migrated store. 0.119.0 and later read schema 11, so they stay
+valid rollback targets.
 
-A release that does not support the ID refuses the vault:
+From the release after 0.120.0, the managed launcher refuses an upgrade target
+that cannot read the live store. It compares the newest store schema that the
+target reads with the schema of the live store, and it refuses before the
+serving worker stops. The serving worker keeps serving. Without a live store, as in a copy of the vault on a fresh
+state root, the launcher has no schema to compare and refuses nothing.
 
-- The managed launcher refuses that release as an upgrade target before the
-  serving worker stops. The serving worker keeps serving.
-- Started by hand, 0.117.3 and 0.118.x refuse at startup with
-  `STATE_MIGRATION_MANIFEST_INVALID`, because they read the ID as an unknown state
-  family. An older release that cannot read the store's marker, such as 0.106.0,
-  refuses the marker first with `COLLECTION_STORE_MARKER_CONFLICT`.
+Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
+cannot open the store. On a vault with a collection store fence, its writer gets
+no lease, so every write on that host refuses with `WRITER_LEASE_REQUIRED`. Roll
+forward to recover.
 
-Every release without the guard refuses, including 0.119.0, which can read
-schema 11 but does not support the ID. After the service has recorded the ID,
-roll back only to a release with the schema guard. The ID lives in the external
-state root, so a copy of the vault on a fresh state root does not carry it.
+From schema 12 on, the service also records a state compatibility ID for each
+store schema, such as `collections-store-schema-12`, in the vault's state
+manifest before it migrates the store. A failed migration removes the ID again.
+A release that does not support the ID then refuses at its own startup. Schema
+11 has no ID, because every release since 0.114.0 treats an unknown ID the same
+way, so an ID would also refuse 0.119.0 and later.
 
-A release from before the guard that already started on a migrated store cannot
-open it. On a vault with a collection store fence, its writer gets no lease, so
-every write on that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to
-recover.
+If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
+or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
+that the release cannot use. Roll forward to a release that supports it.
 
 If you run 0.119.0 on a store that an earlier release wrote, 0.119.0 cannot back
 it up: its backup refuses with `COLLECTION_STORE_SCHEMA_PENDING`. In step 1, back
 up the store with the release that you ran before 0.119.0, then upgrade straight
-to the release after 0.119.0.
+to 0.120.0 or later.
 
 To upgrade a vault with a collection store to a release that changes its schema:
 

@@ -883,9 +883,12 @@ def _migrate_schema(session, token):
     try:
         with session.writer(token):
             pass  # open_writer migrates the schema in its own transaction.
-    except Exception as error:  # noqa: BLE001 - every failure rolls back to the earlier schema, which the pending state reports
-        logger.warning("the collection store schema migration failed; it is retried", exc_info=True)
-        return f"the store schema migration failed and rolled back: {type(error).__name__}: {error}"
+    except Exception as error:  # noqa: BLE001 - any failure that left the earlier schema is this pending state
+        if not connection.schema_pending(session.path):
+            raise  # The migration committed; what failed after it is not a pending schema.
+        logger.warning("the collection store schema migration did not commit; it is retried", exc_info=True)
+        return ("the store schema migration did not commit, so the store keeps its earlier schema: "
+                f"{type(error).__name__}: {error}")
     return None
 
 
@@ -995,8 +998,10 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     """Finish the one pending intent, a create or a migration, in the A5 order after its store is live."""
     manager = session.manager
     intent = None
+    # An intent an earlier release left stays at its schema until a writer below migrates it,
+    # so the intent and the head are read through the head reader.
     if session.path.exists():
-        with closing(connection.open_reader(session.path)) as reader:
+        with closing(connection.open_head_reader(session.path)) as reader:
             intent = authority.pending_create(reader)
     if session.production:
         if intent is not None and intent["kind"] == authority.MIGRATE:
@@ -1004,7 +1009,7 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         else:
             capability.require_records_summary(session.root)
     runtime = session.runtime()
-    with closing(connection.open_reader(session.path)) as reader:
+    with closing(connection.open_head_reader(session.path)) as reader:
         chain.verify_store_chain(reader)
         intent = authority.pending_create(reader)
         if intent is None:
@@ -1019,6 +1024,8 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
+        # This writer may migrate the store, which follows the recovery check as every writer here does.
+        state_migration._require_collection_store_recovery(session, preparation_token)
         # A first cut binds every writer to this store, so a marker that already names another
         # store must refuse before the cut, whoever prepared the store.
         with session.writer(preparation_token) as writer:

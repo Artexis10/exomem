@@ -46,8 +46,10 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 SCHEMA_VERSION = 11
-#: The first schema that the vault state manifest guards: releases that read schema 10 refuse it.
-FIRST_GUARDED_SCHEMA_VERSION = 11
+#: The first schema that the vault state manifest guards with an ID. Every release since the
+#: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
+#: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.
+FIRST_GUARDED_SCHEMA_VERSION = 12
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"

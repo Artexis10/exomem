@@ -406,20 +406,21 @@ as `skipped` with the reason `declared_none`, because the store schema is not a
 state migration. The new worker migrates the store itself once it acquires the
 writer lease. Until then, the old worker keeps the lease and serves.
 
-A release from before the schema change cannot open the migrated store. A new
-worker with the schema guard records the schema's state compatibility ID, such
-as `collections-store-schema-11`, in the vault's state manifest before it
-migrates the store. The supervisor then refuses an upgrade to a release that
-does not support that ID. It refuses before the serving worker stops, so that
-worker keeps serving. Started by hand, 0.117.3 and 0.118.x refuse at startup
-with `STATE_MIGRATION_MANIFEST_INVALID`.
+A release from before the schema change cannot open the migrated store. From
+the release after 0.120.0, the supervisor compares the newest store schema that
+an upgrade target reads with the schema of the live store. It refuses a target that cannot read the live
+store before the serving worker stops, so that worker keeps serving. Releases
+0.114.0 through 0.118.x read only up to schema 10, so the supervisor refuses them
+on a store at schema 11. 0.119.0 and later read schema 11 and stay valid targets.
 
-0.119.0 changed the store schema, and the release after it is the first that
-migrates a store from an earlier release. 0.119.0 does not support the ID, so
-after the new worker has recorded it, roll back only to a release with the
-schema guard. Back up the store with the earlier release before the upgrade, as
-"A release that changes the collection store's schema" in `docs/deployment.md`
-describes.
+Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
+cannot open it. On a vault with a collection store fence, every write on that
+host then refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover.
+
+0.119.0 changed the store schema, and 0.120.0 is the first release that migrates
+a store from an earlier release. Back up the store with the earlier release
+before the upgrade, as "A release that changes the collection store's schema" in
+`docs/deployment.md` describes.
 
 ### The service environment file
 

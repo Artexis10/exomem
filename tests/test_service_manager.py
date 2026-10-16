@@ -445,6 +445,47 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("candidate", ["earlier", "same-schema"])
+def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_stop(tmp_path, monkeypatch, candidate):
+    """Defect: the supervisor hands a store at schema 11 to a release that reads only schema 10. Its reader
+    refuses the store, so on a fenced vault its writer gets no lease and every write on the host refuses."""
+    interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
+    if candidate == "earlier" and not interpreter:
+        pytest.skip("requires an installed earlier reader")
+    from exomem.collection_store import connection
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    # The live store, as this release migrated it: at the current schema.
+    connection.open_writer(connection.store_path(vault), lease_check=lambda: True).close()
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        python = interpreter if candidate == "earlier" else sys.executable
+        version = subprocess.run(
+            [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target = await runtime.inspect({"python": python, "version": version})
+        if candidate == "earlier":
+            result = await manager.upgrade(target)
+            assert not result["ok"], result
+            assert "current admission unchanged" in result["error"], result
+            assert serving.pid == 100
+            assert serving.events == ingress.events == []
+        else:
+            # A release that reads the live schema, as 0.119.0 and 0.120.0 read schema 11, stays a target.
+            runtime.migration_required(target)
+
+    asyncio.run(scenario())
+
+
 def _mixed_marker(vault):
     from exomem.collection_store import authority
 

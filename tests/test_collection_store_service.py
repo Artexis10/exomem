@@ -203,46 +203,6 @@ def test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_
         assert schema.schema_version(raw) == schema.SCHEMA_VERSION
 
 
-def test_a_store_this_release_migrated_refuses_an_actual_earlier_release_before_handoff(tmp_path, monkeypatch):
-    """Defect: the launcher hands a store that this release migrated to an earlier release that cannot open
-    it. That release's writer then gets no fenced lease, so every write on the host refuses."""
-    import asyncio
-    import subprocess
-
-    from test_collection_store_s1_gate import OLDER, SCHEMA_GUARD, _older
-
-    from exomem.service_manager import WorkerRuntime
-
-    root = _served_vault(tmp_path, monkeypatch)
-    with coordinator(tmp_path / "coordinator.sqlite"):
-        with monkeypatch.context() as previous:
-            previous_release(previous)
-            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
-        started = Service(root, writer_lease.start_server_lifecycle())
-        try:
-            _until(lambda: runtime.served(root))
-            assert call(root, "record_memory", action="append", collection=CID, item={"title": "After upgrade"},
-                        item_key=ROW, why="first row after the upgrade")["outcome"] == "committed"
-        finally:
-            started.stop()
-    with closing(sqlite3.connect(connection.store_path(root))) as raw:
-        assert schema.schema_version(raw) == schema.SCHEMA_VERSION
-    assert SCHEMA_GUARD in state_migration.recorded_descriptor_ids(root)
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
-    launcher = WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
-    earlier = asyncio.run(launcher.inspect({"python": OLDER, "version": _older()}))
-    with pytest.raises(ValueError, match="does not support required state compatibility"):
-        launcher.migration_required(earlier)
-    # Started by hand on the same state root, the earlier release refuses at its startup gate: a store-aware
-    # one refuses the manifest's unknown ID, and a store-blind one refuses the marker before it.
-    refusal = subprocess.run(
-        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
-         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(root)],
-        capture_output=True, text=True)
-    assert refusal.returncode != 0, refusal.stderr
-    assert "StateMigrationManifestError" in refusal.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in refusal.stderr
-
-
 def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_path, monkeypatch):
     """A recoverable declaration in trash cannot block enrollment of a new store."""
     root = tmp_path / "vault"

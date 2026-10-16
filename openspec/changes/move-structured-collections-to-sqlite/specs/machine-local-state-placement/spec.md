@@ -48,13 +48,16 @@ The keep-vault state-adoption remedy SHALL refuse an enrolled optional
 collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
-Each live store schema from 11 on SHALL have one optional compatibility ID,
-`collections-store-schema-<N>`, because every store reader refuses a newer
-schema. A release SHALL support the IDs up to its own store schema. A writer
-SHALL record the current schema's IDs before it migrates a store or installs a
-migrated copy, and every store admission SHALL record them. A migration that
-rolls back SHALL record the earlier schema's IDs again. A release that does not
-support a recorded ID SHALL refuse before it opens the store.
+Supported launchers SHALL refuse a candidate whose newest readable store schema
+is below the live store's schema, before the serving worker stops. Without a
+live store, or with one whose schema the launcher cannot read, this check SHALL
+refuse nothing. Each live store schema from 12 on SHALL also have one optional
+compatibility ID, `collections-store-schema-<N>`; schema 11 has none, because
+releases since 0.114.0 treat an unknown ID alike, so an ID would also refuse the
+releases that read schema 11. A release SHALL support the IDs up to its own
+store schema. A writer SHALL record the current schema's IDs before it migrates
+a store or installs a migrated copy, and every store admission SHALL record
+them. A migration that rolls back SHALL record the earlier schema's IDs again.
 
 Supported Exomem launchers SHALL derive required store compatibility from the
 existing vault-side authority marker before fresh external-state bootstrap,
@@ -132,10 +135,10 @@ No plugin bit, declaration, or boolean override SHALL grant custody.
 
 #### Scenario: A store at a newer schema refuses an earlier release
 
-- **WHEN** a writer migrates a vault's store to a schema whose compatibility ID an earlier release does not support
-- **THEN** the state manifest records that ID before the migration commits, so no crash leaves a migrated store without it
-- **AND** a supported launcher refuses the earlier release as a candidate before the serving worker stops, and the earlier release's own startup gate refuses the manifest
-- **AND** a migration that rolls back records the earlier schema's IDs again, so the release that wrote the store can still start
+- **WHEN** a writer has migrated a vault's live store to a schema that an earlier release cannot read
+- **THEN** a supported launcher refuses that release as a candidate before the serving worker stops
+- **AND** it still accepts a release that reads the live store's schema
+- **AND** from schema 12 on, the state manifest records the schema's ID before the migration commits, and a migration that rolls back records the earlier schema's IDs again
 
 #### Scenario: Unknown replication custody does not disable file knowledge
 

@@ -47,10 +47,10 @@ CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
 # What an enrolled store and its marker require; the store's schema adds its own generation IDs.
 _COLLECTION_STORE_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
-# The closed catalog this release recognizes; an earlier release reads any other ID as unknown.
+# With the store schema IDs, the closed catalog this release recognizes; an earlier release
+# reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = frozenset({
     *_COLLECTION_STORE_IDS, "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
-    *store_schema.compatibility_ids(),
 })
 
 
@@ -249,7 +249,8 @@ def partition_state_descriptor_ids(
     """Separate physical families from the closed optional compatibility catalog."""
 
     recorded = frozenset(descriptors)
-    return recorded - _OPTIONAL_COMPATIBILITY_IDS, recorded & _OPTIONAL_COMPATIBILITY_IDS
+    optional = _OPTIONAL_COMPATIBILITY_IDS | set(store_schema.compatibility_ids())
+    return recorded - optional, recorded & optional
 
 
 def _require_supported_compatibility(optional: frozenset[str]) -> None:
@@ -324,6 +325,8 @@ def record_collection_store_schema(
 
 def _record_optional(vault_root: Path, authority_check: Callable[[], bool], *,
                      add: frozenset[str], drop: frozenset[str] = frozenset()) -> None:
+    if not (add or drop):
+        return  # A store schema without an ID has nothing to record and needs no manifest.
     if not callable(authority_check):
         raise StateMigrationOfflineRequired("collection-store authority is absent")
     state_dir = state_paths.vault_state_dir(vault_root)

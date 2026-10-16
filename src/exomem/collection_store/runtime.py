@@ -532,7 +532,9 @@ class CollectionStoreRuntime:
                             self.sample_head()
                             # Opening may serve reads of an unadmitted copy; transactions never.
                             # It migrates a copy an earlier release wrote, after recording the
-                            # new schema's IDs as admission's writer does, so reads continue.
+                            # new schema's IDs as admission's writer does, so reads continue. That
+                            # can precede a refusal of the pending takeover; the launcher's store
+                            # schema check refuses an earlier release afterwards, as after any migration.
                             opening = [True]
                             self._handle = connection.open_writer(
                                 self.path, lease_check=lambda: self._authority(
@@ -768,7 +770,7 @@ def _durable_create(root):
     try:
         if not connection.store_path(root).exists():
             return None
-        with closing(connection.open_reader(connection.store_path(root))) as reader:
+        with closing(connection.open_head_reader(connection.store_path(root))) as reader:
             intent = authority.pending_create(reader)
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
@@ -1108,7 +1110,8 @@ class StoreServer:
         if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            # The resume migrates a store an earlier release left with this intent; until then only its head reads.
+            with closing(connection.open_head_reader(self.runtime.path)) as reader:
                 intent = authority.pending_create(reader)
             if intent is None:
                 self.pending_create = None

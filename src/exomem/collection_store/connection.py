@@ -494,6 +494,18 @@ def schema_pending(path: Path) -> bool:
     return found < schema.SCHEMA_VERSION
 
 
+def store_schema(path: Path) -> int:
+    """The schema that a store records, also one newer than this release can open."""
+    try:
+        conn, found = _open_read_only(path, BUSY_TIMEOUT_MS)
+    except CollectionStoreError as error:
+        if isinstance(error.__cause__, schema.SchemaVersionError):
+            return error.__cause__.found
+        raise
+    conn.close()
+    return found
+
+
 def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:
     """An existing store opened read-only at any schema up to the current one, with that schema."""
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:

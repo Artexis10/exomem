@@ -879,6 +879,29 @@ def remove_stale_socket(path: Path) -> None:
     path.unlink()
 
 
+def _require_store_schema(vault: Path, ceiling: int | None) -> None:
+    """Refuse a candidate whose newest store schema is older than the vault's live store.
+
+    Such a release's reader refuses the store, so on a vault with a collection store fence
+    its writer gets no lease and every write on the host refuses. A store whose schema this
+    launcher cannot read refuses nothing here: the candidate meets it as any release would,
+    and refusing would also block the release that repairs it.
+    """
+    import sqlite3
+
+    from .collection_store import connection
+
+    path = connection.store_path(vault)
+    if not path.exists():
+        return
+    try:
+        live = connection.store_schema(path)
+    except (connection.CollectionStoreError, connection.CollectionStoreUnavailable, sqlite3.Error, OSError):
+        return
+    if ceiling is None or ceiling < live:
+        raise ValueError(f"candidate cannot read the collection store's schema {live}")
+
+
 class WorkerRuntime:
     """Own every state-touching child through stop, migration and readiness.
 
@@ -911,8 +934,9 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
+        # The exact verified candidate, its optional state support and its store schema ceiling.
         self._verified_state_compatibility: tuple[
-            tuple[str, str, tuple[str, ...]], frozenset[str]
+            tuple[str, str, tuple[str, ...]], frozenset[str], int | None
         ] | None = None
         self.standby_waiting: str | None = None
         #: What the replacement last reported waiting on after the old worker
@@ -1047,10 +1071,15 @@ class WorkerRuntime:
             "    standby = True\n"
             "except Exception:\n"
             "    standby = False\n"
+            # The newest collection store schema the target reads; a release without the store has none.
+            "try:\n"
+            "    from exomem.collection_store.schema import SCHEMA_VERSION as store_schema\n"
+            "except Exception:\n"
+            "    store_schema = None\n"
             + _STATE_DECLARATIONS_PROBE
             + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
-            '"supported_state_compatibility":compatibility}))'
+            '"supported_state_compatibility":compatibility,"store_schema":store_schema}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1088,9 +1117,12 @@ class WorkerRuntime:
             isinstance(entry, str) and entry for entry in compatibility
         ):
             raise ValueError("target did not declare its state compatibility")
+        store_schema = actual.get("store_schema")
+        if store_schema is not None and (type(store_schema) is not int or store_schema < 0):
+            raise ValueError("target did not declare its collection store schema")
         self.standby_capable = actual.get("standby") is True
         self._verified_state_compatibility = (
-            (interpreter, version, tuple(descriptors)), frozenset(compatibility)
+            (interpreter, version, tuple(descriptors)), frozenset(compatibility), store_schema
         )
         return {
             "python": interpreter,
@@ -1279,6 +1311,7 @@ class WorkerRuntime:
         supported = verified[1] if verified is not None and verified[0] == key else frozenset()
         if required - supported:
             raise ValueError("candidate does not support required state compatibility")
+        _require_store_schema(Path(vault), verified[2] if verified is not None and verified[0] == key else None)
         if recorded is None:
             return True, "state manifest records no descriptor set"
         declared = target.get("state_descriptors")

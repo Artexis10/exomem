@@ -1427,8 +1427,13 @@ def test_a_missing_marker_is_refused_as_unreadable_not_crashed_on(abc):
 
 # --- a store that an earlier release wrote: schema guard, migration order and adoption ----------
 
-# The persisted state compatibility ID for schema 11; releases that read schema 10 do not know it.
+# The state compatibility ID that schema 11 carries once tests guard it: no ID guards 11 itself,
+# but guarding it exercises the mechanism on the real migration from schema 10.
 SCHEMA_GUARD = "collections-store-schema-11"
+
+
+def _guard_schema_11(patch):
+    patch.setattr(schema, "FIRST_GUARDED_SCHEMA_VERSION", 11)
 
 
 def _earlier_c(found):
@@ -1458,6 +1463,7 @@ def test_a_crash_right_after_the_migration_leaves_the_schema_guard_recorded(ab, 
     """Defect: the writer records what the new schema requires only after migrating, so a crash between
     leaves a migrated store that the launcher still hands to an earlier release, which then deadlocks."""
     _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
     ensure = schema.ensure_schema
 
     def crash_once_migrated(conn):
@@ -1473,18 +1479,6 @@ def test_a_crash_right_after_the_migration_leaves_the_schema_guard_recorded(ab, 
     assert SCHEMA_GUARD in _recorded(ab.root)
 
 
-def test_admission_records_the_schema_guard_for_a_store_an_earlier_writer_migrated(ab):
-    """Defect: a store that the release before the guard migrated never gains the schema's ID, so the
-    launcher keeps accepting an earlier release that cannot open it."""
-    _earlier_c(ab)
-    # That release's writer migrated the store without recording what the new schema requires.
-    connection.open_writer(ab.session.path, lease_check=lambda: True).close()
-    assert SCHEMA_GUARD not in _recorded(ab.root)
-    assert ab.open() == {"status": "admitted"}
-    assert SCHEMA_GUARD in _recorded(ab.root)
-    assert ab.read_c() == ["Canonical"]
-
-
 def test_an_admission_that_refuses_leaves_a_store_from_an_earlier_release_unmigrated(ab):
     """Defect: admission migrates the store before its recovery check, so a store that it then refuses is
     already out of reach of the earlier release that wrote it."""
@@ -1494,7 +1488,6 @@ def test_an_admission_that_refuses_leaves_a_store_from_an_earlier_release_unmigr
     with pytest.raises(state_migration.StateMigrationOfflineRequired, match="OFFLINE_REQUIRED"):
         ab.open()
     assert _schema(ab.session.path) == 10
-    assert SCHEMA_GUARD not in _recorded(ab.root)
 
 
 def test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_retries(ab, monkeypatch):
@@ -1504,6 +1497,7 @@ def test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_
     from exomem.collection_store import native_metadata
 
     _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
     failing = [True]
     repair = native_metadata.repair_triggers
 
@@ -1524,6 +1518,29 @@ def test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_
     assert ab.open() == {"status": "admitted"}
     assert ab.read_c() == ["Canonical"] and _schema(ab.session.path) == schema.SCHEMA_VERSION
     assert SCHEMA_GUARD in _recorded(ab.root)
+
+
+def test_a_create_that_an_earlier_release_left_pending_finishes_after_the_upgrade(ab):
+    """Defect: a create intent left at the earlier schema is never migrated, so every recovery read refuses
+    COLLECTION_STORE_SCHEMA_PENDING and the create stays pending forever."""
+    publish = replica.publish_replica
+
+    def sync_appears(*args, **kwargs):
+        result = publish(*args, **kwargs)
+        (ab.root / ".stfolder").mkdir(exist_ok=True)
+        return result
+
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        previous.setattr(replica, "publish_replica", sync_appears)
+        refused(lambda: create_c(ab), "COLLECTION_STORE_CUSTODY_REQUIRED")
+    assert _schema(ab.session.path) == 10 and not authority.marker_path(ab.root).exists()
+    (ab.root / ".stfolder").rmdir()
+    ab.session.verify_custody()
+    refused(ab.open, "create recovery owns this store")  # as the service finds it at startup
+    assert admission.resume_local(ab.session, ab.manager, fence_client=ab.operator)["status"] == "marker_admitted"
+    assert _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert ab.write_c(ROW, "After the upgrade")["outcome"] == "committed"
 
 
 def _copied(found, tmp_path):

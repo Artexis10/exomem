@@ -125,10 +125,11 @@ def staged_replica(session, check, heads):
                 os.write(staged.descriptor, chunk)
             os.fsync(staged.descriptor)
             signature = before if _signature(os.fstat(shared.fileno())) == before else None
-        conn = sqlite3.connect(path, isolation_level=None)
+        conn = None
         try:
             # A replica an earlier release published is migrated in this private copy, never in the vault.
             snapshot.migrate_copy(path, check)
+            conn = sqlite3.connect(path, isolation_level=None)
             metadata = snapshot._validate(conn, check)
             chain.verify_store_chain(conn)
             marker = authority.parse_marker(session.root, authority.read_marker(session.root))
@@ -145,7 +146,8 @@ def staged_replica(session, check, heads):
         except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.DatabaseError):
             result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [])
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
         yield result
     finally:
         try:
