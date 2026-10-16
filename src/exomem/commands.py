@@ -73,6 +73,7 @@ from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
+from .viewer_map import op_viewer_map
 from . import evolution as evolution_module
 from . import find as find_module
 from . import (
@@ -12473,7 +12474,8 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         # not yet have a query: it resolves what the turn is about and returns a
         # bounded packet, or abstains. The rest of the family assumes the agent
         # already knows what it is looking for.
-        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media"],
+        # These keys route registered product commands, a closed protocol vocabulary.
+        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media", "viewer_map"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
@@ -12624,6 +12626,7 @@ _SPEC: tuple[tuple, ...] = (
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
     ("graph_context", op_graph_context, 1, False, False, "path", _MCRC),
+    ("viewer_map", op_viewer_map, 1, False, False, None, _MCRC),
     ("suggest_relations", op_suggest_relations, 1, False, False, None, _MCRC),
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
@@ -12776,6 +12779,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("overview", "list_directory"),
         {"surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True},
+    ),
+    (
+        "viewer_map",
+        op_viewer_map,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("viewer_map",),
+        {"surface": "advanced", "actions": ("ask",), "first_run_safe": True},
     ),
     (
         "remember",

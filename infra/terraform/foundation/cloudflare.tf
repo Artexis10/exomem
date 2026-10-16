@@ -73,6 +73,16 @@ resource "cloudflare_dns_record" "gateway" {
   comment = "Exomem Cloud MCP direct TLS ingress"
 }
 
+resource "cloudflare_dns_record" "status" {
+  zone_id = var.cloudflare_zone_id
+  name    = "status.substratesystems.io"
+  type    = "CNAME"
+  content = "substrate-systems.github.io"
+  proxied = false
+  ttl     = 300
+  comment = "Exomem public status on GitHub Pages"
+}
+
 resource "cloudflare_zero_trust_access_service_token" "substrate" {
   account_id = var.cloudflare_account_id
   name       = "exomem-substrate-control"

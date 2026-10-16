@@ -188,6 +188,43 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
         thread.join(10)
 
 
+def test_indexed_native_snapshot_retains_exact_current_values_and_correction_history(genesis, monkeypatch):
+    """Copied native indexes must validate before import recovery can publish their store."""
+    from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
+
+    from exomem.collection_store import typed_storage
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.governance.principal import library_scope
+
+    root, stage, writer = genesis
+    (root / "Knowledge Base").mkdir()
+    monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
+    declaration = manifest_text().replace("count: {type: integer}", "count: {type: number}")
+    declaration = declaration.replace(
+        "\n---", "\nindexes:\n  by_count:\n    keys: [{field: count}]\n---"
+    )
+    with library_scope():
+        store = CollectionWriter(root, writer)
+        store.create_collection(manifest_path(), declaration, why="create", scaffold=False)
+        original = store.append_record(CID, item_key=KEY, item={"title": "Entry", "count": -0.0}, why="record")
+        assert store.migrate_typed_encoding(CID) == "ready"
+        store.update_record(
+            CID, item_key=KEY, changes={"count": 2**80 + 1}, why="correct",
+            expected_item_version=original["after_item_hash"],
+            expected_container_hash=store.inspect_collection(CID)["lifecycle_guards"]["expected_container_hash"],
+        )
+    row_id = store.connection.execute("SELECT row_id FROM items WHERE item_key=?", (KEY,)).fetchone()[0]
+    with snapshot.staged_snapshot(root, directory=stage, deadline=time.monotonic() + 10) as artifact:
+        with closing(sqlite3.connect(artifact.path, isolation_level=None)) as copied:
+            # Owner reconciliation and replica takeover validate standalone connections too.
+            assert snapshot._validate(copied, lambda: None)[schema.META_STORE_ID] == artifact.store_id
+            layout = typed_storage.require_layout(copied, CID)
+            assert typed_storage.current_values(copied, layout, row_id) == {"title": "Entry", "count": 2**80 + 1}
+            before, _ = typed_storage.version_values(copied, row_id, 1)
+            assert typed_storage.canonical_json(before) == '{"count":-0.0,"title":"Entry"}'
+    assert list(stage.iterdir()) == []
+
+
 def test_genesis_preserves_original_lineage_and_opaque_lease_epoch(genesis) -> None:
     # A valid empty store must not gain a fabricated head, ancestry or lease.
     root, stage, writer = genesis

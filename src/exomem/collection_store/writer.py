@@ -546,6 +546,12 @@ class CollectionWriter:
             diagnostics.append({"code": "PROJECTION_PENDING", "reason": "collection views are pending publication"})
         for code in sorted({candidate[5] for candidate in corrections}):
             diagnostics.append({"code": code, "reason": "held collection view correction"})
+        if complete:
+            # A migration reason can identify an unreleased source row, so only a whole-owner view includes it.
+            migration = typed_storage.migration_diagnostic(self.connection, manifest.collection_id)
+            if migration is not None:
+                diagnostics.append({"code": "NATIVE_MIGRATION_PENDING", "reason": "the original encoding remains active",
+                                    "migration": migration})
         guards = {"expected_manifest_hash": manifest.manifest_version.hash,
                   "expected_container_hash": self._container(row) if complete else visible_snapshot}
         payload = {
@@ -1264,19 +1270,19 @@ class CollectionWriter:
         """One rollup batch alone; True once every declared rollup is ready."""
         return self.backfill_derived(collection, limit=limit, projection=False)[1]
 
-    def migrate_typed_encoding(self, collection, *, limit=128) -> str:
-        """Advance this collection's forward typed-v1 encoding migration by one batch.
+    def migrate_typed_encoding(self, collection, *, limit=128, encoding=typed_storage.TYPED_V2) -> str:
+        """Advance this collection's native encoding migration by one bounded batch.
 
         Internal maintenance under the writer lease and current authority, not
         a public route. Logical values, hashes, generations and audit are
-        unchanged; the JSON encoding stays authoritative until the proved
+        unchanged; the original encoding stays authoritative until the proved
         cutover commits. Returns ``building``, ``ready`` or ``failed``.
         """
         with self._mutation():
             _, manifest, _ = self._collection(collection)
             state = typed_storage.migrate_batch(
                 index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, tuple(manifest.schema.fields), limit=limit,
+                manifest.collection_id, manifest.schema.fields, limit=limit, encoding=encoding,
             )
             self._precommit(manifest)
         return state
@@ -1407,10 +1413,10 @@ class CollectionWriter:
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
             if manifest.view_mode == summary.SUMMARY:
-                # A NEW summary collection is typed-v1 from its first row: an empty
-                # forward migration publishes the layout in this transaction.
+                # An empty summary collection publishes its native payload/query pair here.
                 if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
-                                               manifest.collection_id, tuple(manifest.schema.fields), limit=1) != "ready":
+                                               manifest.collection_id, manifest.schema.fields, limit=1,
+                                               encoding=typed_storage.TYPED_V2) != "ready":
                     raise RuntimeError("an empty collection publishes its typed layout at once")
                 self._pending_summary(manifest, 1)
             affected = [manifest.path, *summary.page_paths(manifest)] + ([manifest.storage.source] if scaffold else [])
@@ -1677,7 +1683,7 @@ class CollectionWriter:
                           "published_sha256=pending_sha256 WHERE path=?", (path,))
 
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
-                    *, ordinal=0, queue_log=True):
+                    *, ordinal=0, queue_log=True, scope=None):
         if before is None and manifest.view_mode == "items":
             self._require_items_capacity(manifest.collection_id)
         if _renders_rows(manifest):
@@ -1719,7 +1725,7 @@ class CollectionWriter:
                 index_migrations.AccountedWriter(self.connection, self._execute),
                 typed_storage.require_layout(self.connection, manifest.collection_id),
                 row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
-                txn_id=txn["txn_id"], schema_version=manifest.schema.version,
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key, scope=scope,
             )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
@@ -1915,9 +1921,10 @@ class CollectionWriter:
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans])
+            scope = self.handle.write_scope
             for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
                 self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
-                                 ordinal=ordinal, queue_log=False)
+                                 ordinal=ordinal, queue_log=False, scope=scope)
             if is_log:
                 self._pending_log(manifest, txn)
             elif manifest.view_mode == summary.SUMMARY:
@@ -2422,7 +2429,8 @@ class CollectionWriter:
                               (proposed.view_mode, current.collection_id))
                 if proposed.view_mode == summary.SUMMARY and typed_storage.migrate_batch(
                         index_migrations.AccountedWriter(self.connection, self._execute),
-                        current.collection_id, tuple(proposed.schema.fields), limit=1) != "ready":
+                        current.collection_id, proposed.schema.fields, limit=1,
+                        encoding=typed_storage.TYPED_V2) != "ready":
                     raise RuntimeError("an empty collection publishes its typed layout at once")
                 for path in retired_pages:
                     self._publication.retire(self._publication.captured[path])

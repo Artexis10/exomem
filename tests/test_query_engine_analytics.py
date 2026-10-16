@@ -9,6 +9,7 @@ the defect only it catches.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import time
 
 import pytest
@@ -54,7 +55,13 @@ def seed(store, items, *, cid=CID):
     per-test budget; the reduction under test reads only canonical rows. An
     items collection's rows get the view paths their files would have.
     """
-    from exomem.collection_store import governance, tables, tokens, typed_storage
+    from exomem.collection_store import (
+        governance,
+        native_identity,
+        tables,
+        tokens,
+        typed_storage,
+    )
 
     conn = store.connection
     text, metadata, path, mode = conn.execute(
@@ -65,30 +72,36 @@ def seed(store, items, *, cid=CID):
     stored = collections.parse_manifest_bytes(store.root, path, text.encode())
     layout = typed_storage.require_layout(conn, cid)
     txn = conn.execute("SELECT MAX(txn_id) FROM txns").fetchone()[0]
-    keyed = [(f"seed-{number}", values) for number, values in enumerate(items)]
+    keyed = []
+    for number, values in enumerate(items):
+        key = f"00000000-0000-4000-8000-{number:012x}"
+        keyed.append((key, values, tokens.payload_hash(1, key, values, "")))
     folder = None if mode == "summary" else path.rsplit("/", 1)[0] + "/Items/"
     with store.handle.transaction() as tx:
         tx.executemany(
             "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json,encoding) "
-            "VALUES (?,?,?,1,1,NULL,?,?,?,?,?,'typed-v1')",
-            ((cid, key, collections.manifest_natural_key(stored, values), tokens.payload_hash(1, key, values, ""),
-              folder and f"{folder}{key}.md", txn, txn, governance.row_metadata(stored.schema, values, metadata))
-             for key, values in keyed))
+            "VALUES (?,?,?,1,1,NULL,?,?,?,?,?,?)",
+            ((cid, key, collections.manifest_natural_key(stored, values), payload_hash,
+              folder and f"{folder}{key}.md", txn, txn, governance.row_metadata(stored.schema, values, metadata), layout.encoding)
+             for key, values, payload_hash in keyed))
         ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
         _, _, upsert, insert_version = typed_storage._declarations(layout)
+        # One metadata scope serves every row of this transaction; the layout's columns are fixed for it too.
+        scope, columns = store.handle.write_scope, (*layout.value_columns, "r")
         # Core batches seed canonical fixtures without per-row dispatch or unbounded parameters.
         batch_size = 128
         for start in range(0, len(keyed), batch_size):
             current_rows, versions, identities = [], [], []
-            for key, values in keyed[start:start + batch_size]:
-                encoded = dict(zip((*layout.value_columns, "r"), typed_storage.encode_row(layout, values), strict=True))
+            for key, values, payload_hash in keyed[start:start + batch_size]:
+                encoded = dict(zip(columns, typed_storage.encode_row(layout, values, connection=tx, scope=scope), strict=True))
                 current = {"row_id": ids[key], "row_version": 1, **encoded}
-                current_rows.append(current)
+                current_rows.append({**current, **({"item_key": native_identity.encode(key, layout.identity)}
+                                    if layout.encoding == typed_storage.TYPED_V2 else {})})
                 versions.append({**current, "body": ""})
-                identities.append({"row_id": ids[key], "row_version": 1, "encoding": typed_storage.TYPED_V1,
-                                   "payload_hash": tokens.payload_hash(1, key, values, ""), "txn_id": txn,
-                                   "schema_version": 1})
+                identities.append({"row_id": ids[key], "row_version": 1, "encoding": layout.encoding,
+                                   "payload_hash": payload_hash, "txn_id": txn,
+                                   "schema_version": 1, "payload_generation": layout.generation})
             store.handle.execute(upsert, current_rows)
             store.handle.execute(insert_version, versions)
             store.handle.execute(tables.INSERT_IDENTITY, identities)
@@ -96,6 +109,35 @@ def seed(store, items, *, cid=CID):
 
 def create(store, rollups=None):
     store.create_collection(manifest_path(), manifest(rollups=rollups), why="create", scaffold=False)
+
+
+def test_a_write_scope_refuses_reuse_after_its_transaction_and_with_another_file(store, tmp_path):
+    """A scope kept past ROLLBACK would store a frame that names a rolled-back format ID, and one used with
+    another file's rows would store their instants against this file's epoch."""
+    import sqlite3
+
+    from exomem.collection_store import typed_storage
+
+    create(store)
+    layout = typed_storage.require_layout(store.connection, CID)
+    assert layout.encoding == typed_storage.TYPED_V2
+    values = {"id": "a", "start": "2024-01-02T00:30:00+02:00"}
+    with pytest.raises(LookupError):
+        with store.handle.transaction() as tx:
+            kept = store.handle.write_scope
+            typed_storage.encode_row(layout, values, connection=tx, scope=kept)
+            raise LookupError("roll the transaction back")
+    other = sqlite3.connect(tmp_path / "other.sqlite", isolation_level=None)
+    try:
+        other.execute("BEGIN")
+        other.execute("CREATE TABLE marker(x)")
+        with store.handle.transaction() as tx:
+            with pytest.raises(RuntimeError, match="outlived"):
+                typed_storage.encode_row(layout, values, connection=tx, scope=kept)
+            with pytest.raises(RuntimeError, match="another connection"):
+                typed_storage.encode_row(layout, values, connection=other, scope=store.handle.write_scope)
+    finally:
+        other.close()
 
 
 @pytest.fixture(autouse=True)
@@ -159,11 +201,47 @@ def test_analytics_exact_reduction_over_a_large_collection_matches_the_reference
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         reduce(store, request())
     started = time.monotonic()
-    result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
+    process_started, thread_started = time.process_time(), time.thread_time()
+    try:
+        result = reduce(store, analytics(request()), limits=runtime.QueryLimits(profile="analytics"))
+    except runtime.QueryError as error:
+        try:
+            _report_analytics_failure(error, started, process_started, thread_started)
+        except Exception:  # noqa: BLE001 - diagnostics cannot replace the query failure.
+            pass
+        raise
     elapsed = time.monotonic() - started
     assert result["plan"]["strategy"] == "base" and len(result["groups"]) == len(daily) <= 200
     assert by_bucket(result) == daily and result["flagged_rows"] == len(flagged)
     assert elapsed < 2.0, elapsed
+
+
+def _report_analytics_failure(error, started, process_started, thread_started):
+    """Report only numeric counters after failure, without tracing the measured loop."""
+    numbers = {"window": "reduce-call-through-error-unwind", "wall_s": time.monotonic() - started,
+               "process_cpu_s": time.process_time() - process_started,
+               "thread_cpu_s": time.thread_time() - thread_started, "partial_reduce": None}
+    from exomem.query_engine import reductions
+
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend((current.__cause__, current.__context__))
+        trace = current.__traceback__
+        while trace is not None:
+            frame = trace.tb_frame
+            if frame.f_code is reductions._from_rows.__code__:
+                # Fixed reducer counters exclude source rows, values and query text.
+                counters = {name: value if type(value := frame.f_locals.get(name)) is int else None
+                            for name in ("visited", "flagged", "retained")}
+                groups = frame.f_locals.get("groups")
+                counters["groups"] = len(groups) if type(groups) is dict else None
+                numbers["partial_reduce"] = counters
+            trace = trace.tb_next
+    print("analytics_failure " + json.dumps(numbers, sort_keys=True), flush=True)
 
 
 def test_whole_call_deadline_returns_no_partial_reduction_or_continuation(store):

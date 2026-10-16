@@ -135,7 +135,7 @@ def _seed(store, cid, count):
     manifest = collections.parse_manifest_bytes(store.root, path, text.encode())
     typed = typed_storage.ready_layout(conn, cid)
     txn = conn.execute("SELECT MAX(txn_id) FROM txns").fetchone()[0]
-    seeded = [(f"seed-{number}", {"title": f"Seed {number}"}) for number in range(count)]
+    seeded = [(f"00000000-0000-4000-8000-{number:012x}", {"title": f"Seed {number}"}) for number in range(count)]
     with store.handle.transaction() as tx:
         tx.executemany(
             "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
@@ -144,20 +144,20 @@ def _seed(store, cid, count):
               None if typed else json.dumps(values), tokens.payload_hash(1, key, values, ""),
               None if typed else f"{manifest.storage.source}/{key}.md", txn, txn,
               governance.row_metadata(manifest.schema, values, metadata),
-              "typed-v1" if typed else "json-v1") for key, values in seeded))
+              typed.encoding if typed else "json-v1") for key, values in seeded))
         if typed:
             ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
             for key, values in seeded:
                 typed_storage.write_version(store.handle, typed, row_id=ids[key], row_version=1, values=values, body="",
                                             payload_hash=tokens.payload_hash(1, key, values, ""), txn_id=txn,
-                                            schema_version=1)
+                                            schema_version=1, item_key=key)
 
 
 def test_new_summary_collection_is_typed_and_described_by_store_bounds(store):
     """A summary collection created as JSON rows with per-row view paths, or described with a file row cap."""
     receipt = create(store)
     assert mutation_terminal.valid_record_receipt(receipt)
-    assert store.connection.execute("SELECT encoding,view_mode FROM collections").fetchone() == ("typed-v1", "summary")
+    assert store.connection.execute("SELECT encoding,view_mode FROM collections").fetchone() == ("typed-v2", "summary")
     store.append_record(CID, item={"title": "One", "count": 1}, why="observe")
     assert store.connection.execute("SELECT view_path FROM items").fetchall() == [(None,)]
     described = store.inspect_collection(CID)
