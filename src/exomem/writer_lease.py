@@ -4315,21 +4315,35 @@ class LeaseManager:
 
         The fence keeps out releases that do not know the store. In this release, a process
         that does not serve the store refuses a record_memory or plan_memory request for a
-        store collection, but only once the marker routes collections. A first enrolment cuts
-        the fence before it installs the marker, and in that window the fence alone keeps
-        writers off the files the migration imported. The serving process offers the
-        capability only with its store runtime attached, as before.
+        collection that the marker routes to the store. A pending create, migration or export
+        names collections whose routing is changing, and a first enrolment cuts the fence
+        before it installs the marker. In those windows the fence alone keeps writers off the
+        files the intent works on, so such a process offers the capability only when a marker
+        exists and the store records no pending intent. The serving process offers it only
+        with its store runtime attached, as before.
         """
         if self._collection_store is not None:
             return True
         if self._serves_collection_store:
             return False
         try:
-            from .collection_store import authority
+            import sqlite3
+            from contextlib import closing
+
+            from .collection_store import authority, connection
             from .vault import resolve_vault
 
-            return authority.read_marker(resolve_vault()) is not None
-        except Exception:  # noqa: BLE001 - unknown routing keeps the process fenced
+            root = resolve_vault()
+            if authority.read_marker(root) is None:
+                return False
+            # A plain read of the one intent key, so that a media child loads no store libraries.
+            uri = f"{connection.store_path(root).resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as store:
+                pending = store.execute(
+                    "SELECT 1 FROM store_meta WHERE key=?", (authority.PENDING_CREATE,)
+                ).fetchone()
+            return pending is None
+        except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
             return False
 
     def _store_refused(self) -> bool:

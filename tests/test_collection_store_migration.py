@@ -649,6 +649,17 @@ def test_a_store_write_after_prepare_forces_a_fresh_copy(s1, capsys):
         service.stop()
 
 
+def test_a_writer_without_a_store_runtime_stays_fenced_while_an_s1_migration_is_pending(s1, capsys, tmp_path):
+    """On an S1 vault the marker predates the migration and does not yet route the collections
+    it imports. A writer that passes the fence while the migration is pending writes those
+    collections as files, and the next apply refuses them as stale."""
+    root = s1
+    crash_apply(tmp_path, "before-marker", released=MIGRATE | {capability.RECORDS_SUMMARY_V1})
+    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+        append_to_work(root, "a write while the migration is pending")
+    assert migrate(root, "apply") == 0
+
+
 def test_a_service_never_finishes_a_migration_its_owner_left_unfinished(s1, monkeypatch, tmp_path):
     """A serving S1 store that completes a pending migration on its own, without the owner's
     recheck of the files the migration imported."""
