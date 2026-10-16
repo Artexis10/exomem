@@ -48,12 +48,16 @@
       {%- endfor -%}
       {{ cells }}
 
+# Only a cell whose live volume is on the target: a cell moved off it before
+# the removal leaves only its retained volume there, and its holds, an hourly
+# backup included, run on its new node, which the drain does not touch.
 - name: Find cell maintenance holds in flight on the target
   ansible.builtin.set_fact:
     k3s_remove_holds: >-
       {{ k3s_remove_statefulsets_doc['items']
          | selectattr('metadata.namespace', 'in',
-                      k3s_remove_local_cells | map(attribute='namespace') | list + k3s_remove_attached_cells)
+                      k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | list
+                      + k3s_remove_attached_cells)
          | selectattr('metadata.annotations', 'defined')
          | selectattr('metadata.annotations', 'contains', 'exomem.io/hold')
          | map(attribute='metadata.namespace') | list }}

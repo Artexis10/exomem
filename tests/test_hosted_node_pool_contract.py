@@ -1185,6 +1185,37 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
     assert "k3s_remove_node" in revoke["vars"]["k3s_firewall_peer_ips"]
 
 
+
+def test_the_removal_preflight_runs_alone_and_changes_nothing(tmp_path: Path) -> None:
+    # The operator checks room with --tags preflight before moving any cell
+    # by hand (cloud-dedicated-host.md, "Remove the host" step 3). A tag that
+    # also selected the cordon, a move, the stop or the node deletion would
+    # start a removal the operator only meant to check.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.yml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {"hosted_nodes": {
+        "hosts": {"server": None}, "children": {"k3s_agents": {"hosts": {"exomem-agent-01": None}}}}}}}))
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "--list-tasks", "--tags", "preflight", "-i", str(inventory),
+         str(ANSIBLE / "remove-agent.yml"), "-e", "k3s_remove_node=exomem-agent-01"],
+        cwd=ANSIBLE, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    tasks = [line.split("\t")[0].strip() for line in result.stdout.splitlines()
+             if "TAGS:" in line and not line.strip().startswith("play #")]
+
+    assert tasks == [
+        "Resolve the one K3s server",
+        "Refuse anything but one inventoried agent",
+        "Look up the agent's Kubernetes node",
+        "Record whether the node is present and Ready",
+        "Refuse a node that is not an agent",
+        "Read the cluster state the preflight measures",
+        "Parse the cluster state",
+        "Refuse unless the cells fit the remaining nodes",
+    ]
+
 def test_remove_stop_kills_containers_unmounts_and_closes_volume_mappings() -> None:
     stop = _read(K3S_ROLE / "tasks/remove_stop.yml")
     defaults = _read(K3S_ROLE / "defaults/main.yml")
@@ -1362,8 +1393,11 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
 @pytest.mark.parametrize(("hold_on", "volume_phase", "target_ready", "refusal", "moves"), [
     # An hourly backup on another node's cell no longer blocks the removal...
     ("shared", "Bound", "True", None, []),
-    # ...one on a cell whose volume is on the target still does.
-    ("target", "Released", "True", "maintenance is in flight", None),
+    # ...one on a cell whose live volume is on the target still does...
+    ("target", "Bound", "True", "maintenance is in flight", None),
+    # ...but not one on a cell moved off the target before the removal, which
+    # left only its retained volume there and backs up on its new node.
+    ("target", "Released", "True", None, []),
     # A cell still living on the target moves off it before the node goes:
     # deleting the Node would relocate it from its last backup.
     (None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
@@ -1371,8 +1405,8 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
     (None, "Bound", "Unknown", "is not Ready", None),
     # A volume a relocation or a move retained holds no live cell.
     (None, "Released", "True", None, []),
-], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "live-volume-on-a-target-not-ready",
-        "retained-volume-on-target"])
+], ids=["hold-elsewhere", "hold-on-target", "hold-on-a-cell-moved-off-the-target", "live-volume-on-target",
+        "live-volume-on-a-target-not-ready", "retained-volume-on-target"])
 def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
     tmp_path: Path, hold_on: str | None, volume_phase: str, target_ready: str, refusal: str | None,
     moves: list[str] | None,

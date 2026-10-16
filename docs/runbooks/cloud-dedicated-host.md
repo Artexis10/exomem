@@ -491,14 +491,21 @@ cannot be accepted.
    kubectl annotate namespace "$NS" exomem.io/move-volume-
    ```
 
-2. Pause cellctl, and stop the cell:
+2. Uncordon the old volume's node if it is cordoned, as during a host removal. `OLD_PV` is the retained volume you recorded in step 7 of the move. The old volume is pinned to that node, so the cell's pod cannot start there while it is cordoned:
+
+   ```bash
+   OLD_NODE=$(kubectl get persistentvolume "$OLD_PV" -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}')
+   kubectl uncordon "$OLD_NODE"
+   ```
+
+3. Pause cellctl, and stop the cell:
 
    ```bash
    kubectl -n exomem-cloud scale deployment cellctl --replicas=0
    kubectl -n "$NS" scale statefulset cell --replicas=0
    ```
 
-3. Retain the new volume, and retire its claim. `NEW_PV` is the claim's current volume:
+4. Retain the new volume, and retire its claim. `NEW_PV` is the claim's current volume:
 
    ```bash
    NEW_PV=$(kubectl -n "$NS" get persistentvolumeclaim cell-data -o jsonpath='{.spec.volumeName}')
@@ -506,19 +513,19 @@ cannot be accepted.
    kubectl -n "$NS" delete persistentvolumeclaim cell-data
    ```
 
-4. Free the retained volume, `OLD_PV`, for a new claim: `kubectl patch persistentvolume "$OLD_PV" --type=json --patch '[{"op":"remove","path":"/spec/claimRef"}]'`. Expect its status `Available`.
-5. Create claim `cell-data` in `$NS` bound to it: `volumeName: $OLD_PV`, the PV's `storageClassName` and capacity, access mode `ReadWriteOnce`. Expect `Bound`.
-6. Release the row's identity by compare-and-set on the new volume's ID, as the control database owner. It must report `UPDATE 1`:
+5. Free the retained volume, `OLD_PV`, for a new claim: `kubectl patch persistentvolume "$OLD_PV" --type=json --patch '[{"op":"remove","path":"/spec/claimRef"}]'`. Expect its status `Available`.
+6. Create claim `cell-data` in `$NS` bound to it: `volumeName: $OLD_PV`, the PV's `storageClassName` and capacity, access mode `ReadWriteOnce`. Expect `Bound`.
+7. Release the row's identity by compare-and-set on the new volume's ID, as the control database owner. It must report `UPDATE 1`:
 
    ```sql
    UPDATE exomem_cloud_cells SET volume_id = NULL WHERE cell_id = '<cell id>' AND volume_id = '<new volume id>';
    ```
 
-7. Resume cellctl: `kubectl -n exomem-cloud scale deployment cellctl --replicas=1`.
+8. Resume cellctl: `kubectl -n exomem-cloud scale deployment cellctl --replicas=1`.
 
-Expected result: the cell starts on its old volume, its row records the old
-volume's ID, its namespace has no `exomem.io/move-volume` mark, and no new
-move starts. It passes the acceptance in step 5 of the move. The new volume
+Expected result: the cell starts on its old volume, on the uncordoned node
+that holds it. Its row records the old volume's ID, its namespace has no
+`exomem.io/move-volume` mark, and no new move starts. It passes the acceptance in step 5 of the move. The new volume
 stays retained until you delete its PV.
 
 ## Remove the host
@@ -548,7 +555,16 @@ cells as for a lost node first ([cloud-node-loss.md](cloud-node-loss.md)).
    kubectl get pv -o json | jq -r --arg node exomem-agent-dx1 '.items[] | select(.status.phase == "Bound" and any(.spec.nodeAffinity.required.nodeSelectorTerms[]?.matchExpressions[]?; .key == "topology.topolvm.io/node" and (.values | index($node)))) | "\(.spec.capacity.storage) \(.spec.claimRef.namespace)"'
    ```
 
-4. Move each listed cell, the largest first and one at a time, through [Move a cell to a new claim](#move-a-cell-to-a-new-claim). Accept each one (its step 5) before you move the next. If a cell cannot be accepted, roll it back ([Roll a moved cell back](#roll-a-moved-cell-back)) and stop the removal.
+   Then check that the other nodes have room for them. Run the removal
+   playbook's preflight alone. It changes nothing, and it refuses as step 5
+   would, with the room each node has beyond the snapshot reserve:
+
+   ```bash
+   cd infra/ansible && ansible-playbook --inventory inventory.yml remove-agent.yml -e k3s_remove_node=exomem-agent-dx1 --tags preflight
+   ```
+
+   Expect the run to pass and to print `moving cells fit the remaining nodes' local pools`. If it refuses, add a node or free room first.
+4. Move each listed cell, the largest first and one at a time, through [Move a cell to a new claim](#move-a-cell-to-a-new-claim). Accept each one (its step 5) before you move the next. If a cell cannot be accepted, roll it back ([Roll a moved cell back](#roll-a-moved-cell-back)), which uncordons the host, then stop the removal and do step 6.
 5. Run the removal playbook, as in [cloud-node-pool.md](cloud-node-pool.md#remove-a-node):
 
    ```bash
