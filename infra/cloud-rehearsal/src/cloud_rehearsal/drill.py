@@ -42,7 +42,7 @@ import asyncpg
 import boto3
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
-from cellctl.control_test_contract import control_test_sql
+from cellctl.control_test_contract import control_test_sql, import_test_sql
 from cellctl.k8s_client import MOVE_VOLUME_ANNOTATION, OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
 from cellctl.manifests import (
     BACKUP_JOB_NAME,
@@ -1274,6 +1274,8 @@ async def control_database(stack: infra.Stack) -> None:
         await owner.execute(TENANTS_STANDIN_SQL)
         schema_sql, grants_sql = control_test_sql(FIXTURES)
         await owner.execute(schema_sql)
+        # cellctl reads a cell's open import on every pass.
+        await owner.execute(import_test_sql(FIXTURES))
         await owner.execute(grants_sql)
     finally:
         await owner.close()
