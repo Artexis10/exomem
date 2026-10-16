@@ -397,7 +397,9 @@ class ClusterClient:
         self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None
     ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
-        namespace_volume_lost = (getattr(namespace_obj.metadata, "annotations", None) or {}).get(VOLUME_LOST_ANNOTATION)
+        namespace_annotations = getattr(namespace_obj.metadata, "annotations", None) or {}
+        namespace_volume_lost = namespace_annotations.get(VOLUME_LOST_ANNOTATION)
+        namespace_move_volume = namespace_annotations.get(MOVE_VOLUME_ANNOTATION)
 
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
@@ -539,6 +541,7 @@ class ClusterClient:
             pv_node_stop_confirmed=pv_node is not None and node_presence is not None and pv_node in node_presence[1],
             pv_node_absent=pv_node is not None and node_presence is not None and pv_node not in node_presence[0],
             namespace_volume_lost=namespace_volume_lost,
+            namespace_move_volume=namespace_move_volume,
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
@@ -845,6 +848,11 @@ OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
 # D4: set by the operator on a cell's namespace, naming the recorded volume
 # that no disk holds, so cellctl relocates the cell from its backup.
 VOLUME_LOST_ANNOTATION = "exomem.io/volume-lost"
+# Tasks 6.4 and 7.3: set by the operator, or by remove-agent.yml, on a cell's
+# namespace, naming the volume a healthy cell is on, so cellctl moves the cell
+# to a new claim through a fresh stopped backup. The role default
+# k3s_remove_move_annotation repeats it; test_planned_move checks they agree.
+MOVE_VOLUME_ANNOTATION = "exomem.io/move-volume"
 
 
 def _node_presence(nodes) -> tuple[frozenset[str], frozenset[str]] | None:

@@ -22,6 +22,7 @@ from .capacity import GIB, snapshot_reserve_bytes
 from .rollout import current_image, target_image
 from .state import (
     BACKUP_FAILED,
+    BACKUP_OUTCOME_FAILED,
     GROWTH_AT_CAP,
     GROWTH_NO_ROOM,
     GROWTH_NOT_NEEDED,
@@ -29,6 +30,8 @@ from .state import (
     IDENTITY_CONFLICT,
     INIT_DEADLINE_EXCEEDED,
     INIT_FAILURE_CODES,
+    MOVE,
+    MOVE_BACKUP_FAILED,
     RELOCATION_NO_BACKUP,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
@@ -220,7 +223,7 @@ def decide(
         # for the tenant's: the cell stays where it is for the operator.
         decision = Decision(row_updates={"last_error_code": RELOCATION_NO_BACKUP, "ready": False})
     elif lost_volume is not None and start_relocation:
-        decision = _start_relocation(row, observation, now, lost_volume)
+        decision = _start_relocation(row, observation, now, lost_volume, row.last_backup_snapshot)
     elif active_hold == "restore" and observation.statefulset_relocation_volume:
         decision = _continue_relocation(row, observation, now, config)
     elif _claim_missing(observation) and row.volume_id is not None:
@@ -245,6 +248,11 @@ def decide(
         decision = _continue_backup(row, observation, now, config)
     elif active_hold == "restore":
         decision = _continue_restore(row, observation, now, config)
+    elif active_hold == MOVE:
+        decision = _continue_move(row, observation, now, config, storage)
+    elif active_hold is None and (move_volume := planned_move_volume(row, observation, storage)) is not None:
+        # Before any start: a marked cell moves first, whatever else is due.
+        decision = _start_move(row, observation, now, move_volume)
     elif row.desired_state == "stopped":
         decision = _decide_stopped(row, observation, changes_live, refusal_parked)
     else:
@@ -844,8 +852,8 @@ def _continue_snapshot_backup(
     if observation.backup_job_failed or observation.backup_job_succeeded or now - hold_started_at > config.backup_deadline:
         # A Job that exits 0 without a real snapshot id is a failure too (M1/M2).
         retry_after, retry_minutes = _next_backup_backoff(observation, now, config)
-        decision = step(backup_outcome="failed", backup_retry_after=retry_after, backup_retry_minutes=retry_minutes,
-                        delete_snapshot_backup=True)
+        decision = step(backup_outcome=BACKUP_OUTCOME_FAILED, backup_retry_after=retry_after,
+                        backup_retry_minutes=retry_minutes, delete_snapshot_backup=True)
         decision.row_updates = {**decision.row_updates, "last_error_code": BACKUP_FAILED}
         return decision
 
@@ -1143,9 +1151,12 @@ def can_relocate(row: CellRow) -> bool:
     return _valid_snapshot_id(row.last_backup_snapshot)
 
 
-def _start_relocation(row: CellRow, observation: ClusterObservation, now: datetime, lost_volume: str) -> Decision:
-    """D4: recreate the cell elsewhere from its last backup, as a restore hold
-    that starts the cell only once the restore succeeds."""
+def _start_relocation(
+    row: CellRow, observation: ClusterObservation, now: datetime, lost_volume: str, snapshot: str | None
+) -> Decision:
+    """D4: recreate the cell elsewhere from `snapshot`, as a restore hold that
+    starts the cell only once the restore succeeds. A lost node's cell
+    restores its last backup; a planned move restores the backup it just took."""
 
     image = current_image(row, observation)
     return Decision(
@@ -1156,7 +1167,7 @@ def _start_relocation(row: CellRow, observation: ClusterObservation, now: dateti
         hold_kind="restore",
         hold_started_at=now,
         previous_image=image,
-        pre_upgrade_snapshot=row.last_backup_snapshot,
+        pre_upgrade_snapshot=snapshot,
         relocation_volume=lost_volume,
         # An hourly hold on the lost node can never finish; its clone and
         # snapshot go with it.
@@ -1209,6 +1220,97 @@ def _continue_relocation(
     if decision.hold_kind == "restore":
         decision.relocation_volume = old_volume
     return decision
+
+
+def planned_move_volume(row: CellRow, observation: ClusterObservation, storage: StorageConfig) -> str | None:
+    """Tasks 6.4 and 7.3: the volume an operator's planned move leaves, or None.
+
+    The operator marks the cell's namespace with `exomem.io/move-volume`
+    naming the volume the row records, which the cell's claim is bound to. A
+    mark naming any other volume is stale and moves nothing, as a
+    `volume-lost` mark is: a mark left after a finished move names the old
+    volume, so it never moves the cell again. A move needs a local class to
+    move to, and a node that can still run the cell's backup: a lost node's
+    cell is relocated from its last backup instead."""
+
+    if storage.local is None or row.volume_id is None or observation.namespace_move_volume != row.volume_id:
+        return None
+    if not observation.pvc_bound or observation.pvc_terminating or observation.pvc_volume_id != row.volume_id:
+        return None
+    if observation.pv_node_lost:
+        return None
+    return row.volume_id
+
+
+def _start_move(row: CellRow, observation: ClusterObservation, now: datetime, volume: str) -> Decision:
+    """A planned move stops the cell on its own volume, claim untouched."""
+
+    image = current_image(row, observation)
+    return Decision(
+        apply_manifests=True,
+        replicas=0,
+        read_only=row.desired_state == "read_only",
+        image=image,
+        hold_kind=MOVE,
+        hold_started_at=now,
+        relocation_volume=volume,
+        row_updates={"hold_kind": row_hold_kind(MOVE), "hold_started_at": now, "observed_state": "stopping",
+                     "ready": False},
+    )
+
+
+def _continue_move(
+    row: CellRow, observation: ClusterObservation, now: datetime, config: ReconcileConfig, storage: StorageConfig
+) -> Decision:
+    """A planned move's first step: a fresh stopped backup of the cell's own
+    volume, through the stopped backup's Job. Only once it succeeds does the
+    move touch the claim, continuing as a relocation that restores that
+    backup (D4), so no write the cell acknowledged before it stopped is lost.
+
+    A failed backup leaves the cell stopped on its untouched claim, and the
+    hold records the outcome so the backup is not run again. Until the claim
+    changes, the operator's mark is what keeps the cell stopped: once it no
+    longer names the cell's volume, the cell starts there as before."""
+
+    hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
+    old_volume = observation.statefulset_relocation_volume or row.volume_id
+    image = current_image(row, observation)
+    read_only = row.desired_state == "read_only"
+
+    def hold(**fields: object) -> Decision:
+        return Decision(apply_manifests=True, replicas=0, read_only=read_only, image=image, hold_kind=MOVE,
+                        hold_started_at=hold_started_at, relocation_volume=old_volume, **fields)
+
+    if planned_move_volume(row, observation, storage) != old_volume:
+        return Decision(
+            apply_manifests=True,
+            replicas=0 if row.desired_state == "stopped" else 1,
+            read_only=read_only,
+            image=image,
+            hold_kind=None,
+            # A backup still running would read the volume the cell writes again.
+            delete_backup_job=True,
+            row_updates={"hold_kind": None, "hold_started_at": None, "last_error_code": None},
+        )
+    failed = hold(backup_outcome=BACKUP_OUTCOME_FAILED,
+                  row_updates={"observed_state": "stopping", "last_error_code": MOVE_BACKUP_FAILED})
+    if observation.statefulset_backup_outcome == BACKUP_OUTCOME_FAILED:
+        return failed
+    snapshot_id = observation.backup_job_snapshot_id
+    if observation.backup_job_succeeded and _valid_snapshot_id(snapshot_id):
+        decision = _start_relocation(row, observation, now, old_volume, snapshot_id)
+        # Its finished pod would hold the old claim until the Job expires.
+        decision.delete_backup_job = True
+        decision.clear_backup_retry_after = True
+        decision.row_updates = {**decision.row_updates, "last_backup_at": now, "last_backup_snapshot": snapshot_id,
+                                "last_error_code": None}
+        return decision
+    if observation.backup_job_failed or observation.backup_job_succeeded or now - hold_started_at > config.backup_deadline:
+        # A Job that exits 0 without a real snapshot id is a failure too (M1/M2).
+        return failed
+    if observation.pod_uses_volume:
+        return hold(row_updates={"observed_state": "stopping"})
+    return hold(run_backup_job=True, row_updates={"observed_state": "stopping"})
 
 
 def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:

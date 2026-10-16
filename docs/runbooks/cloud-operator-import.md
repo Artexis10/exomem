@@ -21,7 +21,7 @@ Three machines take part:
 - **Operator machine:** reaches the source and the node over SSH. It only ever carries ciphertext.
 - **Node:** holds the one-time key in `/dev/shm` and the ciphertext on disk, decrypts, and runs `kubectl` as break-glass.
 
-The cell is down from step 5 to step 7, which takes minutes for a vault of a few gigabytes. Everything that can refuse the archive runs before step 5, so a refusal never costs downtime. Run the node steps in an interactive shell **without** `set -e`: a failed gate must leave the shell and its variables in place so that [recovery](#if-a-step-fails-after-step-5) can run. Don't start between 02:00 and 05:00 UTC, when cellctl runs backups.
+The cell is down from step 5 to step 7, which takes minutes for a vault of a few gigabytes. Everything that can refuse the archive runs before step 5, so a refusal never costs downtime. Run the node steps in an interactive shell **without** `set -e`: a failed gate must leave the shell and its variables in place so that [recovery](#if-a-step-fails-after-step-5) can run. A cell on a Hetzner volume is backed up between 02:00 and 05:00 UTC, so don't start then. A cell on local storage is backed up hourly; step 5 checks that no backup is in progress.
 
 The unpacker is the reviewed commit's `src/exomem/cloud_import.py`. It uses only the standard library. Copy it to the source machine and to the node before starting, and record its SHA-256 on both.
 
@@ -336,7 +336,7 @@ unset BREAK_GLASS_KUBECONFIG
 
 Then end the break-glass session as the access runbook describes.
 
-Delete the prior directory only after cellctl's next scheduled backup of the cell succeeds. It runs in the 02:00–05:00 UTC window; `last_backup_at` on the cell's row moves past the swap time. Check that backup's duration against the backup Job's 900-second deadline. The owner's cell is the rollout canary, so a backup that cannot finish would stall every upgrade. Then, under a fresh break-glass identity and with the runtime stopped as in step 5, run the helper pod again and remove `/data/.restore-prior-$IMPORT_ID`.
+Delete the prior directory only after cellctl's next scheduled backup of the cell succeeds. A cell on local storage is backed up hourly, and a cell on a Hetzner volume in the 02:00–05:00 UTC window. The backup has succeeded when `last_backup_at` on the cell's row moves past the swap time. Check that backup's duration against the backup Job's 900-second deadline. The owner's cell is the rollout canary, so a backup that cannot finish would stall every upgrade. Then, under a fresh break-glass identity and with the runtime stopped as in step 5, run the helper pod again and remove `/data/.restore-prior-$IMPORT_ID`.
 
 ## If a step fails after step 5
 

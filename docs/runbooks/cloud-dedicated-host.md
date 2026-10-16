@@ -320,11 +320,136 @@ reads TopoLVM's `topolvm_thinpool_data_percent` and
 Expected result: `lvs` shows both percentages below 80 for `pool0`, and a
 `RESOLVED: thin-pool-high` email follows within a few minutes.
 
+## Move a cell to a new claim
+
+A planned move takes a serving cell off its volume without losing a write.
+cellctl stops the cell and takes a fresh stopped backup of its volume. It then
+keeps the old volume as the rollback copy, restores the backup into a new claim
+on the local class, and starts the cell only after the restore succeeds. The
+cell is down from the stop until it is ready again.
+
+Use it to migrate cells from Hetzner volumes after the cutover (OpenSpec task
+7.2): the owner's cell first, then the rest one at a time, each accepted before
+the next. `remove-agent.yml` uses the same move for the cells of an agent it
+removes.
+
+Preconditions:
+
+- `cellStorage.local.enabled` is true. Without it, cellctl ignores the mark.
+- A local node other than the cell's own has room for the cell.
+- The cell is not in another hold: no upgrade, backup or restore runs on it.
+  A move waits for an hourly backup to end.
+- To move a cell off a local node, cordon that node first with
+  `kubectl cordon "$NODE"`, or the new claim can land on it again. A cell on a
+  Hetzner volume needs no cordon: its node has no local pool.
+
+Steps, with `CELL_ID` set to the cell's ID:
+
+1. Agree the window with the cell's owner. For the owner's cell, agree it
+   before the move (OpenSpec task 7.1).
+2. Read the volume the cell is on, and record its governance status:
+
+   ```bash
+   NS="exo-cell-$CELL_ID"
+   VOLUME=$(kubectl get pv "$(kubectl -n "$NS" get persistentvolumeclaim cell-data -o jsonpath='{.spec.volumeName}')" -o jsonpath='{.spec.csi.volumeHandle}')
+   kubectl -n "$NS" exec cell-0 -c exomem -- exomem governance-schema status --vault /data/vault --json > "governance-$CELL_ID-before.json"
+   ```
+
+   `$VOLUME` must be the row's `volume_id`. A mark naming any other volume moves nothing.
+3. Mark the cell:
+
+   ```bash
+   kubectl annotate namespace "$NS" "exomem.io/move-volume=$VOLUME"
+   ```
+
+4. Watch the row, as the control database owner:
+
+   ```sql
+   SELECT hold_kind, observed_state, ready, volume_id, last_backup_at, last_error_code FROM exomem_cloud_cells WHERE cell_id = '<cell id>';
+   ```
+
+   Expect `hold_kind` `backup` while the stopped backup runs, then `restore`,
+   then no hold, `ready` true and a new `volume_id`. `last_backup_at` moves to
+   the time of the backup. Record the time from the mark to `ready`.
+5. Accept the cell:
+   1. Read its governance status again, as in step 2, into a second file. It must match the first.
+   2. Through the owner's Exomem Cloud connector, ask for a note the vault held before the move. It must answer.
+   3. Make one governed write, such as a short note, and read it back.
+6. Remove the mark:
+
+   ```bash
+   kubectl annotate namespace "$NS" exomem.io/move-volume-
+   ```
+
+7. Record the retained volume, the rollback copy until the soak ends. It is the PV whose `volumeHandle` is `$VOLUME`, now `Released` with reclaim policy `Retain`.
+
+Expected result: the cell serves from a new claim on the local class, and its
+old volume is retained.
+
+For the owner's cell, check the restart against the existing gate, cellctl's
+10-minute readiness deadline (`upgrade_ready_deadline` in
+`infra/cellctl/src/cellctl/decide.py`). The next upgrade rolls back a cell
+that is not ready within it after its start. Compare it with the time from the
+restore's end to `ready`, which `kubectl -n "$NS" get events` shows. If the
+restart comes close to the deadline, raise it before the next upgrade.
+
+If the move fails:
+
+- `MOVE_BACKUP_FAILED`: the stopped backup failed, and the claim and its
+  volume are untouched. The cell stays stopped on its volume until you remove
+  the mark (step 6), then starts there as before. If you cordoned its node,
+  uncordon it first. cellctl's log names the backup Job's own reason.
+- `RESTORE_FAILED` or `RELOCATION_REFUSED`: the move had already retired the
+  claim, and its old volume is retained. Follow those codes in
+  [cloud-node-loss.md](cloud-node-loss.md#relocate-the-cells-of-a-lost-agent).
+- Removing the mark stops a move only until its backup succeeds. After that,
+  the move goes on to its restore.
+
+### Roll a moved cell back
+
+Until the soak ends (OpenSpec task 8.1), a moved cell can go back to its
+retained volume. It then serves the volume as it was when the move stopped it:
+writes it accepted after the move are lost. Run this only when the moved cell
+cannot be accepted.
+
+1. Pause cellctl, and stop the cell:
+
+   ```bash
+   kubectl -n exomem-cloud scale deployment cellctl --replicas=0
+   kubectl -n "$NS" scale statefulset cell --replicas=0
+   ```
+
+2. Retain the new volume, and retire its claim. `NEW_PV` is the claim's current volume:
+
+   ```bash
+   NEW_PV=$(kubectl -n "$NS" get persistentvolumeclaim cell-data -o jsonpath='{.spec.volumeName}')
+   kubectl patch persistentvolume "$NEW_PV" --type=merge --patch '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+   kubectl -n "$NS" delete persistentvolumeclaim cell-data
+   ```
+
+3. Free the retained volume, `OLD_PV`, for a new claim: `kubectl patch persistentvolume "$OLD_PV" --type=json --patch '[{"op":"remove","path":"/spec/claimRef"}]'`. Expect its status `Available`.
+4. Create claim `cell-data` in `$NS` bound to it: `volumeName: $OLD_PV`, the PV's `storageClassName` and capacity, access mode `ReadWriteOnce`. Expect `Bound`.
+5. Release the row's identity by compare-and-set on the new volume's ID, as the control database owner. It must report `UPDATE 1`:
+
+   ```sql
+   UPDATE exomem_cloud_cells SET volume_id = NULL WHERE cell_id = '<cell id>' AND volume_id = '<new volume id>';
+   ```
+
+6. Resume cellctl: `kubectl -n exomem-cloud scale deployment cellctl --replicas=1`.
+
+Expected result: the cell starts on its old volume, its row records the old
+volume's ID, and it passes the acceptance in step 5. The new volume stays
+retained until you delete its PV.
+
 ## Remove the host
 
-Removing an agent that still holds cells needs relocation (task 6.4), which
-`remove-agent.yml` does not do yet. Until it does, remove only an agent with no
-cells.
+`remove-agent.yml` cordons the host, then moves each cell whose live volume is
+on it to a new claim on another node, one at a time, as in
+[Move a cell to a new claim](#move-a-cell-to-a-new-claim). The other nodes need
+room for those cells. A failed move stops the playbook with the host still in
+the cluster, and its message says what to do. The host must be Ready: the
+moves take their backups on it. If it is not, relocate its cells as for a lost
+node first ([cloud-node-loss.md](cloud-node-loss.md)).
 
 1. Run the removal playbook, as in [cloud-node-pool.md](cloud-node-pool.md#remove-a-node):
 
@@ -333,23 +458,24 @@ cells.
    ansible-playbook --inventory inventory.yml remove-agent.yml -e k3s_remove_node=exomem-agent-dx1
    ```
 
-2. Destroy the cell array's LUKS header. Step 1 already closed the storage. This is irreversible, so type the confirmation yourself:
+2. Accept each moved cell with recall, governance status and a governed write, as in step 5 of the move. The host's disk still holds each moved cell's old volume until step 3.
+3. Destroy the cell array's LUKS header. Step 1 already closed the storage. This is irreversible, so type the confirmation yourself:
 
    ```bash
    ssh -t exomem-admin@100.64.0.40 'sudo cryptsetup erase /dev/md/exomem-cells'
    ```
 
-3. Remove the host from the host list, regenerate the inventory, and run `site.yml` without `--limit`.
-4. Boot the server into the provider's rescue system.
-5. If the disks are NVMe, wipe each whole disk: `nvme format --ses=1 /dev/nvme0n1`, then `/dev/nvme1n1`.
-6. If they are not NVMe, wipe each whole disk with `blkdiscard -f /dev/<disk>`.
-7. Remove the host's peer from NetBird.
-8. In one reviewed commit, remove the host's passphrase entry from the secret matrix and from `infra/contracts/active-ansible-selection-v1.json`, and delete its SOPS files.
+4. Remove the host from the host list, regenerate the inventory, and run `site.yml` without `--limit`.
+5. Boot the server into the provider's rescue system.
+6. If the disks are NVMe, wipe each whole disk: `nvme format --ses=1 /dev/nvme0n1`, then `/dev/nvme1n1`.
+7. If they are not NVMe, wipe each whole disk with `blkdiscard -f /dev/<disk>`.
+8. Remove the host's peer from NetBird.
+9. In one reviewed commit, remove the host's passphrase entry from the secret matrix and from `infra/contracts/active-ansible-selection-v1.json`, and delete its SOPS files.
 
-Expected result: after step 3, every node has dropped the host's WireGuard
+Expected result: after step 4, every node has dropped the host's WireGuard
 peer, inter-node rules and Tang rule. If it was the last WireGuard host, every
 node has also stopped `wg-quick@wgexomem` and removed its configuration and
-key. After step 5, `nvme format` has completed on both disks. The WireGuard
+key. After step 6, `nvme format` has completed on both disks. The WireGuard
 key and the agent token were only on those disks. Rotate the agent token
 unless the wipe is confirmed: `blkdiscard` and an empty `blkid --probe` do not
 prove erasure. That rotation is pending (OpenSpec task 5.7); until it exists,

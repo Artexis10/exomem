@@ -123,5 +123,19 @@ k3s_remove_pod_procs_argv:
   - /usr/bin/cat
   - "{}"
   - +
+# move-cloud-cells-to-local-storage 6.4: the removal moves each cell whose
+# local volume is on the agent to a new claim, by cellctl's planned-move mark
+# (k8s_client.MOVE_VOLUME_ANNOTATION; infra/cellctl/tests/test_planned_move.py
+# checks the two agree). A move takes a stopped backup (15 minutes at most), a
+# restore (45) and a start (10), so the wait allows 70 minutes.
+k3s_remove_move_annotation: exomem.io/move-volume
+k3s_remove_move_retries: 420
+k3s_remove_move_delay: 10
+# The nodes a local PV is pinned to, as a kubectl JSONPath.
+k3s_remove_move_pinned_jsonpath: >-
+  {.spec.nodeAffinity.required.nodeSelectorTerms[*].matchExpressions[?(@.key=="{{ k3s_local_storage_topology_key }}")].values[*]}
+# The kubectl the move runs on the server. The contract test points it at a
+# stand-in that plays cellctl's part.
+k3s_remove_kubectl: [/usr/local/bin/k3s, kubectl]
 k3s_remove_pod_mount_pattern: ^/var/lib/kubelet/pods/
 k3s_remove_csi_mount_pattern: ^/var/lib/kubelet/plugins/kubernetes.io/csi/

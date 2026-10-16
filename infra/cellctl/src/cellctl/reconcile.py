@@ -43,6 +43,7 @@ from .decide import (
     decide,
     hourly_backup_due,
     nightly_backup_due,
+    planned_move_volume,
     relocation_volume,
     storage_receipt,
 )
@@ -80,6 +81,7 @@ from .state import (
     CANARY_PARKED,
     GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
+    MOVE,
     RELOCATION_REFUSED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
@@ -866,8 +868,11 @@ def _compute_render_digest(
 
 def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
     storage = cluster_config.storage
-    if (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
-        # D4: a relocated cell's new claim is local, whatever the domain.
+    new_claim = observation.pvc_storage_class not in storage.classes
+    if new_claim and (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
+        # D4: a relocated or moved cell's new claim is local, whatever the
+        # domain. Its old claim keeps its own class until it is gone, since
+        # storageClassName is immutable: a planned move leaves a Hetzner one.
         return storage.local.class_name
     return storage.claim_class(observation.pvc_storage_class)
 
@@ -1534,8 +1539,9 @@ async def _reconcile_row(
         and not start_upgrade
         and not is_render_digest_candidate
         # D4: a converged cell whose volume is lost still has its relocation
-        # to start.
+        # to start, and one the operator marked to move has its move.
         and relocation_volume(row, observation, cluster_config.storage) is None
+        and planned_move_volume(row, observation, cluster_config.storage) is None
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1956,15 +1962,16 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     """D3: the hourly hold reads its clone and prunes only on its first run
     after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
-    prunes. Every backup of a Hetzner cell keeps its claim and the nightly
-    prune, as before local storage."""
+    prunes, nor does a planned move's. Every other backup of a Hetzner cell
+    keeps its claim and the nightly prune, as before local storage."""
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
             "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
-    if spec.local_volume and decision.hold_kind == "upgrade":
+    if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):
+        # A move's cell is down while its backup runs, so it never prunes either.
         return {"retention": None}
     return {"retention": RETENTION_ARGS}
 

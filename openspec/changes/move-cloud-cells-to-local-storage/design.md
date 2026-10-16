@@ -136,10 +136,10 @@ TopoLVM's controller would delete every claim on a deleted Node when it finalize
 
 **No fresh claim over a recorded volume:** while a row records a volume, cellctl never creates a fresh claim for it, on any storage class. A missing claim then sets the row to `VOLUME_MISSING`, and the cell stays stopped until an operator acts. The one exception is relocation, which restores into its new claim before the cell starts. An operator who has found a volume lost, for example after an etcd restore, marks the cell's namespace with `exomem.io/volume-lost=<volume id>`; a missing claim with that mark relocates the cell from its backup. The empty-vault guard (D5) stays as the second line: it covers a claim that exists over an empty volume.
 
-**The removal refusal while a cell's volume is on the target:** until the removal playbook relocates cells itself (task 6.4), `remove-agent.yml` refuses while a local cell PV is still pinned to the target and bound. A retained PV left by a finished relocation does not block it. Maintenance holds block a removal only on cells whose volume is on the target.
+**Cells on the target of a removal:** `remove-agent.yml` cordons the target, then moves each cell whose local PV is still pinned to it and bound, one at a time, through the planned move (D7). A failed move stops the removal with the target still in the cluster. A retained PV left by a finished relocation or move holds no live cell. Maintenance holds block a removal only on cells whose volume is on the target. A target that is not Ready cannot take a move's stopped backup, so the removal refuses while such a target still holds a live cell volume:
 
-- **What it prevents:** deleting the Node of an agent that still holds a cell's only current volume. cellctl would then relocate that cell from its last backup and lose up to an hour of its writes, although the node may have been healthy.
-- **Cost when it fires wrongly:** the removal waits until the cell is relocated, or its volume released.
+- **What it prevents:** deleting the Node of an agent that still holds a cell's only current volume. cellctl would then relocate that cell from its last backup and lose up to an hour of its writes.
+- **Cost when it fires wrongly:** the removal waits until the cell is relocated under node loss, or its volume released.
 - **Who pays:** the operator. Tenants are not affected.
 
 **Recovery order after a node loss:**
@@ -235,6 +235,14 @@ The Hetzner class stays the configured cell storage domain until the dedicated a
 5. start after the restore succeeds, and accept with recall, governance status and a governed write.
 
 The retained Hetzner volumes are deleted after a 7-day soak.
+
+**The planned move:** steps 1 to 4 are one cellctl operation, which agent removal (task 6.4) also uses.
+
+- **Trigger:** the operator marks the cell's namespace with `exomem.io/move-volume=<the row's volume_id>`, as for `volume-lost` (D4). A mark naming any other volume is stale and moves nothing, so a mark left after the move never moves the cell again. With no local class configured, a mark moves nothing.
+- **First step:** a `move` hold, which the row records as `backup`. It stops the cell and runs the stopped backup's Job on the old volume, with no prune. Only once that backup succeeds does the hold become the relocation's restore hold (D4), with that backup, not the last hourly one, as its restore point. A failed backup leaves the cell stopped on its untouched claim with `MOVE_BACKUP_FAILED`, recorded on the hold so the backup is not run again; removing the mark starts the cell on its volume as before. Removing the mark after the backup succeeded does not stop the move.
+- **Holds:** a move starts only on a cell with no other hold, and a deletion supersedes it, as it supersedes every hold.
+- **Claim class:** the old claim keeps its class while it exists, because `storageClassName` is immutable. The new claim takes the local class, as a relocation's does.
+- **Placement:** the new claim binds where its restore Job schedules (WaitForFirstConsumer). A cell leaving a Hetzner volume cannot bind back: its node has no local pool. To leave a local node, the operator or the removal playbook cordons it first. A backup Job of a local volume therefore tolerates its node's cordon: its PV already pins it there. The restore Job does not, so the new claim binds elsewhere. Admission admits that one toleration on a Job, and none on a cell's pod.
 
 ### D8. Dedicated agents join over a private link; a Cloud recovery agent stays available
 

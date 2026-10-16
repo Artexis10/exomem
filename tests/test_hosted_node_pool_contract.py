@@ -809,6 +809,7 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
         "Refuse a node that is not an agent",
         "Refuse unless the cells fit the remaining nodes",
         "Cordon the agent",
+        "Move each cell off the agent's local storage",
         "Drain the agent without force",
         "Stop the agent completely",
         "Require a confirmed stop before deleting a present node",
@@ -1023,24 +1024,28 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
             "status": {"phase": phase}}
 
 
-@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+@pytest.mark.parametrize(("hold_on", "volume_phase", "target_ready", "refusal", "moves"), [
     # An hourly backup on another node's cell no longer blocks the removal...
-    ("shared", "Bound", None),
+    ("shared", "Bound", "True", None, []),
     # ...one on a cell whose volume is on the target still does.
-    ("target", "Released", "maintenance is in flight"),
-    # A cell still living on the target refuses it: deleting the Node would
-    # relocate that cell from its last backup.
-    (None, "Bound", "still holds"),
-    # A volume a relocation retained holds no live cell.
-    (None, "Released", None),
-], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+    ("target", "Released", "True", "maintenance is in flight", None),
+    # A cell still living on the target moves off it before the node goes:
+    # deleting the Node would relocate it from its last backup.
+    (None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
+    # A target that is not Ready cannot take the move's stopped backup.
+    (None, "Bound", "Unknown", "is not Ready", None),
+    # A volume a relocation or a move retained holds no live cell.
+    (None, "Released", "True", None, []),
+], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "live-volume-on-a-target-not-ready",
+        "retained-volume-on-target"])
 def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
-    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+    tmp_path: Path, hold_on: str | None, volume_phase: str, target_ready: str, refusal: str | None,
+    moves: list[str] | None,
 ) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
     nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
-              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+              "status": {"conditions": [{"type": "Ready", "status": target_ready if name == "target" else "True"}]}}
              for name in ("target", "shared")]
     held = "aaaaaaaaaaaaaaaa"
     volumes = [_local_volume(held, hold_on or "target", volume_phase)]
@@ -1062,13 +1067,104 @@ def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
     }
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
-        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"k3s_remove_moves == {moves}"]}}]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
                             capture_output=True, text=True)
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
+# Plays cellctl's part for remove_move.yml: answers kubectl from a scenario,
+# one namespace listing per poll, and logs every call.
+_FAKE_KUBECTL = r"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[2:]
+with (here / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+scenario = json.loads((here / "scenario.json").read_text())
+if args[:2] == ["get", "statefulsets,persistentvolumeclaims,jobs"]:
+    count = here / "polls"
+    polls = int(count.read_text()) if count.exists() else 0
+    count.write_text(str(polls + 1))
+    print(json.dumps({"items": scenario["polls"][min(polls, len(scenario["polls"]) - 1)]}))
+elif args[:3] == ["get", "persistentvolumeclaim", "cell-data"]:
+    print(scenario["claim_volume"], end="")
+elif args[:2] == ["get", "persistentvolume"]:
+    print(scenario["volumes"][args[2]], end="")
+"""
+
+
+def _cell_objects(*, hold: str | None = None, outcome: str | None = None, volume: str = "pv-old",
+                  ready: bool = True, failed_restore: bool = False) -> list[dict]:
+    annotations = {key: value for key, value in (("exomem.io/hold", hold), ("exomem.io/backup-outcome", outcome))
+                   if value}
+    objects = [
+        {"kind": "StatefulSet", "metadata": {"name": "cell", "generation": 4, "annotations": annotations},
+         "spec": {"replicas": 1}, "status": {"observedGeneration": 4, "readyReplicas": 1 if ready else 0}},
+        {"kind": "PersistentVolumeClaim", "metadata": {"name": "cell-data"},
+         "spec": {"volumeName": volume}, "status": {"phase": "Bound"}},
+    ]
+    if failed_restore:
+        objects.append({"kind": "Job", "metadata": {"name": "cell-restore-0a1b2c3d4e",
+                                                    "labels": {"exomem.io/cell-job": "restore"}},
+                        "status": {"failed": 1}})
+    return objects
+
+
+@pytest.mark.parametrize(("polls", "new_volume_nodes", "refusal"), [
+    ([_cell_objects(), _cell_objects(hold="move"), _cell_objects(hold="restore", volume="pv-new", ready=False),
+      _cell_objects(volume="pv-new")], "shared", None),
+    ([_cell_objects(hold="move"), _cell_objects(hold="move", outcome="failed")], "shared",
+     "failed before its claim changed"),
+    ([_cell_objects(hold="restore", volume="pv-new", ready=False, failed_restore=True)], "shared",
+     "failed after its claim was retired"),
+    ([_cell_objects(volume="pv-new")], "target", "not to another node"),
+], ids=["moved", "backup-failed", "restore-failed", "landed-back-on-the-agent"])
+def test_removal_moves_a_cell_off_the_agent_and_stops_on_a_failed_move(
+    tmp_path: Path, polls: list, new_volume_nodes: str, refusal: str | None
+) -> None:
+    # move-cloud-cells-to-local-storage 6.4. Going on before a move finished,
+    # or after it failed, would delete the node of a cell's only current
+    # volume, and cellctl would relocate it from an older backup.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    kubectl = tmp_path / "k3s"
+    kubectl.write_text(_FAKE_KUBECTL)
+    kubectl.chmod(0o755)
+    (tmp_path / "scenario.json").write_text(json.dumps({
+        "claim_volume": "pv-old", "polls": polls,
+        "volumes": {"pv-old": "vol-old target", "pv-new": new_volume_nodes},
+    }))
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    play = tmp_path / "move.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        "k3s_remove_node": "target", "k3s_remove_move_namespace": "exo-cell-aaaaaaaaaaaaaaaa",
+        "k3s_remove_kubectl": [str(kubectl), "kubectl"], "k3s_remove_move_delay": 0,
+        **{key: defaults[key] for key in ("k3s_remove_move_annotation", "k3s_remove_move_retries",
+                                          "k3s_remove_move_pinned_jsonpath", "k3s_local_storage_topology_key")},
+    }, "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_move.yml")}]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    marks = [call[2:] for call in calls if call[0] == "annotate"]
+    assert marks[0] == ["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume=vol-old", "--overwrite"]
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        # The mark goes only once the cell serves from its new volume.
+        assert marks[1:] == [["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume-"]]
+        assert (tmp_path / "polls").read_text() == str(len(polls))
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+        # A failed move keeps its mark, which keeps the cell stopped on its volume.
+        assert marks[1:] == []
 
 
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])

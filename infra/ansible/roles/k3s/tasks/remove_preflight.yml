@@ -62,22 +62,33 @@
       Cell maintenance is in flight ({{ k3s_remove_holds | join(', ') }}); a drain
       would evict its Job. Retry once no exomem.io/hold annotation remains.
 
-# move-cloud-cells-to-local-storage D4. Prevents: deleting the Node of an agent
-# that still holds a cell's live local volume, which makes cellctl relocate that
-# cell from its last backup and lose up to an hour of its writes, from a node
-# that may be healthy. When it fires wrongly, the removal waits until the
-# operator relocates those cells first; the operator pays, and no tenant does.
-# A volume a relocation retained (Released) holds no live cell.
-- name: Refuse a removal while a cell still lives on the target's local storage
+# move-cloud-cells-to-local-storage D4 and task 6.4. Each cell still living on
+# the target's local storage moves to a new claim through a fresh stopped
+# backup (remove_move.yml), so deleting the Node never makes cellctl relocate
+# it from its last backup and lose up to an hour of its writes. A volume a
+# relocation or a move retained (Released) holds no live cell.
+- name: Find the cells to move off the target's local storage
+  ansible.builtin.set_fact:
+    k3s_remove_moves: >-
+      {{ k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | unique | list }}
+    k3s_remove_target_ready: >-
+      {%- set target = k3s_remove_nodes_doc['items']
+            | selectattr('metadata.name', 'equalto', k3s_remove_node) | first | default({}) -%}
+      {{ ((target.status | default({})).conditions | default([]) | selectattr('type', 'equalto', 'Ready')
+          | map(attribute='status') | first | default('False')) == 'True' }}
+
+# Only a Ready target can run the stopped backups the moves take. Prevents:
+# deleting the Node of an agent that still holds a cell's only current volume.
+# When it fires wrongly, the removal waits until the operator relocates those
+# cells under node loss; the operator pays, and no tenant does.
+- name: Refuse to move cells off a target that is not Ready
   ansible.builtin.assert:
     that:
-      - k3s_remove_live_local | length == 0
+      - k3s_remove_moves | length == 0 or k3s_remove_target_ready | bool
     fail_msg: >-
-      {{ k3s_remove_node }} still holds the live local volume of {{ k3s_remove_live_local | join(', ') }}.
+      {{ k3s_remove_node }} is not Ready and still holds the live local volume of
+      {{ k3s_remove_moves | join(', ') }}, so it cannot take their stopped backups.
       Relocate those cells first (docs/runbooks/cloud-node-loss.md).
-  vars:
-    k3s_remove_live_local: >-
-      {{ k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | unique | list }}
 
 - name: Find desired cell templates selecting the target reservation
   ansible.builtin.set_fact:

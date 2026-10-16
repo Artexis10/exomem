@@ -2549,12 +2549,15 @@ def test_the_operator_access_runbook_on_real_k3s(
 
 def test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete(k3s: K3sCluster) -> None:
     from cellctl.manifests import (
+        CORDON_TOLERATION,
         CellManifestSpec,
+        render_backup_job,
         render_clone_claim,
         render_namespace,
         render_network_policies,
         render_pvc,
         render_resource_quota,
+        render_statefulset,
         render_volume_snapshot,
     )
     from cellctl.reconcile import RETAINED_DELETE_POLICY_NAME
@@ -2595,11 +2598,22 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
                      render_volume_snapshot(spec, snapshot_class=local.snapshot_class)):
         result = create(admitted)
         assert result.returncode == 0, result.stderr
+    # Tasks 6.4 and 7.3: a local backup Job tolerates its node's cordon, so a
+    # move's stopped backup runs on the cordoned agent the move leaves. No
+    # wider toleration, and no cell pod, may.
+    backup = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example", retention=None)
+    assert backup["spec"]["template"]["spec"]["tolerations"] == [CORDON_TOLERATION]
+    result = create(backup)
+    assert result.returncode == 0, result.stderr
+    every_taint = copy.deepcopy(backup)
+    every_taint["spec"]["template"]["spec"]["tolerations"][0].pop("key")
+    serving = render_statefulset(spec)
+    serving["spec"]["template"]["spec"]["tolerations"] = [dict(CORDON_TOLERATION)]
     foreign = render_clone_claim(spec, clone_class=local.clone_class)
     foreign["spec"]["dataSourceRef"]["name"] = "cell-snapshot-" + "0" * 10
     unconfigured = render_pvc(spec)
     unconfigured["spec"]["storageClassName"] = "local-path"
-    for refused in (foreign, unconfigured):
+    for refused in (foreign, unconfigured, every_taint, serving):
         result = create(refused)
         assert result.returncode != 0 and "exomem-cellctl-scope" in result.stderr, result.stderr
 
