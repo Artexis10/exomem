@@ -527,6 +527,29 @@ def test_an_export_that_cannot_finish_is_abandoned_keeping_every_row_and_the_edi
     assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
 
 
+def test_an_abandon_after_a_checkpoint_torn_between_manifest_and_log_exports_again(env, capsys, tmp_path):  # noqa: F811
+    """An abandon that takes a checkpoint as the next export's parent although only the manifest
+    flip of its write landed and the activity log never received it, so every later export
+    continues a chain from an event that does not exist and ends unverified."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "between-work-files-and-checkpoint", plan_id)
+    # The checkpoint write flips the manifest, then the log; a kill between them leaves this.
+    torn = export._transition(plan_id, OTHER)
+    log = root / "Knowledge Base/log.md"
+    log.write_text("".join(line for line in log.read_text().splitlines(keepends=True) if torn not in line))
+
+    assert run_export(root, "--abandon", "--plan-id", plan_id, "--why", "the export cannot finish") == 0
+    abandoned = printed(capsys)
+
+    assert run_export(root, "--plan-id", preview_id(root, capsys), "--why", "roll back to files") == 0
+    assert {row["collection_id"]: row["audit"] for row in printed(capsys)["collections"]} == {
+        CID: "acknowledged_gap", X3_ID: "acknowledged_gap", LEDGER_ID: "ok", OTHER: "acknowledged_gap"}
+    assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+    assert abandoned["checkpoints"] == [X3_ID]
+
+
 def test_an_abandon_cut_after_its_transaction_leaves_a_store_the_service_serves(env, capsys, tmp_path):  # noqa: F811
     """An abandon killed between its store transaction and its publication that leaves the store
     unadmittable, or still owned by the export it gave up."""
@@ -585,6 +608,30 @@ def test_the_retire_probe_needs_the_operator_credential_and_moves_no_fence(env, 
 
     assert refused.value.code == "SCHEMA_FENCE_OPERATOR_UNAVAILABLE"
     assert fence() == enrolled and enrolled.enrolled
+
+
+def test_an_export_refuses_before_it_writes_on_a_coordinator_that_cannot_read_a_retired_fence(
+        env, capsys, monkeypatch):  # noqa: F811
+    """An export on a coordinator release that retires a store fence but cannot read the retired
+    fence back, so it writes every file and retires the fence, and a rerun after a cut there can
+    never check the head the fence was retired at, so never goes forward."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    before = vault_bytes(root)
+
+    def route_absent(client):
+        # What the client raises when the coordinator answers this route with 404.
+        raise writer_lease._contract_absent_error(
+            client.config.url, "/v1/vaults/<id>/collection-store-fence/retired", 404)
+
+    monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "retired_collection_store_fence", route_absent)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
+
+    assert "COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED" in capsys.readouterr().err
+    nothing_changed(root, before, store_id)
 
 
 def test_a_log_over_the_file_mode_bound_keeps_the_vault_in_the_store(env, capsys, monkeypatch):  # noqa: F811

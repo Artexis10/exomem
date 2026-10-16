@@ -800,6 +800,57 @@ replica before leaving it. Session and auth-generation reads are always direct t
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
 
+### When files change before a migration finishes
+
+`exomem collections migrate --apply` publishes its store before it installs the
+marker. Until the marker is installed, the files stay canonical. If an apply
+stops in that window and a writer outside the writer lease, such as a sync
+client or an editor, then changes an imported file, the next apply does not
+admit the published store, because admitting it would lose that change:
+
+- On a vault that no store served before, the apply imports the change into a
+  new store and moves the coordinator's fence to it at the next generation. Its
+  report names the replaced store under `superseded`, and the new store keeps
+  that store's replica as `.foreign-*` evidence.
+- On a vault whose store already served collections, the apply first restores
+  that store, with its rows and its head, and then migrates again with the
+  change. Its report describes the restore under `restored`. When the migrated
+  store's replica or head already left this host, the restored store continues
+  as a new tenure, as adopt-local continues one.
+
+To finish the migration:
+
+1. Keep the Exomem service stopped on every host that serves the vault.
+2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
+3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
+4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait until the vault replica reaches this host, then run step 2 again.
+5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
+6. If the apply reports `COLLECTION_STORE_MIGRATION_STALE`, put back the files of each collection that it names, then run step 2 again.
+7. Start the Exomem services.
+
+The apply reports `marker_admitted` when the migration is finished.
+
+`status: restored` means that the restore finished but could not hand back its
+lease. `COLLECTION_STORE_SYNC_PENDING` means that the coordinator's head or the
+vault replica is neither the restored store nor the migrated store, usually
+because a newer vault replica has not reached this host yet.
+`COLLECTION_STORE_DIVERGED` means that the restored store records a divergence
+that adopt-local must resolve first.
+
+`COLLECTION_STORE_MIGRATION_STALE` means that the apply cannot prove that the
+migrated store is the restored store plus only the migration's own imports, so
+it restored nothing. The stores, the marker, the fence and the files stay as they
+were. When the apply found the changed files, the refusal names the manifest of
+each collection that holds them. Put back those files with the bytes that the
+migration imported, for example from a backup or the vault's sync history.
+
+An apply that stops during a restore, after the migrated store reached the vault
+replica or the coordinator, leaves the restored store refused with
+`COLLECTION_STORE_SYNC_PENDING` until the next apply finishes the restore. An
+apply that finished its restore and then stopped, for example on a failed
+round-trip proof, leaves the restored store serving. The services may run
+meanwhile, and the next apply migrates that store with the writes it served.
+
 ### Export the vault to files before a downgrade
 
 A release from before the collection store cannot open a vault whose collections

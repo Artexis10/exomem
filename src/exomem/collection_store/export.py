@@ -383,15 +383,18 @@ def _require_retire_route(fence_client):
 
     Without this check, an export would write every file and then stop with its
     collections unavailable until the coordinator is upgraded or the credential fixed.
-    A false refusal costs the owner one coordinator check before any file changes.
+    The coordinator must also read a retired fence back, which a rerun after the retire
+    checks before it goes forward. A false refusal costs the owner one coordinator check
+    before any file changes.
     """
     try:
         fence_client.probe_collection_store_fence_retire()
+        fence_client.retired_collection_store_fence()
     except OpError as error:
         if error.code != "WRITER_COORDINATOR_CONTRACT_ABSENT":
             raise
         raise CollectionStoreError(
-            preflight.UPGRADE_REQUIRED, "the writer-lease coordinator cannot retire a collection store fence; "
+            preflight.UPGRADE_REQUIRED, "the writer-lease coordinator cannot retire a collection store fence or read a retired one; "
             f"upgrade it to Exomem {preflight._running_release()}, the release running here") from error
 
 
@@ -757,7 +760,7 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
     For an export that refuses as unverified, or over a view a person edited, on a rerun.
     In one store transaction it records each file that holds the export's bytes as that
     view's published bytes, forgets each resolved held file the export removed, records
-    each checkpoint the export published as the parent of the next export's, and deletes
+    each checkpoint the activity log holds as the parent of the next export's, and deletes
     the intent; then it publishes the replica and records the head. It rewrites no vault
     file and adopts no edit: the service's view-edit capture holds what a person changed.
     """
@@ -800,9 +803,9 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                 views, removed = [], []
                 for cid, planned in work.items():
                     transition = _transition(plan_id, cid)
-                    checkpointed = _checkpointed(planned["manifest_text"], collections.parse_manifest_bytes(
-                        root, planned["manifest_path"], planned["manifest_text"].encode("utf-8")),
-                        transition).encode("utf-8")
+                    manifest = collections.parse_manifest_bytes(
+                        root, planned["manifest_path"], planned["manifest_text"].encode("utf-8"))
+                    checkpointed = _checkpointed(planned["manifest_text"], manifest, transition).encode("utf-8")
                     for path, target in planned["targets"].items():
                         data = _read(root, path)
                         if target is None and data is None:
@@ -810,8 +813,11 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                         elif data is not None and (data == target or path == planned["manifest_path"]
                                                    and data == checkpointed):
                             views.append((_sha(data), path))
-                    if _read(root, planned["manifest_path"]) == checkpointed:
-                        # The manifest names this checkpoint as its audit head, so the legacy chain ends there.
+                    history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
+                    if history.parsed and any(event["transition_id"] == transition for event in history.events):
+                        # The log holds this checkpoint, so the legacy chain ends there. A checkpoint cut
+                        # between its manifest and log flips is not in the chain, whatever the manifest
+                        # names: the next export rewrites the manifest and checkpoints its parent again.
                         parents[cid] = transition
                 with writer.handle.transaction() as conn:
                     session.require(token)

@@ -290,7 +290,8 @@ def _apply_and_crash(environment, database, cut, released):
      "after-publication": lambda: setattr(admission, "_publish_current_epoch",
                                           after(admission._publish_current_epoch)),
      "before-marker": lambda: setattr(admission, "_install_marker", die),
-     "before-fork": lambda: setattr(owner, "record_fork", die)}[cut]()
+     "before-fork": lambda: setattr(owner, "record_fork", die),
+     "before-staging": lambda: setattr(migration, "_stage", die)}[cut]()
     with coordinator(database), library_scope():
         cli._collections_main(["migrate", "--vault", environment["EXOMEM_VAULT_PATH"], "--apply"])
     os._exit(0)
@@ -706,6 +707,18 @@ def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys
     edit_by_hand(root)
     crash_apply(tmp_path, "before-fork", released=S1_RELEASED)
     assert live_head(root)[1] == head  # restored, not yet continued
+    from test_collection_store_s1_gate import _until
+
+    service = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        # Until the fork, takeover refuses the migration's replica, so the restored store commits nothing.
+        _until(lambda: service.manager.status().get("collection_store", {}).get("status") in {
+            "admitted", "sync_pending"}, seconds=30)
+        assert service.manager.status()["collection_store"]["status"] == "sync_pending"
+    finally:
+        with suppress(OpError):
+            service.stop()
+    wait_out_the_lease()
     capsys.readouterr()
 
     assert migrate(root, "apply") == 0
@@ -716,6 +729,50 @@ def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys
     service = start_service(root)
     try:
         assert summary_titles(root) == ["Summary row"]
+    finally:
+        service.stop()
+
+
+def refuse_ledger_round_trip(original):
+    """The import proof as it fails for one collection whose rendered rows do not parse back."""
+    def drift(captured, *args):
+        if captured.manifest.collection_id == LEDGER_ID:
+            legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
+        return original(captured, *args)
+    return drift
+
+
+@pytest.mark.parametrize("stop", ["blocked", "killed"])
+def test_a_restored_store_that_served_a_write_before_its_migration_went_live_migrates_again(
+        s1, capsys, monkeypatch, tmp_path, stop):
+    """A restore that finished while the new migration never went live (its proof blocked, or the
+    apply was killed), after which the restored store served a write: every later apply then reads
+    the abandoned migration as an unfinished restore and refuses it as unprovable, for good."""
+    root = s1
+    crash_apply(tmp_path, "before-publication", released=S1_RELEASED)
+    edit_by_hand(root)
+    if stop == "blocked":
+        with monkeypatch.context() as patched:
+            patched.setattr(legacy_import, "_prove_round_trip", refuse_ledger_round_trip(legacy_import._prove_round_trip))
+            assert migrate(root, "apply") == 1  # restored, then the new staging's proof blocks
+    else:
+        crash_apply(tmp_path, "before-staging", released=S1_RELEASED)  # restored, then killed
+    wait_out_the_lease()
+    service = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Later row"},
+                    item_key=OTHER, why="a write after the restore")["outcome"] == "committed"
+    finally:
+        service.stop()
+    capsys.readouterr()
+
+    assert migrate(root, "apply") == 0
+
+    assert printed(capsys)["status"] == "marker_admitted"
+    assert stored_body(root, KEY) == "Edited by hand\n"
+    service = start_service(root)
+    try:
+        assert sorted(summary_titles(root)) == ["Later row", "Summary row"]
     finally:
         service.stop()
 

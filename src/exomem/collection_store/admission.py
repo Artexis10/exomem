@@ -516,10 +516,7 @@ def continue_past(session, runtime, token, preview, *, why):
             (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
                 schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
             identity = owner.record_fork(conn, preview, why=why, token=token)
-        with session.manager._report_lock:
-            runtime._identity = identity
-            # A pending takeover verdict described the old tenure.
-            runtime._takeover = None
+        runtime.rebind(identity)
         kept = None if abandoned is None else replica.discard_abandoned_publication(
             session.root, writer.handle, abandoned, predecessor=predecessor,
             authority_check=_publication_authority(session, token), deadline=time.monotonic() + 30)

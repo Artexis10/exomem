@@ -448,9 +448,11 @@ def _newest_superseded(session):
 def _superseded_migration(session, raw):
     """Whether the newest superseded store is a migration that a restore stopped part way past (P1b.3c).
 
-    The live store then carries no intent, and the superseded one carries a migration
-    whose expected marker is the current marker. A store this release cannot read is
-    not that evidence.
+    The superseded store then carries a migration whose expected marker is the current
+    marker, and the live store carries no intent and still ends at the head that
+    migration imported onto. A restored store that committed since was admitted, which
+    a restore short of its fork cannot be (takeover refuses the migration's replica), so
+    nothing is left to finish. A store this release cannot read is not that evidence.
     """
     superseded = _newest_superseded(session)
     if superseded is None:
@@ -458,10 +460,13 @@ def _superseded_migration(session, raw):
     try:
         with closing(connection.open_reader(superseded)) as reader:
             intent = authority.pending_create(reader)
+        with closing(connection.open_reader(session.path)) as live:
+            head = chain.recorded_head(live)
     except (CollectionStoreError, sqlite3.DatabaseError):
         return False
     return (intent is not None and intent["kind"] == authority.MIGRATE
-            and intent["expected_marker"] is not None and intent["expected_marker"].encode() == raw)
+            and intent["expected_marker"] is not None and intent["expected_marker"].encode() == raw
+            and "base_head" in intent and head == (intent["base_head"]["commit_seq"], intent["base_head"]["head_hash"]))
 
 
 def _imports_onto(base, migrated, intent):
@@ -488,7 +493,7 @@ def _imports_onto(base, migrated, intent):
         f"OR collection_id NOT IN ({','.join('?' * len(ids))})) LIMIT 1", (head[0], *ids)).fetchone() is None
 
 
-def _restore(session, manager, fence_client, raw):
+def _restore(session, manager, fence_client, raw, changed=()):
     """Put back the store a migration over an enrolled vault superseded, as this host's tenure (P1b.3c).
 
     The live store and the newest superseded store are the migration's store and the
@@ -498,6 +503,7 @@ def _restore(session, manager, fence_client, raw):
     coordinator, the restored store continues past them as a new tenure, as adopt-local
     continues one, and keeps that replica as ``.foreign-*`` evidence. It then publishes
     and records its head. Returns the restored head, and whether it restored and forked.
+    A refusal names the ``changed`` manifests the caller found.
     """
     root = session.root
     marker = authority.parse_marker(root, raw)
@@ -508,7 +514,7 @@ def _restore(session, manager, fence_client, raw):
         recorded = admission._acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
         superseded = _newest_superseded(session)
         if superseded is None:
-            raise _unproven()
+            raise _unproven(changed)
         with closing(connection.open_reader(session.path)) as live, \
                 closing(connection.open_reader(superseded)) as other:
             restoring = authority.pending_create(live)
@@ -518,7 +524,7 @@ def _restore(session, manager, fence_client, raw):
                     or intent["expected_marker"].encode() != raw or not _imports_onto(base, migrated, intent)):
                 # Prevents dropping a write the restore cannot prove is only this migration's
                 # import; a false refusal leaves the owner the manual repair of the files.
-                raise _unproven()
+                raise _unproven(changed)
             meta = dict(base.execute("SELECT key,value FROM store_meta"))
             if schema.META_REPLICA_DIVERGENCE in meta or schema.META_VIEW_DIVERGED in meta:
                 raise CollectionStoreError(takeover.DIVERGED, "the store this migration superseded records "
@@ -556,9 +562,10 @@ def _restore(session, manager, fence_client, raw):
             "head": {"commit_seq": publication.commit_seq, "head_hash": publication.head_hash}}
 
 
-def _unproven():
+def _unproven(changed=()):
+    named = f" ({', '.join(changed)})" if changed else ""
     return CollectionStoreError(STALE, (
-        "these collections changed after the migration published its store, and that store cannot be proven to "
+        f"collections changed after the migration published its store{named}, and that store cannot be proven to "
         "be the store it superseded plus only its imports, so nothing was restored. Restore their files to the "
         "bytes the migration imported (from a backup or the sync history), then run "
         "`exomem collections migrate --apply` again"))
@@ -619,7 +626,7 @@ def cutover(session, manager, fence_client) -> dict:
             # that change, so the unadmitted store gives way to fresh staging that imports it.
             if pending["expected_marker"] is not None:
                 # The marker routes the store this migration superseded: restore it first.
-                restored = {**_restore(session, manager, fence_client, pending["expected_marker"].encode()),
+                restored = {**_restore(session, manager, fence_client, pending["expected_marker"].encode(), changed),
                             "changed": changed}
                 pending = None
             else:
@@ -675,9 +682,8 @@ def cutover(session, manager, fence_client) -> dict:
             session.require(token)
             takeover.replace_live(session, _STAGING, lambda: session.require(token), subdirectory=directory.name)
             if supersedes is not None:
-                with manager._report_lock:
-                    # The runtime opened the superseded store; it now serves the store the fence moves to.
-                    runtime._identity = identity
+                # The runtime opened the superseded store; it now serves the store the fence moves to.
+                runtime.rebind(identity)
         result = admission._resume_locked(session, fence_client, preparation_token=token)
         _discard(directory)
     return {**report, "step": "apply", "coordinator": coordinator,
