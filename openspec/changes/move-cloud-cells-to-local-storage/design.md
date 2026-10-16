@@ -279,6 +279,15 @@ A 4 GiB default only holds if a cell that fills grows without an operator. cellc
 - **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.
 - **Not shrunk:** a cell never shrinks automatically. Kubernetes cannot shrink a claim, and a smaller size needs a backup and a restore.
 
+### D11. Capacity grows by adding mid-sized nodes on demand
+
+Cells are created automatically on any node with a free slot. Nodes are added by the operator when demand needs them, not by an autoscaler, because a dedicated server is a monthly commitment.
+
+- **Node shape:** any provider's server with a mirrored NVMe pair qualifies. It joins over vSwitch on Hetzner, or over WireGuard elsewhere (D8). Nodes stay mid-sized, because node-loss recovery time grows with the cells a node holds (D4). Capacity grows by adding nodes, not by building bigger ones.
+- **When to add one:** the operator orders the next node while a few free places remain, not when none do, because the join and its checks take days on new hardware. A signal for low free places belongs where free places are computed, with the operator's other alerts; it is outside this change.
+- **Bursts:** a Hetzner Cloud node can serve as temporary overflow on the Hetzner class. Its cells move to a local node by the per-cell migration (D7), and the overflow node is then removed.
+- **A tenant that needs more:** a cell grows its storage online (D10). A cell that needs a node to itself uses the existing per-cell reservation: an agent labelled and tainted `exomem.io/dedicated-cell` with the cell's id publishes no general slots.
+
 ### Archive order
 
 The `cloud-cell` and `cloud-service-resource-policy` requirements modified here still live only in the deltas of `adopt-exomem-cloud-plain-cells` and `add-cloud-service-resource-policy`. This change archives after both. If an archive tool refuses that order, these deltas fold into the earlier change before it archives.
