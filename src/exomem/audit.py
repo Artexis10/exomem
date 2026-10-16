@@ -163,6 +163,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
+    "collection_view_corrections",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -630,6 +631,11 @@ def audit(
         findings.extend(_check_duplicated_sidecars(vault_root))
     if "semantic_recall_isolation" in selected:
         findings.extend(_check_semantic_recall_isolation(vault_root))
+    if "collection_view_corrections" in selected:
+        correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
+        findings.extend(correction_findings)
+        if correction_coverage is not None:
+            metadata.setdefault("coverage", {})["collection_view_corrections"] = correction_coverage
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     if semantic_categories:
         semantic_findings, semantic_metadata = _check_semantic_contract_drift(
@@ -657,6 +663,25 @@ def audit(
         role_state=role_state,
         backfill_cursors=backfill_cursors,
     )
+
+
+def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFinding], str | None]:
+    """Held corrections of store collection views (OpenSpec move-structured-collections-to-sqlite §6).
+
+    Each is an owner edit of a view that edit-back could not apply. A vault without the
+    collection-store mode marker has none and loads no store library; a store that cannot
+    answer reports its coverage as unknown rather than as no corrections.
+    """
+    from .collection_store import authority
+
+    try:
+        if authority.read_marker(vault_root) is None:
+            return [], None
+    except Exception:  # noqa: BLE001 - an unreadable marker leaves the queue's coverage unknown
+        return [], "unknown"
+    from .collection_store import edit_back
+
+    return edit_back.attention_findings(vault_root)
 
 
 def _check_bridge_review(
