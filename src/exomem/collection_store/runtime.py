@@ -1098,7 +1098,8 @@ class StoreServer:
                 return IMPORT_IDLE_SECONDS
             if intent["kind"] != authority.CREATE:
                 # Only the owner's `exomem collections migrate --apply` finishes a migration: it
-                # first rechecks each collection's files against the basis it imported.
+                # first rechecks each collection's files against the basis it imported. Only the
+                # owner's `exomem collections export` finishes an export, with the service stopped.
                 return IMPORT_IDLE_SECONDS
             with principal.library_scope():
                 result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)

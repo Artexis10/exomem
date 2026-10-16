@@ -2297,6 +2297,37 @@ class LeaseCoordinatorClient:
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
+    def probe_collection_store_fence_retire(self) -> None:
+        """Prove that the coordinator serves the fence retire and accepts this operator credential.
+
+        The probe sends no field: the coordinator checks the operator credential, then
+        answers 400 before it reads any fence, so the probe changes nothing. Only that
+        400 proves both; any other answer refuses.
+        """
+        contract_route = "/v1/vaults/<id>/collection-store-fence/retire"
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        request = self._json_request("POST", f"/v1/vaults/{vault}/collection-store-fence/retire", {})
+        try:
+            with self._open_request(request):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                return
+            if exc.code in _CONTRACT_ABSENT_STATUSES:
+                raise _contract_absent_error(self.config.url, contract_route, exc.code) from None
+            if exc.code == 401:
+                raise OpError(
+                    "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+                    "the coordinator rejected the operator credential",
+                    "Set EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN to the coordinator's operator token.",
+                ) from None
+            raise _coordinator_unavailable_error(exc) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise _coordinator_unavailable_error(exc) from None
+        raise _coordinator_unavailable_error(
+            ValueError("the coordinator accepted a fence retire that names no fence")
+        )
+
     def schema_admission(self, schema_version: int) -> SchemaAdmission:
         if isinstance(schema_version, bool) or schema_version not in {3, 4}:
             raise ValueError("schema_version must be 3 or 4")
@@ -2396,14 +2427,7 @@ class LeaseCoordinatorClient:
             ).open
         return open_request(request, timeout=self.config.timeout_seconds)
 
-    def _request_json(
-        self,
-        method: str,
-        route: str,
-        body: dict | None,
-        *,
-        contract_route: str,
-    ) -> dict[str, Any]:
+    def _json_request(self, method: str, route: str, body: dict | None) -> urllib.request.Request:
         url = f"{self.config.url}{route}"
         headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
         data = None
@@ -2412,7 +2436,17 @@ class LeaseCoordinatorClient:
             headers["Content-Type"] = "application/json"
         if self.config.token:
             headers["Authorization"] = f"Bearer {self.config.token}"
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        return urllib.request.Request(url, data=data, headers=headers, method=method)
+
+    def _request_json(
+        self,
+        method: str,
+        route: str,
+        body: dict | None,
+        *,
+        contract_route: str,
+    ) -> dict[str, Any]:
+        request = self._json_request(method, route, body)
         try:
             with self._open_request(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))

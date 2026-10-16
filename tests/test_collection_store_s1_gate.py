@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
@@ -68,7 +69,10 @@ def coordinator(database):
         def urlopen(request, timeout):
             response = transport.request(request.method, request.full_url, content=request.data,
                                          headers=dict(request.header_items()))
-            assert response.status_code == 200, response.text
+            if response.status_code != 200:
+                # What a real client sees, so the code under test answers the status itself.
+                raise urllib.error.HTTPError(request.full_url, response.status_code, response.text,
+                                             response.headers, BytesIO(response.content))
             return BytesIO(response.content)
         patch.setattr("urllib.request.urlopen", urlopen)
         yield
