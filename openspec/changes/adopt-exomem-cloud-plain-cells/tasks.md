@@ -333,10 +333,12 @@ Tasks 6.0–6.3 stay unchecked until their exact closure evidence is reconciled.
   If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
   The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
   Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
-- [ ] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
+- [x] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
   Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
   The 2026-09-28 exercise does not close this current-release acceptance.
-- [ ] 6.13 Complete the friend end-to-end journey through invite, paid entitlement with a 100%-off QA code, provisioning and connector sign-in.
+  - Done on 2026-10-16 with the 0.116 cell image (`sha256:5d665b47…`), following `docs/runbooks/cloud-operator-export.md` at `886a0a9bf`. The owner cell's 02:00 UTC B2 snapshot was restored into a scratch namespace (45 files). The archive was encrypted to an operator-held age recipient (543,048 bytes), decrypted again and compared with the restored scratch content: identical. The scratch namespace, its volume, the break-glass directories and the work directory were then confirmed absent.
+- [ ] 6.13 Complete the friend end-to-end journey through invite, paid entitlement, provisioning and connector sign-in.
+  The inline checkout takes no discount codes, so a 100%-off QA code cannot complete the paid step; the paid step is a real friend checkout. A complimentary ("Covered") invitation exercises the same invite, provisioning and connector steps without a payment.
   Verify save, cited recall, token refresh, a restorable backup, recipient export and ordered deletion without operator repair.
   Select the friend discount through the product configuration; do not encode a historical price.
   After capacity qualification, set and verify the fleet default `cellImage` through the existing release API.
