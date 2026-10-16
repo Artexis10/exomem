@@ -142,10 +142,12 @@ reserve ([remove a dedicated host](cloud-dedicated-host.md#remove-the-host)).
 It also refuses while any desired cell template selects the target
 reservation, including a stopped cell;
 relocate and clear that selection first. It cordons the agent. On an agent
-with local storage, it then moves each cell whose live volume is on the agent
-to a new claim on another node, one at a time, through a fresh stopped backup
+with local storage, move and accept its cells before you run the playbook
+([remove the host](cloud-dedicated-host.md#remove-the-host)). The playbook
+skips a cell already bound elsewhere, and moves a cell still on the agent to
+a new claim on another node, one at a time, through a fresh stopped backup
 ([move a cell](cloud-dedicated-host.md#move-a-cell-to-a-new-claim)). A failed
-move stops the removal with the agent still in the cluster. It refuses to move
+move stops the removal with the agent still in the cluster and cordoned. It refuses to move
 cells off an agent that is not Ready; relocate those cells as for a lost node
 first ([node loss](cloud-node-loss.md)). Then it drains without force, stops
 K3s and every container, deletes the Node, and revokes the node's inter-node

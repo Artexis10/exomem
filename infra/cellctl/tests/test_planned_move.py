@@ -11,7 +11,7 @@ touch.
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import asyncpg
@@ -108,6 +108,19 @@ def test_a_planned_move_restores_its_fresh_backup_not_the_last_hourly_one() -> N
     assert decision.delete_backup_job is True
 
 
+@pytest.mark.parametrize("change", [dict(pv_node_lost=True), dict(namespace_move_volume=None)],
+                         ids=["node-lost", "mark-removed"])
+def test_a_move_whose_backup_succeeded_restores_it_whatever_happens_next(change: dict) -> None:
+    # A node lost, or the mark removed, after the stopped backup succeeded:
+    # ending the move there would leave a lost node's cell to the older
+    # hourly backup, and lose the writes the fresh one holds.
+    decision = _decide(_moving(backup_job_succeeded=True, backup_job_snapshot_id=FRESH_BACKUP, **change))
+
+    assert (decision.hold_kind, decision.relocation_volume) == ("restore", "vol-old")
+    assert decision.pre_upgrade_snapshot == FRESH_BACKUP
+    assert decision.row_updates["last_backup_snapshot"] == FRESH_BACKUP
+
+
 @pytest.mark.parametrize(("failure", "now"), [
     (dict(backup_job_failed=True), NOW),
     (dict(backup_job_succeeded=True, backup_job_snapshot_id=None), NOW),  # exit 0 without a real snapshot (M1/M2)
@@ -137,6 +150,29 @@ def test_removing_the_mark_before_the_backup_succeeds_starts_the_cell_on_its_own
     assert (unmarked.hold_kind, unmarked.replicas, unmarked.relocation_volume) == (None, 1, None)
     assert (unmarked.retain_volume, unmarked.delete_claim, unmarked.delete_backup_job) == (None, False, True)
     assert unmarked.row_updates["hold_kind"] is None
+
+
+@pytest.mark.parametrize("observed", [True, False], ids=["observed", "unobserved"])
+def test_a_hetzner_cells_move_takes_a_nightly_backup_slot(observed: bool) -> None:
+    # The move's stopped backup of a Hetzner volume is a nightly backup's
+    # work. Not counting it lets one more backup run than the window allows,
+    # and only while the moving cell can be observed.
+    from cellctl.decide import ReconcileConfig
+    from cellctl.reconcile import _select_backup_candidates
+
+    moving, due = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+    in_window = datetime(2026, 1, 1, 3, tzinfo=UTC)
+    rows = [_row(cell_id=moving, hold_kind="backup", hold_started_at=STARTED), _row(cell_id=due)]
+    observations = {moving: _bound(STORAGE_CLASS, statefulset_hold_kind="move"), due: _bound(STORAGE_CLASS)}
+    config = dataclasses.replace(ReconcileConfig(), backup_concurrency=1)
+
+    if observed:
+        chosen = _select_backup_candidates(rows, observations, in_window, config, storage=MIGRATING)
+    else:
+        chosen = _select_backup_candidates(rows[1:], observations, in_window, config, unobserved=rows[:1],
+                                           storage=MIGRATING)
+
+    assert chosen == set()
 
 
 @pytest.mark.parametrize(("row", "observation", "storage"), [
@@ -245,6 +281,36 @@ def test_the_removal_playbook_reserves_what_cellctl_reserves() -> None:
     assert defaults["k3s_local_storage_driver"] == local.driver
 
 
+def test_cellctl_agrees_with_the_removal_playbook_on_where_a_moved_cell_fits() -> None:
+    # The playbook copies this rule; tests/test_hosted_node_pool_contract.py
+    # runs the playbook on the same cases. A side that drifts places a moved
+    # cell on a node whose backups then have no room, or refuses a removal
+    # that fits.
+    import json
+    from pathlib import Path
+
+    from cellctl.capacity import GIB, pool_takes, snapshot_reserve_bytes
+    from cellctl.k8s_client import _general_node
+    from cellctl.storage_config import LocalStorage
+
+    def node(case: dict) -> NS:
+        taints = [NS(key=taint["key"], effect=taint["effect"], value=None) for taint in case.get("taints", [])]
+        ready = NS(type="Ready", status="True" if case.get("ready", True) else "False")
+        return NS(metadata=NS(name=case["name"], labels=case.get("labels", {})),
+                  spec=NS(taints=taints, unschedulable=case.get("unschedulable", False)),
+                  status=NS(conditions=[ready]))
+
+    local = LocalStorage()
+    cases = json.loads((Path(__file__).parent / "fixtures/removal-room-cases.json").read_text())["cases"]
+    for case in cases:
+        largest = max([case["moving_gib"], *case["other_claims_gib"]])
+        takes = sorted(entry["name"] for entry in case["nodes"] if _general_node(node(entry)) and pool_takes(
+            local, free_bytes=entry["free_gib"] * GIB, added_bytes=case["moving_gib"] * GIB, largest_cell_gib=largest))
+
+        assert snapshot_reserve_bytes(local, largest) == case["reserve_bytes"], case["name"]
+        assert takes == case["takes_the_moving_cell"], case["name"]
+
+
 async def test_a_planned_move_through_the_controller_backs_up_first_then_restores_onto_a_local_claim(
     cell_db: CellDatabase,
 ) -> None:
@@ -264,6 +330,11 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
 
         def delete_claim(self, namespace: str) -> None:
             self.events.append(("delete claim", namespace))
+
+        def apply_all(self, manifests: list[dict]) -> None:
+            super().apply_all(manifests)
+            self.events.extend(("apply claim", manifest["spec"]["storageClassName"])
+                               for manifest in manifests if manifest["kind"] == "PersistentVolumeClaim")
 
     cell_id, namespace = "aaaaaaaaaaaaaaaa", namespace_name("aaaaaaaaaaaaaaaa")
     await _seed_cell(cell_db, cell_id, "tenant-a")
@@ -324,6 +395,11 @@ async def test_a_planned_move_through_the_controller_backs_up_first_then_restore
 
     assert [event for event in cluster.events if event[0] in ("job", "retain", "delete claim")] == [
         ("job", "backup"), ("retain", "pv-old"), ("delete claim", namespace), ("job", "restore")]
+    # Once the old claim is deleted, only a local claim is applied. The
+    # Hetzner claim applied again in the pass that deleted it would bind a new
+    # Hetzner volume, and the restore would land there.
+    after_delete = cluster.events[cluster.events.index(("delete claim", namespace)) + 1:]
+    assert [event for event in after_delete if event[0] == "apply claim"] == [("apply claim", LOCAL.class_name)]
     assert claim_class() == LOCAL.class_name
     restore = cluster.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"][2]
     assert FRESH_BACKUP in restore and LAST_BACKUP not in restore

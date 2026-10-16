@@ -1525,6 +1525,57 @@ def test_removal_counts_each_cell_against_the_storage_it_uses(
         assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
 
 
+
+ROOM_CASES = json.loads(_read(ROOT / "infra/cellctl/tests/fixtures/removal-room-cases.json"))["cases"]
+
+
+@pytest.mark.parametrize("case", ROOM_CASES, ids=[case["name"] for case in ROOM_CASES])
+def test_the_removal_playbook_agrees_with_cellctl_on_where_a_moved_cell_fits(tmp_path: Path, case: dict) -> None:
+    # The preflight copies cellctl's room rule; cellctl's own test checks
+    # cellctl on the same cases. A side that drifts places a moved cell on a
+    # node whose backups then have no room, or refuses a removal that fits.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": "target", "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+    for entry in case["nodes"]:
+        nodes.append({
+            "metadata": {"name": entry["name"], "labels": entry.get("labels", {}),
+                         "annotations": {"capacity.topolvm.io/thin": str(entry["free_gib"] * GIB)}},
+            "spec": {"unschedulable": entry.get("unschedulable", False), "taints": entry.get("taints", [])},
+            "status": {"conditions": [{"type": "Ready", "status": "True" if entry.get("ready", True) else "False"}]},
+        })
+    claims = [{"metadata": {"namespace": f"exo-cell-{letter * 16}", "name": "cell-data"},
+               "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": f"{gib}Gi"}}}}
+              for letter, gib in zip("abcd", [case["moving_gib"], *case["other_claims_gib"]], strict=False)]
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        **{key: defaults[key] for key in ("k3s_local_storage_driver", "k3s_local_storage_topology_key",
+                                          "k3s_topolvm_device_class", "k3s_local_backup_concurrency_per_node",
+                                          "k3s_local_default_cell_gib")},
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_pvs_doc": {"items": [_local_volume("a" * 16, "target", "Bound")]},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_storageclasses_doc": {"items": [{"metadata": {"name": "exomem-cloud-local"},
+                                                     "provisioner": "topolvm.io"}]},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("csinodes", "attachments", "statefulsets")},
+    }
+    takes = ("k3s_remove_local_rooms | dict2items | selectattr('value', 'ge', "
+             f"{case['moving_gib'] * GIB}) | map(attribute='key') | sort")
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables, "tasks": [
+        {"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+        {"ansible.builtin.assert": {"that": [f"k3s_remove_snapshot_reserve | int == {case['reserve_bytes']}",
+                                             f"({takes}) == {case['takes_the_moving_cell']}"]}},
+    ]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
 # Plays cellctl's part for remove_move.yml: answers kubectl from a scenario,
 # one namespace listing per poll, and logs every call.
 _FAKE_KUBECTL = r"""#!/usr/bin/env python3

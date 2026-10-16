@@ -1268,9 +1268,12 @@ def _continue_move(
     backup (D4), so no write the cell acknowledged before it stopped is lost.
 
     A failed backup leaves the cell stopped on its untouched claim, and the
-    hold records the outcome so the backup is not run again. Until the claim
-    changes, the operator's mark is what keeps the cell stopped: once it no
-    longer names the cell's volume, the cell starts there as before."""
+    hold records the outcome so the backup is not run again. Until the
+    backup succeeds, the operator's mark is what keeps the cell stopped: once
+    it no longer names the cell's volume, the cell starts there as before. A
+    backup that succeeded is restored whatever happens next, a lost node
+    included: the cell's pod was gone before it ran, so nothing has written
+    the volume since, and the last hourly backup would lose those writes."""
 
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
     old_volume = observation.statefulset_relocation_volume or row.volume_id
@@ -1281,6 +1284,16 @@ def _continue_move(
         return Decision(apply_manifests=True, replicas=0, read_only=read_only, image=image, hold_kind=MOVE,
                         hold_started_at=hold_started_at, relocation_volume=old_volume, **fields)
 
+    snapshot_id = observation.backup_job_snapshot_id
+    if (observation.backup_job_succeeded and _valid_snapshot_id(snapshot_id)
+            and observation.statefulset_backup_outcome != BACKUP_OUTCOME_FAILED):
+        decision = _start_relocation(row, observation, now, old_volume, snapshot_id)
+        # Its finished pod would hold the old claim until the Job expires.
+        decision.delete_backup_job = True
+        decision.clear_backup_retry_after = True
+        decision.row_updates = {**decision.row_updates, "last_backup_at": now, "last_backup_snapshot": snapshot_id,
+                                "last_error_code": None}
+        return decision
     if planned_move_volume(row, observation, storage) != old_volume:
         return Decision(
             apply_manifests=True,
@@ -1296,15 +1309,6 @@ def _continue_move(
                   row_updates={"observed_state": "stopping", "last_error_code": MOVE_BACKUP_FAILED})
     if observation.statefulset_backup_outcome == BACKUP_OUTCOME_FAILED:
         return failed
-    snapshot_id = observation.backup_job_snapshot_id
-    if observation.backup_job_succeeded and _valid_snapshot_id(snapshot_id):
-        decision = _start_relocation(row, observation, now, old_volume, snapshot_id)
-        # Its finished pod would hold the old claim until the Job expires.
-        decision.delete_backup_job = True
-        decision.clear_backup_retry_after = True
-        decision.row_updates = {**decision.row_updates, "last_backup_at": now, "last_backup_snapshot": snapshot_id,
-                                "last_error_code": None}
-        return decision
     if observation.backup_job_failed or observation.backup_job_succeeded or now - hold_started_at > config.backup_deadline:
         # A Job that exits 0 without a real snapshot id is a failure too (M1/M2).
         return failed

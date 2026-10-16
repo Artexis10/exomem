@@ -105,11 +105,15 @@
           restore: >-
             The move of {{ k3s_remove_move_namespace }} failed after its claim was retired: its restore failed.
             Its old volume ({{ k3s_remove_move_pv_name }}) is retained on {{ k3s_remove_node }}, which stays in the
-            cluster. Follow RESTORE_FAILED in docs/runbooks/cloud-node-loss.md; once the cell serves, remove its
-            mark and run the removal again.
+            cluster, cordoned. Follow RESTORE_FAILED in docs/runbooks/cloud-node-loss.md; once the cell serves,
+            remove its mark and run the removal again. To stop the removal instead, run kubectl uncordon
+            {{ k3s_remove_node }}: until then, no other cell on it can start again.
           none: >-
             The move of {{ k3s_remove_move_namespace }} did not finish in time; {{ k3s_remove_node }} stays in the
-            cluster. Read the cell's row and its hold, and run the removal again once the cell serves.
+            cluster, cordoned, and the cell keeps its mark. Read the cell's row and its hold. Once the cell serves,
+            from either volume, run kubectl annotate namespace {{ k3s_remove_move_namespace }}
+            {{ k3s_remove_move_annotation }}-, then run the removal again. To stop the removal instead, run kubectl
+            uncordon {{ k3s_remove_node }}: until then, no other cell on it can start again.
 
     - name: Read where the cell's new volume is
       ansible.builtin.command:

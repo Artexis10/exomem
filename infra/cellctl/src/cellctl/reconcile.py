@@ -89,6 +89,7 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
@@ -927,10 +928,13 @@ def _select_backup_candidates(
                 chosen.add(row.cell_id)
         rows = [row for row in rows if not local(row)]
 
+    # A move's stopped backup counts as the backup it is, by the same mapping
+    # the row's hold column records it with.
     active = sum(
         1
         for row in rows
-        if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
+        if row_hold_kind(_active_hold(row, observations[row.cell_id])) == "backup"
+        and row.cell_id not in statefulset_blocked
     )
     # A row that could not be observed this pass counts by its hold column.
     active += sum(1 for row in unobserved if row.hold_kind == "backup")
@@ -1810,10 +1814,18 @@ async def _reconcile_row(
             and decision.target_applied_at is not None
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
+        manifests = render_cell_manifests(spec)
+        if decision.delete_claim:
+            # D4: a claim deleted this pass is not applied again. This pass
+            # renders the deleted claim's class, and an unused claim is gone
+            # at once, so the apply would recreate it on the old class. The
+            # next pass, seeing no claim, applies the new one.
+            manifests = [manifest for manifest in manifests
+                         if (manifest["kind"], manifest["metadata"]["name"]) != ("PersistentVolumeClaim", spec.pvc_name)]
         refused, statefulset_applied = _apply_cell_manifests(
             cluster,
             row.cell_id,
-            render_cell_manifests(spec),
+            manifests,
             hold_active=hold_active,
             statefulset_exists=observation.statefulset_exists,
         )

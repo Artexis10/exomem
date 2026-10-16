@@ -207,8 +207,10 @@
 # move-cloud-cells-to-local-storage D6, for each cell the removal moves. A node
 # takes a volume only while its published free bytes still hold the snapshot
 # reserve afterwards: twice the largest cell for each backup the node may run
-# at once. cellctl.capacity.pool_takes is the one place this rule lives; the
-# playbook cannot import cellctl, so it applies the same rule here.
+# at once. The playbook cannot import cellctl, so this is a copy of
+# cellctl.capacity.pool_takes and k8s_client._general_node.
+# infra/cellctl/tests/fixtures/removal-room-cases.json holds the cases on
+# which the two must agree, and a test on each side checks them.
 - name: Measure room for the cells moving off the target's local storage
   when: k3s_remove_moves | length > 0
   block:
