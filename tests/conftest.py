@@ -990,13 +990,37 @@ def _quiesce_graph_rebuilds():
     Deliberately not a convergence helper: a test that needs the graph to be
     current asserts that for itself with `graph_sync.await_active_rebuild`.
     This fixture only guarantees that nothing is still running.
+
+    Each test is one lifetime, as each service is. Every coordinator created
+    while the test runs is bound to the test's stop event, which teardown sets
+    before the drain. A rebuild then stops at its next cancellation point
+    instead of finishing a whole-vault walk that no assertion reads; joining
+    those walks was most of the teardown time in the suite's heaviest modules.
+    Coordinators created in module or session fixture setup stay unbound, so
+    their rebuilds are still joined and shared corpora still converge. A
+    service runtime the test starts binds its own lifetime over this one, as in
+    production. The patch uses a private MonkeyPatch, for the same reason as
+    `_isolate_state_root`: a test's `monkeypatch.undo()` must not unbind it.
     """
+    lifetime = threading.Event()
+    create_coordinator = graph_sync_module.GraphRebuildCoordinator.__init__
+
+    def _create_within_test_lifetime(coordinator, *args, **kwargs):
+        create_coordinator(coordinator, *args, **kwargs)
+        coordinator.bind_shutdown(lifetime)
+
+    private = pytest.MonkeyPatch()
+    private.setattr(
+        graph_sync_module.GraphRebuildCoordinator, "__init__", _create_within_test_lifetime
+    )
     yield
+    lifetime.set()
     try:
         _drain_background_threads()
     finally:
         with graph_sync_module._COORDINATORS_LOCK:
             graph_sync_module._COORDINATORS.clear()
+        private.undo()
 
 
 @pytest.fixture(autouse=True)
