@@ -305,15 +305,36 @@ def test_markdown_delete_reconciles_without_full_rebuild(
     assert all(entry.path != removed for entry in second.identity_census.entries)
 
 
+@pytest.mark.parametrize(
+    ("title", "body", "rebuilds_corpus"),
+    [
+        # A new title can change how every other page's links resolve.
+        ("Incremental", "Changed with the same governed rules.\n", True),
+        # An in-place edit re-derives only the edited page's own facts.
+        ("One", "- vault.hosts [[Knowledge Base/Notes/Insights/two]]\n", False),
+    ],
+    ids=["retitled", "edited-in-place"],
+)
 def test_incremental_reconcile_matches_full_rebuild(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    title: str,
+    body: str,
+    rebuilds_corpus: bool,
 ) -> None:
     _shared_context(vault)
-    (vault / _PAGE_REL).write_text(
-        _page(title="Incremental", body="Changed with the same governed rules.\n"),
-        encoding="utf-8",
-    )
-    incremental = _shared_context(vault)
+    (vault / _PAGE_REL).write_text(_page(title=title, body=body), encoding="utf-8")
+    real_rebuild = semantic_contract._context_from_state_map
+    rebuilt_corpus: list[bool] = []
+
+    def record_rebuild(*args, **kwargs):
+        rebuilt_corpus.append(True)
+        return real_rebuild(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", record_rebuild)
+        incremental = _shared_context(vault)
+    assert bool(rebuilt_corpus) is rebuilds_corpus
 
     semantic_contract.reset_corpus_context_cache()
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
