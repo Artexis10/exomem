@@ -515,6 +515,8 @@ def test_relevant_due_advice_respects_the_fixed_request_deadline(
     working_set_index.WorkingSetIndex(activation_vault).rebuild()
     baseline = commands.op_activate_context(activation_vault, turn=TURN, anchor=page)
     assert baseline["abstained"] is False and baseline["relevant_due_refs"]
+    # The late read below must happen: drop the parse the baseline left behind.
+    due_state.reset_serve_cache()
 
     clock = [time.monotonic()]
     budget = request_budget.RequestBudget(seconds=50, entry=clock[0] - 47)

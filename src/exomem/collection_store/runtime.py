@@ -721,11 +721,14 @@ def projection_route(vault_root, path):
     raw = authority.read_marker(root)
     if raw is None:
         return None
-    root = root.resolve()
-    # Bind marker bytes to the canonical root, never to the earlier path spelling.
-    raw = authority.read_marker(root)
-    if raw is None:
-        return None
+    canonical = root.resolve()
+    if canonical != root:
+        # Bind marker bytes to the canonical root, never to the earlier path spelling.
+        # A root that is already canonical was just read there: recall routes every hit.
+        root = canonical
+        raw = authority.read_marker(root)
+        if raw is None:
+            return None
     marker = authority.parse_marker(root, raw)
     entry = authority.owned_entry(root, marker, path)
     if entry is None:
