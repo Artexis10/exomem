@@ -123,14 +123,21 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
   These actions enqueue or inspect work; they do not wait for model completion or
   overwrite an existing valid transcript.
-- **Pull a vault file back out — the download channel.** Call
-  **`transfer_artifact(operation="download")`** for a short-lived `{token, download_url}`, then GET
-  `download_url?path=<vault-relative path>` with `Authorization: Bearer <token>`.
-  Read-only, download-scoped, path confined to the vault root.
+- **Recover a stored original.** Call
+  **`transfer_artifact(operation="download", artifact="<stored artifact or custody page>")`**.
+  Supply `expected_sha256` when a particular version is required. The response names
+  the original's SHA-256, size, filename, MIME source and available delivery paths.
+  Use `deliveries.native_resource.uri` with MCP `resources/read` only when the client
+  can consume a blob. Otherwise open `deliveries.https.url` in a normal browser;
+  it needs no hidden header. Large originals use HTTPS before base64 encoding.
+  A prepared handoff proves no consumption: verify the recovered bytes before
+  claiming success. Native attachment rendering in other clients remains unverified.
+  Desktop/personal endpoints serve recovery; Cloud outbound delivery remains unavailable.
+  Notes and exports use their separate read and export paths.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the
   *file* as the result and the matched transcript/OCR snippet as the "why"; offer
-  to pull the original via `transfer_artifact(operation="download")`. Images and video are also
+  to recover the original with `transfer_artifact(operation="download", artifact=...)`. Images and video are also
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.

@@ -99,6 +99,16 @@ class StableIdentity:
     link_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class FileVersion:
+    """A held identity and platform change witness for ordinary concurrent writes."""
+
+    identity: StableIdentity
+    size: int
+    mtime_ns: int
+    change_time_ns: int
+
+
 def _same_file_identity(first: StableIdentity, second: StableIdentity) -> bool:
     return (
         first.device == second.device
@@ -142,6 +152,9 @@ class HeldFile:
         self.close()
 
     def close(self) -> None:
+        raise NotImplementedError
+
+    def version(self) -> FileVersion:
         raise NotImplementedError
 
 
@@ -232,6 +245,7 @@ class HeldFilesystem:
         source: HeldFile,
         destination_parent: HeldDirectory,
         destination_leaf: str,
+        *, max_bytes: int | None = None, deadline: float | None = None,
     ) -> HeldResult[None]:
         raise NotImplementedError
 

@@ -21,6 +21,11 @@ failure recur:
 
 ## What Changes
 
+Preservation also requires recovery. A supported client must recover the original
+stored bytes after the external source disappears. Native consumable files are
+preferred where the client supports them; secure HTTPS supplies the fallback.
+Both paths reuse Exomem identity, live disclosure checks and canonical storage.
+
 - `capture_source` declares `_meta["openai/fileParams"] == ["files"]`, like
   `preserve_artifacts`.
 - `/upload` on local ingress can hold bytes instead of preserving them (`hold=1`, with a
@@ -37,6 +42,11 @@ failure recur:
   content type. When the original is not stored, no transcription is written.
 - Bootstrap, tool descriptions and the scaffold skill say to preserve the original first,
   name each client's path, and say plainly where a client cannot pass bytes.
+- Original retrieval returns the exact permitted artifact version through a
+  supported native file interface or secure HTTPS. A short-lived download grant
+  names one artifact version and preserves its issuing principal and session.
+- Client acceptance proves retrieval, consumption, derivative provenance and
+  re-preservation. A minted URL alone does not prove a successful transfer.
 
 No tool argument names a local path.
 
@@ -62,3 +72,7 @@ No tool argument names a local path.
 - claude.ai remote connectors expose no file-handle argument. Their path stays
   `transfer_artifact` plus `/upload` from code execution, which needs the user's opt-in
   (network access to the Exomem host); guidance says so rather than implying custody.
+- Outbound retrieval extends the existing transfer and client adapters. It adds
+  no account, public sharing service or parallel artifact store. Cloud delivery
+  must preserve cell isolation; the existing inbound broker does not supply an
+  outbound route.

@@ -1910,10 +1910,10 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
 
 
 def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
-                    snapshot: bytes | None = None, derived: bool = False) -> bool:
+                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
-    return (connector_boundary.permits(vault_root, path, who, content=snapshot)
-            and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived))
+    return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
+            and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
 def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
@@ -1958,6 +1958,7 @@ def _decide_path(
     authorization_context: authorization_session_lifecycle.AuthorizationSessionContext
     | None = None,
     expected_content_hash: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
     tombstones: frozenset[str] | None = None,
     principal: RequestPrincipal | None = None,
 ) -> Decision | None:
@@ -1989,7 +1990,7 @@ def _decide_path(
     who = principal if principal is not None else effective_principal()
     if who.audience_id != audience:
         who = RequestPrincipal(audience_id=audience)
-    if not content_permits(vault_root, rel_path, who):
+    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
         return Decision(DISCLOSURE_MIN)
     from ..collection_store.connection import CollectionStoreError
 
@@ -2007,8 +2008,8 @@ def _decide_path(
         return None
 
     raw: bytes | None = None
-    live_content_hash: str | None = None
-    if _is_markdown_path(rel_path):
+    live_content_hash: str | None = artifact_copy.sha256 if artifact_copy is not None else None
+    if _is_markdown_path(rel_path) and artifact_copy is None:
         try:
             raw = full_path.read_bytes()
         except OSError:
@@ -2023,7 +2024,7 @@ def _decide_path(
     if canonical is not None:
         return _resolve_l4_bridge(vault_root, canonical, policy=policy, audience=audience)
     mtime = st.st_mtime
-    if not _is_markdown_path(rel_path):
+    if not _is_markdown_path(rel_path) or artifact_copy is not None:
         # NON-MARKDOWN. Never hand a binary to the markdown parser: it cannot
         # decode one, and its failure used to arrive here as `None` — a value
         # meaning BOTH "unreadable" and "not permitted". That single
@@ -2035,7 +2036,7 @@ def _decide_path(
         # companion descriptors are implemented.
         try:
             scope_ids = membership_module.evaluate_path_only(
-                vault_root, rel_path, policy
+                vault_root, rel_path, policy, artifact_copy=artifact_copy
             ).require_classified()
         except membership_module.MembershipUnresolved:
             return None
@@ -2093,6 +2094,7 @@ def _decide_path(
         st.st_mtime_ns,
         st.st_size,
         live_content_hash,
+        scope_ids,
     )
     cached = _DECISION_MEMO.get(key)
     if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
@@ -5974,6 +5976,7 @@ def release_level_for(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     receipt_decision: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> int | None:
     """The disclosure ceiling for one item, or `None` when it cannot be decided.
 
@@ -5987,7 +5990,7 @@ def release_level_for(
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return None
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who):
+    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
         return DISCLOSURE_MIN
     policy = policy_module.load(vault_root)
     from ..collection_store.connection import CollectionStoreError
@@ -6012,6 +6015,7 @@ def release_level_for(
         grants_hash=_grants_hash(policy),
         authorization_session=who.authorization_session_id,
         authorization_context=who.verified_authorization_session,
+        artifact_copy=artifact_copy,
     )
     level = None if decision is None else decision.level
     _outcome_for_decision(
@@ -6028,6 +6032,8 @@ def release_level_for(
             else "withheld"
         ),
         purpose=declared_purpose,
+        content_hash=artifact_copy.sha256 if artifact_copy is not None else None,
+        size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
 
@@ -6216,6 +6222,7 @@ def _binary_boundary(
     minimum_level: int,
     principal: RequestPrincipal | None,
     purpose: str | None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """Own direct download/frame authorization when no command dispatcher does."""
     if _collector() is not None:
@@ -6225,6 +6232,7 @@ def _binary_boundary(
             principal=principal,
             purpose=purpose,
             receipt_decision="release_authorized",
+            artifact_copy=artifact_copy,
         )
         return level is not None and level >= minimum_level
     with disclosure_boundary(vault_root, boundary_name) as collector:
@@ -6234,6 +6242,7 @@ def _binary_boundary(
             principal=principal,
             purpose=purpose,
             receipt_decision="release_authorized",
+            artifact_copy=artifact_copy,
         )
         allowed = level is not None and level >= minimum_level
         emit_boundary_receipt(collector)
@@ -6933,6 +6942,7 @@ def release_allows_download(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     snapshot: bytes | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """True only at FULL disclosure — a download hands over the complete bytes.
 
@@ -6942,7 +6952,7 @@ def release_allows_download(
     instead of the text.
     """
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, snapshot=snapshot):
+    if not content_permits(vault_root, rel_path, who, snapshot=snapshot, artifact_copy=artifact_copy):
         return False
     return _binary_boundary(
         vault_root,
@@ -6951,6 +6961,7 @@ def release_allows_download(
         minimum_level=LEVEL_FULL,
         principal=principal,
         purpose=purpose,
+        artifact_copy=artifact_copy,
     )
 
 

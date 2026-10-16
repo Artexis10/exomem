@@ -82,9 +82,9 @@ def protect(page: str, *, artifact_path: str, digest: str) -> str:
     return page.replace("---\n", "---\n" + yaml.safe_dump({"raw_protection": block}, sort_keys=False), 1)
 
 
-def binding(root: Path, path: str) -> tuple[dict, str, str] | None:
+def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[dict, str, str] | None:
     """Resolve only the named pair; an orphan never acquires a release."""
-    candidates = [path] if path.endswith(".md") else []
+    candidates = [path] if path.endswith(".md") and artifact_copy is None else []
     candidates.append(path + ".md")
     if path.endswith(".md"):
         candidates.append(path[:-3] + "-notes.md")
@@ -153,6 +153,7 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
 def permits(
     root: Path, path: str, who: RequestPrincipal, *,
     snapshot: bytes | None = None, derived: bool = False,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """Meet with ordinary policy; never let a caller-declared purpose widen RAW."""
     if not marked(path):
@@ -174,7 +175,7 @@ def permits(
               if grant.raw_protection is not None and grant.to_audience == who.audience_id]
     if not grants:
         return False
-    found = binding(root, path)
+    found = binding(root, path, artifact_copy=artifact_copy)
     if found is None:
         return False
     block, companion, companion_hash = found
@@ -188,9 +189,14 @@ def permits(
                 or spec["purpose"] != trusted_purpose):
             continue
         try:
-            original = reserved_paths.read_generic_bytes(root, block["artifact_path"]).data
-            if hashlib.sha256(original).hexdigest() != block["artifact_sha256"]:
-                return False
+            if artifact_copy is not None:
+                if (artifact_copy.vault_root != root or artifact_copy.relative_path != block["artifact_path"]
+                        or artifact_copy.sha256 != block["artifact_sha256"]):
+                    return False
+            else:
+                original = reserved_paths.read_generic_bytes(root, block["artifact_path"]).data
+                if hashlib.sha256(original).hexdigest() != block["artifact_sha256"]:
+                    return False
             if snapshot is not None:
                 expected = block["artifact_sha256"] if path == block["artifact_path"] else companion_hash
                 if hashlib.sha256(snapshot).hexdigest() != expected:
