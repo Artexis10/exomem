@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. operator-restore-abort: interrupted in-place recovery after steps 1-2. local-storage-drill: node-loss recovery."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. operator-restore-abort: interrupted in-place recovery after steps 1-2. local-storage-drill: node-loss recovery. k3s-link: flannel MTU and agent-token rotation on a server and one agent."
         type: choice
-        options: [full, full-coexistence, operator-restore-abort, local-storage-drill]
+        options: [full, full-coexistence, operator-restore-abort, local-storage-drill, k3s-link]
         default: full
 
 permissions:
@@ -55,7 +55,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'local-storage-drill'
+    if: github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'k3s-link')
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -167,5 +167,52 @@ jobs:
           path: |
             ${{ runner.temp }}/local-storage-drill-report.json
             ${{ runner.temp }}/drill-diagnostics
+          if-no-files-found: error
+          retention-days: 30
+
+  k3s-link:
+    name: Flannel MTU and agent-token rotation on disposable K3s
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'k3s-link'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # Exit 1 is a recorded finding, 2 a harness failure; both fail the job.
+      - name: Run the rehearsal
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 25
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/k3s-link-diagnostics
+        run: |
+          uv run --frozen exomem-cloud-rehearsal k3s-link --report "${RUNNER_TEMP}/k3s-link-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/k3s-link-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: k3s-link-report
+          path: |
+            ${{ runner.temp }}/k3s-link-report.json
+            ${{ runner.temp }}/k3s-link-diagnostics
           if-no-files-found: error
           retention-days: 30

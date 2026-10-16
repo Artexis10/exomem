@@ -213,3 +213,50 @@ The agents share the runner's kernel, where device-mapper names are global,
 so two `cells/pool0` pools cannot be active at once. Agent B therefore gets
 its volume group only after agent A's disk is destroyed, as replacement
 capacity. The report lists this and every other adaptation.
+
+## Private-link rehearsal (k3s-link)
+
+`move-cloud-cells-to-local-storage` tasks 6.5 (flannel MTU) and 5.7 (agent-token
+rotation). It runs a K3s server with embedded etcd and one agent, with no cell
+images, in about ten minutes. It needs privileged Docker and `uvx`, but no
+`sudo`, so it also runs on a workstation. On a runner, dispatch the
+`Cloud rehearsal` workflow with `mode` set to `k3s-link`.
+
+```
+cd infra/cloud-rehearsal
+uv run --frozen exomem-cloud-rehearsal k3s-link --report k3s-link-report.json
+```
+
+`--label` and `--image-label` add a `key=value` label to every container,
+network and volume it creates, and to the image it builds.
+
+The pinned ansible-core renders the k3s role's flannel configuration and the
+values the checks expect from the role's own template and defaults. The run
+stops before any node starts if the K3s image does not report the role's
+`k3s_version`. The Docker network runs at the Hetzner Cloud network's 1450
+bytes, and the agent lowers its interface to a vSwitch's 1400.
+
+The checks run in order. A failed 6.5 check blocks only the later 6.5 checks:
+
+1. **6.5:** a ping with fragmentation forbidden crosses the agent's link at
+   1400 bytes and fails at 1450, in both directions.
+2. **6.5:** `flannel.1` and `FLANNEL_MTU` on both nodes equal the role's pod
+   MTU, the values the role's handler asserts.
+3. **6.5:** a pod on each node has `eth0` at the pod MTU, and a ping of that full
+   size with fragmentation forbidden crosses the link both ways.
+4. **5.7:** the server's agent token changes from A to B. The server restarts,
+   then restarts again without the re-save. The check records whether the
+   second restart stops on K3s's `newer than datastore` fatal. If it does, the
+   check removes `server/cred/passwd` and starts the server, as the message
+   directs.
+5. **5.7:** the role's re-save helper leaves the server token file unchanged,
+   and the server then restarts ready.
+6. **5.7:** the supervisor answers `/v1-k3s/readyz` with 401 for token A and
+   200 for token B, each presented alone.
+7. **5.7:** the agent moves to token B, loses its kubelet client certificate,
+   and restarts. It must get a new certificate and run its pod again. With
+   its certificate it would rejoin on that alone.
+
+The report (`exomem-k3s-link-rehearsal-report-v1`) records each check's
+evidence and the rendered configuration. Exit 0 means every check passed, 1
+a check failed, and 2 the rehearsal itself failed.

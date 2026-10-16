@@ -34,6 +34,19 @@ k3s_kubelet_args:
   - container-log-max-size=10Mi
   - container-log-max-files=3
 
+# The pod network. It is K3s's own default; the server's cluster-cidr and every
+# node's flannel configuration both render this one value.
+k3s_cluster_cidr: 10.42.0.0/16
+# Flannel's VXLAN packets must fit the smallest private link a node joins over
+# (move-cloud-cells-to-local-storage D8, task 6.5): a vSwitch carries 1400 bytes,
+# the WireGuard interface 1420 and the Cloud network 1450. Without this value
+# flannel takes the interface's MTU, and a Cloud node's packets would be 1450.
+k3s_flannel_mtu: 1400
+# flannel.1 and every pod run below k3s_flannel_mtu by VXLAN's overhead, which
+# flannel fixes at 50 bytes (encapOverhead in its vxlan backend).
+k3s_flannel_pod_mtu: "{{ k3s_flannel_mtu | int - 50 }}"
+k3s_flannel_conf_path: /etc/rancher/k3s/flannel-net-conf.json
+
 # server: the one cluster-init server (hosted_nodes outside k3s_agents).
 # agent: a node in k3s_agents. Derived from group membership, so no play can
 # render the server configuration on an agent by forgetting to set it.

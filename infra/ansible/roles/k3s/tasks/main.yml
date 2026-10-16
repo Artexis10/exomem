@@ -40,6 +40,18 @@
     group: exomem-operators
     mode: "0750"
 
+# Flannel reads this only when K3s starts, and keeps an existing flannel.1
+# whatever its MTU, so a change recreates the device (handlers/main.yml).
+- name: Install the flannel network configuration
+  ansible.builtin.template:
+    src: flannel-net-conf.json.j2
+    dest: "{{ k3s_flannel_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k3s_flannel_conf
+  notify: Recreate the flannel device
+
 - name: Install required K3s kernel settings
   ansible.builtin.copy:
     src: 99-exomem-k3s.conf

@@ -104,6 +104,7 @@
 - [ ] 5.5 Alert when a dedicated host's cell array is degraded, through the existing alert receiver. Today `site.yml` only reports it, and the host has no mail transport for `mdmonitor`. Evidence: an alert from a failed member on a disposable host.
 - [ ] 5.6 Alert when a thin pool's data or metadata use passes 80%, from TopoLVM's thin-pool metrics, through the existing alert receiver. Evidence: an alert-rule test.
 - [ ] 5.7 Write and rehearse a rotation of the K3s agent token (`k3s_agent_token`) for the pinned K3s version. A dedicated host's disk that leaves the provider's custody unwiped exposes the token. The procedure owns the token's activation: it escrows the new version, then selects it in `infra/contracts/active-ansible-selection-v1.json` in a reviewed commit, because escrowing alone activates nothing. Evidence: every agent rejoins with the new token, and the old token is refused.
+  - Built: the `Rotate the agent token` procedure in `docs/runbooks/cloud-dedicated-host.md`, the role's re-save helper `exomem-k3s-resave-bootstrap`, and the `k3s-link` rehearsal mode; a local run of that mode passed all seven checks and showed the re-save is needed. Pending: the CI `k3s-link` run, and a production rotation in an operator window.
 
 ## 6. Private-link join (needs the purchased server)
 
@@ -112,7 +113,9 @@
 - [ ] 6.3 Add the optional Terraform Cloud recovery agent, with its volume group on one Cloud volume under the same LUKS and Clevis layout, created and removed by variable. Evidence: plan/apply/destroy on a disposable stack.
 - [ ] 6.4 Implement relocation in the agent-removal playbook for cells whose volumes the remaining nodes cannot reach: a fresh stopped backup, a restore, start after the restore succeeds, acceptance. Evidence: a removal of a disposable agent holding a seeded cell.
 - [ ] 6.5 Set the cluster's flannel MTU so that VXLAN fits the private link before the first dedicated join. Cloud nodes run flannel at 1400 over the 1450-byte Cloud network, so their VXLAN packets are 1450 bytes (1400 plus 50 bytes of overhead). A vSwitch carries at most 1400, and a default WireGuard interface 1420. Evidence: pod-to-pod traffic at full MTU between a Cloud node and the dedicated agent.
+  - Built: `k3s_flannel_mtu` 1400 and `k3s_cluster_cidr` in the k3s role, its flannel configuration, the handler that recreates `flannel.1` and asserts 1350, and the `Roll out the flannel MTU` runbook steps; the `k3s-link` rehearsal mode passed its three 6.5 checks locally. Pending: the CI `k3s-link` run, the production rollout window, and the full-MTU traffic to a joined dedicated agent.
 - [ ] 6.6 Before the first production dedicated join, run the release gate on the full inventory with `--limit` set to the server, so that no agent needs to be reachable and nothing is pruned. A fleet with a WireGuard host would then need every peer's WireGuard public key carried in the inventory, because only a run on that peer reads its key today. Evidence: the gate's two passes on the server, with the agents unreached.
+  - Built: an optional `wireguard_public_key` per WireGuard host in the generator, which emits `k3s_wireguard_public_key`; the host's check of its record; and the runbook step that records it. Role tests cover a server-limited run. Pending: the gate's two passes on the production server.
 
 ## 7. Cutover and migration (needs the purchased server)
 

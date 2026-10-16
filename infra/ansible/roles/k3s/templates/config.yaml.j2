@@ -7,6 +7,8 @@ agent-token: {{ k3s_agent_token | to_json }}
 node-ip: {{ private_node_ip | to_json }}
 advertise-address: {{ private_node_ip | to_json }}
 flannel-iface: {{ k3s_resolved_private_interface | to_json }}
+flannel-conf: {{ k3s_flannel_conf_path | to_json }}
+cluster-cidr: {{ k3s_cluster_cidr | to_json }}
 secrets-encryption: true
 # The admin kubeconfig is root-only (harden-exomem-cloud-operator-access D4):
 # the administrator reaches cluster-admin only through sudo, and everyday

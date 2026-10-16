@@ -9,6 +9,7 @@ test in test_hosted_k3s_agent_join.py.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -344,6 +345,10 @@ def test_inventory_generator_refuses_sensitive_agent_output(tmp_path: Path) -> N
 
 # --- Inventory: hosts Terraform does not create --------------------------------
 
+# Invented WireGuard public keys: 32 bytes counting up from 0, and from 32.
+_RECORDED_KEY = base64.b64encode(bytes(range(32))).decode()
+_OTHER_KEY = base64.b64encode(bytes(range(32, 64))).decode()
+
 _VSWITCH_OUTPUT = {
     "sensitive": False,
     "value": {
@@ -440,6 +445,18 @@ def test_inventory_generator_joins_hosts_terraform_does_not_create(tmp_path: Pat
     }
 
 
+def test_inventory_generator_carries_a_recorded_wireguard_key(tmp_path: Path) -> None:
+    # Task 6.6: a run limited to the server reads a WireGuard peer's key from
+    # the inventory. Under any other variable the role would not find it.
+    result = _generate_with_dedicated(
+        tmp_path, _dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wireguard_public_key=_RECORDED_KEY)
+    )
+    assert result.returncode == 0, result.stderr
+    hosted = json.loads((tmp_path / "inventory.json").read_text(encoding="utf-8"))["all"]["children"]["hosted_nodes"]
+    host = hosted["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]["exomem-agent-dx1"]
+    assert host["k3s_wireguard_public_key"] == _RECORDED_KEY
+
+
 def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) -> None:
     # An inventory that omits dedicated hosts makes site.yml retire their
     # WireGuard link, firewall rules and Tang access on every other node.
@@ -486,6 +503,20 @@ def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) ->
         (_dedicated("exomem-agent-dx1", "10.50.3.40", "vswitch"), "other than its gateway"),
         (_dedicated("exomem-agent-dx1", "10.50.2.1", "vswitch"), "other than its gateway"),
         (_dedicated("exomem-agent-dx1", "10.51.0.40", "ipsec"), "link must be wireguard or vswitch"),
+        # A recorded key is rendered into every peer's wg-quick file, which runs
+        # PreUp and PostUp lines as root.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    wireguard_public_key=_RECORDED_KEY + "\nPostUp = touch /tmp/owned"),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    wireguard_public_key=base64.b64encode(bytes(31)).decode()),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        # Decodes, but is not the form wg prints, so the host's check never matches it.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wireguard_public_key=_RECORDED_KEY[:-2] + "x="),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        # Only a WireGuard host's key reaches its peers.
+        (_dedicated("exomem-agent-dx1", "10.50.2.41", "vswitch", wireguard_public_key=_RECORDED_KEY),
+         "dx1: wireguard_public_key needs link wireguard"),
     ],
 )
 def test_inventory_generator_refuses_malformed_dedicated_hosts(
@@ -628,6 +659,88 @@ def test_a_peer_cannot_inject_wireguard_configuration(
         assert result.returncode != 0 and refusal in result.stdout, result.stdout
 
 
+def _wireguard_block() -> list[dict]:
+    link = next(task for task in _yaml(K3S_ROLE / "tasks/private_link.yml")
+                if task["name"] == "Converge the WireGuard private link")
+    return link["block"]
+
+
+@pytest.mark.parametrize(
+    "recorded,outcome",
+    [
+        (_RECORDED_KEY, "passes"),
+        # A rotated or rebuilt host: its record would take a later --limit
+        # run's tunnel down, so the host prints its live key instead.
+        (_OTHER_KEY, "refused"),
+        # The first join: nothing recorded yet, so the run prints the key to record.
+        (None, "reported"),
+    ],
+)
+def test_a_wireguard_host_checks_the_key_its_inventory_records(
+    tmp_path: Path, recorded: str | None, outcome: str
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    host = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]["exomem-agent-dx1"]
+    if recorded is not None:
+        host["k3s_wireguard_public_key"] = recorded
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    checks = [task for task in _wireguard_block() if task["name"] in (
+        "Require the recorded WireGuard key to be this host's key",
+        "Report a WireGuard key to record in the host list",
+    )]
+    assert len(checks) == 2
+    play = tmp_path / "record.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-agent-dx1", "gather_facts": False,
+        # What the key helper printed on the host.
+        "vars": {"k3s_wireguard_pubkey": {"stdout": _RECORDED_KEY, "stderr": ""}},
+        "tasks": [{"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}}, *checks]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if outcome == "refused":
+        assert result.returncode != 0 and f"public key is {_RECORDED_KEY}" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (f"Record {_RECORDED_KEY}" in result.stdout) == (outcome == "reported"), result.stdout
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_a_run_limited_to_the_server_configures_a_recorded_wireguard_peer(tmp_path: Path, recorded: bool) -> None:
+    # Task 6.6: with --limit set to the server, no WireGuard host runs, so its
+    # key can only come from the inventory.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    if recorded:
+        dedicated = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]
+        dedicated["exomem-agent-dx1"]["k3s_wireguard_public_key"] = _RECORDED_KEY
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    checks = [task for task in _wireguard_block() if task["name"] in (
+        "Require every WireGuard peer in this run or its key in the inventory",
+        "Refuse a WireGuard key that is not exactly one public key",
+    )]
+    assert len(checks) == 2
+    rendered = tmp_path / "wgexomem.conf"
+    play = tmp_path / "limited.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "hosted_nodes", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        *checks,
+        {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/wireguard.conf.j2"),
+                                       "dest": str(rendered), "mode": "0600"}},
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), "--limit", "exomem-alpha", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if recorded:
+        assert result.returncode == 0, result.stdout + result.stderr
+        peer = rendered.read_text(encoding="utf-8").split("[Peer]", 1)[1]
+        assert f"PublicKey = {_RECORDED_KEY}" in peer and "Endpoint = 203.0.113.40:51820" in peer
+    else:
+        assert result.returncode != 0 and "record each WireGuard host's" in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize(
     "free_extents,overrides,expected",
     [
@@ -699,6 +812,74 @@ def test_agent_presents_the_ca_pinned_secure_token_format() -> None:
     # Only the checksum leaves the server; never the certificate or a token file.
     assert "slurp" not in agent and "fetch" not in agent
     assert "/var/lib/rancher/k3s/server/agent-token" not in agent
+
+
+def test_the_pod_network_and_flannel_mtu_render_from_one_place(tmp_path: Path) -> None:
+    # Catches the server's cluster-cidr and flannel's Network drifting apart,
+    # which gives pods addresses flannel does not route, and a node whose
+    # config omits flannel-conf: it would run flannel at its interface's MTU
+    # and overflow a vSwitch.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    rendered = {name: tmp_path / name for name in ("flannel.json", "server.yaml", "agent.yaml")}
+    play = tmp_path / "render.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {
+            "k3s_cluster_cidr": "10.44.0.0/16", "k3s_flannel_mtu": 1380,
+            "k3s_server_token": "s" * 32, "k3s_agent_token": "a" * 32, "k3s_agent_join_token": "test-token",
+            "private_node_ip": "10.0.0.2", "k3s_server_private_ip": "10.0.0.1",
+            "k3s_resolved_private_interface": "eth0",
+        }},
+        *({"ansible.builtin.template": {"src": str(K3S_ROLE / "templates" / source), "dest": str(rendered[name]),
+                                        "mode": "0600"}}
+          for source, name in (("flannel-net-conf.json.j2", "flannel.json"), ("config.yaml.j2", "server.yaml"),
+                               ("agent-config.yaml.j2", "agent.yaml"))),
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+    flannel = json.loads(rendered["flannel.json"].read_text(encoding="utf-8"))
+    server, agent = _yaml(rendered["server.yaml"]), _yaml(rendered["agent.yaml"])
+    assert flannel["Network"] == server["cluster-cidr"] == "10.44.0.0/16"
+    assert flannel["Backend"] == {"Type": "vxlan", "MTU": 1380}
+    conf_path = _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_conf_path"]
+    assert server["flannel-conf"] == agent["flannel-conf"] == conf_path
+    install = next(task for task in _yaml(K3S_ROLE / "tasks/main.yml")
+                   if task["name"] == "Install the flannel network configuration")
+    assert install["ansible.builtin.template"]["dest"] == "{{ k3s_flannel_conf_path }}"
+
+
+@pytest.mark.parametrize(
+    "device,subnet_env,passes",
+    [
+        ("1350", "FLANNEL_MTU=1350", True),
+        # The rollout trap: a restart reuses flannel.1 at its old MTU.
+        ("1400", "FLANNEL_MTU=1350", False),
+        # flannel kept its old configuration: new pods still get the old MTU.
+        ("1350", "FLANNEL_MTU=1400", False),
+    ],
+)
+def test_the_flannel_handler_refuses_a_node_left_at_the_old_mtu(
+    tmp_path: Path, device: str, subnet_env: str, passes: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    check = next(handler for handler in _yaml(K3S_ROLE / "handlers/main.yml")
+                 if handler["name"] == "Require flannel.1 and new pods at the configured MTU")
+    play = tmp_path / "mtu.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        # What the handler's wait read from flannel.1 and /run/flannel/subnet.env.
+        "vars": {"k3s_flannel_observed": {"rc": 0, "stdout_lines": [
+            device, "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_SUBNET=10.42.1.1/24", subnet_env]}},
+        "tasks": [{"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+                  {key: value for key, value in check.items() if key != "listen"}]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if passes:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and "did not take k3s_flannel_mtu 1400" in result.stdout, result.stdout
 
 
 def test_join_playbook_skips_a_host_that_removal_marked() -> None:
@@ -1091,6 +1272,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
         "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
+        "k3s_flannel_conf_path": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_conf_path"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),
