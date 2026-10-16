@@ -628,9 +628,38 @@ class CollectionStoreRuntime:
         head = self.sample_head()
         return CollectionStoreHead(head.store_id, head.instance_id, result.commit_seq, result.head_hash)
 
+    def _drain_views(self, handle, *, deadline, cancelled=None):
+        """Install the views that committed changes left pending, before a handoff or a stop (design §5).
+
+        It publishes what the serving store thread would, under the release that lets that
+        thread publish, through the same reconcile. A view it cannot install before the
+        deadline stays pending for the next holder's startup pass, so a failure costs a
+        lagging view, never the handoff.
+        """
+        from . import capability
+
+        if not capability.views_published(self.root):
+            return
+        from ..governance import principal
+        from .writer import CollectionWriter
+
+        writer, after, passes = CollectionWriter(self.root, handle), None, 0
+        try:
+            with principal.library_scope():
+                # One pass installs each view; the next confirms it current.
+                while passes < 2 and time.monotonic() < deadline and not (cancelled is not None and cancelled()):
+                    if handle.connection.execute(
+                            "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
+                        return
+                    after = writer.reconcile_views(limit=VIEW_BATCH_PATHS, after=after, pending_only=True)["next_path"]
+                    passes += after is None
+        except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
+            logger.warning("pending collection views were not installed before the handoff", exc_info=True)
+
     def flush(self, token, *, deadline, cancelled=None):
         """Called only after admission stops, drainage and boundary acquisition."""
         with self._publication_writer(token) as writer:
+            self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
@@ -1263,11 +1292,9 @@ class StoreServer:
         from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None:
+        if self.runtime is None or not capability.views_published(self.root):
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
-        if not views and not capability.records_summary_enabled(self.root):
-            return IMPORT_IDLE_SECONDS
         if views and self._edit_back is None:
             self._edit_back = edit_back.EditBack()
         # Without edit-back, the publication pass alone sets the next tick, as before it existed.

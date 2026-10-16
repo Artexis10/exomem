@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, record_formats, reserved_paths, vault
-from . import authority, capability, connection, governance, summary, typed_storage
+from . import authority, capability, connection, governance, log_view, summary, typed_storage
 
 STAGE_PREFIX = ".exomem-collection-stage-"
 ASIDE_PREFIX = ".exomem-collection-aside-"
@@ -87,7 +87,13 @@ class PublicationBatch:
         self.pending = True
         return False
 
-    def _render_context(self, projection, manifest=None):
+    def _render_context(self, projection, manifest=None, *, pair=None):
+        """The governance a view's render was released under, with its version and digest.
+
+        ``pair`` names a recorded ``(version, digest)`` of a log view: a log view is governed by
+        its collection's current manifest, as a summary page is, whatever rows it rendered, so
+        the pair needs no render to be proved.
+        """
         conn = self.writer.connection
         if projection["kind"] == "item":
             row = conn.execute("SELECT governance_json,updated_txn,values_json,encoding,collection_id FROM items "
@@ -96,8 +102,9 @@ class PublicationBatch:
                 item = {"row_id": projection["row_id"], "values_json": row[2], "encoding": row[3],
                         "collection_id": row[4]}
                 row = (*row[:2], typed_storage.hydrate(conn, [item])[0]["values_json"])
-        elif projection["kind"] in ("manifest", "summary"):
-            # A summary page is governed by its collection's current manifest.
+        # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+        elif projection["kind"] in ("manifest", "summary", "log"):
+            # A summary page and a log view are governed by their collection's current manifest.
             if manifest is not None and projection["kind"] == "manifest":
                 row = conn.execute("SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                                    (projection["collection_id"], projection["pending_row_version"])).fetchone()
@@ -116,6 +123,8 @@ class PublicationBatch:
         cid = projection["collection_id"]
         if manifest is not None:
             version, digest = projection["pending_row_version"], projection["pending_sha256"]
+        elif pair is not None and projection["kind"] == "log":
+            version, digest = pair
         else:
             current = self.writer._collection_row(cid)
             if projection["kind"] == "item":
@@ -187,7 +196,15 @@ class PublicationBatch:
                         invalid = True
                     else:
                         matches[metadata] = {**context, "governance_json": metadata}
-            if not matches and not invalid:
+            if not matches and not invalid and previous["kind"] == "log":
+                # Any bytes the store recorded for a log view, the imported file's included, have this context.
+                try:
+                    context = self._render_context(previous, pair=(version, digest))
+                except (TypeError, ValueError):
+                    context = None
+                if context:
+                    matches[context["governance_json"]] = context
+            elif not matches and not invalid:
                 if not backfilled:
                     try:
                         canonical = self._render_context(previous)
@@ -716,6 +733,12 @@ def render_view(conn, identity, projection, manifest):
         generation, head = conn.execute("SELECT generation,audit_head FROM collections WHERE collection_id=?",
                                         (projection["collection_id"],)).fetchone()
         return generation, summary.render_page(conn, manifest, stamp(identity, generation, head))
+    if projection["kind"] == "log":
+        generation, frame = conn.execute("SELECT generation,log_frame_json FROM collections WHERE collection_id=?",
+                                         (projection["collection_id"],)).fetchone()
+        return generation, log_view.render(
+            manifest, log_view.load(frame, manifest), log_view.rows(conn, manifest),
+            stamp=lambda row: stamp(identity, row["row_version"], row["payload_hash"]))
     cursor = conn.execute(
         "SELECT * FROM held_candidates WHERE held_id=? AND view_path=?",
         (projection.get("held_id", Path(projection["path"]).stem), projection["path"]),

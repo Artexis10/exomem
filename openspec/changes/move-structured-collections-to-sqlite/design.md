@@ -245,6 +245,11 @@ Every canonical object has a rendered view at today's path:
 | History | `<collection>/_history.md` (newest), plus `<collection>/_history/<NNNN>.md` pages of 500 transitions (A6) | no; read-only, rewritten if touched |
 
 **Log frame.** For the log layout, the prose outside the declared item section (headings, legend, notation), the BOM, the newline style and the final-newline state are stored in `collections.log_frame_json` and re-emitted byte-identically. An edit to the frame is recorded as a content-free `view_frame_edit` transaction, and it never touches items.
+- The frame has one versioned shape, version 1: `text` (everything before the first block, BOM included), `suffix` (everything from the end of the item section), `newline`, `bom` and `final_newline`. The importer captures it from the file, and a create stores the empty frame: the section heading with LF newlines. Stores created before the shape was versioned hold `{"text"}` alone; the reader treats it as that text with LF newlines and no suffix. No released store holds that shape, so no store migration rewrites it.
+- One renderer, `collection_store.log_view.render`, writes `text`, then one block per row in insertion order with the frame's newline, then `suffix`. The projector stamps each block; the reverse export writes the same bytes without stamps, because file mode has no store to name. `bom` and `final_newline` describe what `text` and `suffix` already hold. When the item section ends the file, the file ends with the last block's blank line, as the export writes it today; a legacy file whose section ended the file without a final newline gains one at its first render. This keeps the export byte for byte (S2, conservative choice; open for the operator).
+- An append or update of a log row records only the log view's pending basis (`pending_row_version`, `pending_sha256` NULL), as summary pages do, and its receipt carries `projection_pending`. Nothing renders the log on the acknowledgement path.
+- A log view's render context, the governance that its holds take, is its collection's current manifest, as for a summary page. Any bytes the store recorded for the log view have that context, the imported file's bytes included, so displaced log bytes can always be held.
+- An edit of the frame is not applied yet: edit-back holds it (below). `view_frame_edit` remains to be built.
 
 **Rendering** reuses today's renderers: `render_markdown_item`, `render_markdown_log_item`, the managed presentation blocks and the filename recipes. The system frontmatter stays (`type`, `collection_id`, `record_id` / `plan_id`, `schema_version`), so identity is visible in the file. Every item and manifest view also carries the **view stamp** `exomem_view: {s, i, v, h}` (store id, instance id, row version, payload-hash prefix), and every log block carries the same stamp as a comment (§16 A2). The audit marker comments and the manifest `record_audit` / `plan_audit` mappings are no longer rendered.
 
@@ -296,7 +301,36 @@ Every canonical object has a rendered view at today's path:
 | unbound `.md` file created under a projection root | held `VIEW_UNBOUND` as a proposed insert, resumable with `append(held=...)` for Records or `add` for Planning |
 | sync-conflict copy (`*.sync-conflict-*`, `* (conflicted copy)*`) | held `VIEW_CONFLICT_COPY`; never applied |
 
-A **manifest view** edit becomes a governed `revise` when it validates as a revision of the current `manifest_version`. Otherwise it is held, with the same classification. Schema-breaking revisions follow today's revise rules. A **log view** is diffed block by block using each block's stamp (§16 A2) and the `exomem-record-id` binding. A changed block is an update. A block with no binding, or a removed block, is held. Reordering is ignored and re-rendered. Held **view corrections** appear in `inspect` coverage, in the attention queue (category `collection_view_corrections`), and as read-only views under `Held/`. Inspect and attention count only the corrections released to the caller, so a withheld correction is absent. They are resolved by resuming or by discarding with a reason. A later valid edit of the same view resolves only a correction held at that view path: an invalid edit kept in place, or a deleted view. A correction of displaced bytes, such as a stale-buffer save (`VIEW_CONFLICT`), is resolved only by resuming or discarding it, so a later edit never drops an unreviewed save. Discarding a correction held in place re-renders its view over the discarded bytes.
+A **manifest view** edit becomes a governed `revise` when it validates as a revision of the current `manifest_version`. Otherwise it is held, with the same classification. Schema-breaking revisions follow today's revise rules. A **log view** is diffed block by block using each block's stamp (§16 A2) and the `exomem-record-id` binding. A changed block is an update. A block with no binding, or a removed block, is held. Reordering is ignored and re-rendered.
+
+**Log view classification (S2).** The whole view is classified first:
+
+| Whole log view | Result |
+| --- | --- |
+| does not parse as the declared log, or two blocks carry one identity | held `VIEW_INVALID` with the adapter's diagnostics |
+| its text outside the item section differs from the stored frame | held `VIEW_INVALID`, issue `VIEW_FRAME_CHANGED` |
+| a block carries another store's or instance's stamp | held `VIEW_FOREIGN`; `COLLECTION_STORE_DIVERGED` |
+| no block carries a stamp, and the view shows stored rows | held `VIEW_INVALID`, issue `VIEW_UNSTAMPED`, whose remedy says to make the edit again in the re-rendered, stamped view and then discard the correction |
+
+Otherwise each block is classified against its own row:
+
+| Block | Result |
+| --- | --- |
+| no `exomem-record-id`, or one that names no row of the collection | held `VIEW_UNBOUND` |
+| no stamp, while other blocks carry one | held `VIEW_INVALID`, issue `VIEW_UNSTAMPED` |
+| stamp `v` older than the row | nothing, when the block is this edit's own applied block (its request identity is in `txns`) or the store's render of the row at `v`; else held `VIEW_CONFLICT` |
+| stamp `v` newer than the row, or `h` not the row's | held `VIEW_INVALID` |
+| current stamp, same values, the store's render up to trailing spaces and blank lines | nothing |
+| current stamp, same values, other text in the block | held `VIEW_INVALID`, issue `VIEW_BLOCK_TEXT`, because the store keeps only declared values |
+| current stamp, changed values that validate | ONE governed `update` of that row, recorded as a `view_edit`; its request identity is derived from the block's view path `<log>#<key>`, the stamp version and the block's bytes |
+| current stamp, changed values that fail validation or the leaf | held `VIEW_INVALID` with the diagnostics |
+| a stored row with no block | held `VIEW_DELETED`, unless the row was committed after the newest row version that the saved buffer shows, so it was never in that buffer |
+
+- Edit-back applies the changed blocks first, one update each, then one reconcile holds the remaining blocks and re-renders the log. A refused or invalid block waits the 10 s invalid window, as an item view does.
+- A log view's holds never stay in place. O2 covers item and manifest views only, because a log hold kept in place would keep every later row out of the view. The held bytes move into the correction and the log re-renders.
+- A block hold names its row as `item_key`, so it is released no further than that row. A hold of the whole log view names `view: log`, and `governance.held_targets` releases it only when every row of the collection is released, as the log view itself is (§7).
+- Without the `collection-views-v1` release, a log edit waits on disk, as an item edit does. Bytes that an install displaces are held whole as `VIEW_CONFLICT` (§16 A1).
+- On quiesce, the release flush (`runtime.RuntimeAdapter.flush`) installs pending views through the same reconcile before it publishes the replica, under the release that lets the store thread publish views. It stops at the flush deadline, and a view it cannot install stays pending for the next holder. Held **view corrections** appear in `inspect` coverage, in the attention queue (category `collection_view_corrections`), and as read-only views under `Held/`. Inspect and attention count only the corrections released to the caller, so a withheld correction is absent. They are resolved by resuming or by discarding with a reason. A later valid edit of the same view resolves only a correction held at that view path: an invalid edit kept in place, or a deleted view. A correction of displaced bytes, such as a stale-buffer save (`VIEW_CONFLICT`), is resolved only by resuming or discarding it, so a later edit never drops an unreviewed save. Discarding a correction held in place re-renders its view over the discarded bytes.
 
 The watcher is the human's write path, not a bypass. It uses the same leaf functions as MCP, REST and CLI, so the surface-consistency rule holds.
 

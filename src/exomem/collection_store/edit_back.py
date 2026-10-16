@@ -1,14 +1,15 @@
 """Edit-back: an owner's edit of a store collection view becomes a governed update or a held correction.
 
 OpenSpec move-structured-collections-to-sqlite design §6 and §16 A1, A2. A reconcile
-pass reads every item and manifest view at startup and every 60 s, with a stat-identity
-fast path, outside the store's write transaction. A changed view settles first: it acts
-once its bytes stay the same for 2 s, and holds a parse or validation failure only once
-the view stays invalid for 10 s, so a typing storm leaves no hold. Classification runs
-the stamp rules first, then the §6 rows. A valid edit at the current base becomes ONE
-governed update through the ordinary writer leaf (``update_record``, a Planning
-``triage``, or ``revise_collection`` for a manifest), recorded as a ``view_edit``
-transition by ``owner:view-edit``. Everything else is a held view correction, keyed so
+pass reads every item, manifest and log view at startup and every 60 s, with a
+stat-identity fast path, outside the store's write transaction. A changed view settles
+first: it acts once its bytes stay the same for 2 s, and holds a parse or validation
+failure only once the view stays invalid for 10 s, so a typing storm leaves no hold.
+Classification runs the stamp rules first, then the §6 rows. A valid edit at the current
+base becomes ONE governed update through the ordinary writer leaf (``update_record``, a
+Planning ``triage``, or ``revise_collection`` for a manifest), recorded as a ``view_edit``
+transition by ``owner:view-edit``. A log view is classified block by block: each edited
+block is one such update of its row. Everything else is a held view correction, keyed so
 that a repeat of the same observation adds nothing.
 
 Only the serving store thread runs a pass, as the writer-lease holder, and only while the
@@ -31,7 +32,7 @@ from pathlib import Path
 
 from .. import held_fs, memory_refs, planning, record_formats, records, vault
 from .. import structured_collections as collections
-from . import connection, views
+from . import connection, log_view, views
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ CONFLICT = "VIEW_CONFLICT"
 INVALID = "VIEW_INVALID"
 FOREIGN = "VIEW_FOREIGN"
 DELETED = "VIEW_DELETED"
+UNBOUND = "VIEW_UNBOUND"
 
 #: PROVISIONAL (operator choice O2, not yet ruled): an invalid item or manifest view keeps the
 #: owner's bytes at the view path, held in place, and re-renders only when the hold is
@@ -62,7 +64,28 @@ KEEP_INVALID_IN_PLACE = True
 
 #: The view kinds edit-back reads; the others are generated read-only output.
 # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-EDITABLE_KINDS = ("item", "manifest")
+EDITABLE_KINDS = ("item", "manifest", "log")
+#: The kinds whose invalid edit stays at its view path (O2). A log view shows every row, so a hold
+#: kept there would keep every later row out of it; a log view's holds take its bytes aside instead.
+# nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+IN_PLACE_KINDS = ("item", "manifest")
+
+# The issues that say why a log view or block is held and how the owner goes on (design §6, §16 A2).
+_UNSTAMPED = {
+    "code": "VIEW_UNSTAMPED", "reason": "the edited log view carries no view stamp, so it names no row version",
+    "remedy": "The log view shows the stored rows again, with a stamp in every block. Make the edit again in "
+              "that view and save it, then discard this correction.",
+}
+_FRAME_CHANGED = {
+    "code": "VIEW_FRAME_CHANGED", "reason": "the text outside the log's item section changed",
+    "remedy": "The store keeps the log's frame as it was imported or created and applies no edit to it yet. "
+              "Discard this correction to keep the stored frame.",
+}
+_BLOCK_TEXT = {
+    "code": "VIEW_BLOCK_TEXT", "reason": "a log block holds text that is none of its declared values",
+    "remedy": "The store keeps a block's declared values only. Copy the text where it belongs, then discard "
+              "this correction.",
+}
 
 _HEX12 = re.compile(r"[0-9a-f]{12}")
 #: The id shape of a view correction an earlier release held, before ids were UUID-shaped.
@@ -76,7 +99,12 @@ def legacy_held_id(reference) -> bool:
 
 def kept_in_place(code: str, kind: str) -> bool:
     """Whether a hold of ``code`` leaves the owner's bytes at an item or manifest view path."""
-    return KEEP_INVALID_IN_PLACE and code == INVALID and kind in EDITABLE_KINDS
+    return KEEP_INVALID_IN_PLACE and code == INVALID and kind in IN_PLACE_KINDS
+
+
+def whole_log_candidate() -> dict:
+    """What a hold of a whole log view would change: every row the log shows (``governance.held_targets``)."""
+    return {"action": "view-edit", "item_key": None, "view": "log"}
 
 
 def held_id(path: str, *, base: int | None = None, raw: bytes | None = None) -> str:
@@ -105,7 +133,11 @@ def why(path: str) -> str:
 
 @dataclass(frozen=True)
 class Classification:
-    """What one view's bytes are. ``code`` None is a valid change at the current base."""
+    """What one view's bytes are. ``code`` None is a valid change at the current base.
+
+    A log view with ``code`` None is classified block by block: ``blocks`` holds one
+    classification per block, each naming its item's view ``path`` and its bytes ``raw``.
+    """
 
     code: str | None
     stamp: dict | None = None
@@ -113,6 +145,9 @@ class Classification:
     current: int | None = None
     change: dict | None = None
     issues: tuple = ()
+    path: str | None = None
+    raw: bytes | None = None
+    blocks: tuple = ()
 
 
 def _refused(error: collections.CollectionError) -> tuple:
@@ -135,6 +170,9 @@ def current_version(conn, projection) -> int | None:
     """The row or manifest version a view of ``projection`` renders now."""
     if projection["kind"] == "item":
         row = conn.execute("SELECT row_version FROM items WHERE row_id=?", (projection["row_id"],)).fetchone()
+    elif projection["kind"] == "log":
+        row = conn.execute("SELECT generation FROM collections WHERE collection_id=?",
+                           (projection["collection_id"],)).fetchone()
     else:
         row = conn.execute("SELECT manifest_version FROM collections WHERE collection_id=?",
                            (projection["collection_id"],)).fetchone()
@@ -145,11 +183,14 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = (), edit_back: 
     """Classify a view's bytes: the stamp rules of §16 A2 first, then the §6 rows.
 
     The caller holds a read snapshot or the mutation. ``refusal`` carries a leaf refusal
-    edit-back met when it applied these bytes, which holds them as invalid. Without the
-    edit-back release (``edit_back`` False), a store validates as it did before edit-back:
-    without the Planning graph or the stored row, so such an edit waits on disk.
+    edit-back met when it applied these bytes, which holds them as invalid; for a log view,
+    one ``(block path, issues)`` pair per refused block. Without the edit-back release
+    (``edit_back`` False), a store validates as it did before edit-back: without the
+    Planning graph or the stored row, so such an edit waits on disk.
     """
     conn = writer.connection
+    if projection["kind"] == "log":
+        return _classify_log(writer, projection, raw, dict(refusal))
     try:
         text = raw.decode()
         frontmatter, body, _ = vault.parse_frontmatter(text, strict=True)
@@ -280,6 +321,130 @@ def _parsed_view(manifest_text: str, stamp) -> tuple:
     return frontmatter, body.strip()
 
 
+def _classify_log(writer, projection, raw, refusals) -> Classification:
+    """Classify a log view (design §6): its frame and stamps first, then block by block.
+
+    The whole view is held when it does not parse, its frame changed, a block carries another
+    store's stamp, or it shows stored rows and no block carries a stamp. Otherwise each block
+    is classified by the A2 stamp rules against its own row, and each stored row with no block
+    is a removed block.
+    """
+    conn = writer.connection
+    _, manifest, declared = writer._collection(projection["collection_id"])
+    generation, frame_json = conn.execute("SELECT generation,log_frame_json FROM collections WHERE collection_id=?",
+                                          (manifest.collection_id,)).fetchone()
+    try:
+        parsed = record_formats.MarkdownLogAdapter(writer.root, manifest).read_bytes(raw)
+        start, end = log_view.bounds(manifest, raw, parsed.records)
+    except collections.CollectionError as error:
+        return Classification(INVALID, None, generation, generation, issues=_refused(error))
+    except UnicodeError:
+        return Classification(INVALID, None, generation, generation,
+                              issues=({"code": "INVALID_RECORD_SOURCE", "reason": "markdown log is not UTF-8"},))
+    if parsed.diagnostics:
+        return Classification(INVALID, None, generation, generation, issues=tuple(
+            {"code": diagnostic.code, "reason": diagnostic.reason} for diagnostic in parsed.diagnostics))
+    frame = log_view.load(frame_json, manifest)
+    if raw[:start] != frame.text.encode() or raw[end:] != frame.suffix.encode():
+        return Classification(INVALID, None, generation, generation, issues=(_FRAME_CHANGED,))
+    blocks = [(record, raw[record.span.start:record.span.end]) for record in parsed.records]
+    stamps = [record_formats.read_log_block_stamp(block) for _, block in blocks]
+    identity = views.store_identity(conn)
+    lineage = {entry["instance_id"] for entry in
+               json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+    for stamp in stamps:
+        if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+            return Classification(FOREIGN, stamp, stamp["v"])
+    stored = {row["item_key"]: row for row in log_view.rows(conn, manifest)}
+    if all(stamp is None for stamp in stamps) and any(record.identity.key in stored for record, _ in blocks):
+        # Only the exact imported bytes may be unstamped, and those are the published digest.
+        return Classification(INVALID, None, generation, generation, issues=(_UNSTAMPED,))
+    found, rendered, bound = [], [], set()
+    for (record, block), stamp in zip(blocks, stamps, strict=True):
+        row = None if record.identity.inferred else stored.get(record.identity.key)
+        if row is None:
+            found.append(Classification(UNBOUND, stamp, path=projection["path"], raw=block))
+            continue
+        bound.add(row["item_key"])
+        if stamp is None:
+            found.append(Classification(INVALID, None, None, row["row_version"], path=row["view_path"], raw=block,
+                                        issues=(_UNSTAMPED,)))
+            continue
+        rendered.append([row["row_id"], min(stamp["v"], row["row_version"])])
+        found.append(_classify_block(writer, manifest, declared, frame, row, record, stamp, block,
+                                     refusals.get(row["view_path"])))
+    # The newest row version a block of this buffer was rendered at: the buffer is at least that recent.
+    newest = conn.execute(
+        "SELECT MAX(v.txn_id) FROM json_each(?) j JOIN item_versions v "
+        "ON v.row_id=json_extract(j.value,'$[0]') AND v.row_version=json_extract(j.value,'$[1]')",
+        (json.dumps(rendered),)).fetchone()[0]
+    for key, row in stored.items():
+        # A row committed after the newest render this buffer shows was never in it, so it was not removed.
+        if key in bound or (newest is not None and row["created_txn"] > newest):
+            continue
+        found.append(Classification(DELETED, None, row["row_version"], row["row_version"], path=row["view_path"],
+                                    raw=b""))
+    return Classification(None, None, generation, generation, blocks=tuple(found))
+
+
+def _block_lines(data: bytes) -> list[bytes]:
+    """A block's lines without trailing spaces or blank lines: what a formatting-only edit keeps."""
+    return [line.rstrip() for line in data.splitlines() if line.strip()]
+
+
+def _renders_block(manifest, frame, key, values, stamp, block) -> bool:
+    """Whether ``block`` is the store's render of ``values`` under ``stamp``, up to formatting."""
+    rendered = record_formats.render_markdown_log_item(manifest, values, key, frame.newline, view_stamp=stamp)
+    return _block_lines(rendered.encode()) == _block_lines(block)
+
+
+def _classify_block(writer, manifest, declared, frame, row, record, stamp, block, refused) -> Classification:
+    """One log block bound to a stored row, by the A2 stamp rules, then as one item (§6)."""
+    from . import typed_storage
+
+    conn, path, current = writer.connection, row["view_path"], row["row_version"]
+
+    def found(code, **fields):
+        return Classification(code, stamp, stamp["v"], current, path=path, raw=block, **fields)
+
+    if stamp["v"] < current:
+        # Edit-back applied this very block already, or the owner saved an untouched block of an older render.
+        digest = hashlib.sha256(block).hexdigest()
+        if conn.execute("SELECT 1 FROM txns WHERE request_id=?", (request_id(path, stamp["v"], digest),)).fetchone():
+            return found(SAME)
+        payload = conn.execute("SELECT payload_hash FROM item_versions WHERE row_id=? AND row_version=?",
+                               (row["row_id"], stamp["v"])).fetchone()
+        if payload is not None and payload[0][:12] == stamp["h"] and _renders_block(
+                manifest, frame, row["item_key"], typed_storage.version_values(conn, row["row_id"], stamp["v"])[0],
+                stamp, block):
+            return found(SAME)
+        return found(CONFLICT)
+    if stamp["v"] != current or stamp["h"] != row["payload_hash"][:12]:
+        # A stamp that was tampered with or copied never names the current base.
+        return found(INVALID)
+    try:
+        values = collections.normalize_item_values(manifest.schema, record.values)
+    except collections.CollectionError as error:
+        return found(INVALID, issues=_refused(error))
+    if values == row["values"]:
+        return found(SAME) if _renders_block(manifest, frame, row["item_key"], values, stamp, block) \
+            else found(INVALID, issues=(_BLOCK_TEXT,))
+    if refused:
+        return found(INVALID, issues=tuple(refused))
+    changes, deleted = _changes(row["values"], values)
+    final = {name: value for name, value in row["values"].items() if name not in deleted}
+    final.update(changes)
+    try:
+        # The same validation the leaf runs, with the stored row as its base.
+        writer._validate(manifest, declared, row["item_key"], final, before=row["values"], operation="update")
+    except collections.CollectionError as error:
+        return found(INVALID, issues=_refused(error))
+    return found(None, change={
+        "item_key": row["item_key"], "changes": changes, "delete_fields": deleted, "body": None,
+        "operation": "update", "expected_item_version": writer._version(row),
+    })
+
+
 def resumed_update(writer, held, manifest, before) -> dict:
     """The Records update a held ``VIEW_CONFLICT`` correction resumes: the owner's edit, rebased.
 
@@ -339,7 +504,7 @@ def _stat(version) -> str:
 
 
 def observe(writer, paths=None) -> list[Observation]:
-    """Read the item and manifest views a pass checks, outside the write transaction.
+    """Read the item, manifest and log views a pass checks, outside the write transaction.
 
     A view whose stat identity matches the one recorded with its current bytes costs one
     stat. ``paths`` limits the pass to the views still settling. A collection behind a
@@ -348,10 +513,10 @@ def observe(writer, paths=None) -> list[Observation]:
     with writer.read_snapshot():
         if paths is None:
             cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest') ORDER BY path")
+                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','log') ORDER BY path")
         else:
             cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest') AND path IN "
+                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','log') AND path IN "
                 "(SELECT value FROM json_each(?)) ORDER BY path", (json.dumps(sorted(paths)),))
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
@@ -465,7 +630,20 @@ class EditBack:
             return True
         with writer.read_snapshot():
             found = classify(writer, projection, observation.raw)
-        if found.code is None:
+        if found.code is None and projection["kind"] == "log":
+            # Each edited block is its own governed update; the pass then holds the other blocks.
+            refused = []
+            for block in found.blocks:
+                if block.code is None:
+                    try:
+                        mutate(writer.apply_view_edit, observation, block)
+                    except collections.CollectionError as error:
+                        refused.append((block.path, _refused(error)))
+            observation = Observation(observation.path, projection, observation.digest, observation.stat,
+                                      observation.raw, tuple(refused))
+            if refused or any(block.code == INVALID for block in found.blocks):
+                found = Classification(INVALID)
+        elif found.code is None:
             try:
                 mutate(writer.apply_view_edit, observation, found)
                 return True

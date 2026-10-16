@@ -577,3 +577,168 @@ def test_a_view_correction_held_under_an_earlier_id_shape_can_be_discarded(store
     store.connection.commit()
     store.discard_held(CID, held=legacy, why="an older hold")
     assert holds(store) == []
+
+
+# Log views: one view of every row, edited block by block (design §6, §16 A2).
+
+
+def test_an_edit_of_a_stale_log_block_is_held_as_a_conflict(store):
+    """Defect: a log block saved from a buffer older than its row reverts the agent's newer row, or
+    the owner's bytes for that block are lost when the log is rendered again."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    store.update_record(CID, item_key=KEY, changes={"details": [{"field": "reps", "value": "11"}]}, why="agent",
+                        expected_container_hash=receipt["after_container_hash"],
+                        expected_item_version=receipt["after_item_hash"])
+    store.reconcile_views()
+    edited = stale.replace(b"- reps | 10", b"- reps | 12")
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    [(_, code, raw)] = holds(store)
+    assert code == "VIEW_CONFLICT" and b"- reps | 12" in raw
+    assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0])["details"] == [
+        {"field": "reps", "value": "11"}]
+    assert txns(store, "view_edit") == [] and b"- reps | 11" in path.read_bytes()
+
+
+def test_an_imported_log_edited_before_its_first_render_is_held_and_says_how_to_resume(store, tmp_path):
+    """Defect: an edit of an imported log that the store never rendered, so it carries no stamps, is
+    read as an edit of the current rows, or the first render drops it without a word."""
+    from test_collection_store_views import X3_ID, imported_log
+
+    source = imported_log(store, tmp_path)
+    edited = source.read_bytes().replace(b"Overhead Press | blue short | 12", b"Overhead Press | blue short | 13")
+    source.write_bytes(edited)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    [(_, code, raw)] = holds(store)
+    assert (code, raw) == ("VIEW_INVALID", edited)
+    [diagnostic] = json.loads(store.connection.execute("SELECT diagnostics_json FROM held_candidates").fetchone()[0])
+    assert [issue["code"] for issue in diagnostic["issues"]] == ["VIEW_UNSTAMPED"]
+    assert diagnostic["issues"][0]["remedy"]
+    assert txns(store, "view_edit") == []
+    assert b"exomem-view" in source.read_bytes()
+    assert store.connection.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (X3_ID,)).fetchone()[0] > 0
+
+
+@pytest.mark.parametrize("stamped", ["foreign", "tampered"])
+def test_a_log_blocks_foreign_or_tampered_stamp_is_held(store, stamped):
+    """Defect: a log block copied from another store's view, or one whose stamp names another
+    payload, is applied as the owner's edit of the current row."""
+    from test_collection_store_writer import log_manifest_text
+
+    from exomem.collection_store import connection
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    instance = store.connection.execute("SELECT value FROM store_meta WHERE key='instance_id'").fetchone()[0]
+    payload = store.connection.execute("SELECT payload_hash FROM items").fetchone()[0]
+    tampered = (f"i={instance}", "i=00000000-0000-4000-8000-000000000001") if stamped == "foreign" \
+        else (f"h={payload[:12]}", "h=000000000000")
+    edited = rendered.replace(b"- reps | 10", b"- reps | 12").replace(*(part.encode() for part in tampered))
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    [(_, code, raw)] = holds(store)
+    assert txns(store, "view_edit") == []
+    if stamped == "foreign":
+        assert (code, raw) == ("VIEW_FOREIGN", edited)
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_DIVERGED"):
+            store.append_record(CID, item={"title": "Two", "details": []}, why="capture")
+    else:
+        assert code == "VIEW_INVALID" and b"- reps | 12" in raw and b"h=000000000000" in raw
+        assert b"- reps | 10" in path.read_bytes()
+
+
+X3 = "Knowledge Base/Records/Health/X3/_collection.md"
+X3_LOG = "Knowledge Base/Records/Health/X3/Training Log.md"
+
+
+@pytest.fixture
+def served_log(env, capsys, monkeypatch):
+    """A migrated vault whose X3 log has a BOM, CRLF lines and a section after its own, served."""
+    from record_fixtures import copy_x3_fixture
+    from test_collection_store_migration import migrate, stop_writer
+
+    from exomem.init import init_vault
+
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 0.3)
+    root = env
+    init_vault(root)
+    copy_x3_fixture(root)
+    log = root / X3_LOG
+    log.write_bytes(b"\xef\xbb\xbf" + log.read_bytes().replace(b"\n", b"\r\n"))
+    stop_writer()
+    assert migrate(root, "apply") == 0
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {VIEWS})
+    capsys.readouterr()
+    vault = Served(root)
+    vault.start()
+    try:
+        yield vault
+    finally:
+        if vault.service is not None:
+            vault.stop()
+
+
+def log_state(root):
+    return store_rows(root, "SELECT state FROM projection_state WHERE path=?", (X3_LOG,))
+
+
+def test_a_served_log_view_is_exports_render_and_takes_one_edited_block_as_one_update(served_log):
+    """Defect: the projector and the export render a log by two rules that disagree, so the view
+    the owner edits is not the file an export writes back; or a saved log view is applied as
+    anything but one governed update per edited block, or a block the owner removed is dropped."""
+    from contextlib import closing
+
+    from test_collection_store_views import SESSION, SESSION_HEADING
+
+    from exomem import record_formats
+    from exomem.collection_store import connection, export
+
+    root = served_log.root
+    owner(root, "record_memory", action="append", collection=X3, item=SESSION, why="a store-mode session")
+    until(lambda: log_state(root) == [("current",)])
+    view = (root / X3_LOG).read_bytes()
+    with closing(connection.open_reader(connection.store_path(root))) as conn:
+        text, frame = conn.execute(
+            "SELECT m.manifest_text,c.log_frame_json FROM collections c JOIN collection_manifests m "
+            "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version").fetchone()
+        manifest = collections.parse_manifest_bytes(root, X3, text.encode())
+        [(_, exported)] = export._render_log(root, conn, manifest, manifest.collection_id, frame)
+    # The export writes no stamps, because file mode has no store to name.
+    unstamped = b"".join(line for line in view.splitlines(keepends=True)
+                         if record_formats.read_log_block_stamp(line) is None)
+    assert unstamped == exported and view.startswith(b"\xef\xbb\xbf") and SESSION_HEADING in view
+    blocks = view.split(b"### ")
+    removed = next(block for block in blocks if block.startswith("2024-10-13 · Pull".encode()))
+    edited = view.replace(b"Overhead Press | blue short | 12", b"Overhead Press | blue short | 13")
+    (root / X3_LOG).write_bytes(edited.replace(b"### " + removed, b""))
+    until(lambda: store_rows(root, "SELECT code FROM held_candidates") == [("VIEW_DELETED",)])
+    assert store_rows(root, "SELECT operation,actor FROM txns WHERE operation='view_edit'") == [
+        ("view_edit", "owner:view-edit")]
+    until(lambda: log_state(root) == [("current",)] and b"### " + removed in (root / X3_LOG).read_bytes())
+    assert b"Overhead Press | blue short | 13" in (root / X3_LOG).read_bytes()
+
+
+def test_stopping_the_service_installs_its_pending_log_view(served_log, monkeypatch):
+    """Defect: a stop or a lease handoff leaves a committed append's log view pending, so the vault
+    file stays behind the store until another holder starts."""
+    from test_collection_store_views import SESSION, SESSION_HEADING
+
+    from exomem.collection_store import runtime
+
+    root = served_log.root
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", lambda self: 3600.0)  # the projector stays idle
+    owner(root, "record_memory", action="append", collection=X3, item=SESSION, why="a store-mode session")
+    assert log_state(root) == [("pending",)]
+    served_log.stop()
+    assert SESSION_HEADING in (root / X3_LOG).read_bytes()

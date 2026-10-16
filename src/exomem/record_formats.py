@@ -734,6 +734,45 @@ def validate_storage_contract(manifest: collections.CollectionManifest) -> None:
     _child_grammar(descriptor.get("child_rows"), manifest.schema)
 
 
+#: The keys of a view stamp, in the order a log block's stamp comment writes them (design §16 A2).
+_LOG_STAMP_KEYS = ("s", "i", "v", "h")  # nosemgrep: ep-word-set -- the stamp's fixed keys.
+# The stamp comment is this module's own fixed format; the pattern checks its shape only.
+_LOG_STAMP = re.compile(
+    rb"<!-- exomem-view s=([0-9a-fA-F-]{36}) i=([0-9a-fA-F-]{36}) v=([1-9][0-9]{0,18}) h=([0-9a-f]{12}) -->"
+)
+
+
+def _log_block_stamp_line(view_stamp: Mapping[str, str | int]) -> str:
+    return "<!-- exomem-view " + " ".join(f"{key}={view_stamp[key]}" for key in _LOG_STAMP_KEYS) + " -->"
+
+
+def read_log_block_stamp(data: bytes) -> dict[str, str | int] | None:
+    """The view stamp that a log block's bytes carry, or None (design §16 A2).
+
+    It reads the one stamp comment line outside the block's fences, as
+    ``render_markdown_log_item`` writes it. A block with no stamp line, more than one, or a
+    malformed one carries none.
+    """
+    found: list[dict[str, str | int]] = []
+    fence: tuple[bytes, int] | None = None
+    for raw in data.splitlines(keepends=True):
+        if fence is not None:
+            if _closes_fence(raw, fence):
+                fence = None
+            continue
+        if (opened := _opens_fence(raw)) is not None:
+            fence = opened
+            continue
+        if not raw.strip().startswith(b"<!-- exomem-view "):
+            continue
+        match = _LOG_STAMP.fullmatch(raw.strip())
+        identities = [memory_refs.normalize_id(match.group(index).decode("ascii")) for index in (1, 2)] if match else []
+        if match is None or None in identities:
+            return None
+        found.append({"s": identities[0], "i": identities[1], "v": int(match.group(3)), "h": match.group(4).decode()})
+    return found[0] if len(found) == 1 else None
+
+
 def render_markdown_log_item(
     manifest: collections.CollectionManifest,
     values: Mapping[str, Any],
@@ -826,11 +865,7 @@ def render_markdown_log_item(
     lines = [
         "#" * grammar.level + " " + title,
         f"<!-- exomem-record-id: {marker} -->",
-        *(
-            ["<!-- exomem-view " + " ".join(f"{key}={view_stamp[key]}" for key in ("s", "i", "v", "h")) + " -->"]
-            if view_stamp is not None
-            else []
-        ),
+        *([_log_block_stamp_line(view_stamp)] if view_stamp is not None else []),
         *(
             [f"<!-- exomem-record-audit: {audit_correlation} -->"]
             if audit_correlation is not None
