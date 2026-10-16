@@ -476,6 +476,24 @@ def test_a_write_from_outside_the_owner_boundary_before_a_resume_reaches_the_sto
         service.stop()
 
 
+def test_a_resume_whose_marker_names_another_store_refuses_before_the_fence_cut(env, capsys, tmp_path):
+    """A resumed cutover that cuts the first fence to its store before it finds that the vault's
+    marker names another store, which binds every writer to a store it can never admit."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-fence")
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        target = authority.pending_create(reader)["target_marker"]
+    published = authority.parse_marker(root, target)["store_id"]
+    other = target.replace(published, "0b5c8a3e-6d1f-4e2a-9c7b-3f4e5d6a7b8c").encode()
+    authority.marker_path(root).parent.mkdir(parents=True, exist_ok=True)
+    authority.marker_path(root).write_bytes(other)
+    capsys.readouterr()
+    assert migrate(root, "apply") == 1
+    assert printed(capsys)["status"] == "conflict"
+    assert (fence().enrolled, fence().generation) == (False, 0)
+    assert authority.read_marker(root) == other
+
+
 def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
     """Carrying a prepared import forward although its collection changed since, which loses
     the write from the store that becomes canonical."""

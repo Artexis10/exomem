@@ -967,10 +967,12 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
-            with session.writer(preparation_token) as writer:
-                recovered = _recover_create(writer)
-                if recovered["status"] == "conflict":
-                    return recovered
+        # A first cut binds every writer to this store, so a marker that already names another
+        # store must refuse before the cut, whoever prepared the store.
+        with session.writer(preparation_token) as writer:
+            recovered = _recover_create(writer)
+            if recovered["status"] == "conflict":
+                return recovered
         session.require(preparation_token)
     fence = _store_fence(fence_client, fence, target, initial=intent["expected_marker"] is None)
     lease = manager.ensure_writer()
