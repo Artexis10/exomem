@@ -35,8 +35,12 @@ Each row SHALL be validated as a single append is validated (schema, representab
 - **THEN** the first call reports every row `inserted` with `identity: "generated"`, the second inserts them again, and no row is ever `updated` or `unchanged`
 
 #### Scenario: Oversized batch refuses
-- **WHEN** a request carries 51 rows, or would raise the collection past its item ceiling
+- **WHEN** a request carries 51 rows
 - **THEN** it refuses whole with the typed `BULK_UPSERT_TOO_MANY_ROWS` error, whose message and details say to split the import into batches of at most the cap chained by the returned `after_container_hash` (`rows`, `maximum`, `batches_needed`, `chain_with`), and no file, manifest change or audit entry is written
+
+#### Scenario: A batch past the item ceiling refuses
+- **WHEN** a request of at most 50 rows would raise the collection's item count past `COLLECTION_ITEM_LIMIT`
+- **THEN** it refuses whole with `COLLECTION_ITEM_LIMIT` naming the items held, the items to add and the maximum, and nothing is written
 
 #### Scenario: A batch that would cross the chain-depth budget refuses up front
 - **WHEN** the collection's audit chain already holds 2040 events and a batch would write 20 items

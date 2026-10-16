@@ -24,7 +24,7 @@
 
 - [x] 5.1 Measure 24 rows and 500 rows against 24 and 500 serial appends on a synthetic collection; record before/after in design.md and the PR body.
 - [x] 5.2 Gates: privacy gate, `ruff --select F`, `openspec validate --all --strict`, `generate-capabilities.py --check`, scoped pytest.
-- [ ] 5.3 Merge, then synchronize the delta into `records` and archive the change (orchestrator).
+- [x] 5.3 Merge, then synchronize the delta into `records` and archive the change. Evidence: shipped in #1477 (commit 7fd5429aa, an ancestor of main) with `tests/test_records_bulk_upsert.py`; the delta was re-read against `src/exomem/records.py` and one scenario corrected (the item-ceiling refusal is `COLLECTION_ITEM_LIMIT`, not `BULK_UPSERT_TOO_MANY_ROWS`); archived through `openspec archive`.
 
 ## 6. Cap the lease hold
 
