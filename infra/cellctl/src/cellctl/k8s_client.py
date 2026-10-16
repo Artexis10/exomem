@@ -91,16 +91,22 @@ async def _read_metrics(targets: dict[str, str], port: int, scraped: dict[str, s
                 async with client.stream("GET", f"http://{address}:{port}/metrics") as response:
                     response.raise_for_status()
                     body = b""
-                    async for chunk in response.aiter_bytes():
+                    # Raw bytes, so the cap counts what the pod sent: a decoded
+                    # stream would inflate a small compressed body before the check.
+                    async for chunk in response.aiter_raw():
                         body += chunk
                         if len(body) > METRICS_MAX_BYTES:
                             raise ValueError("metrics page too large")
             scraped[node] = body.decode("utf-8")
-        except (httpx.HTTPError, ValueError, TimeoutError):
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
             pass
 
     # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
-    async with httpx.AsyncClient(trust_env=False, timeout=None) as client:
+    # Accept-Encoding identity: the exporters then send plain text, and a page that is
+    # compressed anyway fails to decode or parse and reads unreadable.
+    async with httpx.AsyncClient(
+        trust_env=False, timeout=None, headers={"Accept-Encoding": "identity"}
+    ) as client:
         await asyncio.gather(*(read(client, node, address) for node, address in targets.items()))
 
 
