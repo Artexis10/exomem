@@ -19,6 +19,7 @@ from test_observe_memory import (
 )
 
 from exomem import (
+    append_to_file,
     commands,
     compiled_history,
     semantic_index,
@@ -154,6 +155,17 @@ def test_exact_transition_replay_reuses_the_same_retained_revision(tmp_path: Pat
     )
     assert result.mutated is False and result.lifecycle_state == "committed_replay"
     assert compiled_history.read(tmp_path, path=PAGE)["returned"] == 1
+
+
+def test_successive_appends_to_a_crlf_page_chain_their_history(tmp_path: Path, owner) -> None:
+    page = _write_page(
+        tmp_path, source=_page_source("- [rule] First wording. ^stable"), newline="\r\n"
+    )
+    for appendix in ("First appendix.", "Second appendix."):
+        append_to_file.append_to_file(tmp_path, path=PAGE, content=f"\n{appendix}\n")
+    newer, older = compiled_history.read(tmp_path, path=PAGE)["revisions"]
+    assert newer["before_hash"] == older["after_hash"]
+    assert newer["after_hash"] == _page_hash(page)
 
 
 def test_revisions_do_not_rotate_at_registry_history_limit_and_paginate(
@@ -333,9 +345,10 @@ def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
     history = compiled_history.plan_entry(
         tmp_path,
         preflight=SimpleNamespace(
-            path=PAGE, before=SimpleNamespace(document=before_state.document, source_hash=vault.content_hash(source)),
+            path=PAGE, before=SimpleNamespace(document=before_state.document),
             after=SimpleNamespace(document=after_state.document, source_hash=vault.content_hash(after)),
-            before_source=source, after_source=after, operation="edit", committed_replay=False,
+            before_source=source, exact_before_source=source, before_hash=vault.content_hash(source),
+            after_source=after, operation="edit", committed_replay=False,
         ),
         token={"history_at": "2025-01-01T00:00:00Z", "transition_id": "a" * 64},
         reason="The source clarified the interpretation.",
