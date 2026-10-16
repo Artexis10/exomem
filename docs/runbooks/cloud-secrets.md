@@ -255,7 +255,12 @@ Escrowing it activates nothing. Activate v1 in a reviewed commit that adds
 `"ansible.hosted-node.k3s-agent-token.active": "v1"` to
 `infra/contracts/active-ansible-selection-v1.json`. From then on,
 `active_ansible_vars.py hosted-node` passes it to every wrapper invocation
-below (see `cloud-node-pool.md`).
+below (see `cloud-node-pool.md`). The first run with it restarts the K3s
+server with a new agent token. Save the bootstrap data again straight after
+that run, as in steps 4 to 6 of
+[Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token), with
+step 6's first-selection credentials. Otherwise the server's next start stops
+with `cred/passwd newer than datastore`.
 
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
@@ -272,8 +277,8 @@ refuses when that file names a destination the secret matrix does not declare,
 or a version whose SOPS file is missing. Escrowing a new version activates
 nothing; only a reviewed commit to the selection file does. Rotate a token only
 through its own procedure, which owns that commit. The agent token's procedure
-is pending (OpenSpec `move-cloud-cells-to-local-storage` task 5.7). Run the
-wrapper with the selected versions:
+is [Rotate the agent token](cloud-dedicated-host.md#rotate-the-agent-token). Run
+the wrapper with the selected versions:
 
 ```bash
 export EXOMEM_SECRET_TMPFS_DIR="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"

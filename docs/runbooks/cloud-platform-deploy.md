@@ -111,6 +111,15 @@ link and Tang to the inventory, so a run over part of the fleet would remove
 the missing nodes' rules on every node it reaches. The shared control database
 is not in this inventory; substrate-infra converges it.
 
+A routine gate run restarts no K3s node for the flannel MTU: the k3s role
+leaves `k3s_flannel_mtu` unset, and then installs no flannel configuration. Its
+rollout is the reviewed commit that sets the value, merged and run in an
+operator window
+([cloud-dedicated-host.md](cloud-dedicated-host.md#roll-out-the-flannel-mtu)).
+Once the value is set, a gate run whose nodes already run at it changes
+nothing. Do not use the gate for the rollout itself: its output hides the
+MTU check's message.
+
 ```bash
 set -euo pipefail
 umask 077
@@ -147,10 +156,12 @@ their peers from the inventory's groups, not from the hosts a run reaches.
   server excluded, that read needs the excluded node, and the run stops with
   nothing removed.
 - With any WireGuard host in the inventory, every node's private-link check
-  needs every peer's public key, which only a run on that peer reads. The run
-  stops in the same way.
-- Without a WireGuard host, a gate run with `--limit` set to the server needs
-  no agent to be reachable. It is unproven until OpenSpec
+  needs each WireGuard host's public key. A run on that host reads it, or the
+  host list records it as `wireguard_public_key`
+  ([cloud-dedicated-host.md](cloud-dedicated-host.md#add-the-host)). A key that
+  is neither stops the run in the same way.
+- A gate run with `--limit` set to the server needs no agent to be reachable,
+  once every WireGuard host's key is recorded. It is unproven until OpenSpec
   `move-cloud-cells-to-local-storage` task 6.6 runs it.
 - A node that stays down for longer leaves the inventory through
   [cloud-node-pool.md](cloud-node-pool.md#remove-a-node) or
