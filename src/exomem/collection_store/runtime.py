@@ -321,6 +321,17 @@ class CollectionStoreRuntime:
             self._acquisition = record
             self._admitted_token = None
 
+    def rebind(self, identity):
+        """Serve ``identity``, the ``(store_id, instance_id)`` an owner step made live under the boundary.
+
+        The step replaced the live store or continued it as a new tenure, which the
+        identity check of ``sample_head`` would otherwise refuse, and a pending takeover
+        verdict described the store before it.
+        """
+        with self.manager._report_lock:
+            self._identity = identity
+            self._takeover = None
+
     def record_admission(self, token):
         self._admitted_token = token
         self._takeover = None
@@ -426,7 +437,9 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_VAULT_MISMATCH", "the live store placement changed"
             )
-        with closing(connection.open_reader(self.path)) as reader:
+        # A store an earlier release wrote keeps its head where this reads it; its writer
+        # migrates the schema once this head lets the lease manager acquire for the store.
+        with closing(connection.open_reader(self.path, pending_schema=True)) as reader:
             reader.execute("BEGIN")
             metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
             head = CollectionStoreHead(
@@ -721,11 +734,14 @@ def projection_route(vault_root, path):
     raw = authority.read_marker(root)
     if raw is None:
         return None
-    root = root.resolve()
-    # Bind marker bytes to the canonical root, never to the earlier path spelling.
-    raw = authority.read_marker(root)
-    if raw is None:
-        return None
+    canonical = root.resolve()
+    if canonical != root:
+        # Bind marker bytes to the canonical root, never to the earlier path spelling.
+        # A root that is already canonical was just read there: recall routes every hit.
+        root = canonical
+        raw = authority.read_marker(root)
+        if raw is None:
+            return None
     marker = authority.parse_marker(root, raw)
     entry = authority.owned_entry(root, marker, path)
     if entry is None:
@@ -1093,7 +1109,8 @@ class StoreServer:
                 return IMPORT_IDLE_SECONDS
             if intent["kind"] != authority.CREATE:
                 # Only the owner's `exomem collections migrate --apply` finishes a migration: it
-                # first rechecks each collection's files against the basis it imported.
+                # first rechecks each collection's files against the basis it imported. Only the
+                # owner's `exomem collections export` finishes an export, with the service stopped.
                 return IMPORT_IDLE_SECONDS
             with principal.library_scope():
                 result = admission.resume_local(self.session, self.manager, fence_client=self.session.fence_client)

@@ -1025,8 +1025,15 @@ class ExistingPreflight:
     applicability: Literal["full", "structural", "not_semantic"]
     operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"]
     path: str
+    # The logical (LF) before image that semantic evaluation reads.
     before_source: str
+    # The before image as read. The writer hashes the after image as written, so
+    # the token, lifecycle record and history hash this one to keep one basis.
+    exact_before_source: str
     after_source: str
+    # `before.source_hash` stays logical for grandfathering: `build_census` reads
+    # with universal newlines, and the corpus census takes this LF state through
+    # the `with_candidate` repair in preflight. Bind transitions to `before_hash`.
     before: semantic_contract.SemanticPageState
     after: semantic_contract.SemanticPageState
     grandfathered: bool
@@ -1052,6 +1059,10 @@ class ExistingPreflight:
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     unit_target_guards: tuple[vault.PathGuard, ...] = ()
 
+    @property
+    def before_hash(self) -> str:
+        return vault.content_hash(self.exact_before_source)
+
     def as_dict(self) -> dict[str, Any]:
         value = {
             "applicability": self.applicability,
@@ -1061,7 +1072,7 @@ class ExistingPreflight:
             "transition_token": self.transition_token,
             "transition_hash": self.transition_hash,
             "relation_review_hash": self.transition_hash,
-            "before_hash": self.before.source_hash,
+            "before_hash": self.before_hash,
             "after_hash": self.after.source_hash,
             "mutated": self.mutated,
             "contract_result": _bounded_semantic_feedback(self.contract_result),
@@ -1919,18 +1930,17 @@ def _preflight_existing(
     path = vault.canonical_vault_rel(root, path)
     entry_generation = _entry_commit_generation(root)
     with mutation_timing_span(timings, "preflight.read_guarded"):
-        before_source, primary_guard = vault.read_guarded_text(root, root / path)
-    raw_before_hash = vault.content_hash(before_source)
-    # The parser/corpus and public content-hash contract normalize platform
-    # newlines. Keep the raw-byte PathGuard, but evaluate the same logical text
-    # on Windows so CRLF alone never looks like concurrent semantic drift.
-    before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
+        exact_before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    raw_before_hash = vault.content_hash(exact_before_source)
+    # Evaluate the logical text so CRLF alone never looks like semantic drift.
+    # The PathGuard and the transition token bind the exact bytes instead.
+    before_source = exact_before_source.replace("\r\n", "\n").replace("\r", "\n")
     after_source = _place_origin_source(path, after_source, before_source=before_source)
     origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
-    before_hash = vault.content_hash(before_source)
+    logical_before_hash = vault.content_hash(before_source)
     if expected_before_hash is not None and expected_before_hash not in {
         raw_before_hash,
-        before_hash,
+        logical_before_hash,
     }:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
     # Tier-2 overwrite is the deliberate break-glass route for repairing a
@@ -1995,7 +2005,8 @@ def _preflight_existing(
             # in the short window before its freshness event is published.
             # Repair the exact evaluated page from those authoritative bytes so
             # a lagging process cache never turns a valid write into a
-            # corpus-state refusal.
+            # corpus-state refusal. On a CRLF page it also gives the activation
+            # census the LF hash that grandfathering matches.
             before_corpus = before_corpus.with_candidate(before)
         after = semantic_contract.build_page_state(
             root,
@@ -2061,7 +2072,7 @@ def _preflight_existing(
     token = transition_token or _existing_transition_token(
         operation=operation,
         path=path,
-        before_hash=before.source_hash,
+        before_hash=raw_before_hash,
         after_hash=after.source_hash,
         stamp=stamp,
     )
@@ -2070,14 +2081,14 @@ def _preflight_existing(
         transition_token is not None
         and token_value["operation"] == operation
         and token_value["path"] == path
-        and token_value["after_hash"] == before.source_hash
+        and token_value["after_hash"] == raw_before_hash
         and token_value["after_hash"] == after.source_hash
     )
     if (
         token_value["operation"] != operation
         or token_value["path"] != path
         or token_value["after_hash"] != after.source_hash
-        or (token_value["before_hash"] != before.source_hash and not committed_replay)
+        or (token_value["before_hash"] != raw_before_hash and not committed_replay)
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -2169,6 +2180,7 @@ def _preflight_existing(
         operation,
         path,
         before_source,
+        exact_before_source,
         after_source,
         before,
         after,
@@ -2355,7 +2367,7 @@ def _commit_existing_locked(
                 operation=preflight.operation,
                 page_identity=preflight.after.identity,
                 before_path=preflight.before.path,
-                before_source_hash=preflight.before.source_hash,
+                before_source_hash=preflight.before_hash,
                 after_path=preflight.after.path,
                 after_source_hash=preflight.after.source_hash,
                 after_fingerprint=preflight.after.review_fingerprint,
@@ -2365,7 +2377,7 @@ def _commit_existing_locked(
             )
             current = relation_review.LifecyclePrimaryBinding(
                 preflight.before.path,
-                preflight.before.source_hash,
+                preflight.before_hash,
                 preflight.before.review_fingerprint,
             )
             lifecycle = relation_review.plan_lifecycle_transition(

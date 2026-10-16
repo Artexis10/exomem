@@ -197,7 +197,7 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         if (
             prepared.before_path != manifest.primary_path or prepared.after_path != manifest.primary_path
             or manifest.primary_before_source is None
-            or prepared.before_source_hash != _hash(manifest.primary_before_source.replace("\r\n", "\n").replace("\r", "\n"))
+            or prepared.before_source_hash != _hash(manifest.primary_before_source)
             or prepared.after_source_hash != manifest.primary_after_sha256
             or prepared.after_fingerprint != fingerprint
         ):

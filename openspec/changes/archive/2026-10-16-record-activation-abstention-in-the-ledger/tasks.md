@@ -20,5 +20,5 @@
 ## 4. Integrated delivery
 
 - [x] 4.1 Run scoped ledger, wrapper, egress and reader workflows plus privacy, strict OpenSpec and required static gates; retain exact input hashes.
-- [ ] 4.2 Complete independent exact-content review and integrated CI; deliver the producer and readers through the ordinary release.
-- [ ] 4.3 Synchronize the call-ledger delta and archive through OpenSpec after delivery evidence; preserve later requirements and validate strictly.
+- [x] 4.2 Complete independent exact-content review and integrated CI; deliver the producer and readers through the ordinary release. Evidence: #1694 merged (f80864884) with `required CI gate` passing; first released in v0.116.0; code in `src/exomem/activation_result.py` and `src/exomem/server.py`, tests in `tests/test_activate_context_surface.py` and `tests/test_durable_closure_ledger.py`.
+- [x] 4.3 Synchronize the call-ledger delta and archive through OpenSpec after delivery evidence; preserve later requirements and validate strictly. Evidence: delta re-read against current code and the canonical requirement (no later edits to it); archived through `openspec archive`.

@@ -7451,6 +7451,11 @@ def document_newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
 
+def with_newline(text: str, newline: str) -> str:
+    """Rewrite `text`'s LF and CRLF line endings to `newline`."""
+    return text.replace("\r\n", "\n").replace("\n", newline)
+
+
 def render_frontmatter_document(
     fm_text: str, body: str, *, newline: str = "\n", blank_line: bool = False
 ) -> str:
@@ -7465,7 +7470,7 @@ def render_frontmatter_document(
     `body` is passed through byte-for-byte; only the delimiters and the
     frontmatter block, which callers build themselves, are normalized.
     """
-    block = fm_text.replace("\r\n", "\n").replace("\n", newline)
+    block = with_newline(fm_text, newline)
     lead = newline if blank_line else ""
     return f"---{newline}{block}{newline}---{newline}{lead}{body}"
 
@@ -7508,7 +7513,7 @@ def prepend_log_entry(
         title = title[len(kb_prefix()) :]
     newline = document_newline(log_text)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
-    new_entry = new_entry.replace("\r\n", "\n").replace("\n", newline)
+    new_entry = with_newline(new_entry, newline)
     if new_entry in log_text:
         return log_text
     # Reuse the same separator the indexes module emits.

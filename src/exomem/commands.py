@@ -10131,6 +10131,7 @@ def op_maintain_memory(
         "tag-variants",
         "collections-store",
         "collections-store-adopt-local",
+        "collections-store-export",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -10425,10 +10426,9 @@ def op_maintain_memory(
         from .collection_store import preflight as store_preflight
 
         return store_preflight.preflight(vault_root)
-    if mode == "collections-store-adopt-local":
-        from .collection_store import admission as store_admission
-
-        if (
+    def store_preview_arguments_invalid() -> bool:
+        # The preview-first store modes take no audit arguments; an apply needs true, plan_id and why.
+        return (
             categories is not None
             or dry_run is not None
             or rebuild_embeddings
@@ -10438,7 +10438,12 @@ def op_maintain_memory(
             or source_snapshot is not None
             or (apply is None and (plan_id is not None or why is not None))
             or (apply is not None and (apply is not True or plan_id is None or why is None))
-        ):
+        )
+
+    if mode == "collections-store-adopt-local":
+        from .collection_store import admission as store_admission
+
+        if store_preview_arguments_invalid():
             raise ValueError(
                 "INVALID_ARGUMENTS: collections-store-adopt-local previews without arguments; "
                 "apply needs true, plan_id and why"
@@ -10450,6 +10455,16 @@ def op_maintain_memory(
             return preview
         return store_admission.adopt_local_route(vault_root, why=why, preview_id=plan_id,
                                                  acknowledge_skipped=acknowledge_skipped is True)
+    if mode == "collections-store-export":
+        from .collection_store import admission as store_admission
+
+        if store_preview_arguments_invalid():
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-store-export previews without arguments; "
+                "apply needs true, plan_id and why, and runs only offline"
+            )
+        # The service answering this refuses an apply; the offline CLI applies it.
+        return store_admission.export_route(vault_root, plan_id=plan_id, why=why)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10495,7 +10510,8 @@ def op_maintain_memory(
         return _carrying_batch_advisories(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, tag-variants, or collections-store-adopt-local"
+        "backfill-ids, structured-files, curation, tag-variants, collections-store-adopt-local, "
+        "or collections-store-export"
     )
 
 
@@ -13333,13 +13349,10 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="read_media",
                 reason=(
-                    "Sampling video frames needs the same decoding "
-                    "dependencies the cloud image omits."
+                    "Sampling video frames needs video decoding, which the "
+                    "cloud image does not ship."
                 ),
-                lifted_when=(
-                    "a media-capable cloud image ships with the required "
-                    "decoding dependencies"
-                ),
+                lifted_when="the cloud image ships video decoding",
             ),
         )
     }

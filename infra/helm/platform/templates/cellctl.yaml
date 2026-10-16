@@ -204,6 +204,8 @@ spec:
               value: {{ .Values.cellctl.dedicatedCellIds | toJson | quote }}
             - name: CELLCTL_MEDIA_ENGINE_CELL_IDS
               value: {{ .Values.cellctl.mediaEngineCellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT
+              value: {{ .Values.cellctl.mediaEngineFleetDefault | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
               value: INFO
             - name: CELLCTL_HEARTBEAT_PATH
@@ -537,11 +539,26 @@ spec:
     # 4c. Only chart-selected cells may select their own reserved agent.
     # Absent placement permits stop/change/start transitions. A StatefulSet
     # uses the separately rendered PVC, never volumeClaimTemplates.
+    {{- if $local }}
+    # With local storage, a Job may also tolerate its node's cordon, and
+    # nothing else: a local volume's PV already pins its backup Job to the
+    # volume's node, and remove-agent.yml cordons that node before it moves
+    # the node's cells off (tasks 6.4, 7.3). A cell's own pod never may.
+    {{- end }}
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
         (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
           !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
           ((!has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector)) ||
+            {{- if $local }}
+            (request.resource.resource == 'jobs' && !has(variables.podSpec.nodeSelector) &&
+              has(variables.podSpec.tolerations) && variables.podSpec.tolerations.size() == 1 &&
+              variables.podSpec.tolerations[0].?key.orValue('') == 'node.kubernetes.io/unschedulable' &&
+              variables.podSpec.tolerations[0].?operator.orValue('') == 'Exists' &&
+              variables.podSpec.tolerations[0].?value.orValue('') == '' &&
+              variables.podSpec.tolerations[0].?effect.orValue('') == 'NoSchedule' &&
+              !has(variables.podSpec.tolerations[0].tolerationSeconds)) ||
+            {{- end }}
             (variables.namespaceName.substring(9) in {{ .Values.cellctl.dedicatedCellIds | toJson }} &&
               has(variables.podSpec.nodeSelector) && variables.podSpec.nodeSelector.size() == 1 &&
               'exomem.io/dedicated-cell' in variables.podSpec.nodeSelector &&
@@ -575,7 +592,7 @@ spec:
           !has(variables.podSpec.affinity) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may use only exact operator-selected dedicated or qualified shared placement, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
+      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-

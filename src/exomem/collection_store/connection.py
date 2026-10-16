@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -428,8 +428,15 @@ def open_writer(
         raise
 
 
-def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-    """Open an existing store read-only at the current schema version."""
+def open_reader(
+    path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS, pending_schema: bool = False,
+) -> sqlite3.Connection:
+    """Open an existing store read-only at the current schema version.
+
+    ``pending_schema`` also opens a store an earlier release wrote, before its writer
+    migrates it. Only a reader of what every schema version keeps may pass it: the
+    head in ``store_meta`` and ``txns``, which the writer needs before it can open.
+    """
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
@@ -451,7 +458,7 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
-        if found < schema.SCHEMA_VERSION:
+        if found < schema.SCHEMA_VERSION and not pending_schema:
             raise CollectionStoreError(
                 "COLLECTION_STORE_SCHEMA_PENDING",
                 "the collection store has not been migrated by its writer yet",
@@ -460,6 +467,12 @@ def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite
         conn.close()
         raise
     return conn
+
+
+def schema_pending(path: Path) -> bool:
+    """Whether the store an earlier release wrote still awaits its writer's migration."""
+    with closing(open_reader(path, pending_schema=True)) as reader:
+        return schema.schema_version(reader, ceiling=schema.SCHEMA_VERSION) < schema.SCHEMA_VERSION
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

@@ -9,9 +9,11 @@ test in test_hosted_k3s_agent_join.py.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -344,6 +346,10 @@ def test_inventory_generator_refuses_sensitive_agent_output(tmp_path: Path) -> N
 
 # --- Inventory: hosts Terraform does not create --------------------------------
 
+# Invented WireGuard public keys: 32 bytes counting up from 0, and from 32.
+_RECORDED_KEY = base64.b64encode(bytes(range(32))).decode()
+_OTHER_KEY = base64.b64encode(bytes(range(32, 64))).decode()
+
 _VSWITCH_OUTPUT = {
     "sensitive": False,
     "value": {
@@ -440,6 +446,18 @@ def test_inventory_generator_joins_hosts_terraform_does_not_create(tmp_path: Pat
     }
 
 
+def test_inventory_generator_carries_a_recorded_wireguard_key(tmp_path: Path) -> None:
+    # Task 6.6: a run limited to the server reads a WireGuard peer's key from
+    # the inventory. Under any other variable the role would not find it.
+    result = _generate_with_dedicated(
+        tmp_path, _dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wireguard_public_key=_RECORDED_KEY)
+    )
+    assert result.returncode == 0, result.stderr
+    hosted = json.loads((tmp_path / "inventory.json").read_text(encoding="utf-8"))["all"]["children"]["hosted_nodes"]
+    host = hosted["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]["exomem-agent-dx1"]
+    assert host["k3s_wireguard_public_key"] == _RECORDED_KEY
+
+
 def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) -> None:
     # An inventory that omits dedicated hosts makes site.yml retire their
     # WireGuard link, firewall rules and Tang access on every other node.
@@ -486,6 +504,20 @@ def test_inventory_generator_requires_the_dedicated_host_list(tmp_path: Path) ->
         (_dedicated("exomem-agent-dx1", "10.50.3.40", "vswitch"), "other than its gateway"),
         (_dedicated("exomem-agent-dx1", "10.50.2.1", "vswitch"), "other than its gateway"),
         (_dedicated("exomem-agent-dx1", "10.51.0.40", "ipsec"), "link must be wireguard or vswitch"),
+        # A recorded key is rendered into every peer's wg-quick file, which runs
+        # PreUp and PostUp lines as root.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    wireguard_public_key=_RECORDED_KEY + "\nPostUp = touch /tmp/owned"),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard",
+                    wireguard_public_key=base64.b64encode(bytes(31)).decode()),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        # Decodes, but is not the form wg prints, so the host's check never matches it.
+        (_dedicated("exomem-agent-dx1", "10.51.0.40", "wireguard", wireguard_public_key=_RECORDED_KEY[:-2] + "x="),
+         "dx1: wireguard_public_key must be one WireGuard public key"),
+        # Only a WireGuard host's key reaches its peers.
+        (_dedicated("exomem-agent-dx1", "10.50.2.41", "vswitch", wireguard_public_key=_RECORDED_KEY),
+         "dx1: wireguard_public_key needs link wireguard"),
     ],
 )
 def test_inventory_generator_refuses_malformed_dedicated_hosts(
@@ -628,6 +660,88 @@ def test_a_peer_cannot_inject_wireguard_configuration(
         assert result.returncode != 0 and refusal in result.stdout, result.stdout
 
 
+def _wireguard_block() -> list[dict]:
+    link = next(task for task in _yaml(K3S_ROLE / "tasks/private_link.yml")
+                if task["name"] == "Converge the WireGuard private link")
+    return link["block"]
+
+
+@pytest.mark.parametrize(
+    "recorded,outcome",
+    [
+        (_RECORDED_KEY, "passes"),
+        # A rotated or rebuilt host: its record would take a later --limit
+        # run's tunnel down, so the host prints its live key instead.
+        (_OTHER_KEY, "refused"),
+        # The first join: nothing recorded yet, so the run prints the key to record.
+        (None, "reported"),
+    ],
+)
+def test_a_wireguard_host_checks_the_key_its_inventory_records(
+    tmp_path: Path, recorded: str | None, outcome: str
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    host = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]["exomem-agent-dx1"]
+    if recorded is not None:
+        host["k3s_wireguard_public_key"] = recorded
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    checks = [task for task in _wireguard_block() if task["name"] in (
+        "Require the recorded WireGuard key to be this host's key",
+        "Report a WireGuard key to record in the host list",
+    )]
+    assert len(checks) == 2
+    play = tmp_path / "record.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-agent-dx1", "gather_facts": False,
+        # What the key helper printed on the host.
+        "vars": {"k3s_wireguard_pubkey": {"stdout": _RECORDED_KEY, "stderr": ""}},
+        "tasks": [{"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}}, *checks]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if outcome == "refused":
+        assert result.returncode != 0 and f"public key is {_RECORDED_KEY}" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (f"Record {_RECORDED_KEY}" in result.stdout) == (outcome == "reported"), result.stdout
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_a_run_limited_to_the_server_configures_a_recorded_wireguard_peer(tmp_path: Path, recorded: bool) -> None:
+    # Task 6.6: with --limit set to the server, no WireGuard host runs, so its
+    # key can only come from the inventory.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    groups = json.loads(json.dumps(_WITH_DEDICATED))
+    if recorded:
+        dedicated = groups["hosted_nodes"]["children"]["k3s_agents"]["children"]["dedicated_hosts"]["hosts"]
+        dedicated["exomem-agent-dx1"]["k3s_wireguard_public_key"] = _RECORDED_KEY
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    checks = [task for task in _wireguard_block() if task["name"] in (
+        "Require every WireGuard peer in this run or its key in the inventory",
+        "Refuse a WireGuard key that is not exactly one public key",
+    )]
+    assert len(checks) == 2
+    rendered = tmp_path / "wgexomem.conf"
+    play = tmp_path / "limited.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "hosted_nodes", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        *checks,
+        {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/wireguard.conf.j2"),
+                                       "dest": str(rendered), "mode": "0600"}},
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), "--limit", "exomem-alpha", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if recorded:
+        assert result.returncode == 0, result.stdout + result.stderr
+        peer = rendered.read_text(encoding="utf-8").split("[Peer]", 1)[1]
+        assert f"PublicKey = {_RECORDED_KEY}" in peer and "Endpoint = 203.0.113.40:51820" in peer
+    else:
+        assert result.returncode != 0 and "record each WireGuard host's" in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize(
     "free_extents,overrides,expected",
     [
@@ -699,6 +813,348 @@ def test_agent_presents_the_ca_pinned_secure_token_format() -> None:
     # Only the checksum leaves the server; never the certificate or a token file.
     assert "slurp" not in agent and "fetch" not in agent
     assert "/var/lib/rancher/k3s/server/agent-token" not in agent
+
+
+def test_the_pod_network_and_flannel_mtu_render_from_one_place(tmp_path: Path) -> None:
+    # Catches the server's cluster-cidr and flannel's Network drifting apart,
+    # which gives pods addresses flannel does not route, and a node whose
+    # config omits flannel-conf: it would run flannel at its interface's MTU
+    # and overflow a vSwitch.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    rendered = {name: tmp_path / name for name in ("flannel.json", "server.yaml", "agent.yaml")}
+    play = tmp_path / "render.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {
+            "k3s_cluster_cidr": "10.44.0.0/16", "k3s_flannel_mtu": 1380,
+            "k3s_server_token": "s" * 32, "k3s_agent_token": "a" * 32, "k3s_agent_join_token": "test-token",
+            "private_node_ip": "10.0.0.2", "k3s_server_private_ip": "10.0.0.1",
+            "k3s_resolved_private_interface": "eth0",
+        }},
+        *({"ansible.builtin.template": {"src": str(K3S_ROLE / "templates" / source), "dest": str(rendered[name]),
+                                        "mode": "0600"}}
+          for source, name in (("flannel-net-conf.json.j2", "flannel.json"), ("config.yaml.j2", "server.yaml"),
+                               ("agent-config.yaml.j2", "agent.yaml"))),
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+    flannel = json.loads(rendered["flannel.json"].read_text(encoding="utf-8"))
+    server, agent = _yaml(rendered["server.yaml"]), _yaml(rendered["agent.yaml"])
+    assert flannel["Network"] == server["cluster-cidr"] == "10.44.0.0/16"
+    assert flannel["Backend"] == {"Type": "vxlan", "MTU": 1380}
+    conf_path = _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_conf_path"]
+    assert server["flannel-conf"] == agent["flannel-conf"] == conf_path
+    install = next(task for task in _yaml(K3S_ROLE / "tasks/main.yml")
+                   if task["name"] == "Install the flannel network configuration")
+    assert install["ansible.builtin.template"]["dest"] == "{{ k3s_flannel_conf_path }}"
+
+
+def test_an_unset_flannel_mtu_adds_nothing_a_restart_would_apply(tmp_path: Path) -> None:
+    # The role's default. Catches a routine deploy that restarts K3s on every
+    # node: a new key in either config restarts it, and flannel-conf would
+    # also recreate flannel.1.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    rendered = {name: tmp_path / name for name in ("server.yaml", "agent.yaml")}
+    play = tmp_path / "render.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {
+            "k3s_server_token": "s" * 32, "k3s_agent_token": "a" * 32, "k3s_agent_join_token": "test-token",
+            "private_node_ip": "10.0.0.2", "k3s_server_private_ip": "10.0.0.1",
+            "k3s_resolved_private_interface": "eth0",
+        }},
+        *({"ansible.builtin.template": {"src": str(K3S_ROLE / "templates" / source), "dest": str(rendered[name]),
+                                        "mode": "0600"}}
+          for source, name in (("config.yaml.j2", "server.yaml"), ("agent-config.yaml.j2", "agent.yaml"))),
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+    server, agent = _yaml(rendered["server.yaml"]), _yaml(rendered["agent.yaml"])
+    assert "flannel-conf" not in server and "cluster-cidr" not in server
+    assert "flannel-conf" not in agent
+
+
+@pytest.mark.parametrize(
+    "groups,mtu,refused",
+    [
+        # Today's fleet: nothing set, nothing joined over a dedicated link.
+        (_TERRAFORM_ONLY, None, False),
+        (_WITH_DEDICATED, 1400, False),
+        # 1450 fits the Cloud network but not the vSwitch host's 1400 link.
+        (_WITH_DEDICATED, 1450, True),
+        # A dedicated host joining while flannel sends 1450-byte packets.
+        (_WITH_DEDICATED, None, True),
+        # A quoted value would render, but never compare as a number.
+        (_TERRAFORM_ONLY, "1400", True),
+    ],
+)
+def test_the_flannel_mtu_must_fit_every_link_in_use(
+    tmp_path: Path, groups: dict, mtu: int | str | None, refused: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps({"all": {"vars": {"ansible_connection": "local"}, "children": groups}}))
+    check = next(task for task in _yaml(K3S_ROLE / "tasks/validate.yml")
+                 if task["name"] == "Validate the flannel MTU against the links in use")
+    play = tmp_path / "mtu.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "exomem-alpha", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {"k3s_flannel_mtu": mtu}},
+        check,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", str(inventory), str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if refused:
+        assert result.returncode != 0 and "k3s_flannel_mtu must be unset or an integer" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_the_role_refuses_to_unset_a_flannel_mtu_it_applied(tmp_path: Path, installed: bool) -> None:
+    # Unset after a rollout, K3s writes its own configuration and a restart
+    # keeps flannel.1 at the role's MTU: a split MTU that nothing reports.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    conf = tmp_path / "flannel-net-conf.json"
+    if installed:
+        conf.write_text("{}", encoding="utf-8")
+    checks = [task for task in _yaml(K3S_ROLE / "tasks/validate.yml") if task["name"] in (
+        "Look for a flannel configuration the role installed",
+        "Refuse to unset a flannel MTU the role applied",
+    )]
+    assert len(checks) == 2
+    play = tmp_path / "unset.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": [
+        {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+        {"ansible.builtin.set_fact": {"k3s_flannel_conf_path": str(conf)}},
+        *checks,
+    ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if installed:
+        assert result.returncode != 0 and "never by unsetting it" in result.stdout, result.stdout
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "rc,lines,recreates",
+    [
+        (0, ["1350", "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1350"], False),
+        # A run that failed, or lost its notification, after the configuration
+        # changed: the device still runs at the old MTU.
+        (0, ["1400", "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1400"], True),
+        # No flannel.1 yet: K3s creates it from the configuration at start.
+        (1, ["FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_MTU=1400"], False),
+    ],
+)
+def test_each_run_recreates_a_flannel_device_left_at_another_mtu(
+    tmp_path: Path, rc: int, lines: list[str], recreates: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    drift = next(task for task in _yaml(K3S_ROLE / "tasks/main.yml")
+                 if task["name"] == "Recreate a flannel device that runs at another MTU")
+    play = tmp_path / "drift.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        # What the read before it found on the node.
+        "vars": {"k3s_flannel_running": {"rc": rc, "stdout_lines": lines}, "recreates": recreates},
+        "tasks": [
+            {"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+            {"ansible.builtin.set_fact": {"k3s_flannel_mtu": 1400}},
+            # The play has no handlers; the result shows whether it would notify.
+            {key: value for key, value in drift.items() if key != "notify"},
+            {"ansible.builtin.assert": {"that": ["(k3s_flannel_drift is changed) == recreates"]}},
+        ]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("rotation", ["keeps the token", "changes the token", "never runs"])
+def test_the_resave_helper_reports_any_change_to_the_server_token(tmp_path: Path, rotation: str) -> None:
+    # An empty or different --new-token rotates the real server token, and a
+    # server restarted on a changed token no longer finds its bootstrap data.
+    token = tmp_path / "token"
+    token.write_text("" if rotation == "never runs" else "K10invented::server:invented\n", encoding="utf-8")
+    ran = tmp_path / "k3s-ran"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "k3s"
+    stub.write_text(f"#!/bin/sh\ntouch {ran}\n"
+                    + (f"echo K10invented::server:other > {token}\n" if rotation == "changes the token" else ""),
+                    encoding="utf-8")
+    stub.chmod(0o755)
+    helper = tmp_path / "helper.sh"
+    helper.write_text(_read(K3S_ROLE / "files/exomem-k3s-resave-bootstrap.sh").replace(
+        "/var/lib/rancher/k3s/server/token", str(token)), encoding="utf-8")
+    result = subprocess.run(["sh", str(helper)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    if rotation == "keeps the token":
+        assert result.returncode == 0 and "the server token is unchanged" in result.stdout, result.stderr
+    elif rotation == "changes the token":
+        assert result.returncode != 0 and "Do not restart K3s" in result.stderr
+    else:
+        assert result.returncode != 0 and "refused" in result.stderr and not ran.exists()
+
+
+# Plays `k3s certificate rotate-ca`: records its arguments and a copy of the
+# staged pair, file times included, and exits with the status in exit-status.
+_ROTATE_CA_K3S = r"""#!/usr/bin/env python3
+import json, shutil, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[1:]
+stage = next(arg for arg in args if arg.startswith("--path=")).removeprefix("--path=")
+shutil.copytree(Path(stage) / "tls", here / "staged")
+(here / "rotate-ca.json").write_text(json.dumps(args))
+sys.exit(int((here / "exit-status").read_text()))
+"""
+
+
+def _openssl(*args: str) -> str:
+    return subprocess.run(["openssl", *args], check=True, capture_output=True, text=True).stdout
+
+
+def _invented_ca(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(directory / "client-ca.key"))
+    _openssl("req", "-x509", "-new", "-days", "1", "-subj", f"/CN={name}", "-key", str(directory / "client-ca.key"),
+             "-out", str(directory / "client-ca.crt"))
+
+
+def _client_ca_helper(tmp_path: Path, exit_status: int = 0) -> tuple[Path, Path, list[str]]:
+    """The role's client-CA helper pointed at tmp_path/server, and a PATH whose k3s is the stand-in."""
+    server, bin_dir = tmp_path / "server", tmp_path / "bin"
+    _invented_ca(server / "tls", "invented-live-client-ca")
+    bin_dir.mkdir()
+    (bin_dir / "k3s").write_text(_ROTATE_CA_K3S)
+    (bin_dir / "k3s").chmod(0o755)
+    (bin_dir / "exit-status").write_text(str(exit_status))
+    helper = tmp_path / "helper.sh"
+    helper.write_text(_read(K3S_ROLE / "files/exomem-k3s-rotate-client-ca.sh").replace(
+        "/var/lib/rancher/k3s/server", str(server)))
+    return server, bin_dir, ["sh", str(helper)]
+
+
+def test_the_client_ca_helper_loads_a_new_ca_and_keeps_the_one_it_replaces(tmp_path: Path) -> None:
+    # rotate-ca --force skips K3s's own checks: a staged key that does not
+    # match, or a certificate that is not a CA, would leave a server that signs
+    # client certificates nothing accepts. The kept pair is the undo.
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+
+    result = subprocess.run(helper, capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode == 0, result.stderr
+    args = json.loads((bin_dir / "rotate-ca.json").read_text())
+    assert args[:2] == ["certificate", "rotate-ca"] and args[3:] == ["--force"]
+    staged = bin_dir / "staged"
+    assert sorted(path.name for path in staged.iterdir()) == ["client-ca.crt", "client-ca.key"]
+    assert (_openssl("x509", "-noout", "-pubkey", "-in", str(staged / "client-ca.crt"))
+            == _openssl("pkey", "-pubout", "-in", str(staged / "client-ca.key")))
+    assert "CA:TRUE" in _openssl("x509", "-noout", "-ext", "basicConstraints", "-in", str(staged / "client-ca.crt"))
+    new = _openssl("x509", "-noout", "-fingerprint", "-sha256", "-in", str(staged / "client-ca.crt")).split("=")[1]
+    assert f"new client CA: {new}" in result.stdout
+    [kept] = server.glob("client-ca-before-*")
+    for name in ("client-ca.crt", "client-ca.key"):
+        assert (kept / name).read_bytes() == (server / "tls" / name).read_bytes()
+    # The staged key goes with the run.
+    assert not list(server.glob("rotate-client-ca.*"))
+
+
+def test_the_client_ca_helper_undoes_a_rotation_with_files_newer_than_the_disk(tmp_path: Path) -> None:
+    # At start K3s stops on a file on disk newer than its datastore copy. A
+    # kept pair loaded with its old times would stop the restarted server.
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+    kept = server / "client-ca-before-20260101T000000Z"
+    _invented_ca(kept, "invented-earlier-client-ca")
+    for name in ("client-ca.crt", "client-ca.key"):
+        os.utime(kept / name, (1_700_000_000, 1_700_000_000))
+
+    result = subprocess.run([*helper, "--restore", str(kept)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode == 0, result.stderr
+    for name in ("client-ca.crt", "client-ca.key"):
+        staged = bin_dir / "staged" / name
+        assert staged.read_bytes() == (kept / name).read_bytes()
+        assert staged.stat().st_mtime >= (server / "tls" / name).stat().st_mtime
+
+
+@pytest.mark.parametrize(("pair", "refusal"), [
+    ("mismatched", "key does not match its certificate"),
+    ("live", "already uses this client CA"),
+])
+def test_the_client_ca_helper_refuses_a_pair_k3s_would_take_under_force(
+    tmp_path: Path, pair: str, refusal: str
+) -> None:
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+    restore = tmp_path / "restore"
+    if pair == "live":
+        shutil.copytree(server / "tls", restore)
+    else:
+        _invented_ca(restore, "invented-client-ca")
+        _invented_ca(tmp_path / "other", "invented-other-client-ca")
+        shutil.copy(tmp_path / "other" / "client-ca.key", restore / "client-ca.key")
+
+    result = subprocess.run([*helper, "--restore", str(restore)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode != 0 and refusal in result.stderr, result.stderr
+    assert not (bin_dir / "rotate-ca.json").exists()
+
+
+def test_the_client_ca_helper_keeps_no_copy_when_k3s_refuses_the_rotation(tmp_path: Path) -> None:
+    # The cluster keeps its CA, so a kept copy would be one more copy of a live key.
+    server, bin_dir, helper = _client_ca_helper(tmp_path, exit_status=1)
+
+    result = subprocess.run(helper, capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode != 0 and "keeps its client CA" in result.stderr
+    assert not list(server.glob("client-ca-before-*"))
+    assert not list(server.glob("rotate-client-ca.*"))
+
+
+@pytest.mark.parametrize(
+    "device,subnet_env,passes",
+    [
+        ("1350", "FLANNEL_MTU=1350", True),
+        # The rollout trap: a restart reuses flannel.1 at its old MTU.
+        ("1400", "FLANNEL_MTU=1350", False),
+        # flannel kept its old configuration: new pods still get the old MTU.
+        ("1350", "FLANNEL_MTU=1400", False),
+    ],
+)
+def test_the_flannel_handler_refuses_a_node_left_at_the_old_mtu(
+    tmp_path: Path, device: str, subnet_env: str, passes: bool
+) -> None:
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    check = next(handler for handler in _yaml(K3S_ROLE / "handlers/main.yml")
+                 if handler["name"] == "Require flannel.1 and new pods at the configured MTU")
+    play = tmp_path / "mtu.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
+        # What the handler's wait read from flannel.1 and /run/flannel/subnet.env.
+        "vars": {"k3s_flannel_observed": {"rc": 0, "stdout_lines": [
+            device, "FLANNEL_NETWORK=10.42.0.0/16", "FLANNEL_SUBNET=10.42.1.1/24", subnet_env]}},
+        "tasks": [{"ansible.builtin.include_vars": {"file": str(K3S_ROLE / "defaults/main.yml")}},
+                  {"ansible.builtin.set_fact": {"k3s_flannel_mtu": 1400}},
+                  {key: value for key, value in check.items() if key != "listen"}]}]))
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if passes:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and "did not take k3s_flannel_mtu 1400" in result.stdout, result.stdout
 
 
 def test_join_playbook_skips_a_host_that_removal_marked() -> None:
@@ -809,6 +1265,7 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
         "Refuse a node that is not an agent",
         "Refuse unless the cells fit the remaining nodes",
         "Cordon the agent",
+        "Move each cell off the agent's local storage",
         "Drain the agent without force",
         "Stop the agent completely",
         "Require a confirmed stop before deleting a present node",
@@ -847,6 +1304,103 @@ def test_remove_agent_playbook_orders_its_steps_and_never_forces() -> None:
     assert "--ignore-not-found" in delete
     revoke = tasks["Converge the inter-node firewall without the removed agent"]
     assert "k3s_remove_node" in revoke["vars"]["k3s_firewall_peer_ips"]
+
+
+
+def test_the_removal_preflight_runs_alone_and_changes_nothing(tmp_path: Path) -> None:
+    # The operator checks room with --tags preflight before moving any cell
+    # by hand (cloud-dedicated-host.md, "Remove the host" step 3). A tag that
+    # also selected the cordon, a move, the stop or the node deletion would
+    # start a removal the operator only meant to check.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    inventory = tmp_path / "inventory.yml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {"hosted_nodes": {
+        "hosts": {"server": None}, "children": {"k3s_agents": {"hosts": {"exomem-agent-01": None}}}}}}}))
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "--list-tasks", "--tags", "preflight", "-i", str(inventory),
+         str(ANSIBLE / "remove-agent.yml"), "-e", "k3s_remove_node=exomem-agent-01"],
+        cwd=ANSIBLE, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    tasks = [line.split("\t")[0].strip() for line in result.stdout.splitlines()
+             if "TAGS:" in line and not line.strip().startswith("play #")]
+
+    assert tasks == [
+        "Resolve the one K3s server",
+        "Refuse anything but one inventoried agent",
+        "Look up the agent's Kubernetes node",
+        "Record whether the node is present and Ready",
+        "Refuse a node that is not an agent",
+        "Read the cluster state the preflight measures",
+        "Parse the cluster state",
+        "Refuse unless the cells fit the remaining nodes",
+    ]
+
+
+# Answers the removal playbook's reads from a scenario, logs every call, and
+# refuses anything but `kubectl get`.
+_READ_ONLY_K3S = r"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[1:]
+with (here / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+if args[:2] != ["kubectl", "get"]:
+    sys.exit("refused: the preflight may only read")
+scenario = json.loads((here / "scenario.json").read_text())
+print(json.dumps(scenario["node"] if args[2] == "node" else {"items": scenario[args[2]]}))
+"""
+
+
+@pytest.mark.parametrize(("free_gib", "outcome"), [
+    (100, "moving cells fit the remaining nodes' local pools"),
+    (10, "leaves no remaining node with room for the local volume"),
+], ids=["fits", "no-room"])
+def test_the_removal_preflight_refuses_on_its_own_and_only_reads(tmp_path: Path, free_gib: int, outcome: str) -> None:
+    # The operator runs `--tags preflight` alone to check room before moving
+    # cells by hand. The room check sits in an included task file, which runs
+    # under the tag only through the include's `apply`; without it, this run
+    # would skip the check and pass.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    k3s = tmp_path / "k3s"
+    k3s.write_text(_READ_ONLY_K3S)
+    k3s.chmod(0o755)
+    target = {"metadata": {"name": "exomem-agent-01", "labels": {"exomem.io/node-pool": "agent"}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    spare = {"metadata": {"name": "exomem-agent-02", "labels": {"exomem.io/node-pool": "agent"},
+                          "annotations": {"capacity.topolvm.io/thin": str(free_gib * 1024**3)}},
+             "spec": {}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    (tmp_path / "scenario.json").write_text(json.dumps({
+        "node": target, "nodes": [target, spare], "csinodes": [], "volumeattachments": [],
+        "persistentvolumes": [_local_volume("a" * 16, "exomem-agent-01", "Bound")],
+        "persistentvolumeclaims": [{"metadata": {"namespace": f"exo-cell-{'a' * 16}", "name": "cell-data"},
+                                    "spec": {"storageClassName": "exomem-cloud-local",
+                                             "resources": {"requests": {"storage": "4Gi"}}}}],
+        "statefulsets": [],
+        "storageclasses": [{"metadata": {"name": "exomem-cloud-local"}, "provisioner": "topolvm.io"}],
+    }))
+    playbook = tmp_path / "remove-agent.yml"
+    playbook.write_text(_read(ANSIBLE / "remove-agent.yml").replace("/usr/local/bin/k3s", str(k3s)))
+    local = {"ansible_connection": "local", "ansible_python_interpreter": "{{ ansible_playbook_python }}"}
+    inventory = tmp_path / "inventory.yml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {"hosted_nodes": {
+        "hosts": {"server": local}, "children": {"k3s_agents": {"hosts": {"exomem-agent-01": local}}}}}}}))
+
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "--tags", "preflight", "-i", str(inventory), str(playbook),
+         "-e", "k3s_remove_node=exomem-agent-01", "-e", "ansible_become=false"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env={**os.environ, "ANSIBLE_ROLES_PATH": str(ANSIBLE / "roles")},
+    )
+
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert all(call[:2] == ["kubectl", "get"] for call in calls), calls
+    assert outcome in result.stdout, result.stdout + result.stderr
+    assert (result.returncode == 0) == (outcome.startswith("moving")), result.stdout + result.stderr
 
 
 def test_remove_stop_kills_containers_unmounts_and_closes_volume_mappings() -> None:
@@ -992,13 +1546,13 @@ def test_removal_excludes_reserved_capacity_and_requires_relocation(tmp_path: Pa
     }]
     variables = {
         "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
-        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5, "k3s_local_storage_driver": "topolvm.io",
         "k3s_remove_nodes_doc": {"items": nodes},
         "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
             for n in nodes]},
         "k3s_remove_statefulsets_doc": {"items": statefulsets},
-        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvs", "pvcs")},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvs", "pvcs", "storageclasses")},
     }
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False,
@@ -1023,52 +1577,319 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
             "status": {"phase": phase}}
 
 
-@pytest.mark.parametrize(("hold_on", "volume_phase", "refusal"), [
+@pytest.mark.parametrize(("hold_on", "hold", "volume_phase", "target_ready", "refusal", "moves"), [
     # An hourly backup on another node's cell no longer blocks the removal...
-    ("shared", "Bound", None),
-    # ...one on a cell whose volume is on the target still does.
-    ("target", "Released", "maintenance is in flight"),
-    # A cell still living on the target refuses it: deleting the Node would
-    # relocate that cell from its last backup.
-    (None, "Bound", "still holds"),
-    # A volume a relocation retained holds no live cell.
-    (None, "Released", None),
-], ids=["hold-elsewhere", "hold-on-target", "live-volume-on-target", "retained-volume-on-target"])
+    ("shared", "snapshot-backup", "Bound", "True", None, []),
+    # ...one on a cell whose live volume is on the target still does...
+    ("target", "snapshot-backup", "Bound", "True", "maintenance is in flight", None),
+    # ...but not one on a cell moved off the target before the removal, which
+    # left only its retained volume there and backs up on its new node.
+    ("target", "snapshot-backup", "Released", "True", None, []),
+    # A move or relocation still restoring after it released its old volume
+    # may yet need that volume, which the removal destroys.
+    ("target", "restore", "Released", "True", "maintenance is in flight", None),
+    # A cell still living on the target moves off it before the node goes:
+    # deleting the Node would relocate it from its last backup.
+    (None, None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
+    # A target that is not Ready cannot take the move's stopped backup.
+    (None, None, "Bound", "Unknown", "is not Ready", None),
+    # A volume a relocation or a move retained holds no live cell.
+    (None, None, "Released", "True", None, []),
+], ids=["hold-elsewhere", "hold-on-target", "hourly-backup-of-a-cell-moved-off-the-target",
+        "restore-of-a-cell-that-released-its-volume-on-the-target", "live-volume-on-target",
+        "live-volume-on-a-target-not-ready", "retained-volume-on-target"])
 def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
-    tmp_path: Path, hold_on: str | None, volume_phase: str, refusal: str | None
+    tmp_path: Path, hold_on: str | None, hold: str | None, volume_phase: str, target_ready: str,
+    refusal: str | None, moves: list[str] | None,
 ) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
-    nodes = [{"metadata": {"name": name, "labels": {}}, "spec": {},
-              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    nodes = [{"metadata": {"name": name, "labels": {}, "annotations": {"capacity.topolvm.io/thin": str(100 * 1024**3)}},
+              "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": target_ready if name == "target" else "True"}]}}
              for name in ("target", "shared")]
     held = "aaaaaaaaaaaaaaaa"
     volumes = [_local_volume(held, hold_on or "target", volume_phase)]
+    claims = [{"metadata": {"namespace": f"exo-cell-{held}", "name": "cell-data"},
+               "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": "4Gi"}}}}]
     statefulsets = [] if hold_on is None else [{
-        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
+        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": hold}},
         "spec": {"replicas": 1, "template": {"spec": {}}},
     }]
     variables = {
         "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
         "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
         "k3s_local_storage_driver": "topolvm.io", "k3s_local_storage_topology_key": "topology.topolvm.io/node",
+        "k3s_snapshot_backup_hold": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_snapshot_backup_hold"],
         "k3s_remove_nodes_doc": {"items": nodes},
         "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}
             for n in nodes]},
+        "k3s_topolvm_device_class": "thin", "k3s_local_backup_concurrency_per_node": 2,
+        "k3s_local_default_cell_gib": 4,
         "k3s_remove_statefulsets_doc": {"items": statefulsets},
         "k3s_remove_pvs_doc": {"items": volumes},
-        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("attachments", "pvcs")},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_storageclasses_doc": {"items": [{"metadata": {"name": "exomem-cloud-local"},
+                                                     "provisioner": "topolvm.io"}]},
+        "k3s_remove_attachments_doc": {"items": []},
     }
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
-        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"k3s_remove_moves == {moves}"]}}]}]))
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
                             capture_output=True, text=True)
     if refusal is None:
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
+GIB = 1024**3
+
+
+# D6 at the role's defaults, which are cellctl's: a node keeps 2 x 4 GiB x 2
+# backups = 16 GiB of its pool free for hourly backups beyond the cells it
+# takes. A cell larger than 4 GiB raises that to 2 x its size x 2.
+@pytest.mark.parametrize(("pools", "cordoned", "moving", "elsewhere", "hetzner_slots", "refusal"), [
+    # A local-only cluster publishes no attachment slots at all.
+    ({"spare": 20}, [], [4], [], None, None),
+    # Free bytes that hold the cell but not the reserve beyond it are no room.
+    ({"spare": 18}, [], [4], [], None, "with room for the local volume"),
+    # A volume cannot span two nodes, so room on two nodes does not add up.
+    ({"spare": 36, "spare-2": 36}, [], [8], [], None, "with room for the local volume"),
+    # The largest cell anywhere sets the reserve, as it does in cellctl.
+    ({"spare": 24}, [], [4], [8], None, "with room for the local volume"),
+    # The target's own pool leaves with it.
+    ({"target": 100, "spare": 18}, [], [4], [], None, "with room for the local volume"),
+    # A cordoned node takes no new claim.
+    ({"spare": 18, "cordoned": 100}, ["cordoned"], [4], [], None, "with room for the local volume"),
+    # A removal holding both kinds counts each against its own capacity.
+    ({"spare": 20}, [], [4], [], 1, None),
+    ({"spare": 18}, [], [4], [], 1, "with room for the local volume"),
+    ({"spare": 20}, [], [4], [], 0, "cell slots"),
+    # The removal moves the largest claim first, the order the placement
+    # assumes, so an early small cell cannot take a later large one's room.
+    ({"spare": 100}, [], [4, 8, 4], [], None, None),
+], ids=["local-with-room", "local-without-room", "room-split-across-nodes", "larger-cell-elsewhere",
+        "target-excluded", "cordoned-node-excluded", "mixed-with-room", "mixed-without-local-room",
+        "mixed-without-attachment-slots", "largest-claim-moves-first"])
+def test_removal_counts_each_cell_against_the_storage_it_uses(
+    tmp_path: Path, pools: dict[str, int], cordoned: list[str], moving: list[int], elsewhere: list[int],
+    hetzner_slots: int | None, refusal: str | None,
+) -> None:
+    # Counting only attachment slots refuses every removal of a local-storage
+    # agent, and never sees a moved cell with nowhere to land: its restore
+    # would wait for room while the cell stays stopped.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": name, "labels": {},
+                           "annotations": {"capacity.topolvm.io/thin": str(pools[name] * GIB)} if name in pools else {}},
+              "spec": {"unschedulable": True} if name in cordoned else {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+             for name in ["target", *(pool for pool in pools if pool != "target")]
+             + (["cloud"] if hetzner_slots is not None else [])]
+    volumes, claims, attachments = [], [], []
+    for index, gib in enumerate(moving):
+        cell = "abcd"[index] * 16
+        volumes.append(_local_volume(cell, "target", "Bound"))
+        claims.append({"metadata": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-local",
+                                "resources": {"requests": {"storage": f"{gib}Gi"}}}})
+    for index, gib in enumerate(elsewhere):
+        cell = "mnop"[index] * 16
+        volumes.append(_local_volume(cell, "spare", "Bound"))
+        claims.append({"metadata": {"namespace": f"exo-cell-{cell}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-local",
+                                "resources": {"requests": {"storage": f"{gib}Gi"}}}})
+    if hetzner_slots is not None:
+        volumes.append({"metadata": {"name": "pv-hetzner"},
+                        "spec": {"csi": {"driver": "csi.hetzner.cloud", "volumeHandle": "123"},
+                                 "claimRef": {"namespace": f"exo-cell-{'h' * 16}", "name": "cell-data"}},
+                        "status": {"phase": "Bound"}})
+        claims.append({"metadata": {"namespace": f"exo-cell-{'h' * 16}", "name": "cell-data"},
+                       "spec": {"storageClassName": "exomem-cloud-encrypted",
+                                "resources": {"requests": {"storage": "10Gi"}}}})
+        attachments.append({"spec": {"attacher": "csi.hetzner.cloud", "nodeName": "target",
+                                     "source": {"persistentVolumeName": "pv-hetzner"}},
+                            "status": {"attached": True}})
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        **{key: defaults[key] for key in ("k3s_local_storage_driver", "k3s_local_storage_topology_key",
+                                          "k3s_topolvm_device_class", "k3s_local_backup_concurrency_per_node",
+                                          "k3s_local_default_cell_gib")},
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_csinodes_doc": {"items": [] if hetzner_slots is None else [
+            {"metadata": {"name": "cloud"},
+             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 5 + hetzner_slots}}]}}]},
+        "k3s_remove_storageclasses_doc": {"items": [
+            {"metadata": {"name": "exomem-cloud-local"}, "provisioner": "topolvm.io"},
+            {"metadata": {"name": "exomem-cloud-encrypted"}, "provisioner": "csi.hetzner.cloud"}]},
+        "k3s_remove_attachments_doc": {"items": attachments},
+        "k3s_remove_pvs_doc": {"items": volumes},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_statefulsets_doc": {"items": []},
+    }
+    # What remove-agent.yml loops its moves over, evaluated after the preflight.
+    tasks = {task["name"]: task for task in _tasks_in_order(_yaml(ANSIBLE / "remove-agent.yml"))}
+    moves = tasks["Move each cell off the agent's local storage"]["loop"].strip()[2:-2]
+    order = [f"exo-cell-{'abcd'[i] * 16}" for i in sorted(range(len(moving)), key=lambda i: (-moving[i], i))]
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"({moves}) == {order}"]}}]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+
+
+
+ROOM_CASES = json.loads(_read(ROOT / "infra/cellctl/tests/fixtures/removal-room-cases.json"))["cases"]
+
+
+@pytest.mark.parametrize("case", ROOM_CASES, ids=[case["name"] for case in ROOM_CASES])
+def test_the_removal_playbook_agrees_with_cellctl_on_where_a_moved_cell_fits(tmp_path: Path, case: dict) -> None:
+    # The preflight copies cellctl's room rule; cellctl's own test checks
+    # cellctl on the same cases. A side that drifts places a moved cell on a
+    # node whose backups then have no room, or refuses a removal that fits.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    nodes = [{"metadata": {"name": "target", "labels": {}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
+    for entry in case["nodes"]:
+        nodes.append({
+            "metadata": {"name": entry["name"], "labels": entry.get("labels", {}),
+                         "annotations": {"capacity.topolvm.io/thin": str(entry["free_gib"] * GIB)}},
+            "spec": {"unschedulable": entry.get("unschedulable", False), "taints": entry.get("taints", [])},
+            "status": {"conditions": [{"type": "Ready", "status": "True" if entry.get("ready", True) else "False"}]},
+        })
+    claims = [{"metadata": {"namespace": f"exo-cell-{letter * 16}", "name": "cell-data"},
+               "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": f"{gib}Gi"}}}}
+              for letter, gib in zip("abcd", [case["moving_gib"], *case["other_claims_gib"]], strict=False)]
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    variables = {
+        "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
+        "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
+        **{key: defaults[key] for key in ("k3s_local_storage_driver", "k3s_local_storage_topology_key",
+                                          "k3s_topolvm_device_class", "k3s_local_backup_concurrency_per_node",
+                                          "k3s_local_default_cell_gib")},
+        "k3s_remove_nodes_doc": {"items": nodes},
+        "k3s_remove_pvs_doc": {"items": [_local_volume("a" * 16, "target", "Bound")]},
+        "k3s_remove_pvcs_doc": {"items": claims},
+        "k3s_remove_storageclasses_doc": {"items": [{"metadata": {"name": "exomem-cloud-local"},
+                                                     "provisioner": "topolvm.io"}]},
+        **{f"k3s_remove_{name}_doc": {"items": []} for name in ("csinodes", "attachments", "statefulsets")},
+    }
+    takes = ("k3s_remove_local_rooms | dict2items | selectattr('value', 'ge', "
+             f"{case['moving_gib'] * GIB}) | map(attribute='key') | sort")
+    play = tmp_path / "preflight.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables, "tasks": [
+        {"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+        {"ansible.builtin.assert": {"that": [f"k3s_remove_snapshot_reserve | int == {case['reserve_bytes']}",
+                                             f"({takes}) == {case['takes_the_moving_cell']}"]}},
+    ]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+# Plays cellctl's part for remove_move.yml: answers kubectl from a scenario,
+# one namespace listing per poll, and logs every call.
+_FAKE_KUBECTL = r"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[2:]
+with (here / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+scenario = json.loads((here / "scenario.json").read_text())
+if args[:2] == ["get", "statefulsets,persistentvolumeclaims,jobs"]:
+    count = here / "polls"
+    polls = int(count.read_text()) if count.exists() else 0
+    count.write_text(str(polls + 1))
+    print(json.dumps({"items": scenario["polls"][min(polls, len(scenario["polls"]) - 1)]}))
+elif args[:3] == ["get", "persistentvolumeclaim", "cell-data"]:
+    print(scenario["claim_volume"], end="")
+elif args[:2] == ["get", "persistentvolume"]:
+    print(scenario["volumes"][args[2]], end="")
+"""
+
+
+def _cell_objects(*, hold: str | None = None, outcome: str | None = None, volume: str = "pv-old",
+                  ready: bool = True, failed_restore: bool = False) -> list[dict]:
+    annotations = {key: value for key, value in (("exomem.io/hold", hold), ("exomem.io/backup-outcome", outcome))
+                   if value}
+    objects = [
+        {"kind": "StatefulSet", "metadata": {"name": "cell", "generation": 4, "annotations": annotations},
+         "spec": {"replicas": 1}, "status": {"observedGeneration": 4, "readyReplicas": 1 if ready else 0}},
+        {"kind": "PersistentVolumeClaim", "metadata": {"name": "cell-data"},
+         "spec": {"volumeName": volume}, "status": {"phase": "Bound"}},
+    ]
+    if failed_restore:
+        objects.append({"kind": "Job", "metadata": {"name": "cell-restore-0a1b2c3d4e",
+                                                    "labels": {"exomem.io/cell-job": "restore"}},
+                        "status": {"failed": 1}})
+    return objects
+
+
+@pytest.mark.parametrize(("polls", "new_volume_nodes", "refusal"), [
+    ([_cell_objects(), _cell_objects(hold="move"), _cell_objects(hold="restore", volume="pv-new", ready=False),
+      _cell_objects(volume="pv-new")], "shared", None),
+    ([_cell_objects(hold="move"), _cell_objects(hold="move", outcome="failed")], "shared",
+     "failed before its claim changed"),
+    ([_cell_objects(hold="restore", volume="pv-new", ready=False, failed_restore=True)], "shared",
+     "failed after its claim was retired"),
+    ([_cell_objects(volume="pv-new")], "target", "not to another node"),
+], ids=["moved", "backup-failed", "restore-failed", "landed-back-on-the-agent"])
+def test_removal_moves_a_cell_off_the_agent_and_stops_on_a_failed_move(
+    tmp_path: Path, polls: list, new_volume_nodes: str, refusal: str | None
+) -> None:
+    # move-cloud-cells-to-local-storage 6.4. Going on before a move finished,
+    # or after it failed, would delete the node of a cell's only current
+    # volume, and cellctl would relocate it from an older backup.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    kubectl = tmp_path / "k3s"
+    kubectl.write_text(_FAKE_KUBECTL)
+    kubectl.chmod(0o755)
+    (tmp_path / "scenario.json").write_text(json.dumps({
+        "claim_volume": "pv-old", "polls": polls,
+        "volumes": {"pv-old": "vol-old target", "pv-new": new_volume_nodes},
+    }))
+    defaults = _yaml(K3S_ROLE / "defaults/main.yml")
+    play = tmp_path / "move.yml"
+    play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": {
+        "k3s_remove_node": "target", "k3s_remove_move_namespace": "exo-cell-aaaaaaaaaaaaaaaa",
+        "k3s_remove_kubectl": [str(kubectl), "kubectl"], "k3s_remove_move_delay": 0,
+        **{key: defaults[key] for key in ("k3s_remove_move_annotation", "k3s_remove_move_retries",
+                                          "k3s_remove_move_pinned_jsonpath", "k3s_local_storage_topology_key")},
+    }, "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_move.yml")}]}]))
+
+    result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
+                            capture_output=True, text=True)
+
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    marks = [call[2:] for call in calls if call[0] == "annotate"]
+    assert marks[0] == ["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume=vol-old", "--overwrite"]
+    if refusal is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        # The mark goes only once the cell serves from its new volume.
+        assert marks[1:] == [["exo-cell-aaaaaaaaaaaaaaaa", "exomem.io/move-volume-"]]
+        assert (tmp_path / "polls").read_text() == str(len(polls))
+    else:
+        assert result.returncode != 0 and refusal in result.stdout, result.stdout + result.stderr
+        # A failed move keeps its mark, which keeps the cell stopped on its volume.
+        assert marks[1:] == []
 
 
 @pytest.mark.parametrize("cell_id,profile", [("", ""), ("aaaaaaaaaaaaaaaa", ""), ("", "qualified-test")])
@@ -1091,6 +1912,7 @@ def test_agent_reservation_registers_and_converges_only_owned_fields(tmp_path: P
         "private_node_ip": "10.0.0.2", "k3s_resolved_private_interface": "eth0",
         "k3s_agent_node_label": "exomem.io/node-pool=agent", "expected_taints": expected,
         "k3s_kubelet_args": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_kubelet_args"],
+        "k3s_flannel_mtu": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_flannel_mtu"],
     }, "tasks": [
         _yaml(K3S_ROLE / "tasks/validate.yml")[0],
         {"ansible.builtin.template": {"src": str(K3S_ROLE / "templates/agent-config.yaml.j2"),

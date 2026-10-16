@@ -196,7 +196,7 @@ The Cloud speech engine and model SHALL be selected under the selection rule of 
 
 ### Requirement: Each Cloud engine is off by default and turns on after acceptance in a canary cell
 
-Each engine (documents, OCR, image search, captions and speech) SHALL have its own switch. cellctl SHALL render the switch into each cell's environment, per cell. Every switch SHALL default to off. Personal installs SHALL keep their current defaults. Under the current cellctl render, changing a cell's switch re-renders that cell and restarts its pod, a brief outage. While a switch change restarts the pod, the canary and the rollout SHALL change switches outside the cell backup window.
+Each engine (documents, OCR, image search, captions and speech) SHALL have its own switch. cellctl SHALL render the switch into each cell's environment, per cell. Every switch SHALL default to off: a deployment that sets no per-cell selection and no fleet default SHALL run no engine in any cell. Personal installs SHALL keep their current defaults. Under the current cellctl render, changing a cell's switch re-renders that cell and restarts its pod, a brief outage. While a switch change restarts the pod, the canary and the rollout SHALL change switches outside the cell backup window.
 
 An operator SHALL turn a switch on first in the acceptance cell, which is the owner's cell acting as the canary, and SHALL run that engine's acceptance there with the engine's backlog active. Acceptance SHALL require all of these:
 
@@ -210,6 +210,8 @@ An operator SHALL turn a switch on first in the acceptance cell, which is the ow
 - the engine's anonymous-memory budget and VmData budget are recorded and pinned in deployment configuration.
 
 When acceptance passes, the switch SHALL turn on in the other cells one cell at a time. When any gate misses, the switch SHALL be turned off in the acceptance cell and SHALL stay off in every other cell. Turning a switch off SHALL stop new jobs for that engine, and SHALL leave stored sidecars and vectors valid.
+
+An engine whose switch is on in every existing cell MAY be made the fleet default. A fleet default SHALL apply to every Cloud cell, including a cell created later, so a new cell runs the engine with no per-cell edit. A cell's engines SHALL be the union of the fleet default and its own per-cell entries. The operator SHALL turn the engine on in each existing cell through the per-cell selection before setting the default, so that the default changes no existing cell's rendered environment, restarts no cell and starts no backfill. The operator, not cellctl, SHALL check this precondition: cellctl cannot tell an existing cell from a new one, and a cell created later is the case the default exists for.
 
 #### Scenario: A missed gate keeps the engine off
 
@@ -238,6 +240,23 @@ When acceptance passes, the switch SHALL turn on in the other cells one cell at 
 - **WHEN** an engine passes its acceptance in the owner's cell
 - **THEN** its switch turns on in the other cells one cell at a time, each outside the backup window
 
+#### Scenario: A new cell under a fleet default runs the engine
+
+- **WHEN** the fleet default names an engine and a cell is created afterwards, with no per-cell entry for it
+- **THEN** the new cell runs that engine
+- **AND** no per-cell edit was needed
+
+#### Scenario: Setting the default after per-cell rollout restarts no cell
+
+- **WHEN** an engine is on in every existing cell through the per-cell selection, and the operator then adds the engine to the fleet default
+- **THEN** every existing cell keeps the same rendered environment
+- **AND** no cell restarts and no backfill starts
+
+#### Scenario: A deployment with no default keeps every engine off
+
+- **WHEN** a deployment sets no fleet default and no per-cell selection
+- **THEN** every engine is off in every cell, including a cell created later
+
 #### Scenario: Turning an engine off is a safe rollback
 
 - **WHEN** an operator turns an engine's switch off in a cell
@@ -256,7 +275,7 @@ An engine whose switch is off, or which the deployment does not ship, SHALL be r
 
 ### Requirement: Existing media is backfilled one cell at a time
 
-When an engine's switch turns on in a cell, the media already in that cell SHALL be queued for that engine automatically, with no operator action per file. Because switches turn on one cell at a time, backfill SHALL never run in every cell at once. A change of image space SHALL re-encode the stored image vectors once, through the same backfill.
+When an engine's switch turns on in a cell, the media already in that cell SHALL be queued for that engine automatically, with no operator action per file. Because switches turn on one cell at a time, backfill SHALL never run in every cell at once. This SHALL hold when an engine is made the fleet default under the precondition of the requirement "Each Cloud engine is off by default and turns on after acceptance in a canary cell", and for a cell created later, which backfills only its own media. A change of image space SHALL re-encode the stored image vectors once, through the same backfill.
 
 #### Scenario: Turning on OCR processes the images already stored
 

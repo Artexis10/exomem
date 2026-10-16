@@ -255,7 +255,7 @@ Mixed-authority marker installation SHALL be durable and no-clobber when absent.
 - **AND** an enrolment based on a generation before N, and a replay of the retire at generation N, conflict
 
 ### Requirement: Collection store migration is verifiable and reversible
-A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The vault's collection mode SHALL have one authority: a vault-side mode marker that adoption reads. On a multi-host vault, migration SHALL refuse while the lease coordinator does not explicitly advertise `collections-store-v1`, with a message naming the exact release to upgrade the coordinator to. Store adoption SHALL advance a separate vault-specific `collections-store-v1` capability fence with generation CAS and lease-token invalidation in one coordinator transaction, reacquire before marker cutover, and record an optional state compatibility descriptor so older releases refuse before access. Governance versions 3/4 and file-only manifests SHALL remain unchanged; ignoring extra request fields SHALL NOT establish coordinator capability. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of only the collections changed since pre-import (carrying forward the proofs of unchanged ones) within the cutover budget, abandoning the upgrade cleanly when it cannot, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. Export SHALL set the mode marker to exported and tombstone the replica so no host can adopt it. Downgrade to a pre-store release SHALL require export first.
+A vault SHALL move from file-canonical collections to the store only through a declared offline migration that imports every Records and Planning collection and proves a round trip before the store becomes canonical. The proof requires all of the following: item counts equal; every row, rendered and parsed back, yields equal values, body, identity and natural key; payload hashes equal the legacy derivation; the imported legacy audit chain has the same head and length; manifest text is byte-equal; and the legacy audit status is preserved, never upgraded. Import SHALL rewrite no vault file and SHALL record the current file bytes as the current views. A vault with duplicate identities, schema violations or unsupported versions SHALL NOT migrate until they are fixed. The vault's collection mode SHALL have one authority: a vault-side mode marker that adoption reads. On a multi-host vault, migration SHALL refuse while the lease coordinator does not explicitly advertise `collections-store-v1`, with a message naming the exact release to upgrade the coordinator to. Store adoption SHALL advance a separate vault-specific `collections-store-v1` capability fence with generation CAS and lease-token invalidation in one coordinator transaction, reacquire before marker cutover, and record an optional state compatibility descriptor so older releases refuse before access. Governance versions 3/4 and file-only manifests SHALL remain unchanged; ignoring extra request fields SHALL NOT establish coordinator capability. The importer SHALL read legacy audit history with an uncapped streaming reader filtered per collection. It SHALL record each view's expected hash as the hash of the exact bytes it parsed. Non-managed installs SHALL migrate through an offline command with the same proof. The migration SHALL run under the managed standby-upgrade handoff: pre-import on the standby without ownership, re-verification of only the collections changed since pre-import (carrying forward the proofs of unchanged ones) within the cutover budget, abandoning the upgrade cleanly when it cannot, and atomic publication, so that writes pause only for the ordinary bounded handoff. The substrate SHALL provide a preview-first reverse export that renders the store into the legacy file layout with a content-free checkpoint transition per collection, so the legacy inspector reports `acknowledged_gap` for any collection written in store mode. A collection the store never wrote SHALL keep its files byte for byte. The export SHALL apply only offline, as the owner, with the service stopped and the operator credential; a serving process SHALL refuse it. It SHALL refuse the whole vault, naming each collection and reason, while any routed collection was created by the store, exceeds a file-mode bound, holds a value or held correction without a file form, or has a view that a person changed since the store published it; the first of these is the current rule pending the operator's decision on rollback for store-only collections. Before any file changes it SHALL record an export intent in the store and publish the replica, so no host serves or adopts the store while it leaves. It SHALL retire the coordinator's store fence only after it verifies that file mode reads every collection as the store served it, and only then retire the marker by renaming it to `mode.json.exported-<utc>`, never by writing a new marker mode that released launchers cannot parse. It SHALL then tombstone the replica and the live store under the same `.exported-<utc>` suffix, retire the store's state compatibility descriptors, and keep the tombstones as evidence that no host adopts. A run cut at any step SHALL resume from its intent to the same files. It SHALL record in its intent that it verified the files before it retires the fence, and a resumed run after that retire SHALL finish the marker and tombstones without reading the files again. A retired fence alone SHALL never let a run retire the marker. A later migration SHALL mint a new store identity and enrol the fence at the next generation. Other hosts SHALL retire their stale local stores with an explicit owner step once the exported vault reaches them. Downgrade to a pre-store release SHALL require export first.
 
 #### Scenario: Import proves its round trip
 - **WHEN** a vault with Records and Planning collections is migrated
@@ -279,11 +279,69 @@ A vault SHALL move from file-canonical collections to the store only through a d
 
 #### Scenario: An exported vault cannot be re-adopted
 - **WHEN** a migrated vault is exported and a host later starts with a stale local store or finds the tombstoned replica
-- **THEN** the mode marker says exported and no replica or local store is adopted as canonical
+- **THEN** the vault has no mode marker, only its `mode.json.exported-<utc>` tombstone, and no replica or local store is adopted as canonical
 
 #### Scenario: Reverse export restores files
 - **WHEN** a migrated vault is exported back to files
 - **THEN** collections never written in store mode are byte-equal to their pre-migration files, and written collections are legacy-valid and report `acknowledged_gap`
+- **AND** file mode reads every collection as the store served it
+
+#### Scenario: A collection the store created keeps the vault in the store
+- **WHEN** the owner previews an export of a vault with a collection that the store created
+- **THEN** the preview is blocked, names that collection, and the vault, its marker and its fence stay as they were
+
+#### Scenario: Another host refuses a store whose export recorded its intent
+- **WHEN** an export recorded its intent and published the replica, then stopped, and another host with its own state adopts the replica
+- **THEN** that host refuses the store's collections with `COLLECTION_STORE_EXPORT_PENDING`, commits nothing and leaves the coordinator's recorded head as it was
+
+#### Scenario: An interrupted export resumes from its intent
+- **WHEN** an export stops after its intent, between a collection's files and its checkpoint, after its fence retire or after its marker retire
+- **THEN** the next apply with the same plan identity finishes to the same files and tombstones without a second checkpoint
+- **AND** no host is left with a retired fence beside a marker that still routes collections
+
+#### Scenario: An exported vault migrates again at the next generation
+- **WHEN** the owner migrates a vault whose export retired its fence at generation N
+- **THEN** the new store has a new identity and its fence and marker carry generation N+1
+
+### Requirement: An unadmitted migration and an unfinished export have an owner way out
+A migration whose imported files changed after it published its store SHALL NOT admit that store; the owner's next apply SHALL supersede it with fresh staging that imports the changed files. On a first enrolment, the coordinator's fence SHALL move from the superseded store to the new one by one CAS at the next generation, and the new store's first publication SHALL keep the superseded store's replica as `.foreign-*` evidence. On an enrolled vault, the apply SHALL first restore the store that the migration superseded, only after it proves that the migrated store is that store plus only the migration's own imports, and SHALL continue the restored store as a new tenure when the migrated store's publication or head reached the vault replica or the coordinator. The owner SHALL be able to abandon an export that cannot finish while its fence stands: one store transaction records each file that holds the export's bytes as that file's view, records each checkpoint that the activity log holds as the parent of the next export's checkpoint, and deletes the intent; no vault file is rewritten and no edit is adopted. After the fence is retired, a rerun SHALL go on from the frozen store only when the coordinator's newest retired fence names this store at the marker's generation with a head in this store's chain. A rerun SHALL finish a restore only while the restored store still ends at the head the migration imported onto; a restored store that committed since SHALL migrate again as any live store does. An export SHALL refuse before its intent unless the coordinator serves both the fence retire and the retired-fence read. A failed proof or check SHALL refuse and keep the stores, the marker, the fence and the files as they were.
+
+#### Scenario: A changed import supersedes the unadmitted store on a first enrolment
+- **WHEN** a migration that cut the first fence and published its store is cut before its marker, a writer outside the lease changes an imported file, and the owner applies again
+- **THEN** the apply imports the change into a new store, moves the fence to it at the next generation and installs the marker, at whichever step a further cut stops that apply
+- **AND** the superseded store's replica is kept as `.foreign-*` evidence
+
+#### Scenario: A changed import on an enrolled vault restores the store it superseded
+- **WHEN** a migration on a vault with a live store is cut after it published the migrated store, an imported file changes, and the owner applies again
+- **THEN** the apply restores the store that the migration superseded, with its rows and its head, and migrates again with the change
+- **AND** when the migrated store reached the replica or the coordinator, the restored store continues as a new tenure, and the coordinator's head names that tenure
+
+#### Scenario: A restore cut before its fork finishes on the next apply
+- **WHEN** an apply restored the superseded store and stopped before it continued that store as a new tenure
+- **THEN** until that apply the service holds the restored store as `sync_pending` and commits nothing
+- **AND** the next apply recognises the restore from the newest superseded store, which carries the migration's intent for the current marker, forks, and migrates again
+
+#### Scenario: A restored store that served a write migrates again
+- **WHEN** an apply restored the superseded store, its new staging never went live because its proof refused or the apply was killed, and the service then committed a write to the restored store
+- **THEN** the next apply migrates the restored store with the changed file, and the service serves the restored rows and the later write
+
+#### Scenario: An export that cannot finish is abandoned
+- **WHEN** an export stopped after some collections' files and checkpoints, a person edited a view, the rerun refuses over that view, and the owner abandons the export
+- **THEN** no vault file changes, the edit stays where the person wrote it, the store serves every row it served before the export, and a later export reads `acknowledged_gap` for every written collection
+- **AND** a checkpoint whose manifest write landed without its activity-log event is not the next export's parent
+
+#### Scenario: A fence retired by hand lets the export go forward
+- **WHEN** the operator retires the store fence after an export recorded its intent but before it wrote the files, and the owner runs the apply again
+- **THEN** the apply writes and verifies the files from the store, then retires the marker and tombstones the store, and file mode reads every collection as the store served it
+- **AND** when the head the coordinator recorded at that retire is not in this store, the apply refuses and no file changes
+
+#### Scenario: An edit after the export's own fence retire does not stop its renames
+- **WHEN** an export is cut after it retired its fence, and a person edits a view in file mode before the rerun
+- **THEN** the rerun finishes the marker and tombstones without reading the files again, and the edit stays
+
+#### Scenario: An export whose lease lapsed after its intent refuses behind another host's head
+- **WHEN** an export's lease lapses after it recorded its intent, and another host takes the lease and records a newer head
+- **THEN** the export refuses with `COLLECTION_STORE_SYNC_PENDING` before it publishes or writes a file
 
 ### Requirement: Collection store writes meet a latency budget
 

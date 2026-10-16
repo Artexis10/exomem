@@ -2450,12 +2450,15 @@ def annotate_hits(
     who = principal if principal is not None else effective_principal()
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     effective_limit = len(hits) if limit is None else limit
+    # Read once for every hit, as `policy` is: proving the set current stats
+    # every tombstone and event file, and the plane does not move during one pass.
+    tombstones = lifecycle.tombstoned_paths(vault_root)
 
     tombstoned = frozenset(
         path
         for hit in hits
         if (path := _hit_path(hit)) and (
-            lifecycle.is_tombstoned(vault_root, path)
+            lifecycle.is_tombstoned_in(tombstones, path)
             or not content_permits(vault_root, path, who)
         )
     )
@@ -2512,6 +2515,7 @@ def annotate_hits(
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
             expected_content_hash=getattr(hit, "snapshot_hash", None),
+            tombstones=tombstones,
         )
         if decision is None:
             # The page vanished or would not parse: it cannot be shown to
@@ -5626,6 +5630,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "tag-variants": "apply-conditional",
         "collections-store": "structure",
         "collections-store-adopt-local": "apply-conditional",
+        "collections-store-export": "apply-conditional",
     },
     ("manage_memory_file", "operation"): {
         "list": "structure",
@@ -6687,7 +6692,9 @@ def release_walk_filter(
     verdicts: dict[tuple, bool] = {}
 
     def keep(rel_path: str) -> bool:
-        if lifecycle.is_tombstoned(vault_root, rel_path):
+        # The set read above, like `policy`: the plane does not move while one
+        # walk runs, and re-proving it per path stats every tombstone and event file.
+        if lifecycle.is_tombstoned_in(tombstones, rel_path):
             return False
         if fail_closed:
             _record_blocked_outcome(who.audience_id)
@@ -6707,6 +6714,7 @@ def release_walk_filter(
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
+            tombstones=tombstones,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         _outcome_for_decision(

@@ -9,7 +9,7 @@ import sys
 def main(path: str) -> None:
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
-    if report.get("schema") == "exomem-local-storage-drill-report-v1":
+    if report.get("schema") in DRILL_TITLES:
         drill(report)
         return
     outcome = report["outcome"]
@@ -43,8 +43,15 @@ def main(path: str) -> None:
             print(f"- step {defect.get('step')}: {defect.get('owner')} -- {defect.get('summary') or defect.get('message')}")
 
 
+# Reports written as drill reports (checks, stages, measurements), by schema.
+DRILL_TITLES = {
+    "exomem-local-storage-drill-report-v1": "Local-storage node-loss drill",
+    "exomem-k3s-link-rehearsal-report-v1": "Flannel MTU, agent-token and client-CA rotation (k3s-link)",
+}
+
+
 def drill(report: dict) -> None:
-    print("## Local-storage node-loss drill\n")
+    print(f"## {DRILL_TITLES[report['schema']]}\n")
     print(f"- all checks passed: **{report['outcome']['all_checks_passed']}** ({report['outcome']['checks']})")
     for name, stage in report["stages"].items():
         if isinstance(stage, dict) and "failure" in stage:
