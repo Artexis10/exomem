@@ -13317,12 +13317,13 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="process_media",
                 reason=(
-                    "Media runs automatically in the cell's own media worker, "
-                    "so the manual media tool is not offered."
+                    "The `cloud` image installs only the `embeddings-onnx` extra "
+                    "and gates the build on torch being absent, so media "
+                    "extraction has no dependencies in the image."
                 ),
                 lifted_when=(
-                    "a Cloud tenant needs a manual reconcile or retry that "
-                    "the automatic media worker does not give"
+                    "a media-capable cloud image ships with the required "
+                    "decoding dependencies"
                 ),
             ),
             SurfaceExclusion(
