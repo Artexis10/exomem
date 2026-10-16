@@ -1031,8 +1031,9 @@ class ExistingPreflight:
     # the token, lifecycle record and history hash this one to keep one basis.
     exact_before_source: str
     after_source: str
-    # `before.source_hash` stays logical: grandfathering matches it through the
-    # activation census, which reads with universal newlines. Bind to `before_hash`.
+    # `before.source_hash` stays logical for grandfathering: `build_census` reads
+    # with universal newlines, and the corpus census takes this LF state through
+    # the `with_candidate` repair in preflight. Bind transitions to `before_hash`.
     before: semantic_contract.SemanticPageState
     after: semantic_contract.SemanticPageState
     grandfathered: bool
@@ -2004,7 +2005,8 @@ def _preflight_existing(
             # in the short window before its freshness event is published.
             # Repair the exact evaluated page from those authoritative bytes so
             # a lagging process cache never turns a valid write into a
-            # corpus-state refusal.
+            # corpus-state refusal. On a CRLF page it also gives the activation
+            # census the LF hash that grandfathering matches.
             before_corpus = before_corpus.with_candidate(before)
         after = semantic_contract.build_page_state(
             root,

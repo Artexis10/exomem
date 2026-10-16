@@ -137,6 +137,28 @@ def test_grandfathered_missing_unit_allows_nonworsening_edit_with_visible_debt(
     assert path.read_text(encoding="utf-8") == after
 
 
+def test_first_write_to_an_idless_crlf_legacy_page_installs_a_boundary_that_grandfathers_it(
+    tmp_path: Path,
+) -> None:
+    before = _source("Legacy prose without semantic units.", page_id=None).replace("\n", "\r\n")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+    assert activation_manifest.load_manifest(tmp_path) is None
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.grandfathered is True
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert committed.mutated is True
+    assert activation_manifest.load_manifest(tmp_path) is not None
+    assert path.read_bytes() == after.encode("utf-8")
+
+
 def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     activation_manifest.ensure_manifest(tmp_path)
     before = _source(
