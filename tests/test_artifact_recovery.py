@@ -524,7 +524,7 @@ def test_application_logs_remove_encoded_artifact_authority(vault, monkeypatch, 
     scope = {"type": "http", "path": "/download", "query_string": query.encode()}
     accepted = Request(scope).query_params["grant"]
     assert artifact_recovery.claim(vault, accepted, delivery=upload_tokens.ARTIFACT_HTTPS)[0] == descriptor
-    for name in ("fastmcp.server.server", "uvicorn.access", "uvicorn.error"):
+    for name in artifact_recovery.REDACTED_LOGGERS:
         # Installation is process-wide; restore each logger's filters for later tests.
         monkeypatch.setattr(logging.getLogger(name), "filters", [])
     artifact_recovery.install_log_redaction()

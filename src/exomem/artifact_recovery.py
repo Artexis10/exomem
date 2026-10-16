@@ -59,18 +59,23 @@ class _CapabilityRedaction(logging.Filter):
                         target = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "grant=artifact-capability-removed", ""))
                 except ValueError:
                     target = "artifact-request-target-removed"
-                target = _CAPABILITY.sub("artifact-capability-removed", target)
                 # Uvicorn's AccessFormatter unpacks these five arguments positionally.
-                record.args = (client, method, target, version, status)
+                record.args = tuple(
+                    _CAPABILITY.sub("artifact-capability-removed", item) if isinstance(item, str) else item
+                    for item in (client, method, target, version, status)
+                )
                 return True
         record.msg = _CAPABILITY.sub("artifact-capability-removed", record.getMessage())
         record.args = ()
         return True
 
 
+REDACTED_LOGGERS = ("fastmcp.server.server", "uvicorn.access", "uvicorn.error")
+
+
 def install_log_redaction() -> None:
     """FastMCP errors and Uvicorn access records must not retain delegated authority."""
-    for name in ("fastmcp.server.server", "uvicorn.access", "uvicorn.error"):
+    for name in REDACTED_LOGGERS:
         logger = logging.getLogger(name)
         if not any(isinstance(item, _CapabilityRedaction) for item in logger.filters):
             logger.addFilter(_CapabilityRedaction())
