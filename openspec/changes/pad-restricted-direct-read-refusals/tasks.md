@@ -4,7 +4,7 @@
 - [x] 1.2 Add the `restricted_refusal_floor` attribute to `Command` and set it in the registry metadata of `read_memory`, `get` and `fetch`.
 - [x] 1.3 Wrap `writer_lease.invoke_command` beside `_fixed_projected_command_completion` and outside `_collection_store_thread`: start the clock at entry, ask `caller_restricted` only after a refusal, free the refusal's finished frames, hand the wait to the surface or wait on the thread, record `command.refusal_floor` with `work_ms`, `overrun` and `deferred`, and raise the same exception.
 - [x] 1.4 Wait out a pending floor in an outermost MCP middleware and around the REST handler, after their own handling of the refusal: an `await` on the loop, and the last 3 ms on a worker thread.
-- [x] 1.5 Log a coded refusal on FastMCP's server logger as one line without its traceback, and keep the traceback of an exception without a code.
+- [x] 1.5 Obsolete, not shipped: a logging filter for coded refusals. The command surface answers coded refusals with the error envelope, so FastMCP no longer logs them (design D6).
 
 ## 2. Early decision and refusal work
 

@@ -10,7 +10,7 @@ A refusal whose own work runs past F SHALL complete late with its original refus
 
 For a restricted caller, a read by path SHALL decide whether the page is withheld entirely before the optional work that grows with the vault or with the page's history: links, history, the query log and the heat signal. That early refusal SHALL use the same release decision as the release gate, SHALL return the same missing-path response, and SHALL leave the same disclosure receipt. An owner without a connector ceiling SHALL keep the existing order.
 
-The work of a refusal SHALL NOT grow with the number of files in the vault, except for one directory check per directory and the first refusal after a file was added, removed or renamed. That refusal MAY complete after F.
+The work of a refusal SHALL NOT grow with the number of files in the vault, except for one directory check per directory, the first refusal after a file was added, removed or renamed, and the first withheld refusal in a process, which builds the memory-reference index. That refusal MAY complete after F.
 
 This requirement covers pages up to the governed capacity of 1 MiB per item. The refusal of a larger page MAY complete after F.
 

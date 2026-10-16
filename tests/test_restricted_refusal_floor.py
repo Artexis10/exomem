@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import statistics
 import time
 from pathlib import Path
@@ -136,7 +135,8 @@ def test_a_restricted_notice_returns_without_the_floor(
     assert result["withheld"] is True
     assert result["level"] == egress.LEVEL_NOTICE
     assert "path" not in result
-    assert elapsed < 1.0
+    # Well inside the patched 2 s floor, which a padded notice would wait out.
+    assert elapsed < 1.5
 
 
 def test_a_restricted_withheld_refusal_writes_no_read_log_row(
@@ -185,7 +185,9 @@ def test_mcp_refusals_of_withheld_and_missing_pages_take_the_same_time(
         started = time.perf_counter()
         result = await client.call_tool("read_memory", {"path": target}, raise_on_error=False)
         elapsed[target].append(time.perf_counter() - started)
-        assert result.is_error
+        answer = json.loads(result.content[0].text)
+        assert answer["success"] is False
+        assert answer["error"]["code"] == "NOT_FOUND"
         answers.add(result.content[0].text.replace(target, "<target>"))
 
     async def refuse_in_turn() -> None:
@@ -208,33 +210,3 @@ def test_mcp_refusals_of_withheld_and_missing_pages_take_the_same_time(
     # small loaded runners stay well under is still far below that.
     gap = statistics.median(elapsed[withheld]) - statistics.median(elapsed[missing])
     assert abs(gap) < 0.02
-
-
-def test_a_coded_refusal_logs_one_line_and_a_fault_keeps_its_traceback() -> None:
-    """FastMCP logs a tool's exception with its traceback; the owner still needs it for a fault."""
-    from fastmcp.server import server as fastmcp_server
-
-    from exomem import server
-
-    server._install_coded_refusal_log_line()
-    logger = fastmcp_server.logger
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append  # type: ignore[method-assign]
-    logger.addHandler(handler)
-    try:
-        for error in (
-            ValueError("NOT_FOUND: file does not exist: Notes/example.md"),
-            RuntimeError("an unexpected state"),
-        ):
-            try:
-                raise error
-            except Exception:
-                logger.exception("Error calling tool 'read_memory'")
-    finally:
-        logger.removeHandler(handler)
-
-    refusal, fault = records
-    assert refusal.exc_info is None
-    assert refusal.getMessage() == "Error calling tool 'read_memory' (NOT_FOUND)"
-    assert fault.exc_info is not None and fault.exc_info[1] is not None

@@ -147,6 +147,8 @@ def literal_alias_spans(
 #: walk. The margin covers coarse filesystem timestamps and the small backward
 #: steps of a virtualized clock.
 _CENSUS_RACY_NS = 2_000_000_000
+#: Censuses kept per process, one per vault, least recently used first out.
+#: A process serves one vault; tests and tools that open several stay bounded.
 _CENSUS_LIMIT = 8
 
 _Stamp = tuple[int, int, int, int]
