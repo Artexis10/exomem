@@ -284,6 +284,16 @@ def _apply_and_crash(environment, database, cut, released):
     os._exit(0)
 
 
+def _media_authority(environment, database, answer):
+    """The media worker's writer-authority probe in a fresh interpreter, as a media child runs it."""
+    os.environ.clear()
+    os.environ.update(environment)
+    from exomem import media_worker
+
+    with coordinator(database):
+        answer.put(media_worker._probe_writer_authority())
+
+
 def wait_out_the_lease():
     """Wait until a failed owner's lease expires, as an owner retrying would."""
     import time
@@ -314,6 +324,39 @@ def append_to_work(root, title):
                                     expected_container_hash=record_formats.load_adapter(root, manifest).read().snapshot)
     stop_writer()
     return written["item_key"]
+
+
+def test_a_media_child_gets_writer_authority_on_a_migrated_vault(env, capsys, tmp_path):
+    """A media child serves no store. A store fence that admits only a process with a store
+    runtime refuses every media child, so media processing stops on a migrated vault."""
+    import multiprocessing
+
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0
+    service = start_service(root)
+    try:
+        token = service.manager.ensure_writer().fencing_token
+        spawn = multiprocessing.get_context("spawn")
+        answer = spawn.Queue()
+        child = spawn.Process(target=_media_authority,
+                              args=(dict(os.environ), tmp_path / "coordinator.sqlite", answer))
+        child.start()
+        child.join(120)
+        assert answer.get(timeout=5) is None
+        assert service.manager.ensure_writer().fencing_token == token
+    finally:
+        service.stop()
+
+
+def test_a_writer_without_a_store_runtime_stays_fenced_until_the_marker_is_installed(env, capsys, tmp_path):
+    """A first enrolment cuts the fence before it installs the marker, so no collection routes
+    to the store yet. A writer that passes the fence in that window writes the migrating
+    collections as files, and the next apply refuses them as stale."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-marker")
+    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+        append_to_work(root, "a write between the fence cut and the marker")
+    assert migrate(root, "apply") == 0
 
 
 @pytest.mark.parametrize("stop", ["refused", "killed"])

@@ -4262,6 +4262,8 @@ class LeaseManager:
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
+        # Set by start_server_lifecycle: this process serves the store, so it needs its runtime.
+        self._serves_collection_store = False
         self._store_bound = False
         self._store_borrowers: dict[int, int] = {}
         self._store_handoff = False
@@ -4308,6 +4310,28 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - observability must never break the caller
             pass
 
+    def _offers_collection_store_capability(self) -> bool:
+        """Whether this process may pass the vault's collection store fence.
+
+        The fence keeps out releases that do not know the store. In this release, a process
+        that does not serve the store refuses a record_memory or plan_memory request for a
+        store collection, but only once the marker routes collections. A first enrolment cuts
+        the fence before it installs the marker, and in that window the fence alone keeps
+        writers off the files the migration imported. The serving process offers the
+        capability only with its store runtime attached, as before.
+        """
+        if self._collection_store is not None:
+            return True
+        if self._serves_collection_store:
+            return False
+        try:
+            from .collection_store import authority
+            from .vault import resolve_vault
+
+            return authority.read_marker(resolve_vault()) is not None
+        except Exception:  # noqa: BLE001 - unknown routing keeps the process fenced
+            return False
+
     def _store_refused(self) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
 
@@ -4345,11 +4369,10 @@ class LeaseManager:
                     self.config.replica_id, self._expires_at, self._fencing_token, True
                 )
             try:
-                # Every process of this release honours the store's routing: a store
-                # collection is never written as a file here, with or without an
-                # attached store runtime. So a process that serves no store, such as a
-                # media child, still offers the capability the store fence requires.
-                record = self.client.acquire(collection_store_capability=COLLECTION_STORE_CAPABILITY)
+                record = self.client.acquire(**(
+                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
+                    if self._offers_collection_store_capability() else {}
+                ))
             except OpError as error:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
@@ -6397,8 +6420,7 @@ class LeaseManager:
                 if self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
-                # A holder without a store runtime reports no head, so the recorded one stays.
-                record = self.client.renew(token, collection_store_capability=COLLECTION_STORE_CAPABILITY)
+                record = self.client.renew(token)
                 with self._lock:
                     if self._fencing_token != token:
                         continue
@@ -6947,6 +6969,7 @@ def coordination_status(
 
 def start_server_lifecycle() -> LeaseManager:
     manager = get_manager()
+    manager._serves_collection_store = True
     if manager.config.enabled and manager.config.preferred_writer:
         try:
             manager.ensure_writer()
