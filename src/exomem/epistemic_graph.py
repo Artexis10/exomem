@@ -2067,9 +2067,10 @@ class EpistemicGraphIndex:
         # One transaction. Python's sqlite3 commits each DDL statement on its
         # own, so a fresh private rebuild file paid about 26 durable commits
         # before its first row: 32 ms median and up to 2.3 s each on a Windows
-        # CI runner. The schema is also all-or-nothing now.
-        if not conn.in_transaction:
-            conn.execute("BEGIN")
+        # CI runner. The schema is also all-or-nothing now. IMMEDIATE takes the
+        # write lock up front, where the busy timeout applies; a deferred
+        # transaction would fail at once on the read-to-write upgrade instead.
+        conn.execute("BEGIN IMMEDIATE")
         try:
             self._create_graph_schema(conn)
         except BaseException:
