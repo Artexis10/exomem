@@ -76,6 +76,11 @@ _COLLECTION_AUDIT_SPOOL_RE = re.compile(
     re.ASCII,
 )
 _COLLECTION_MIGRATION_RE = re.compile(r"^\.exomem-collection-migration-[0-9a-f]{32}$", re.ASCII)
+#: The names a reverse export gives the live store and its derived rows when it retires them,
+#: casefolded as classification sees every name.
+_COLLECTION_EXPORTED_RE = re.compile(
+    r"^collections(?:-derived)?\.sqlite\.exported-[0-9]{8}t[0-9]{6}z$", re.ASCII
+)
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 
 
@@ -576,6 +581,8 @@ _REGISTRY = (
         # marker are vault-canonical and are reserved by their own phase.
         # Derived collections' rows sit beside it and rebuild from its import log.
         exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
+        # A reverse export keeps the retired store as evidence that no host adopts.
+        patterns=(_COLLECTION_EXPORTED_RE,),
     ),
     InternalStateDescriptor(
         "collection-replica",

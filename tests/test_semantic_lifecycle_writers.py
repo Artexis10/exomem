@@ -137,6 +137,33 @@ def test_grandfathered_missing_unit_allows_nonworsening_edit_with_visible_debt(
     assert path.read_text(encoding="utf-8") == after
 
 
+# Two producers record the boundary: init and migration build it from a universal-newline
+# read, and a first governed write installs it from the corpus census.
+@pytest.mark.parametrize("built_up_front", [True, False], ids=["built-up-front", "installed-by-write"])
+def test_an_idless_crlf_legacy_page_stays_grandfathered_under_either_boundary_producer(
+    tmp_path: Path, built_up_front: bool
+) -> None:
+    before = _source("Legacy prose without semantic units.", page_id=None).replace("\n", "\r\n")
+    after = before.replace("Legacy prose", "Updated legacy prose")
+    path = _write(tmp_path, _PAGE, before)
+    if built_up_front:
+        activation_manifest.ensure_manifest(tmp_path)
+    assert (activation_manifest.load_manifest(tmp_path) is not None) is built_up_front
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.grandfathered is True
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert committed.mutated is True
+    assert activation_manifest.load_manifest(tmp_path) is not None
+    assert path.read_bytes() == after.encode("utf-8")
+
+
 def test_compliant_page_cannot_remove_its_final_unit(tmp_path: Path) -> None:
     activation_manifest.ensure_manifest(tmp_path)
     before = _source(
@@ -3469,10 +3496,11 @@ def test_tier2_append_detects_concurrent_change_without_losing_bytes(
     assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
-    tmp_path: Path,
+    tmp_path: Path, newline: str
 ) -> None:
-    source = _source("A").rstrip("\n")
+    source = _source("A").rstrip("\n").replace("\n", newline)
     page = _write(tmp_path, _PAGE, source)
     preview = append_module.append_to_file(
         tmp_path,
@@ -3489,7 +3517,7 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
         semantic_transition_token=preview.transition_token,
         today=dt.date(2026, 7, 14),
     )
-    after = page.read_text(encoding="utf-8")
+    after = page.read_bytes()
 
     replay = append_module.append_to_file(
         tmp_path,
@@ -3502,8 +3530,8 @@ def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
     assert replay.semantic is not None
     assert replay.semantic["mutated"] is False
     assert replay.semantic["lifecycle_state"] == "committed_replay"
-    assert page.read_text(encoding="utf-8") == after
-    assert after.count("Appended once.") == 1
+    assert page.read_bytes() == after
+    assert after.count(b"Appended once.") == 1
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(

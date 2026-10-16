@@ -43,6 +43,7 @@ from .decide import (
     decide,
     hourly_backup_due,
     nightly_backup_due,
+    planned_move_volume,
     relocation_volume,
     storage_receipt,
 )
@@ -80,6 +81,7 @@ from .state import (
     CANARY_PARKED,
     GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
+    MOVE,
     RELOCATION_REFUSED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
@@ -87,12 +89,16 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
 
 logger = logging.getLogger("cellctl")
+
+# Engine names are a value of the comma-separated cell variable, so a name holds no comma.
+_MEDIA_ENGINE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 # D4 amendment (2026-10-05): a pass follows the last one after the fast
 # interval while anything is in transition, and after the idle interval once
@@ -394,10 +400,17 @@ class ClusterConfig:
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
+    # serve-cloud-artifact-handles: one switch for every cell, so a cell created
+    # later needs no edit. The list stays as the canary that precedes it.
+    artifact_broker_all_cells: bool = False
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
     media_engine_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Engines every cell runs, including a cell created later. The operator sets an engine
+    # here only after it is on in each existing cell through the selection above, so the
+    # default changes no existing cell's render. An empty default renders as before.
+    media_engine_fleet_default: tuple[str, ...] = ()
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -422,20 +435,26 @@ class ClusterConfig:
             or len(cell_ids) > 1024
             or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
-            or (cell_ids and not self.artifact_broker_url)
+            or ((cell_ids or self.artifact_broker_all_cells) and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
         for engine, cell_ids in self.media_engine_cell_ids.items():
             if (
                 not isinstance(engine, str)
-                # Engine names are a value of the comma-separated cell variable.
-                or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", engine)
+                or not _MEDIA_ENGINE_NAME.fullmatch(engine)
                 or not isinstance(cell_ids, tuple)
                 or len(cell_ids) > 1024
                 or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
                 or len(set(cell_ids)) != len(cell_ids)
             ):
                 raise ValueError("a media engine selection maps lower-case engine names to unique base32 cell IDs")
+        default = self.media_engine_fleet_default
+        if (
+            not isinstance(default, tuple)
+            or any(not isinstance(engine, str) or not _MEDIA_ENGINE_NAME.fullmatch(engine) for engine in default)
+            or len(set(default)) != len(default)
+        ):
+            raise ValueError("a media engine fleet default is a list of unique lower-case engine names")
 
     def workload_for_cell(self, cell_id: str) -> tuple[ResourceSettings, dict]:
         if cell_id in self.dedicated_cell_ids:
@@ -451,11 +470,17 @@ class ClusterConfig:
         return self.resources, {}
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
-        return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
+        selected = self.artifact_broker_all_cells or cell_id in self.artifact_broker_cell_ids
+        return self.artifact_broker_url if selected else ""
 
     def media_engines_for_cell(self, cell_id: str) -> str:
-        """The value of the cell's media engine switch; "" when no engine selects it."""
-        return ",".join(sorted(engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids))
+        """The value of the cell's media engine switch; "" when nothing selects an engine for it.
+
+        The cell's own entries and the fleet default form one sorted set, so the same set
+        renders the same value however it is spelled and never re-renders a running cell.
+        """
+        own = {engine for engine, ids in self.media_engine_cell_ids.items() if cell_id in ids}
+        return ",".join(sorted(own | set(self.media_engine_fleet_default)))
 
 
 class ClusterGateway:
@@ -854,7 +879,8 @@ def _compute_render_digest(
         material["artifact_broker_url"] = endpoint
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
-        # Only a selected cell's digest moves, so a canary restarts one cell.
+        # Only a cell whose engine set changes sees its digest move: a canary restarts
+        # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on
@@ -866,8 +892,11 @@ def _compute_render_digest(
 
 def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
     storage = cluster_config.storage
-    if (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
-        # D4: a relocated cell's new claim is local, whatever the domain.
+    new_claim = observation.pvc_storage_class not in storage.classes
+    if new_claim and (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
+        # D4: a relocated or moved cell's new claim is local, whatever the
+        # domain. Its old claim keeps its own class until it is gone, since
+        # storageClassName is immutable: a planned move leaves a Hetzner one.
         return storage.local.class_name
     return storage.claim_class(observation.pvc_storage_class)
 
@@ -922,10 +951,13 @@ def _select_backup_candidates(
                 chosen.add(row.cell_id)
         rows = [row for row in rows if not local(row)]
 
+    # A move's stopped backup counts as the backup it is, by the same mapping
+    # the row's hold column records it with.
     active = sum(
         1
         for row in rows
-        if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
+        if row_hold_kind(_active_hold(row, observations[row.cell_id])) == "backup"
+        and row.cell_id not in statefulset_blocked
     )
     # A row that could not be observed this pass counts by its hold column.
     active += sum(1 for row in unobserved if row.hold_kind == "backup")
@@ -1534,8 +1566,9 @@ async def _reconcile_row(
         and not start_upgrade
         and not is_render_digest_candidate
         # D4: a converged cell whose volume is lost still has its relocation
-        # to start.
+        # to start, and one the operator marked to move has its move.
         and relocation_volume(row, observation, cluster_config.storage) is None
+        and planned_move_volume(row, observation, cluster_config.storage) is None
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1804,10 +1837,18 @@ async def _reconcile_row(
             and decision.target_applied_at is not None
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
+        manifests = render_cell_manifests(spec)
+        if decision.delete_claim:
+            # D4: a claim deleted this pass is not applied again. This pass
+            # renders the deleted claim's class, and an unused claim is gone
+            # at once, so the apply would recreate it on the old class. The
+            # next pass, seeing no claim, applies the new one.
+            manifests = [manifest for manifest in manifests
+                         if (manifest["kind"], manifest["metadata"]["name"]) != ("PersistentVolumeClaim", spec.pvc_name)]
         refused, statefulset_applied = _apply_cell_manifests(
             cluster,
             row.cell_id,
-            render_cell_manifests(spec),
+            manifests,
             hold_active=hold_active,
             statefulset_exists=observation.statefulset_exists,
         )
@@ -1956,15 +1997,16 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     """D3: the hourly hold reads its clone and prunes only on its first run
     after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
-    prunes. Every backup of a Hetzner cell keeps its claim and the nightly
-    prune, as before local storage."""
+    prunes, nor does a planned move's. Every other backup of a Hetzner cell
+    keeps its claim and the nightly prune, as before local storage."""
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
             "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
-    if spec.local_volume and decision.hold_kind == "upgrade":
+    if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):
+        # A move's cell is down while its backup runs, so it never prunes either.
         return {"retention": None}
     return {"retention": RETENTION_ARGS}
 

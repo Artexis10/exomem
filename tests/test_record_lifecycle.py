@@ -101,6 +101,33 @@ def test_revision_and_rebaseline_upgrade_audit_without_rewriting_items(tmp_path:
     assert records.inspect_audit_gap(tmp_path, changed.path)["status"] == "acknowledged_gap"
 
 
+def test_a_checkpoint_over_a_collection_without_history_reads_acknowledged_gap(tmp_path: Path) -> None:
+    """An inspector that stops at the baseline parent before it records the checkpoint's
+    discontinuity, so a reverse export of a collection with no legacy history reads `ok`."""
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    transition = "0123456789abcdef01234567"
+
+    records.export_checkpoint(
+        tmp_path,
+        manifest.path,
+        manifest_text=(tmp_path / manifest.path).read_text(encoding="utf-8"),
+        transition_id=transition,
+        parent_id="baseline",
+        gap_code="collections-store-history:invented:1-2",
+        payload_hash="3" * 64,
+        why="summarize invented store history",
+    )
+
+    report = records.inspect_audit_gap(tmp_path, manifest.path)
+    assert report["status"] == "acknowledged_gap"
+    assert (report["discontinuity"]["prior_head"], report["discontinuity"]["checkpoint_transition"]) == (
+        "baseline",
+        transition,
+    )
+
+
 def test_revision_after_rebaseline_preserves_acknowledged_gap(tmp_path: Path) -> None:
     fixture = copy_x3_fixture(tmp_path)
     _activity_log(tmp_path)

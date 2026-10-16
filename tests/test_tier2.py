@@ -710,6 +710,18 @@ def test_append_to_file_adds_content(vault: Path) -> None:
     assert result.bytes_appended > 0
 
 
+def test_append_to_file_keeps_a_crlf_page_crlf(vault: Path) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "appendable.md"
+    target.write_bytes(b"existing line\r\nlast line")
+    append_module.append_to_file(
+        vault,
+        path="Knowledge Base/Notes/appendable.md",
+        content="new line\n",
+        today=TODAY,
+    )
+    assert target.read_bytes() == b"existing line\r\nlast line\r\nnew line\r\n"
+
+
 def test_append_to_file_refuses_sources(vault: Path) -> None:
     with pytest.raises(append_module.AppendError) as exc:
         append_module.append_to_file(
@@ -1124,13 +1136,13 @@ def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
     note.write_text("---\ntype: insight\n---\n# C\n\nBody.\n", encoding="utf-8")
     rel = "Knowledge Base/Notes/Insights/conf.md"
 
-    with pytest.raises(Exception) as ei:  # ToolError wrapping EXCLUDED_FIELD
-        asyncio.run(mcp.call_tool(
-            "edit_memory",
-            {"path": rel, "why": "x", "field": "confidence", "value": 0.99},
-            run_middleware=True,
-        ))
-    assert "EXCLUDED_FIELD" in str(ei.value) or "confidence" in str(ei.value)
+    refusal = asyncio.run(mcp.call_tool(
+        "edit_memory",
+        {"path": rel, "why": "x", "field": "confidence", "value": 0.99},
+        run_middleware=True,
+    ))
+    assert refusal.structured_content["success"] is False
+    assert refusal.structured_content["error"]["code"] == "EXCLUDED_FIELD"
     assert "confidence" not in note.read_text(encoding="utf-8")
 
     # create_file with an excluded key in its frontmatter dict is refused too.

@@ -134,17 +134,25 @@ manual host reservation that can drift from that declaration.
 
 Run the removal playbook first, while the entry and its inventory host still
 exist. It refuses while a cell whose volume is on the target holds a
-maintenance hold, and when the cluster's cell volumes would not fit the
-remaining nodes' slots (add a node first). It also refuses while any desired
-cell template selects the target reservation, including a stopped cell;
-relocate and clear that selection first. On an agent with local storage, it
-refuses while a cell's live volume is still on the target; relocate those cells
-first ([node loss](cloud-node-loss.md)). Until the playbook relocates them
-itself, that means stopping the agent and relocating as for a lost node, which
-loses each cell's writes since its last hourly backup. It cordons, drains without force, stops K3s and every container, deletes the Node,
-and revokes the node's inter-node firewall rules. Remove nodes when no
-invitations are pending: rows admitted during the drain are not yet visible as
-volumes.
+maintenance hold, and when the cells would not fit the remaining nodes (add a
+node first). Each cell counts against the storage it uses: a cell on a Hetzner
+volume against the remaining attachment slots, and a cell on the target's
+local storage against one remaining node's pool, which must keep its snapshot
+reserve ([remove a dedicated host](cloud-dedicated-host.md#remove-the-host)).
+It also refuses while any desired cell template selects the target
+reservation, including a stopped cell;
+relocate and clear that selection first. It cordons the agent. On an agent
+with local storage, move and accept its cells before you run the playbook
+([remove the host](cloud-dedicated-host.md#remove-the-host)). The playbook
+skips a cell already bound elsewhere, and moves a cell still on the agent to
+a new claim on another node, one at a time, through a fresh stopped backup
+([move a cell](cloud-dedicated-host.md#move-a-cell-to-a-new-claim)). A failed
+move stops the removal with the agent still in the cluster and cordoned. It refuses to move
+cells off an agent that is not Ready; relocate those cells as for a lost node
+first ([node loss](cloud-node-loss.md)). Then it drains without force, stops
+K3s and every container, deletes the Node, and revokes the node's inter-node
+firewall rules. Remove nodes when no invitations are pending: rows admitted
+during the drain are not yet visible as volumes.
 
 The removal reads no secret, so it runs without the SOPS wrapper:
 

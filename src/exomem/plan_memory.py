@@ -6,8 +6,11 @@ from pathlib import Path
 from typing import Any, Literal, Never
 
 from . import planning
-from .cli_ops import OpError
+from .cli_ops import OpError, action_argument_contract
 from .structured_collections import CollectionError, collection_remediation
+
+#: The Planning spec caps every Planning refusal message at 512 UTF-8 bytes.
+_REFUSAL_MESSAGE_MAX_BYTES = 512
 
 ACTIONS = frozenset(
     {
@@ -369,7 +372,12 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
             parts.append(f"unexpected for {action}: " + ", ".join(sorted(surplus)))
         if missing:
             parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
-        _invalid_arguments("; ".join(parts))
+        _invalid_arguments(
+            "; ".join(parts),
+            accepted=action_argument_contract(
+                action, _ACTION_FIELDS[action], _REQUIRED_FIELDS[action]
+            ),
+        )
     if action == "query" and values["view"] is not None and supplied & _VIEW_SHAPING_FIELDS:
         offending = sorted(supplied & _VIEW_SHAPING_FIELDS)
         _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))
@@ -381,10 +389,14 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("update requires at least one of: changes, body")
 
 
-def _invalid_arguments(detail: str | None = None) -> Never:
+def _invalid_arguments(detail: str | None = None, *, accepted: str | None = None) -> Never:
     message = "arguments do not match the selected Planning action"
     if detail:
         message = f"{message}: {detail}"
+    # The accepted-argument list is help, not the refusal itself: drop it
+    # rather than exceed the Planning message cap.
+    if accepted and len(f"{message}; {accepted}".encode()) <= _REFUSAL_MESSAGE_MAX_BYTES:
+        message = f"{message}; {accepted}"
     raise OpError("INVALID_PLAN_ARGUMENTS", message)
 
 

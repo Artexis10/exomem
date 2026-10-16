@@ -46,7 +46,7 @@ def main(path: str) -> None:
 # Reports written as drill reports (checks, stages, measurements), by schema.
 DRILL_TITLES = {
     "exomem-local-storage-drill-report-v1": "Local-storage node-loss drill",
-    "exomem-k3s-link-rehearsal-report-v1": "Flannel MTU and agent-token rotation (k3s-link)",
+    "exomem-k3s-link-rehearsal-report-v1": "Flannel MTU, agent-token and client-CA rotation (k3s-link)",
 }
 
 
