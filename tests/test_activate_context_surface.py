@@ -337,6 +337,8 @@ def test_mcp_due_omission_reaches_the_response_and_final_observation(
     working_set_index.WorkingSetIndex(vault).rebuild()
     baseline = commands.op_activate_context(vault, turn=TURN, anchor=page)
     assert baseline["abstained"] is False and baseline["relevant_due_refs"]
+    # The late read below must happen: drop the parse the baseline left behind.
+    due_state.reset_serve_cache()
 
     logs = tmp_path / "logs"
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(logs))

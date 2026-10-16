@@ -313,6 +313,14 @@ cellStorage:
     # to this many GiB. D6 reserves twice the largest cell per concurrent
     # backup, so this cap also bounds each node's snapshot reserve.
     maxCellGib: 20
+  # Task 5.5: the array alert reads the md arrays of the dedicated hosts, through
+  # node-exporter's mdadm collector alone, pinned by image index digest (v1.12.1,
+  # quay.io/prometheus/node-exporter). It runs on the nodes TopoLVM's node plugin
+  # runs on, with no privilege and no host mount: /proc/mdstat is the host's, in
+  # every container. A Cloud recovery agent (task 6.3) runs it too and has no md
+  # array, so it must be left out of the alert's expected nodes.
+  arrayExporter:
+    image: quay.io/prometheus/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
   snapshotController:
     # external-snapshotter v8.6.0, the release the vendored CRDs in
     # files/external-snapshotter come from (LOCAL_STORAGE_PROVENANCE.md).

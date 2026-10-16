@@ -101,8 +101,11 @@
   - Done in #1595 (`infra/ansible/roles/dedicated_host`). Evidence: the dedicated-host bootstrap workflow, run 37402002035 at a96ff3ee5, built the role on loop devices: RAID1, LUKS with the escrowed passphrase as its first key, Clevis pinned to Tang's signing thumbprint and proven to unlock, a refused unpinned Tang, and the `cells` thin pool. A first run on purchased hardware stays with 5.3.
 - [ ] 5.3 Make the k3s agent unit wait for the unlock. Evidence: `lsblk` and `cryptsetup status` output, plus a reboot that unlocks unattended and starts K3s afterwards.
 - [ ] 5.4 Add the manual unlock and the Tang rebind to the operator runbook, and exercise the manual unlock once.
+  - The runbook (`docs/runbooks/cloud-dedicated-host.md`, "Unlock by hand" and "Tang lost or replaced") is written and checked against the role. The exercise is pending: it waits on the purchased host.
 - [ ] 5.5 Alert when a dedicated host's cell array is degraded, through the existing alert receiver. Today `site.yml` only reports it, and the host has no mail transport for `mdmonitor`. Evidence: an alert from a failed member on a disposable host.
-- [ ] 5.6 Alert when a thin pool's data or metadata use passes 80%, from TopoLVM's thin-pool metrics, through the existing alert receiver. Evidence: an alert-rule test.
+  - The code is done: node-exporter's mdadm collector as a DaemonSet on the nodes TopoLVM's node plugin runs on, read by cellctl, with alert-rule tests against node-exporter's real output. The proof, a failed member on the purchased host before cutover, is pending.
+- [x] 5.6 Alert when a thin pool's data or metadata use passes 80%, from TopoLVM's thin-pool metrics, through the existing alert receiver. Evidence: an alert-rule test.
+  - Done. Evidence: `infra/cellctl/tests/test_local_storage.py`: `test_a_thin_pool_at_80_percent_of_its_data_or_its_metadata_fires`, `test_thin_pools_just_under_80_percent_resolve_the_alert`, `test_a_thin_pool_that_cannot_be_read_sends_nothing_and_never_resolves`, `test_a_full_thin_pool_fires_even_while_another_node_cannot_be_read` and `test_a_degraded_array_and_a_full_pool_each_fire_once_and_resolve_once`. The test page is built from the series names TopoLVM 0.41.1 documents; its first live read comes with the first dedicated host.
 - [ ] 5.7 Write and rehearse a rotation of the K3s agent token (`k3s_agent_token`) for the pinned K3s version. A dedicated host's disk that leaves the provider's custody unwiped exposes the token. The procedure owns the token's activation: it escrows the new version, then selects it in `infra/contracts/active-ansible-selection-v1.json` in a reviewed commit, because escrowing alone activates nothing. Evidence: every agent rejoins with the new token, and the old token is refused.
 
 ## 6. Private-link join (needs the purchased server)
@@ -110,6 +113,7 @@
 - [ ] 6.1 Add the private-link subnet to Terraform foundation (vSwitch for Hetzner), or the WireGuard configuration for another provider.
 - [ ] 6.2 Join the dedicated agent over the private link with the existing hardening, the CA-pinned agent token and the inter-node firewall. The k3s role waits until the agent's storage driver publishes its pool. Evidence: the join playbook output and published slots.
 - [ ] 6.3 Add the optional Terraform Cloud recovery agent, with its volume group on one Cloud volume under the same LUKS and Clevis layout, created and removed by variable. Evidence: plan/apply/destroy on a disposable stack.
+  - The agent publishes a pool but has no md array, so it must be excluded from the `cell-array-degraded` alert's expected nodes (`reconcile._host_alerts`), or carry an array. Otherwise that alert stays unknown and never resolves.
 - [ ] 6.4 Implement relocation in the agent-removal playbook for cells whose volumes the remaining nodes cannot reach: a fresh stopped backup, a restore, start after the restore succeeds, acceptance. Evidence: a removal of a disposable agent holding a seeded cell.
 - [ ] 6.5 Set the cluster's flannel MTU so that VXLAN fits the private link before the first dedicated join. Cloud nodes run flannel at 1400 over the 1450-byte Cloud network, so their VXLAN packets are 1450 bytes (1400 plus 50 bytes of overhead). A vSwitch carries at most 1400, and a default WireGuard interface 1420. Evidence: pod-to-pod traffic at full MTU between a Cloud node and the dedicated agent.
 - [ ] 6.6 Before the first production dedicated join, run the release gate on the full inventory with `--limit` set to the server, so that no agent needs to be reachable and nothing is pruned. A fleet with a WireGuard host would then need every peer's WireGuard public key carried in the inventory, because only a run on that peer reads its key today. Evidence: the gate's two passes on the server, with the agents unreached.
@@ -145,4 +149,5 @@
 ## 9. Production drill and closure
 
 - [ ] 9.1 Create a Cloud recovery agent with the dedicated-node label and taint, select a seeded test cell onto it, destroy the agent, and relocate the cell. Record the recovery point and recovery time.
+  - Exclude the agent from the `cell-array-degraded` alert's expected nodes first (task 6.3), or the alert stays unknown while it exists.
 - [ ] 9.2 Sync these deltas into canonical specs after `adopt-exomem-cloud-plain-cells` and `add-cloud-service-resource-policy` archive, then archive this change.

@@ -15,6 +15,7 @@ thing, or its rate limiting would silently key on nothing useful.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -241,7 +242,9 @@ def test_exomem_cloud_is_default_deny_and_each_workload_policy_allows_its_own_tr
     cellctl = policies["cellctl"]["spec"]
     assert cellctl["policyTypes"] == ["Ingress", "Egress"]
     assert cellctl["ingress"] == []
-    assert _ports(cellctl["egress"]) == {443, 6443, 5432, 53}
+    # Local storage is on in the validation values: 8080 and 9100 are the host
+    # alerts' metrics ports (tasks 5.5, 5.6), asserted in full further down.
+    assert _ports(cellctl["egress"]) == {443, 6443, 5432, 53, 8080, 9100}
 
 
 def _selects(selector: dict[str, Any], labels: dict[str, str]) -> bool:
@@ -1153,10 +1156,12 @@ def test_with_local_storage_off_production_renders_no_part_of_it(monkeypatch: py
     documents = _helm_template("--set", "cellStorage.local.enabled=false", *SNAPSHOT_CLASS_API)
     assert _cellctl_storage(documents, monkeypatch) == DEFAULT_STORAGE
     names = {doc["metadata"]["name"] for doc in documents}
-    assert not {name for name in names if any(part in name for part in ("topolvm", "snapshot", "retained-delete"))}
+    assert not {name for name in names if any(part in name for part in ("topolvm", "snapshot", "retained-delete", "array-exporter"))}
     scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     assert "snapshot.storage.k8s.io" not in scope["spec"]["matchConstraints"]["resourceRules"][0]["apiGroups"]
     assert not any("'persistentvolumes'" in rule["expression"] for rule in scope["spec"]["validations"])
+    # Tasks 5.5 and 5.6: no egress opens to a metrics port nothing serves.
+    assert _ports(_find(documents, "NetworkPolicy", "cellctl")["spec"]["egress"]) == {443, 6443, 5432, 53}
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1231,3 +1236,52 @@ def test_functional_health_ingress_rewrites_get_only_without_changing_pod_probes
     ][0]
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_array_exporter_runs_only_where_topolvm_does_and_asks_the_host_for_nothing() -> None:
+    # Task 5.5: on a node without the cell array it would report no array, and
+    # any privilege or host mount would put a root-capable pod on every
+    # dedicated host for a health read.
+    documents = _helm_template()
+    exporter = _find(documents, "DaemonSet", "exomem-cell-array-exporter")["spec"]["template"]["spec"]
+    topolvm = _find(documents, "DaemonSet", "exomem-platform-topolvm-node")["spec"]["template"]["spec"]
+    container = exporter["containers"][0]
+
+    assert exporter["nodeSelector"] == topolvm["nodeSelector"]
+    assert exporter["tolerations"] == topolvm["tolerations"]
+    assert not exporter.get("volumes") and not exporter.get("hostNetwork") and not exporter.get("hostPID")
+    assert container["securityContext"] == {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                            "capabilities": {"drop": ["ALL"]}}
+    assert exporter["securityContext"]["runAsNonRoot"] is True
+    assert "--collector.disable-defaults" in container["args"] and "--collector.mdadm" in container["args"]
+    assert re.fullmatch(r"quay\.io/prometheus/node-exporter:v[0-9.]+@sha256:[0-9a-f]{64}", container["image"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_told_and_allowed_to_reach_the_pods_that_serve_the_host_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A selector or port cellctl reads that the pods do not carry leaves every
+    # host unreadable, so both alerts stay silent; a policy that omits the port
+    # does the same without a word in any log but cellctl's.
+    documents = _helm_template()
+    local = _cellctl_storage(documents, monkeypatch).local
+    assert local is not None
+    exporter = _find(documents, "DaemonSet", "exomem-cell-array-exporter")["spec"]["template"]
+    topolvm = _find(documents, "DaemonSet", "exomem-platform-topolvm-node")["spec"]["template"]
+    egress = _find(documents, "NetworkPolicy", "cellctl")["spec"]["egress"]
+
+    for selector, port, template in ((local.array_selector, local.array_port, exporter),
+                                     (local.thin_pool_selector, local.thin_pool_port, topolvm)):
+        wanted = dict(pair.split("=", 1) for pair in selector.split(","))
+        assert wanted.items() <= template["metadata"]["labels"].items()
+        assert port in {p["containerPort"] for p in template["spec"]["containers"][0]["ports"]}
+        assert any(
+            rule.get("to", [{}])[0].get("podSelector", {}).get("matchLabels") == wanted
+            and rule["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == local.metrics_namespace
+            and [p["port"] for p in rule["ports"]] == [port]
+            for rule in egress
+        ), selector
+    role = _find(documents, "ClusterRole", "cellctl")
+    assert any("pods" in rule["resources"] and "list" in rule["verbs"] for rule in role["rules"])

@@ -399,6 +399,23 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    {{- if $local }}
+    {{- $metrics := include "exomem.cellMetrics" . | fromJson }}
+    # Tasks 5.5 and 5.6: the host alerts read /metrics from TopoLVM's node plugin
+    # and the array exporter, by pod IP, and from no other pod.
+    {{- range $source := list $metrics.thin_pool $metrics.array }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $source.labels | nindent 14 }}
+      ports:
+        - port: {{ int $source.port }}
+          protocol: TCP
+    {{- end }}
+    {{- end }}
     - to:
         - namespaceSelector:
             matchLabels:
