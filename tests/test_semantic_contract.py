@@ -1122,6 +1122,35 @@ def test_stable_candidate_keeps_current_activation_data_and_stem_precedence(
     assert changed.outbound[path][0].target_status == "resolved"
 
 
+@pytest.mark.parametrize("anchor", ["claim", "renamed-claim"])
+def test_target_revision_refreshes_incoming_exact_claim_bindings(
+    tmp_path: Path, anchor: str
+) -> None:
+    target_path = "Knowledge Base/Notes/Insights/target.md"
+    before = _state(
+        tmp_path, target_path,
+        _source(title="Target", exomem_id=_ID_A, body="- [fact] Original claim. ^claim\n"),
+    )
+    after = _state(
+        tmp_path, target_path,
+        _source(title="Target", exomem_id=_ID_A, body=f"- [fact] Revised claim. ^{anchor}\n"),
+    )
+    source = _state(
+        tmp_path, "Knowledge Base/Notes/Insights/source.md",
+        _source(
+            exomem_id=_ID_B,
+            body="## Relations\n- supports [[Target#claim]]\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, before, source)
+    changed = corpus.with_candidate(after)
+    expected = _corpus(tmp_path, after, source)
+    assert changed.inbound[target_path] == expected.inbound[target_path]
+    incoming, = changed.inbound[target_path]
+    assert incoming.target_unit_fingerprint != corpus.inbound[target_path][0].target_unit_fingerprint
+    assert incoming.target_unit_status == ("found" if anchor == "claim" else "missing")
+
+
 @pytest.mark.parametrize(
     ("before_compiled", "after_compiled"),
     ((True, True), (True, False), (False, True), (False, False)),

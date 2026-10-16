@@ -2,7 +2,9 @@
 
 ## Purpose
 Require black-box release proof through the installed wheel and real product transports, with deterministic lean coverage and explicit heavy-capability tiers.
+
 ## Requirements
+
 ### Requirement: Installed-wheel stdio product loop
 
 The system SHALL provide a black-box test that builds and installs the wheel, initializes a temporary vault through the installed CLI, connects through a real stdio MCP client, and completes source capture, source-backed memory, recall, read, graph context, evidence preservation, supersession, evolution review, reconcile, Records authoring/recovery, restart, and persistence checks. The Records portion SHALL begin without a pre-written collection manifest and SHALL exercise `describe`, create-mode `validate`, `create` with a no-filter saved view, `inspect`, `append`, `query`, `update`, revision-mode `validate`, `revise`, a direct-edit audit gap, and `rebaseline` through the installed command surface.
@@ -35,9 +37,9 @@ The system SHALL exercise the actual HTTP application lifecycle, REST authentica
 - **THEN** it returns exactly 401 with a Bearer challenge naming the local protected-resource metadata URL, its raw response discloses no collection path, row, Planning reference, or aggregate value, and the E2E does not accept another HTTP error or claim command-level governance executed
 
 ### Requirement: Tiered model and media gates
-Lean product E2E SHALL run without optional models for every pull request with changes outside `openspec/` and every main, scheduled, or manual run.
-CI SHALL omit this journey only for a pull request whose complete merge-tree comparison proves that every change is inside `openspec/`.
-CI SHALL report omission explicitly and SHALL retain the journey when that comparison or decision is unavailable.
+Lean product E2E SHALL run without optional models for every pull request that changes a path outside the docs-only set, except the release-please release pull request, and for every main, scheduled, or manual run. The docs-only set is `docs/`, `openspec/`, and Markdown files at the repository root other than `README.md`; none of these paths is a wheel or sdist input.
+CI SHALL omit this journey for a pull request only when its complete merge-tree comparison proves that every change is inside the docs-only set, or when the pull request is the release-please release pull request whose release evidence requires a green full run at its base revision and refuses any change that release-please did not make.
+CI SHALL report omission explicitly, as a job summary or a skipped job, and SHALL retain the journey when that comparison or decision is unavailable.
 Real embeddings/reranking SHALL run in the model job.
 Real OCR, PDF, ASR, CLIP, and video fixtures SHALL run scheduled or opt-in with explicit soft-fail reporting when their configured dependencies are unavailable.
 
@@ -50,13 +52,23 @@ Real OCR, PDF, ASR, CLIP, and video fixtures SHALL run scheduled or opt-in with 
 - **THEN** CI reports that the installed journey did not run and makes no runtime acceptance claim
 - **AND** the remaining CI checks still run under their existing rules
 
+#### Scenario: Docs-only changes report omitted execution
+- **WHEN** every change relative to the pull request merge parent is inside the docs-only set
+- **THEN** CI reports that the installed journey did not run and makes no runtime acceptance claim
+- **AND** every test marked `reads_repository_docs` still runs, the push run on main runs every test after the merge, and the remaining CI checks still run under their existing rules
+
 #### Scenario: Mixed changes retain installed proof
-- **WHEN** a pull request changes any path outside `openspec/`, including a deletion or either side of a rename
-- **THEN** CI runs the installed journey even when the final source commit changes only OpenSpec
+- **WHEN** a pull request changes any path outside the docs-only set, including `README.md`, a deletion, or either side of a rename
+- **THEN** CI runs the installed journey even when the final source commit changes only docs-only paths
 
 #### Scenario: Unavailable comparison retains installed proof
 - **WHEN** CI cannot read the merge ancestry or does not obtain a scope decision
 - **THEN** it does not authorize omission of the installed journey
+
+#### Scenario: Release pull request relies on full-run evidence
+- **WHEN** the pull request is the release-please release pull request
+- **THEN** the installed journey does not run on it
+- **AND** release evidence refuses the pull request unless a green full run exists at its base revision and every change is release-please's own work
 
 #### Scenario: Main and full runs retain installed proof
 - **WHEN** CI runs for main, a schedule, or a manual dispatch

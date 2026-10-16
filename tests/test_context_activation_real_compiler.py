@@ -54,7 +54,7 @@ from membench.utility import context_activation_product as product
 
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
-pytestmark = pytest.mark.timeout(1800)
+pytestmark = [pytest.mark.timeout(1800), pytest.mark.reads_repository_docs]
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 #: Corpus v5's report. The v3 and v4 reports beside it are kept as history.

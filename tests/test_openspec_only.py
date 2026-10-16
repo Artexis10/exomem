@@ -1,4 +1,7 @@
 from pathlib import Path
+import pytest
+
+pytestmark = pytest.mark.reads_repository_docs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -7,17 +10,17 @@ NON_SPEC_MARKER = "<!-- authority:non-specification -->"
 
 
 def test_repository_uses_openspec_as_its_only_specification_system() -> None:
-    for instruction_file in ("AGENTS.md", "CLAUDE.md"):
-        instructions = (ROOT / instruction_file).read_text(encoding="utf-8")
-        assert POLICY_MARKER in instructions, (
-            f"{instruction_file} must declare the OpenSpec-only policy"
-        )
-        normalized = instructions.casefold()
-        for phrase in (
-            "sole specification system",
-            "routine restorative fixes",
-        ):
-            assert phrase in normalized, f"{instruction_file} lost policy: {phrase}"
+    instructions = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert POLICY_MARKER in instructions, "AGENTS.md must declare the OpenSpec-only policy"
+    normalized = instructions.casefold()
+    for phrase in (
+        "sole specification system",
+        "routine restorative fixes",
+    ):
+        assert phrase in normalized, f"AGENTS.md lost policy: {phrase}"
+    # Claude Code reads CLAUDE.md, which carries the same instructions by importing AGENTS.md.
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+    assert "@AGENTS.md" in claude, "CLAUDE.md must import AGENTS.md"
 
     for forbidden_root in (
         ROOT / "docs" / "superpowers",

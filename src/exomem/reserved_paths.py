@@ -385,6 +385,10 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 _REGISTRY = (
     InternalStateDescriptor(
+        "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
+        trees=("_compiled",),
+    ),
+    InternalStateDescriptor(
         CONNECTOR_BOUNDARY_DESCRIPTOR_ID,
         "governance.connector_boundary",
         StatePlacement.VAULT_CANONICAL,

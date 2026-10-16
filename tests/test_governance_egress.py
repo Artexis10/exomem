@@ -34,6 +34,8 @@ from exomem.governance import (
 from exomem.governance.decisions import Decision
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
+pytestmark = pytest.mark.reads_repository_docs
+
 # --------------------------------------------------------------------------
 # Governed-vault helpers
 # --------------------------------------------------------------------------

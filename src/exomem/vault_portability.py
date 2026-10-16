@@ -154,6 +154,10 @@ def _is_registered_internal_state(path: str, parts: tuple[str, ...]) -> bool:
     if not parts or parts[0].casefold() != kb_dirname().casefold():
         return False
     classification = reserved_paths.classify_logical(path)
+    if classification.descriptor_id == "compiled-history":
+        from . import compiled_history
+
+        return not path.startswith(compiled_history.history_root() + "/")
     if classification.descriptor_id == "collection-replica":
         from . import record_history
         from .collection_store import authority, replica

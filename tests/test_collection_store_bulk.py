@@ -3,14 +3,15 @@
 import json
 
 import pytest
+from test_collection_store_writer import CID, create, manifest_path, manifest_text
+from test_collection_store_writer import store as store
+from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import records, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.collection_store.preview import preview_store
 from exomem.record_memory import record_memory
-from test_collection_store_writer import CID, create, manifest_path, manifest_text, store as store
-from test_records_bulk_upsert import EVIDENCE, _evidence
 
 
 def bulk(store, rows, **kwargs):
@@ -119,6 +120,84 @@ def test_a_changed_preserved_source_rolls_back_the_completed_batch(store, monkey
     assert tuple(store.connection.iterdump()) == before
 
 
+@pytest.mark.parametrize("encoding", ["json-v1", "typed-v1", "typed-v2"])
+def test_summary_bulk_preserves_payload_history_and_maintenance_after_reopen(store, monkeypatch, encoding):
+    """Batch inserts must bind each payload, source and effect to its own stored row identity."""
+    from test_collection_rollups import DAILY, FIELDS, by_bucket, manifest, reduce, request
+
+    from exomem.collection_store import index_migrations, query_freshness, tokens, typed_storage
+
+    text = manifest(rollups={"daily": DAILY}, fields={**FIELDS, "meta": "{type: object}"})
+    text = text.removesuffix("---\n") + (
+        "indexes:\n  by_id:\n    keys: [{field: id}]\n"
+        "  by_calories:\n    keys: [{field: calories, direction: desc}]\n---\n"
+    )
+    migrate = typed_storage.migrate_batch
+
+    def installed_encoding(conn, collection_id, fields, **kwargs):
+        # Older installed summaries retain JSON/v1 until their explicit forward migration.
+        if encoding == typed_storage.JSON_V1:
+            return "ready"
+        return migrate(conn, collection_id, fields, **{**kwargs, "encoding": encoding})
+
+    with monkeypatch.context() as installation:
+        installation.setattr(typed_storage, "migrate_batch", installed_encoding)
+        store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    _evidence(store.root)
+    items = [
+        {"id": "One", "start": "2026-03-01T10:00:00+00:00", "calories": 9,
+         "distance_m": -0.0, "meta": {"parts": [True, 2**70, 1.0]}},
+        {"id": "Two", "start": "2026-03-01T11:00:00+00:00", "calories": 3, "distance_m": 1},
+        {"id": "Three", "calories": 5, "distance_m": None},
+    ]
+    result = bulk(store, [{"item": item, "body": f"Body {index}\n"} for index, item in enumerate(items)])
+    assert result["counts"] == {"inserted": 3, "updated": 0, "unchanged": 0, "rejected": 0}
+    keys = [row["item_key"] for row in result["rows"]]
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        from exomem.collection_store.writer import CollectionWriter
+
+        reopened = CollectionWriter(store.root, handle)
+        plan = index_migrations.ready_plan(handle.connection, CID)
+        assert len(plan.indexes) == 2
+        assert handle.connection.execute(
+            f"SELECT i.item_key,p.row_version FROM {plan.table_name} p JOIN items i ON i.row_id=p.row_id ORDER BY i.item_key"
+        ).fetchall() == sorted((key, 1) for key in keys)
+        for index, (key, expected) in enumerate(zip(keys, items, strict=True)):
+            row_id, version, payload = handle.connection.execute(
+                "SELECT row_id,row_version,payload_hash FROM items WHERE collection_id=? AND item_key=?",
+                (CID, key),
+            ).fetchone()
+            body = f"Body {index}\n"
+            assert version == 1 and payload == tokens.payload_hash(1, key, expected, body)
+            assert typed_storage.canonical_json(typed_storage.item_values(handle.connection, row_id)) == typed_storage.canonical_json(expected)
+            historical, historical_body = typed_storage.version_values(handle.connection, row_id, 1)
+            assert typed_storage.canonical_json(historical) == typed_storage.canonical_json(expected)
+            assert historical_body == body
+            assert handle.connection.execute(
+                "SELECT source_ref FROM item_sources WHERE row_id=? AND row_version=1", (row_id,)
+            ).fetchall() == [(EVIDENCE,)]
+            assert handle.connection.execute(
+                "SELECT ordinal,effect,hash_after FROM audit_effects WHERE row_id=?", (row_id,)
+            ).fetchall() == [(index, "insert", payload)]
+        basis = query_freshness.uniform_basis(handle.connection, CID, ["id", "calories"])
+        assert basis.membership_revision == 3 and dict(basis.dependencies) == {"id": 3, "calories": 3}
+        reduced = reduce(reopened, request(ops=("count", "sum", "min", "max", "latest")))
+        assert reduced["flagged_rows"] == 1
+        assert by_bucket(reduced) == {"2026-03-01": {"count": 2, "sum": 12, "min": 3, "max": 9, "latest": 3}}
+        # Ordered updates must recompute extremes before a later member changes its bucket.
+        changed = bulk(reopened, [{"item": {**items[0], "calories": 1}},
+                                  {"item": {**items[1], "start": "2026-03-02T11:00:00+00:00", "calories": 2}},
+                                  {"item": {"id": "Four", "start": "2026-03-01T12:00:00+00:00", "calories": 4}},
+                                  {"item": items[2]}])
+        assert changed["counts"] == {"inserted": 1, "updated": 2, "unchanged": 1, "rejected": 0}
+        assert by_bucket(reduce(reopened, request(ops=("count", "sum", "min", "max", "latest")))) == {
+            "2026-03-01": {"count": 2, "sum": 5, "min": 1, "max": 4, "latest": 4},
+            "2026-03-02": {"count": 1, "sum": 2, "min": 2, "max": 2, "latest": 2},
+        }
+
+
 def test_log_bulk_projects_the_final_batch_and_updates_in_place(store):
     text = manifest_text(layout="markdown-log").replace(
         "  item: {level: 3, key: record_id}",
@@ -156,8 +235,9 @@ def test_describe_uses_store_limits_without_changing_the_file_contract(store):
 
 
 def test_old_row_grant_cannot_commit_changed_bulk_content(store, monkeypatch):
-    from exomem.governance.principal import request_scope
     from test_collection_store_governance import inspection_token, redeem, session
+
+    from exomem.governance.principal import request_scope
 
     create(store)
     _evidence(store.root)
@@ -173,12 +253,17 @@ def test_old_row_grant_cannot_commit_changed_bulk_content(store, monkeypatch):
 
 
 def test_public_bulk_advances_due_projection_only_after_commit(store):
-    from exomem import due_state
     from _nag_governance_helpers import overdue_prediction
-    from test_due_state_bulk_carriers import _command
     from lifecycle_fixtures import (
-        PLANNING_PATH, RECORDS_PATH, RECORDS_ID, planning_manifest, records_manifest,
+        PLANNING_PATH,
+        RECORDS_ID,
+        RECORDS_PATH,
+        planning_manifest,
+        records_manifest,
     )
+    from test_due_state_bulk_carriers import _command
+
+    from exomem import due_state
 
     store.create_collection(PLANNING_PATH, planning_manifest(), why="create", scaffold=False)
     made = store.create_collection(RECORDS_PATH, records_manifest(), why="create", scaffold=False)

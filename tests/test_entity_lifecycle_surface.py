@@ -11,6 +11,8 @@ from exomem import attention, commands, curation, find
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 from exomem.vault import content_hash
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def _write(root: Path, rel: str, text: str) -> Path:
     path = root / rel

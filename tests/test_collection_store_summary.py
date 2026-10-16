@@ -529,6 +529,31 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
             session.admit(CID)
 
 
+@pytest.mark.parametrize("population", ["empty", "uniform", "varying"])
+def test_summary_admission_preserves_held_refusal_and_row_limit(store, monkeypatch, population):
+    """Count-free admission must check held candidates without concealing the row-decision limit."""
+    create(store)
+    if population != "empty":
+        bulk(store, [{"title": f"Row {n}"} for n in range(3)])
+    with pytest.raises(collections.CollectionError) as refused:
+        store.append_record(CID, item={"title": "Candidate", "count": "invalid"}, why="capture")
+    held_path = refused.value.details["held"]["path"].removeprefix("Knowledge Base/")
+    write_scope(store.root, paths=held_path)
+    write_rule(store.root, ceiling=0)
+    expected = "COLLECTION_NOT_FOUND"
+    if population == "varying":
+        monkeypatch.setattr(governance, "MAX_SUMMARY_ROW_DECISIONS", 2)
+        key = store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 1").fetchone()[0]
+        scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
+        expected = "COLLECTION_RELEASE_LIMIT"
+    before = tuple(store.connection.iterdump())
+    with request_scope(_external()):
+        with pytest.raises(collections.CollectionError, match=expected):
+            store.append_record(CID, item={"title": "Refused mutation"}, why="capture")
+    assert tuple(store.connection.iterdump()) == before
+
+
 def test_summary_collection_refuses_a_planning_join(store):
     """A planning join accepted on a summary collection, so every joined planning write loads all of
     its rows to find partners."""

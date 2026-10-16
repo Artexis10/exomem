@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def _constructor_map():
     """descriptor id -> the path constructors this suite pins for it.
@@ -154,6 +156,7 @@ _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
 }
 
 _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
+    "compiled-history",
     "connector-boundary",
     "collection-replica",
     "consolidation-tree",

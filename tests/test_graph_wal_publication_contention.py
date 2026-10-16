@@ -34,6 +34,7 @@ is guaranteed to be uncontended.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -154,6 +155,37 @@ def test_a_live_graph_opener_survives_a_reader_after_the_first_publication(
         reader.close()
 
     assert mode == "wal"
+
+
+def test_a_live_graph_opener_waits_for_a_concurrent_writer(tmp_path: Path) -> None:
+    """Opening the live store must wait out a writer, not fail at once.
+
+    Schema setup writes the instance row. Inside a deferred transaction that
+    write upgrades a read lock, and SQLite skips the busy handler on that
+    upgrade, so the open failed with "database is locked" in milliseconds.
+    """
+    graph = _published_graph(tmp_path / "vault")
+    # Well inside the 5 s busy timeout the live store sets before schema setup.
+    hold_seconds = 0.5
+    holding = threading.Event()
+
+    def hold_write_lock() -> None:
+        blocker = sqlite3.connect(graph.path)
+        try:
+            blocker.execute("BEGIN IMMEDIATE")
+            holding.set()
+            threading.Event().wait(hold_seconds)
+            blocker.rollback()
+        finally:
+            blocker.close()
+
+    writer = threading.Thread(target=hold_write_lock)
+    writer.start()
+    try:
+        assert holding.wait(15.0)
+        graph._connect().close()
+    finally:
+        writer.join()
 
 
 def test_an_in_place_republication_keeps_the_live_store_in_wal_mode(tmp_path: Path) -> None:

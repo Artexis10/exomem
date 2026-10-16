@@ -9,12 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.dialects.sqlite import dialect
+from test_collection_store_writer import store as store
 
 from exomem.collection_store import (
     connection,
     derived_rows,
     native_layout,
     native_metadata,
+    native_operands,
     native_rows,
 )
 from exomem.collection_store.native_layout import Codec
@@ -35,6 +37,117 @@ def write(conn, plan, ordinal, values):
     parameters = plan.parameters(conn, ordinal, f"00000000-0000-4000-8000-{ordinal:012}", 1, values)
     compiled = plan.upsert.compile(dialect=dialect())
     conn.execute(str(compiled), tuple(parameters[name] for name in compiled.positiontup))
+
+
+def test_native_bulk_temporal_and_enum_indexes_survive_failed_payload_metadata_reuse(store):
+    """A failed current payload must not leave reconstruction metadata in the next writer operation."""
+    from test_collection_store_summary import summary_text
+    from test_collection_store_writer import CID as collection_id
+    from test_collection_store_writer import manifest_path, manifest_text
+    from test_records_bulk_upsert import EVIDENCE, _evidence
+
+    from exomem.collection_store import index_migrations, typed_storage
+
+    text = summary_text(manifest_text()).replace("    count: {type: integer}\n", (
+        "    when: {type: datetime, sortable: true}\n"
+        "    kind: {type: enum, enum: [true, 1, one], filterable: true}\n"))
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    _evidence(store.root)
+    guard = store.inspect_collection(collection_id)["snapshot"]
+    failed = [{"title": "First", "when": "2024-01-01T00:00:00Z", "kind": True},
+              {"title": "Failure", "when": "2024-01-01T00:00:00.0000001Z", "kind": "one"}]
+    with pytest.raises(sqlite3.OperationalError, match="user-defined function"):
+        store.bulk_upsert_records(collection_id, rows=[{"item": item} for item in failed],
+                                  source=EVIDENCE, why="import", expected_container_hash=guard)
+    assert store.connection.execute("SELECT count(*) FROM items").fetchone() == (0,)
+    assert store.connection.execute("SELECT count(*) FROM typed_field_epochs").fetchone() == (0,)
+    assert store.connection.execute("SELECT count(*) FROM typed_value_formats").fetchone() == (0,)
+    accepted = [{"title": f"Row {index}", "when": "2024-02-03t01:00:00,1200+01:00", "kind": kind}
+                for index, kind in enumerate(("one", "one", 1, 1))]
+    result = store.bulk_upsert_records(collection_id, rows=[{"item": item} for item in accepted],
+                                      source=EVIDENCE, why="import", expected_container_hash=guard)
+    assert result["counts"]["inserted"] == 4
+    current = {values["title"]: values for _, values in typed_storage.collection_values(store.connection, collection_id)}
+    assert {name: canonical_json(values) for name, values in current.items()} == {
+        item["title"]: canonical_json(item) for item in accepted}
+    plan = index_migrations.ready_plan(store.connection, collection_id)
+    for field in ("when", "kind"):
+        tag, key = plan.key_columns(field)
+        columns = f"{tag},{plan.band_column(field)},{key}"
+        index = next(name for name, spec in zip(plan.index_names, plan.indexes, strict=True)
+                     if spec.keys[0].field == field)
+        expected = sorted(scalar_operand(item[field], "datetime" if field == "when" else "enum") for item in accepted)
+        assert sorted(store.connection.execute(
+            f"SELECT {columns} FROM {plan.read_relation('main', index=index)}"
+        ).fetchall()) == expected
+
+
+def test_operand_scope_keeps_connections_roles_and_layout_namespaces_separate(tmp_path):
+    """Colliding format IDs in another file, generation, collection or ordinal retain their own values."""
+    from exomem.collection_store.native_operands import operand_snapshot, register_native_operands
+
+    with closing(sqlite3.connect(tmp_path / "main.sqlite")) as conn, closing(
+            sqlite3.connect(tmp_path / "other.sqlite")) as other:
+        for opened in (conn, other):
+            native_metadata.install(opened, canonical=False)
+        conn.execute("ATTACH DATABASE ? AS payload", (str(tmp_path / "payload.sqlite"),))
+        conn.execute("CREATE TABLE payload.typed_field_epochs AS SELECT * FROM main.typed_field_epochs")
+        conn.execute("CREATE TABLE payload.typed_value_formats AS SELECT * FROM main.typed_value_formats")
+        conn.execute("INSERT INTO payload.typed_value_formats VALUES(?,7,0,1,?)", (CID, '"derived"'))
+        alternate = "00000000-0000-4000-8000-000000000002"
+        for collection_id, generation, ordinal, value in (
+                (CID, 7, 0, "main"), (CID, 7, 1, "ordinal"), (CID, 8, 0, "generation"),
+                (alternate, 7, 0, "collection")):
+            FieldMetadata(conn, collection_id, generation, ordinal).intern(value)
+        other.execute("BEGIN")
+        FieldMetadata(other, CID, 7, 0).intern("other")
+        register_native_operands(conn, databases={FileRole.STORE: "main", FileRole.DERIVED: "payload"})
+        register_native_operands(other, databases={FileRole.STORE: "main"})
+        layout = native_layout.build(CID, 7, {"kind": FieldSpec("enum", enum=("main",))}, identity="uuid16")
+        with operand_snapshot(conn, layout, role=FileRole.STORE):
+            for opened, role, collection_id, generation, ordinal, expected in (
+                    (conn, FileRole.STORE, CID, 7, 0, "main"),
+                    (other, FileRole.STORE, CID, 7, 0, "other"),
+                    (conn, FileRole.DERIVED, CID, 7, 0, "derived"),
+                    (conn, FileRole.STORE, CID, 8, 0, "generation"),
+                    (conn, FileRole.STORE, alternate, 7, 0, "collection"),
+                    (conn, FileRole.STORE, CID, 7, 1, "ordinal")):
+                assert opened.execute(f"SELECT {native_operands.FUNCTION}(?,?,?,?,?,?,?,?,?,?)",
+                    (Codec.ENUM.value, collection_id, generation, ordinal, "enum", "[]", role.value, 1, 128, "key")).fetchone() == (expected,)
+            with operand_snapshot(conn, replace(layout, database="payload"), role=FileRole.DERIVED):
+                assert conn.execute(f"SELECT {native_operands.FUNCTION}(?,?,?,?,?,?,?,?,?,?)",
+                    (Codec.ENUM.value, CID, 7, 0, "enum", "[]", "derived", 1, 128, "key")).fetchone() == ("derived",)
+            with operand_snapshot(conn, replace(layout, database="payload"), role=FileRole.STORE):
+                assert conn.execute(f"SELECT {native_operands.FUNCTION}(?,?,?,?,?,?,?,?,?,?)",
+                    (Codec.ENUM.value, CID, 7, 0, "enum", "[]", "store", 1, 128, "key")).fetchone() == ("main",)
+            assert conn.execute(f"SELECT {native_operands.FUNCTION}(?,?,?,?,?,?,?,?,?,?)",
+                (Codec.ENUM.value, CID, 7, 0, "enum", "[]", "store", 1, 128, "key")).fetchone() == ("main",)
+
+
+def test_operand_scope_resets_after_failure_and_keeps_each_access_budget(tmp_path):
+    """A warm format cannot authorize a smaller read or survive rollback under a reused format ID."""
+    from exomem.collection_store.native_operands import operand_snapshot, register_native_operands
+
+    with closing(sqlite3.connect(tmp_path / "metadata.sqlite")) as conn:
+        native_metadata.install(conn, canonical=False)
+        conn.commit()
+        register_native_operands(conn, databases={FileRole.STORE: "main"})
+        layout = native_layout.build(CID, 7, {"kind": FieldSpec("enum", enum=("retained",))}, identity="uuid16")
+        statement = f"SELECT {native_operands.FUNCTION}(?,?,?,?,?,?,?,?,?,?)"
+        arguments = (Codec.ENUM.value, CID, 7, 0, "enum", "[]", "store", 1)
+        conn.execute("BEGIN")
+        assert FieldMetadata(conn, CID, 7, 0).intern("retained") == 1
+        with pytest.raises(sqlite3.OperationalError, match="user-defined function"):
+            with operand_snapshot(conn, layout, role=FileRole.STORE):
+                assert conn.execute(statement, (*arguments, 128, "key")).fetchone() == ("retained",)
+                conn.execute(statement, (*arguments, 2, "key")).fetchone()
+        conn.rollback()
+        conn.execute("BEGIN")
+        assert FieldMetadata(conn, CID, 7, 0).intern("replacement") == 1
+        assert conn.execute(statement, (*arguments, 128, "key")).fetchone() == ("replacement",)
+        with operand_snapshot(conn, layout, role=FileRole.STORE):
+            assert conn.execute(statement, (*arguments, 128, "key")).fetchone() == ("replacement",)
+        conn.rollback()
 
 
 def test_late_temporal_metadata_rollback_and_attached_file_use_the_payload_generation(tmp_path):

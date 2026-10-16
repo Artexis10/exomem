@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
+
+pytestmark = pytest.mark.reads_repository_docs
 
 ROOT = Path(__file__).resolve().parents[2]
 def _text(path: str) -> str:
@@ -36,11 +39,17 @@ def test_every_active_non_hosted_capture_carrier_teaches_draft_to_adoption(vault
 
 
 def test_every_active_non_hosted_capture_carrier_maps_adoption_authority(vault: Path) -> None:
+    from exomem import commands
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        envelope = commands.op_bootstrap(vault)["engagement"]["envelope"]
+    assert envelope["promotion_classes"]["typed_edge"] == "proactive_capture"
+    assert envelope["promotion_classes"]["queue_acceptance"] == "link_acceptance"
+    assert envelope["classes"]["restructure_execution"]["ceiling"] == "confirm-required"
     for name, carrier in _active_capture_carriers(vault).items():
         assert "proactive_capture" in carrier, name
         assert "structural_suggestions" in carrier, name
-        assert "restructure_execution" in carrier, name
-        assert "link_acceptance" in carrier, name
         assert "not write consent" in carrier or "not write confirmation" in carrier, name
 
 

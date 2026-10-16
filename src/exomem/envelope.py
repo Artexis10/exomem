@@ -98,34 +98,42 @@ CONFIRM_SHORTCUT: str = (
 #: shadowed by the generic range refusal, and so the capability cannot drift in
 #: as a convenience.
 FOUNDER_GATE: str = (
-    "standing delegation of restructure execution would be an envelope cell above "
-    "the current ceiling. It does not exist in v1, and only a deliberate founder "
-    "ratification may ever create one; requests to create collections automatically "
-    "are refused by this rule"
+    "standing restructure delegation is absent in v1; founder ratification is required. "
+    "Automatic collections stay refused"
 )
 
-#: The confirm-required contract, served rather than implied.
-#:
-#: Three tiers bind it: this marker, the agent contract's in-conversation
-#: confirmation, and the server-side gates that exist today. Only two of the
-#: four `restructure_execution` surfaces HAVE a server-side gate, and the
-#: contract says so instead of letting an agent infer one — v1 adds no new
-#: confirmation parameter, because that is a tool-schema change behind the
-#: documented two-phase rollout.
-#:
-#: Additive entity creation is not on the list: the entity writer resolves
-#: before it creates, so a new identity is `proactive_capture` on a personal
-#: vault, while merge, supersession and deletion stay confirm-required.
-#:
-#: Command-free on purpose, exactly like the epistemic commitments:
-#: `commands._filter_bootstrap_payload` deletes any string naming a command the
-#: active surface cannot call, and a ceiling that vanished on a reduced surface
-#: would be a ceiling nobody was told about.
+# The six actions are closed product operations, not vault vocabulary (O2/R3).
+# Registry saves here mean additive entries; edits to existing meanings stay restructure.
+PROMOTION_CLASSES: dict[str, tuple[str, str]] = {
+    "entity_creation": ("proactive_capture", "proactive_capture"),
+    "typed_edge": ("proactive_capture", "proactive_capture"),
+    "registry_save": ("proactive_capture", "structural_suggestions"),
+    "queue_acceptance": ("link_acceptance", "link_acceptance"),
+    "edge_removal": ("restructure_execution", "restructure_execution"),
+    "promotion_revert": ("restructure_execution", "restructure_execution"),
+}
+
+
+def promotion_classes(*, owner: bool) -> dict[str, str]:
+    """Project the resolved caller's v1 classes; scope and write guards still apply."""
+    return {action: classes[0 if owner else 1] for action, classes in PROMOTION_CLASSES.items()}
+
+
+def _owner_actions(action_class: str) -> str:
+    return ", ".join(
+        action.replace("_", " ")
+        for action, (owner_class, _other) in PROMOTION_CLASSES.items()
+        if owner_class == action_class
+    )
+
+
+# Generate promotion clauses from the map so served prose cannot classify them differently.
 CONFIRM_REQUIRED: str = (
-    "confirm-required: restructure application, collection creation, supersession commit, "
-    "entity merge and deletion. Deletion has a server-side confirm parameter; adoption "
-    "apply is preview-first; supersession has no server-side gate yet: future work. On a "
-    "personal vault, additive entity creation follows proactive_capture"
+    "confirm-required: restructure application, collection creation, supersession, entity merge, deletion, "
+    f"{_owner_actions('restructure_execution')}. Deletion has a server confirm parameter; "
+    "adoption apply is preview-first; supersession has no server-side gate yet: future work. Additive owner "
+    f"promotions on v1: {_owner_actions('proactive_capture')} follow proactive_capture. "
+    "Meaning, alias, deprecation and deletion edits stay restructure."
 )
 
 #: The protocol the agent contract teaches for actions covered by the envelope.
@@ -136,13 +144,12 @@ CONFIRM_REQUIRED: str = (
 #:
 #: Command-free for the same reason as everything else served here.
 DECIDER_PROTOCOL: tuple[str, ...] = (
-    "for envelope actions, name the action class first; an unclassified action "
-    "has no authority; read-only recall follows governance",
-    "check the ceiling: above it, propose, never act",
-    "check disposition: off blocks initiation, never explicit requests; advisory: "
-    "surface and stop; silent: act under prominence; confirm or confirm-shortcut: "
-    "obtain confirmation first, the shortcut approving one named action inline",
-    "triage addressed review decisions only; ordinary writes keep their mutation receipts",
+    "classify envelope actions, promotions from promotion_classes; unclassified action has no "
+    "authority; read-only recall follows governance",
+    "above the ceiling: a proposal, never an act",
+    "off blocks initiation, not explicit requests; advisory: surface and stop; silent: act "
+    "under prominence; confirm/confirm-shortcut: obtain confirmation for that action",
+    "triage addressed review decisions; ordinary writes keep mutation receipts",
 )
 
 _CONFIG_KEY = "envelope"
@@ -293,7 +300,8 @@ def _proactive_permitted(
 
 
 def resolved(
-    level: str | None = None, surface: str | None = None, *, capture_gate: dict | None = None
+    level: str | None = None, surface: str | None = None, *, capture_gate: dict | None = None,
+    promotion_classes: dict[str, str] | None = None,
 ) -> dict:
     """Bootstrap-shaped view: every class, its ceiling, disposition and provenance.
 
@@ -354,6 +362,8 @@ def resolved(
         # improvise a consent -- when a user asks for standing delegation.
         "founder_gate": FOUNDER_GATE,
     }
+    if promotion_classes is not None:
+        served["promotion_classes"] = dict(promotion_classes)
     if ignored:
         # Present only when there is something to report. An always-present empty
         # list would spend bytes on every session start to say nothing, and this

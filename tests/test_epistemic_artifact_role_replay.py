@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytestmark = pytest.mark.reads_repository_docs
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "benchmarks/epistemic/fixtures/sequence5"
 PRIOR_RECEIPT_SHA256S = {

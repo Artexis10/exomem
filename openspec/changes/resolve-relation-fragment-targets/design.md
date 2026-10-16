@@ -35,6 +35,32 @@ multiply the graph without adding a claim. No ranking or scoring.
 
 ## Decisions
 
+### Follow-on: exact endpoints for corrections
+
+The 15 October dogfood failures expose three incompatible endpoint readers.
+The semantic contract rejects distinct units with the same parent path.
+The graph drops local fragments, and compiler currency uses a separate matcher.
+
+`semantic_units` owns pure exact matching over held unit identities.
+The full document and selected structure adapt that result without new parsing
+or I/O. Missing selected definitions remain unavailable rather than proving absence.
+The vault resolver retains page-name resolution and current audience filtering.
+
+Relation facts retain parent paths and add exact endpoint identities.
+Qualification rejects equal endpoints, not equal parents.
+Distinct same-page units can qualify through the existing registry and lifecycle
+rules. Reverse relations reverse endpoint identities as well as parent paths.
+Exact correction preparation binds current fingerprints and target guards.
+
+The graph keeps its existing page fallback and diagnostic for legacy fragments.
+That fallback cannot authorize a correction to a claim.
+Local fragments use the source parent already held by the caller.
+Selected graph readers use the same exact identity primitive.
+Unit destinations retain their owning page for existing page readers.
+
+The correction workflow, retained interpretations and active-agent acceptance
+remain in `close-memory-loop`. This change owns endpoint resolution only.
+
 **Degrade to the page, never drop the edge.** An unresolvable or ambiguous
 fragment produces the page-level edge today's code produces, plus a diagnostic.
 Refusing the edge would make a typo silently delete a relation, which is worse
@@ -163,3 +189,14 @@ pages.** The existing `shared_open_question` candidate is deliberately weak
 because it can only say the pages are related. Making it unit-precise makes the
 proposal sharper and a false positive more costly; the acceptance queue stays the
 gate, and the candidate stays a proposal.
+
+## Move-safe identity evaluation
+
+The endpoint contract must eventually support a unit that changes parents while preserving relations, evidence and retained interpretation history.
+This batch retains the parent UUID and anchor API: note renames and anchored wording changes preserve identity, while fingerprints guard revisions.
+Raw copy-and-remove reparenting remains unsupported; the old parent reports the unit missing without forwarding.
+Anchor renames, changed anonymous content and moved path-based legacy references do not silently select a replacement claim.
+A future persistent unit UUID in Markdown remains a design task, with an atomic move across both parents, historical authorization and source publication.
+That design must settle compatibility before introducing an identifier format or migration.
+Acceptance must distinguish rename, wording change, reparenting, stale references and ambiguous references through deterministic public reads.
+Compiler and SQLite resource acceptance stays with the connected correction journey in `close-memory-loop`; optional backend comparisons do not gate it.
