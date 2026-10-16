@@ -1120,6 +1120,52 @@ def test_a_records_append_has_no_compensation(vault: Path, owner, enabled) -> No
     assert curation.compensation_kind("append-record") == "unavailable"
 
 
+def test_a_leaf_its_writer_refuses_after_approval_answers_with_its_own_code_uncommitted(
+    vault: Path, owner, enabled
+) -> None:
+    """Defect: the approval written before the leaf ran marked the command committed, so
+    a leaf its writer refused after approval answered `committed: true` although nothing
+    was written, and a retry with the same identity could not get the refusal back."""
+    from exomem import writer_lease
+
+    _collection(vault)
+    _record(vault)
+    run = _prepared(vault)["candidates"][0]["leaves"][0]["run_id"]
+    plan_id, fingerprint = curation.CurationStore(vault).identities(run)
+    # An entry a sync client wrote: the container changes and the manifest the plan binds does not.
+    manifest = collections.load_manifest(vault, COLLECTION)
+    by_hand = (vault / COLLECTION).parent / "Entries" / "by-hand.md"
+    by_hand.write_text(
+        record_formats.render_markdown_item(
+            manifest,
+            {"read_on": "2026-09-21", "vat": "south", "temperature_c": 39},
+            "3c0a7f52-9d1e-4b8a-a6f4-2e5b7c9d1f03",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "maintain_memory")
+    answers = []
+    for _attempt in range(2):
+        with pytest.raises(ValueError) as refused:
+            writer_lease.invoke_command(
+                command,
+                vault,
+                mode="curation",
+                curation_action="apply",
+                run_id=run,
+                plan_id=plan_id,
+                expected_plan_fingerprint=fingerprint,
+                why="Approve the vat reading.",
+                idempotency_key="apply-the-vat-reading",
+            )
+        details = getattr(refused.value, "details", None) or {}
+        answers.append((getattr(refused.value, "code", None), details.get("committed")))
+
+    assert answers == [("STALE_RECORD", None)] * 2
+    assert _entries(vault) == [by_hand]
+
+
 def test_the_synthetic_slice_records_event_lands_in_its_collection(
     vault: Path, owner, enabled
 ) -> None:
