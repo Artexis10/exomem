@@ -909,8 +909,9 @@ export finishes. This release has no step that abandons an export.
   holds every row. File a bug report with the refusal text.
 
 Never retire the fence by hand. The export retires it only after it verifies
-every file. A fence retired before that leaves the vault refused with
-`COLLECTION_STORE_EXPORT_UNVERIFIED`, and no rerun can finish it.
+every file. A fence retired before the export wrote every file leaves the
+vault refused with `COLLECTION_STORE_EXPORT_UNVERIFIED`, and no rerun can
+finish it.
 
 #### When the exporting host loses its live store after the fence retire
 
