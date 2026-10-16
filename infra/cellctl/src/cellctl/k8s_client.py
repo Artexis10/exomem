@@ -12,6 +12,7 @@ import json
 import re
 from datetime import datetime
 
+import httpx
 from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
@@ -67,6 +68,12 @@ REVISION_LABEL = "controller-revision-hash"
 # inside the 120 s liveness bound, instead of blocking the loop until
 # liveness restarts cellctl and discards its in-memory refusal parks.
 API_REQUEST_TIMEOUT = (5, 30)
+
+# Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
+# pod. A pod that does not answer in this many seconds, or sends more than this
+# many bytes, leaves its node unreadable; the pass never waits on it.
+METRICS_TIMEOUT = 3.0
+METRICS_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _bound_requests(api_client: k8s.ApiClient) -> None:
@@ -172,6 +179,32 @@ class ClusterClient:
         if key not in data:
             raise KeyError(f"secret {namespace}/{name} has no key {key}")
         return base64.b64decode(data[key]).decode("utf-8").strip()
+
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
+        """Tasks 5.5 and 5.6: the `/metrics` text of each node's pod that
+        matches `selector`, read from the pod's own IP, keyed by the node the
+        pod runs on. A pod that is not running, is being deleted, or does not
+        answer leaves its node out: an unreadable node, never a clean one. A
+        failed pod listing raises. The chart grants `list` on pods."""
+
+        scraped: dict[str, str] = {}
+        with httpx.Client(timeout=METRICS_TIMEOUT, trust_env=False) as client:
+            for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items:
+                node, address = pod.spec.node_name, pod.status.pod_ip
+                if pod.status.phase != "Running" or pod.metadata.deletion_timestamp or not node or not address:
+                    continue
+                try:
+                    with client.stream("GET", f"http://{address}:{port}/metrics") as response:
+                        response.raise_for_status()
+                        body = b""
+                        for chunk in response.iter_bytes():
+                            body += chunk
+                            if len(body) > METRICS_MAX_BYTES:
+                                raise ValueError("metrics page too large")
+                    scraped[node] = body.decode("utf-8")
+                except (httpx.HTTPError, ValueError):
+                    continue
+        return scraped
 
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json

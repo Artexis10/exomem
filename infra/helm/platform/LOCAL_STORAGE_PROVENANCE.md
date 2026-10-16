@@ -19,6 +19,11 @@
   Its RBAC is the release's `deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml`
   without the group-snapshot rules. The tag's own deployment manifest still names image `v8.5.0`,
   which is what the storage spike (task 1.1) ran, so this image is not yet rehearsed.
+- **Array exporter:** `quay.io/prometheus/node-exporter:v1.12.1`, pinned in `cellStorage.arrayExporter.image`
+  by its image index digest `sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0`. It runs the
+  mdadm collector alone, unprivileged, on the nodes TopoLVM's node plugin runs on, for cellctl's `cell-array-degraded`
+  alert. `infra/policy/kubernetes.rego` needs no entry for it: it has no hostPath, is not privileged and pins a digest.
+  `infra/cellctl/tests/fixtures/node_exporter_mdadm_*.txt` are this image's real output.
 
 `files/external-snapshotter/SHA256SUMS.txt` records the upstream digests of the three CRDs, and
 `infra/scripts/validate.sh` checks the copies against it.
@@ -32,3 +37,6 @@ To bump any of them:
    `values.yaml`, and `approved_topolvm_chart` and `approved_topolvm_image` in
    `infra/policy/kubernetes.rego` together. Expect `conftest test` of the rendered chart to pass.
 5. Run the node-loss drill (task 4.1). Expect the snapshot and clone round trip to pass.
+6. For a node-exporter bump, update `cellStorage.arrayExporter.image`. Run the new image with
+   `--collector.disable-defaults --collector.mdadm --path.procfs=<dir>`, with `mdstat` files from its own
+   `collector/fixtures/proc/mdstat`, and save its `/metrics` over the two fixtures. Expect the cellctl tests to pass.

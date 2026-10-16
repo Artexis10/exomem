@@ -1,0 +1,60 @@
+{{- if .Values.cellStorage.local.enabled }}
+{{- $metrics := include "exomem.cellMetrics" . | fromJson }}
+# Task 5.5: the cell array's health, for cellctl's cell-array-degraded alert. This
+# is node-exporter's mdadm collector alone, on the nodes TopoLVM's node plugin
+# runs on (the ones with the cell volume group, so the ones with the md array).
+# /proc/mdstat is not namespaced, so the container's own /proc shows the host's
+# arrays: no hostPath, no host network and no privilege.
+# Prevents: a failed disk going unseen on a dedicated host, where the host has
+# no mail transport for mdmonitor. Costs when it fires wrongly: an email that
+# the array is degraded when it is not, and one pod of 10m CPU per such node.
+# The operator pays.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: exomem-cell-array-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- toYaml $metrics.array.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $metrics.array.labels | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml $metrics.array.labels | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        {{- toYaml .Values.topolvm.node.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.topolvm.node.tolerations | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: node-exporter
+          image: {{ .Values.cellStorage.arrayExporter.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --collector.disable-defaults
+            - --collector.mdadm
+            - --web.disable-exporter-metrics
+            - --web.listen-address=:{{ int $metrics.array.port }}
+          ports:
+            - name: metrics
+              containerPort: {{ int $metrics.array.port }}
+              protocol: TCP
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+{{- end }}
