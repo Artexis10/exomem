@@ -90,6 +90,9 @@ def control(runtime_dir: Path, command: dict[str, Any]) -> dict[str, Any]:
 # `declared_descriptor_ids`. Staging it must still work -- that is the rollback
 # path -- so the probe degrades to an empty set exactly as `WorkerRuntime.inspect`
 # does, and an empty declaration makes the supervisor run the migrator.
+# `offline_migrations` are the extra steps the target's own migrator runs at a
+# handoff (collections-migrate-v1); a target that predates them declares none,
+# and the supervisor then never asks its migrator for one.
 _STATE_DECLARATIONS_PROBE = (
     "try:\n"
     "    from exomem.state_migration import declared_descriptor_ids\n"
@@ -102,6 +105,11 @@ _STATE_DECLARATIONS_PROBE = (
     "    compatibility = []\n"
     "else:\n"
     "    compatibility = list(supported_state_compatibility_ids())\n"
+    "try:\n"
+    "    from exomem.collection_store.capability import offline_migrations\n"
+    "    migrations = list(offline_migrations())\n"
+    "except Exception:\n"
+    "    migrations = []\n"
 )
 
 _TARGET_PROBE = (

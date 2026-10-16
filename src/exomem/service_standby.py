@@ -41,7 +41,9 @@ STANDBY_ENV = "EXOMEM_MANAGED_STANDBY"
 #: (task 1.14) and it is a read-only, process-local build -- so a standby that
 #: has not built it is a standby whose promotion cannot admit a write, however
 #: short the cutover was.
-CUTOVER_COMPONENTS = ("lexical", "embeddings", "graph_snapshot", "semantic_corpus")
+CUTOVER_COMPONENTS = (
+    "lexical", "embeddings", "graph_snapshot", "semantic_corpus", "collections_migration",
+)
 
 #: Readiness components this standby completed AND promotion either re-verified
 #: or cannot invalidate. Written at promotion, read by the promoted worker's own
@@ -58,6 +60,11 @@ _activation: Any = None
 _corpus_built = False
 #: Whether the corpus build RAN, however it ended. See `cutover_components`.
 _corpus_attempted = False
+#: Whether the collections pre-import RAN, however it ended. See `cutover_components`.
+_collections_settled = False
+#: What a collections pre-import leaves of the warm budget, so that it settles before the
+#: supervisor discards a standby that never reported cutover readiness.
+COLLECTIONS_PREIMPORT_MARGIN_SECONDS = 10.0
 #: This release's lexical catalogue, built beside a live one an earlier release
 #: published, held until promotion adopts it or a stop discards it.
 _detached_catalog: Any = None
@@ -133,6 +140,44 @@ def graph_cleanup_attempted() -> bool:
         return bool(getattr(_activation, "graph_cleanup_attempted", False))
 
 
+def _collections_migration_released() -> bool:
+    try:
+        from .collection_store import capability
+
+        return capability.collections_migrate_enabled()
+    except Exception:  # noqa: BLE001 - readiness must stay structured
+        return False
+
+
+def prepare_collections_migration(vault_root: Path, *, deadline: float | None = None) -> None:
+    """Pre-import the vault's file collections into the migration's private staging (design §10).
+
+    The last step of a standby's warm, beside the serving worker. It reads vault files,
+    copies a live store with the backup API, takes no lease and writes only its staging
+    under the state directory; the handoff's migrator finishes or abandons that staging.
+    ``deadline`` (absolute monotonic) bounds it inside the warm budget. Never raises: a
+    pre-import that fails, runs out of time or finds nothing to migrate leaves no staging,
+    and the handoff then runs no collections step.
+    """
+    global _collections_settled
+    try:
+        if _collections_migration_released():
+            from .collection_store import migration
+            from .governance.principal import library_scope
+
+            with library_scope():
+                report = migration.prepare(Path(vault_root), deadline=deadline)
+            log.info(
+                "standby collections pre-import: verdict=%s staging=%s",
+                report.get("verdict"), report.get("staging"),
+            )
+    except Exception:  # noqa: BLE001 - a standby warm must never die loudly
+        log.warning("standby collections pre-import failed", exc_info=True)
+    finally:
+        with _lock:
+            _collections_settled = True
+
+
 def _preload_allowed() -> bool:
     try:
         return bool(warmup.model_preload_allowed())
@@ -148,6 +193,7 @@ def cutover_components() -> dict[str, str]:
         snapshot_ready = _proved_token is not None
         corpus_settled = _corpus_attempted
         catalogue_built = _detached_built
+        collections_settled = _collections_settled
     components: dict[str, str] = {}
     for component in CUTOVER_COMPONENTS:
         if component == "graph_snapshot":
@@ -169,6 +215,12 @@ def cutover_components() -> dict[str, str]:
         elif component == "embeddings":
             if _preload_allowed():
                 components[component] = "ready" if readiness.is_ready("embeddings") else "waiting"
+        elif component == "collections_migration":
+            # Settled, not prepared, for the reason `semantic_corpus` is: a pre-import that
+            # failed or found nothing to migrate leaves no staging, and the handoff then runs
+            # no collections step. Reported only while this release runs the migration.
+            if _collections_migration_released():
+                components[component] = "ready" if collections_settled else "waiting"
         elif component == "lexical":
             # A catalogue built detached is what promotion adopts, so it is as
             # ready as a live one proved current. Its caches are the promoted
@@ -723,8 +775,10 @@ def warm(vault_root: Path) -> None:
     happens next.
     """
     from . import freshness, mode, readiness
+    from .service_manager import standby_warm_budget
 
     vault_root = Path(vault_root)
+    started = time.monotonic()
     readiness.begin_warm()
     try:
         # Seed this process's recall registry before anything reads it. The
@@ -777,7 +831,15 @@ def warm(vault_root: Path) -> None:
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
     finally:
-        readiness.finish_warm()
+        try:
+            # Last, so its staging is as close to the handoff as the warm allows, and after
+            # a crashed warm too, so that its own component always settles.
+            prepare_collections_migration(
+                vault_root,
+                deadline=started + standby_warm_budget() - COLLECTIONS_PREIMPORT_MARGIN_SECONDS,
+            )
+        finally:
+            readiness.finish_warm()
 
 
 def start_warm(vault_root: Path) -> threading.Thread:
@@ -1048,7 +1110,7 @@ def _promote_owned(
 def reset_for_tests() -> None:
     """Clear process-local standby state; intentionally public for tests."""
     global _standby, _promoted, _proved_token, _adoption, _activation
-    global _carried, _corpus_built, _corpus_attempted
+    global _carried, _corpus_built, _corpus_attempted, _collections_settled
     global _detached_catalog, _detached_built, _discarded, _discard_requested
     global _promoting, _proof_signal, _proof_marker
     global _attempt_signal, _attempt_stat, _attempt_ended_at
@@ -1070,4 +1132,5 @@ def reset_for_tests() -> None:
         _carried = frozenset()
         _corpus_built = False
         _corpus_attempted = False
+        _collections_settled = False
         _activation = None

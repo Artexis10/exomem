@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import sqlite3
 import time
@@ -24,7 +25,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from .. import reserved_paths, state_paths
+from .. import state_paths
 from . import (
     admission,
     authority,
@@ -41,8 +42,9 @@ from . import (
 )
 from .connection import CollectionStoreError
 
+logger = logging.getLogger(__name__)
+
 STAGING_PREFIX = ".exomem-collection-migration-"
-_DESCRIPTOR = "collection-migration"
 _STAGING = "staging.sqlite"
 #: The staging store's record of what it was built from; dropped before it goes live.
 _BASIS = "migration_basis"
@@ -50,12 +52,7 @@ _ACTOR = "collections-store-migration"
 
 
 def _staging_directories(root):
-    state = state_paths.vault_state_dir(root)
-    if not state.is_dir():
-        return []
-    return sorted(path for path in state.iterdir()
-                  if reserved_paths.classify_logical(path.name).descriptor_id == _DESCRIPTOR
-                  and path.is_dir() and not path.is_symlink())
+    return connection.migration_staging_directories(root)
 
 
 def _discard(directory):
@@ -77,20 +74,36 @@ def _scratch(root):
     return state_paths.ensure_vault_state_dir(root)
 
 
-def _live_snapshot(root, directory):
+def _deadline(deadline):
+    """``deadline`` (absolute monotonic), or the preflight's own from now."""
+    return time.monotonic() + preflight.DEADLINE_SECONDS if deadline is None else deadline
+
+
+def _expired(deadline):
+    """Whether a handoff's self-imposed deadline has passed; an owner's apply has none."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _copied(copied):
+    return {"store_id": copied.store_id, "instance_id": copied.instance_id, "commit_seq": copied.commit_seq,
+            "head_hash": copied.head_hash, "snapshot_sha256": copied.file_sha256}
+
+
+#: The head of a copied live store, which a basis records beside the copy's digest.
+_HEAD = ("store_id", "instance_id", "commit_seq", "head_hash")
+
+
+def _live_snapshot(root, directory, deadline=None):
     """Copy the live store into ``directory`` as the staging base; what the copy was taken from."""
-    with snapshot.staged_snapshot(root, directory=_scratch(root),
-                                  deadline=time.monotonic() + preflight.DEADLINE_SECONDS) as copied:
+    with snapshot.staged_snapshot(root, directory=_scratch(root), deadline=_deadline(deadline)) as copied:
         copied.path.rename(directory / _STAGING)
-        return {"store_id": copied.store_id, "instance_id": copied.instance_id, "commit_seq": copied.commit_seq,
-                "head_hash": copied.head_hash, "snapshot_sha256": copied.file_sha256}
+        return _copied(copied)
 
 
-def _live_digest(root):
-    """The digest of a fresh validated copy of the live store, compared to the staging base's."""
-    with snapshot.staged_snapshot(root, directory=_scratch(root),
-                                  deadline=time.monotonic() + preflight.DEADLINE_SECONDS) as copied:
-        return copied.file_sha256
+def _live_copy(root, deadline=None):
+    """The head and digest of a fresh validated copy of the live store, compared to the staging base's."""
+    with snapshot.staged_snapshot(root, directory=_scratch(root), deadline=_deadline(deadline)) as copied:
+        return _copied(copied)
 
 
 def _read_basis(conn):
@@ -125,7 +138,8 @@ _RECORDED = frozenset({"manifest_path", "source_path", "layout", "semantic_profi
 def _usable(basis):
     try:
         return (basis["version"] == 1
-                and (basis["live"] is None or isinstance(basis["live"]["snapshot_sha256"], str))
+                and (basis["live"] is None or (isinstance(basis["live"]["snapshot_sha256"], str)
+                                               and set(_HEAD) <= basis["live"].keys()))
                 and all(isinstance(entry, dict) and _RECORDED <= entry.keys()
                         for entry in basis["collections"].values()))
     except (KeyError, TypeError, AttributeError):
@@ -161,26 +175,29 @@ def _require_stageable(root):
     return intent
 
 
-def _stage(root, *, base=True):
+def _stage(root, *, base=True, deadline=None):
     """Build fresh staging from the live store (if any) and every file collection's import and proof.
 
     ``base=False`` starts from an empty store, for a first enrolment whose own unadmitted
     store is live. Returns the report and the retained staging directory, or None when
     nothing is ready or a collection is blocked: a failed proof leaves no staging behind.
+    A collection not checked by ``deadline`` is blocked as the preflight's deadline blocks it.
     """
     for old in _staging_directories(root):
         _discard(old)
     rows, pending, store_ids = preflight.candidates(root)
     directory = _new_directory(root)
     try:
-        live = _live_snapshot(root, directory) if base and connection.store_path(root).exists() else None
+        live = (_live_snapshot(root, directory, deadline)
+                if base and connection.store_path(root).exists() else None)
         if pending:
             with connection.staging_store(directory / _STAGING) as staging:
                 staging.execute("BEGIN IMMEDIATE")
                 _write_basis(staging, {"version": 1, "live": live, "collections": {}})
                 staging.execute("COMMIT")
                 rows.extend(preflight.prove_into(root, pending, staging, _scratch(root),
-                                                 preflight.import_context(_ACTOR), record=_recorder(staging)))
+                                                 preflight.import_context(_ACTOR), record=_recorder(staging),
+                                                 deadline=deadline))
         report = preflight.report(rows, store_ids)
     except BaseException:
         _discard(directory)
@@ -195,15 +212,19 @@ def _stage(root, *, base=True):
 NO_STAGING, SEVERAL_STAGINGS, STAGING_MISSING = "no_staging", "several_stagings", "staging_missing"
 INTERRUPTED, NO_BASIS, LIVE_CHANGED = "interrupted_cutover", "no_basis", "live_store_changed"
 SET_CHANGED, AUDIT_UNREADABLE, BASIS_CHANGED = "collection_set_changed", "audit_unreadable", "basis_changed"
+#: The live store kept its head since the copy, but not its bytes: the serving worker wrote
+#: bookkeeping, such as a view it checked or published, which a swap of the old copy would lose.
+LIVE_REWRITTEN = "live_store_rewritten"
 
 
-def _carried(root, directory, *, supersede=False):
+def _carried(root, directory, *, supersede=False, deadline=None):
     """The report for staging that still matches every input it was built from, or why it does not.
 
     Each collection is compared by its own basis, so an unrelated activity-log write does
-    not invalidate it; the live store, when one exists, must be unchanged since its copy.
-    ``supersede`` ignores a live store that is this migration's own unadmitted one.
-    Returns the report, or None with the reason and the paths of changed collections.
+    not invalidate it; the live store, when one exists, must be unchanged since its copy:
+    its head (``LIVE_CHANGED``) and its bytes (``LIVE_REWRITTEN``). ``supersede`` ignores a
+    live store that is this migration's own unadmitted one. Returns the report, or None
+    with the reason and the paths of changed collections.
     """
     path = directory / _STAGING
     if not path.is_file():
@@ -220,9 +241,14 @@ def _carried(root, directory, *, supersede=False):
     if basis is None or not _usable(basis):
         return None, NO_BASIS, []
     live = connection.store_path(root).exists() and not supersede
-    if (basis["live"] is not None) != live or (
-            live and _live_digest(root) != basis["live"]["snapshot_sha256"]):
+    if (basis["live"] is not None) != live:
         return None, LIVE_CHANGED, []
+    if live:
+        copied = _live_copy(root, deadline)
+        if any(copied[name] != basis["live"][name] for name in _HEAD):
+            return None, LIVE_CHANGED, []
+        if copied["snapshot_sha256"] != basis["live"]["snapshot_sha256"]:
+            return None, LIVE_REWRITTEN, []
     rows, pending, store_ids = preflight.candidates(root)
     recorded = basis["collections"]
     if rows and any(row["status"] == "blocked" for row in rows) or {
@@ -230,7 +256,7 @@ def _carried(root, directory, *, supersede=False):
             cid: entry["manifest_path"] for cid, entry in recorded.items()}:
         return None, SET_CHANGED, []
     changed = []
-    with preflight.scanned(root, _scratch(root), pending) as (audit, blocked):
+    with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked):
         if audit is None:
             return None, AUDIT_UNREADABLE, []
         for manifest in pending:
@@ -256,12 +282,13 @@ def dry_run(root) -> dict:
     return {**preflight.preflight(root), "step": "dry-run"}
 
 
-def prepare(vault_root) -> dict:
+def prepare(vault_root, *, deadline=None) -> dict:
     """Pre-import and prove every file Records and Planning collection into retained staging.
 
     It runs beside a live writer: it reads vault files and copies the live store with the
     backup API, takes no lease and writes only its own staging under the state directory.
-    A later ``cutover`` carries it forward when nothing it read has changed.
+    A later ``cutover`` carries it forward when nothing it read has changed. A managed
+    standby passes ``deadline`` (absolute monotonic) to settle inside its warm budget.
     """
     admission.require_owner(vault_root, "the collections-store migration")
     capability.require_collections_migrate()
@@ -270,7 +297,7 @@ def prepare(vault_root) -> dict:
     if _require_stageable(root) is not None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                    "a migration cutover is unfinished; run the apply step to finish it")
-    report, directory = _stage(root)
+    report, directory = _stage(root, deadline=deadline)
     return {**report, "step": "prepare", "coordinator": coordinator,
             "staging": "retained" if directory is not None else "none"}
 
@@ -588,7 +615,20 @@ def _hold_lease(session, manager, root, *, fenced):
         return manager._fencing_token
 
 
-def cutover(session, manager, fence_client) -> dict:
+#: How a managed handoff's migration ends without publishing (design §10, D2).
+ABANDONED = "abandoned"
+#: Why it was abandoned when no carry-forward reason above says so: its deadline passed,
+#: or a step refused or failed before anything was published.
+DEADLINE, REFUSED = "deadline", "refused"
+
+
+def _abandoned(coordinator, reason, changed=()):
+    """The report of a handoff's migration that publishes nothing; the next handoff retries it."""
+    return {"mode": "collections-store", "step": "apply", "coordinator": coordinator, "status": ABANDONED,
+            "abandoned_because": reason, **({"changed": list(changed)} if changed else {})}
+
+
+def cutover(session, manager, fence_client, *, deadline=None) -> dict:
     """Make verified staging the live store and admit it, inside the owner's offline session.
 
     A live store carrying this migration's intent (a cutover that stopped after it
@@ -599,6 +639,11 @@ def cutover(session, manager, fence_client) -> dict:
     under the mutation boundary, staging is carried forward or rebuilt; a blocked
     collection leaves no store, no marker and an unenrolled fence, and the report names
     it with its failed check.
+
+    A managed handoff passes ``deadline`` (absolute monotonic), its self-imposed budget
+    (D3). It rebuilds staging only within that budget and abandons, publishing nothing,
+    when the budget runs out first or a live S1 store's head moved since the standby
+    copied it (D4); a cutover that published its store always finishes.
     """
     capability.require_collections_migrate()
     root = session.root
@@ -660,8 +705,13 @@ def cutover(session, manager, fence_client) -> dict:
                 None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
             directory = directories[0] if report is not None else None
         if report is None:
-            report, directory = _stage(root, base=not supersede)
+            if deadline is not None and reason == LIVE_CHANGED:
+                # Copying the moved store again is the owner's offline apply (D4).
+                return _abandoned(coordinator, reason)
+            report, directory = _stage(root, base=not supersede, deadline=deadline)
         if directory is None:
+            if _expired(deadline):
+                return _abandoned(coordinator, DEADLINE, changed)
             return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
         # A cut fence admits only a lease that carries the store capability, which a bound runtime sends.
         runtime = session.runtime() if marker is not None or supersedes is not None else None
@@ -669,17 +719,24 @@ def cutover(session, manager, fence_client) -> dict:
             token = manager._fencing_token
             # Staging held no lease, so a lease holder with another state directory may have
             # written meanwhile. Under the lease none can; only a writer outside it still can.
-            rechecked, why, rechanged = _carried(root, directory, supersede=supersede)
+            rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline)
             if rechecked is None:
-                report, directory = _stage(root, base=not supersede)
+                if deadline is not None and why == LIVE_CHANGED:
+                    return _abandoned(coordinator, why)
+                report, directory = _stage(root, base=not supersede, deadline=deadline)
                 reason, changed = why, rechanged
                 if directory is None:
+                    if _expired(deadline):
+                        return _abandoned(coordinator, DEADLINE, changed)
                     return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
             with closing(connection.open_reader(directory / _STAGING)) as staging:
                 fence = _require_current_coordinator(runtime, fence_client, marker, staging, supersedes)
                 intent = _intent(root, marker, raw, staging, fence, supersedes)
                 identity = tuple(staging.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
                                  for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID))
+            if _expired(deadline):
+                # The last point before a live change: from the seal on, the cutover finishes.
+                return _abandoned(coordinator, DEADLINE, changed)
             _seal(directory, intent, _adopted_replica(root, session.path) if supersede else None)
             if runtime is not None and not runtime.retire_idle_handle():
                 raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
@@ -695,3 +752,61 @@ def cutover(session, manager, fence_client) -> dict:
             **({"rebuilt_because": reason, "changed": changed} if reason is not None else {}),
             **({"superseded": supersedes} if supersedes is not None else {}),
             **({"restored": restored} if restored is not None else {}), **result}
+
+
+#: What a managed handoff's collections step ended in, as the supervisor records it: closed
+#: outcomes of this module, beside ``ABANDONED``, ``RESTORED`` and the report verdicts.
+#: ``pending``: a published store still carries its intent; ``unfinished``: an apply that
+#: reported none of these, which published nothing either.
+MIGRATED, PENDING, UNFINISHED = "migrated", "pending", "unfinished"
+
+
+def _intent_pending(root):
+    """Whether the live store carries a migration intent; None when it cannot be read."""
+    path = connection.store_path(root)
+    if not path.exists():
+        return False
+    try:
+        with closing(connection.open_head_reader(path)) as reader:
+            intent = authority.pending_create(reader)
+    except (CollectionStoreError, sqlite3.DatabaseError, ValueError):
+        return None
+    return intent is not None and intent["kind"] == authority.MIGRATE
+
+
+def settle_handoff(vault_root, *, deadline) -> dict:
+    """The collections step of a managed handoff's migrator (design §10, D2 and D3).
+
+    It runs the owner's apply, with the operator credential that the supervisor gave this
+    child alone, under the self-imposed ``deadline`` (absolute monotonic). A migration it
+    cannot finish in time, or whose live S1 store moved, is abandoned before anything is
+    published, so the release completes in file mode and the next handoff retries it. A
+    refusal or a fault before publication settles the same way, because nothing changed and
+    failing the upgrade would only stop the service. One after publication is raised: the
+    store carries the intent, and the handoff's resume finishes it. ``outcome`` is the
+    report's closed outcome; ``pending`` (a published store that still carries its intent)
+    is the one that fails the handoff.
+    """
+    root = Path(vault_root).resolve()
+    try:
+        result = admission.migrate_route(root, step="handoff", deadline=deadline)
+    except Exception as error:  # noqa: BLE001 - classified by the store's own durable intent, below
+        if _intent_pending(root) is not False:
+            raise
+        logger.warning("the managed collections migration was abandoned", exc_info=True)
+        # A deadline a copy or scan ran into is this handoff's budget, as in `cutover`.
+        result = _abandoned(None, DEADLINE if isinstance(error, TimeoutError) else REFUSED)
+        result["code"] = getattr(error, "code", None) or type(error).__name__
+    if result.get("status") == "marker_admitted":
+        outcome = MIGRATED
+    elif _intent_pending(root) is not False:
+        outcome = PENDING
+    elif result.get("status") in (ABANDONED, RESTORED):
+        outcome = result["status"]
+    # nosemgrep: ep-word-membership -- preflight.report's closed verdicts that publish nothing.
+    elif result.get("verdict") in ("blocked", "nothing_to_migrate"):
+        # A blocked or empty report published nothing either; its verdict says which.
+        outcome = result["verdict"]
+    else:
+        outcome = UNFINISHED
+    return {**result, "outcome": outcome}

@@ -180,12 +180,14 @@ def _prove_all(root, manifests) -> list[dict]:
 
 
 @contextmanager
-def scanned(root, scratch, manifests):
+def scanned(root, scratch, manifests, *, deadline=None):
     """One audit spool that scanned the vault, or ``None`` and a blocked row for every collection.
 
-    The spool lives in the private directory ``scratch`` and goes with the context.
+    The spool lives in the private directory ``scratch`` and goes with the context. Its scan,
+    captures and imports stop at ``deadline`` (absolute monotonic), by default the preflight's.
     """
-    with legacy.LegacyAuditSpool(Path(scratch), deadline=time.monotonic() + DEADLINE_SECONDS) as audit:
+    deadline = time.monotonic() + DEADLINE_SECONDS if deadline is None else deadline
+    with legacy.LegacyAuditSpool(Path(scratch), deadline=deadline) as audit:
         blocker = None
         try:
             audit.scan(root)
@@ -201,13 +203,13 @@ def scanned(root, scratch, manifests):
             yield audit, None
 
 
-def prove_into(root, manifests, staging, scratch, context, *, record=None) -> list[dict]:
+def prove_into(root, manifests, staging, scratch, context, *, record=None, deadline=None) -> list[dict]:
     """Capture, import and prove each collection into ``staging``, one committed transaction each.
 
     ``record(captured, result)`` runs inside a ready collection's transaction, so what it
-    writes commits with that collection's import.
+    writes commits with that collection's import. ``deadline`` is ``scanned``'s.
     """
-    with scanned(root, scratch, manifests) as (audit, blocked):
+    with scanned(root, scratch, manifests, deadline=deadline) as (audit, blocked):
         if audit is None:
             return blocked
         rows = []

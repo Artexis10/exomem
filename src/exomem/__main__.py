@@ -37,6 +37,7 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -3966,6 +3967,12 @@ def _simple_adopt_main(argv: list[str]) -> int:
     return _core_op_main(_with_json(core, args.json))
 
 
+def _offline_vault_root(vault: str | None) -> Path:
+    from .vault import resolve_vault
+
+    return Path(vault).expanduser() if vault is not None else resolve_vault()
+
+
 def _run_offline_state_migration(
     *,
     vault: str | None,
@@ -3975,9 +3982,8 @@ def _run_offline_state_migration(
     """Run the sole state-mutating entrypoint under explicit offline authority."""
 
     from . import state_migration
-    from .vault import resolve_vault
 
-    vault_root = Path(vault).expanduser() if vault is not None else resolve_vault()
+    vault_root = _offline_vault_root(vault)
     authority = state_migration.assert_offline_migration_authority(
         source="exomem maintain --migrate-state --offline",
     )
@@ -4059,8 +4065,24 @@ def _simple_maintain_main(argv: list[str]) -> int:
             "rollback governance store"
         ),
     )
+    parser.add_argument(
+        "--migrate-collections",
+        action="store_true",
+        help=(
+            "with --migrate-state --offline: also finish the collections migration that a managed "
+            "standby pre-imported, as a managed upgrade's migrator; needs the operator credential "
+            "and --deadline-seconds, and never fails the upgrade before it publishes"
+        ),
+    )
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        help="with --migrate-collections: abandon a collections migration not published by then",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
+    # Measured from here, as close to the supervisor's spawn as this process can see.
+    started = time.monotonic()
 
     if args.fix and args.reconcile:
         parser.error("choose only one of --fix or --reconcile")
@@ -4074,6 +4096,15 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--adopt-state requires --migrate-state --offline")
     if args.arm_connector_boundary and (not args.migrate_state or args.adopt_state):
         parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
+    if args.migrate_collections and (
+        not args.migrate_state or args.adopt_state or args.arm_connector_boundary
+    ):
+        parser.error("--migrate-collections requires --migrate-state --offline without other state steps")
+    if (args.deadline_seconds is not None) != args.migrate_collections or (
+        args.deadline_seconds is not None
+        and not (math.isfinite(args.deadline_seconds) and args.deadline_seconds > 0)
+    ):
+        parser.error("--migrate-collections requires a positive --deadline-seconds, and only it takes one")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
@@ -4091,23 +4122,41 @@ def _simple_maintain_main(argv: list[str]) -> int:
             else:
                 print(f"Error: {error}", file=sys.stderr)
             return 1
+        collections, pending = None, False
+        if args.migrate_collections:
+            from .collection_store import migration
+            from .governance.principal import library_scope
+
+            try:
+                with library_scope():
+                    collections = migration.settle_handoff(
+                        _offline_vault_root(args.vault), deadline=started + args.deadline_seconds
+                    )
+            except Exception as error:  # noqa: BLE001 - settle_handoff raises only past publication
+                failed = {"outcome": migration.PENDING}
+                if args.json:
+                    print(json.dumps({"success": False, "error": {"message": str(error)},
+                                      "data": {"collections": failed}}))
+                else:
+                    print(f"Error: {error}", file=sys.stderr)
+                return 1
+            pending = collections["outcome"] == migration.PENDING
         if args.json:
-            print(
-                json.dumps(
-                    {
-                        "success": True,
-                        "data": {
-                            "state_root": str(resolution.state_dir),
-                            "migrated": resolution.migrated,
-                            "dual_state": resolution.dual_state,
-                            "adopted": args.adopt_state,
-                        },
-                    }
-                )
-            )
+            data = {
+                "state_root": str(resolution.state_dir),
+                "migrated": resolution.migrated,
+                "dual_state": resolution.dual_state,
+                "adopted": args.adopt_state,
+            }
+            if collections is not None:
+                data["collections"] = collections
+            print(json.dumps({"success": True, "data": data}))
         else:
             print(f"Machine-local state is ready at {resolution.state_dir}")
-        return 0
+            if collections is not None:
+                print(f"Collections: {collections['outcome']}")
+        # A published store that still carries its intent fails the handoff; its resume finishes it.
+        return 1 if pending else 0
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:

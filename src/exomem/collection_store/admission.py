@@ -719,14 +719,16 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
         fence_client=fence_client))
 
 
-def migrate_route(vault_root, *, step):
+def migrate_route(vault_root, *, step, deadline=None):
     """The owner's route behind `exomem collections migrate` (P1b.3b, design §10 and A11).
 
     ``dry-run`` is the read-only preflight. ``prepare`` pre-imports and proves into private
     staging and may run beside the service. ``apply`` runs with the service stopped, in its
     own producer session under the configured lease and the operator credential, as the
     offline create does, so it may make the coordinator's first store fence cut; it hands
-    the lease back with the flushed head.
+    the lease back with the flushed head. ``handoff`` is the same apply run by a managed
+    upgrade's migrator after the old worker stopped, under its self-imposed ``deadline``
+    (absolute monotonic), which abandons what it has not published by then (P1b.3).
     """
     require_owner(vault_root, "migrate")
     capability.require_collections_migrate()  # before any lease, fence or operator credential
@@ -737,14 +739,21 @@ def migrate_route(vault_root, *, step):
         return migration.dry_run(root)
     if step == "prepare":
         return migration.prepare(root)
-    if step == "apply":
-        result = _offline_owner(root, "migrate", migration.cutover)
+    # nosemgrep: ep-word-membership -- the closed steps of `collections migrate` and the managed migrator.
+    if step in ("apply", "handoff"):
+        if (step == "handoff") != (deadline is not None):
+            raise ValueError("a handoff's migration needs its deadline, and only a handoff has one")
+
+        def work(session, manager, fence_client):
+            return migration.cutover(session, manager, fence_client, deadline=deadline)
+
+        result = _offline_owner(root, "migrate", work)
         if result.get("status") == migration.RESTORED and "lease" not in result:
             # The restore handed its lease back with the head it published; the migration
             # starts afresh under a new acquisition, which records that head.
-            return {**_offline_owner(root, "migrate", migration.cutover), "restored": result["restored"]}
+            return {**_offline_owner(root, "migrate", work), "restored": result["restored"]}
         return result
-    raise ValueError("migrate step must be dry-run, prepare or apply")
+    raise ValueError("migrate step must be dry-run, prepare, apply or handoff")
 
 
 def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, abandon=False):

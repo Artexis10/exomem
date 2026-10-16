@@ -523,6 +523,16 @@ class Supervisor:
             return False
         return True
 
+    def _collections_note(self, handoff: dict[str, Any]) -> None:
+        """Record the collections step a target that declares one was given, or why it was not.
+
+        Absent for a target that declares no collections migration, so such an upgrade's
+        record is what it was before the migration existed.
+        """
+        note = getattr(self.runtime, "collections_migration", None)
+        if note is not None:
+            handoff["migration"]["collections"] = dict(note)
+
     def _migration_declared(self, target: dict[str, Any]) -> tuple[bool, str]:
         """Whether the staged target declares a state migration."""
         declared = getattr(self.runtime, "migration_required", None)
@@ -547,6 +557,9 @@ class Supervisor:
             # that this replacement was waiting on something it never reached.
             if getattr(self.runtime, "replacement_waiting", None) is not None:
                 self.runtime.replacement_waiting = None
+            # Same reason: the collections step is decided again for this attempt.
+            if getattr(self.runtime, "collections_migration", None) is not None:
+                self.runtime.collections_migration = None
             pending = self.records.pending()
             if bool(pending) != resume:
                 return {
@@ -638,7 +651,14 @@ class Supervisor:
                     }
                     if migrate:
                         self.records.phase("migrating", worker_pid=0)
-                        await self.runtime.migrate(target, timeout=deadline.remaining(15))
+                        try:
+                            await self.runtime.migrate(
+                                target, timeout=deadline.remaining(MIGRATION_SECONDS)
+                            )
+                        finally:
+                            self._collections_note(handoff)
+                    else:
+                        self._collections_note(handoff)
                 # Nothing is serving from here, and no rollback remains: the only
                 # question left is whether the replacement becomes ready, so it
                 # gets the same window a cold start gets. Ending the wait sooner
@@ -739,6 +759,45 @@ class Supervisor:
                 }
 
 
+def _pass_through(output: Any) -> bytes:
+    """Copy the migrator's recorded output on to this process's own; its bounded tail.
+
+    The service journal keeps receiving the whole report, as it did when the child wrote
+    there itself. Only the tail is kept, for the outcome.
+    """
+    import sys
+
+    output.seek(0)
+    tail = b""
+    while chunk := output.read(65536):
+        try:
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        except (AttributeError, OSError, ValueError):
+            pass  # an unwritable journal must not fail the handoff
+        tail = (tail + chunk)[-_MIGRATOR_OUTPUT_MAX_BYTES:]
+    return tail
+
+
+def _migrator_outcome(output: bytes) -> str:
+    """The collections outcome the migrator child reported, in the shape a record may carry.
+
+    The child runs the target release, so its word is clamped here as a readiness
+    reason is, never trusted or repeated in another shape.
+    """
+    for line in reversed(output.decode("utf-8", errors="replace").splitlines()):
+        try:
+            report = json.loads(line)
+        except ValueError:
+            continue
+        try:
+            outcome = report["data"]["collections"]["outcome"]
+        except (KeyError, TypeError):
+            return UNRECOGNIZED_REASON
+        return _recognized_reason(outcome) if isinstance(outcome, str) else UNRECOGNIZED_REASON
+    return UNRECOGNIZED_REASON
+
+
 def verify_systemd_identity(
     unit: str,
     *,
@@ -832,6 +891,22 @@ def enable_subreaper() -> None:
 WORKER_PROTOCOL = 1
 
 LOCAL_PORT_ENV = "EXOMEM_LOCAL_PORT"
+
+#: How long the supervisor waits for the migrator child once the old worker has stopped
+#: (`move-structured-collections-to-sqlite` D3). Nothing serves meanwhile.
+MIGRATION_SECONDS = 15.0
+#: What the migrator child leaves of that wait after its own deadline: its interpreter's
+#: start, and the steps of a collections cutover that has published its store, which
+#: finish once begun. The child abandons a migration it has not published by then.
+MIGRATION_FINISH_SECONDS = 3.0
+#: The protected operator file, beside the unit's first service environment file (D1).
+#: It is never an `EnvironmentFile=`, so neither systemd nor a worker ever loads it.
+OPERATOR_ENV_FILE = "operator.env"
+#: The one variable the supervisor takes from it, and gives only to the migrator child.
+OPERATOR_TOKEN_ENV = "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
+_OPERATOR_FILE_MAX_BYTES = 16384
+#: The bounded tail of the migrator's output the supervisor reads for its outcome.
+_MIGRATOR_OUTPUT_MAX_BYTES = 65536
 
 
 def local_port_setting(
@@ -934,10 +1009,14 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
-        # The exact verified candidate, its optional state support and its store schema ceiling.
+        # The exact verified candidate, its optional state support, its store schema ceiling
+        # and the offline migrations its own migrator runs.
         self._verified_state_compatibility: tuple[
-            tuple[str, str, tuple[str, ...]], frozenset[str], int | None
+            tuple[str, str, tuple[str, ...]], frozenset[str], int | None, frozenset[str]
         ] | None = None
+        #: The collections step decided for this handoff, then what the migrator reported.
+        #: Content-free: a state, a fixed reason or the migrator's clamped outcome token.
+        self.collections_migration: dict[str, Any] | None = None
         self.standby_waiting: str | None = None
         #: What the replacement last reported waiting on after the old worker
         #: stopped. Recorded for the handoff; it gates nothing.
@@ -1004,6 +1083,45 @@ class WorkerRuntime:
         if not values:
             return None
         return {**os.environ, **values}
+
+    def _operator_credential(self) -> tuple[str | None, str | None]:
+        """The operator credential from the protected operator file, or why there is none (D1).
+
+        The file is ``OPERATOR_ENV_FILE`` beside the unit's first service environment file,
+        and only ``OPERATOR_TOKEN_ENV`` is read from it. The supervisor reads it for the
+        migrator child alone, at the moment it needs it; no worker or standby ever gets it.
+
+        The file must be a regular file of this user that no other user can read or write.
+        That prevents a credential another local user could have read, replaced or pointed
+        at through a symlink from cutting the coordinator's store fence. When it fires
+        wrongly, the managed path does not migrate, the release completes in file mode with
+        the reason in the handoff record, and the owner fixes the file or migrates offline.
+        No value is ever logged or recorded.
+        """
+        if not self.environment_files:
+            return None, "no service environment file"
+        path = self.environment_files[0].parent / OPERATOR_ENV_FILE
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return None, "operator credential file missing"
+        except OSError:
+            return None, "operator credential file unreadable"
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                return None, "operator credential file is not private to its owner"
+            raw = handle.read(_OPERATOR_FILE_MAX_BYTES + 1)
+        if len(raw) > _OPERATOR_FILE_MAX_BYTES:
+            return None, "operator credential file unreadable"
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, "operator credential file unreadable"
+        token = self._parse_environment(text).get(OPERATOR_TOKEN_ENV, "").strip()
+        if not token:
+            return None, "operator credential file holds no operator credential"
+        return token, None
 
     def _spawn_environment(self) -> dict[str, str] | None:
         """The child's environment with this manager's ingress proof applied.
@@ -1079,7 +1197,8 @@ class WorkerRuntime:
             + _STATE_DECLARATIONS_PROBE
             + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
-            '"supported_state_compatibility":compatibility,"store_schema":store_schema}))'
+            '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
+            '"offline_migrations":migrations}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1120,9 +1239,17 @@ class WorkerRuntime:
         store_schema = actual.get("store_schema")
         if store_schema is not None and (type(store_schema) is not int or store_schema < 0):
             raise ValueError("target did not declare its collection store schema")
+        migrations = actual.get("offline_migrations", [])
+        if not isinstance(migrations, list) or not all(
+            isinstance(entry, str) and entry for entry in migrations
+        ):
+            raise ValueError("target did not declare its offline migrations")
         self.standby_capable = actual.get("standby") is True
         self._verified_state_compatibility = (
-            (interpreter, version, tuple(descriptors)), frozenset(compatibility), store_schema
+            (interpreter, version, tuple(descriptors)),
+            frozenset(compatibility),
+            store_schema,
+            frozenset(migrations),
         )
         return {
             "python": interpreter,
@@ -1130,7 +1257,15 @@ class WorkerRuntime:
             "state_descriptors": descriptors,
         }
 
-    async def _spawn(self, command: list[str], *, standby: bool = False) -> None:
+    async def _spawn(
+        self,
+        command: list[str],
+        *,
+        standby: bool = False,
+        environment: dict[str, str] | None = None,
+        stdout: int | None = None,
+    ) -> None:
+        """Start one owned child; ``environment`` is overlaid for that child alone."""
         occupied = self.standby if standby else self.child
         if occupied is not None:
             raise RuntimeError("previous owned process exit has not been proven")
@@ -1140,11 +1275,15 @@ class WorkerRuntime:
                 raise RuntimeError("standby requires a live serving worker")
         elif _descendants(ignore_sessions=self._standby_session()):
             raise RuntimeError("previous owned process exit has not been proven")
+        inherited = self._spawn_environment()
+        if environment:
+            inherited = {**(os.environ if inherited is None else inherited), **environment}
         pending = asyncio.create_task(
             asyncio.create_subprocess_exec(
                 *command,
                 start_new_session=True,
-                env=self._spawn_environment(),
+                env=inherited,
+                stdout=stdout,
             )
         )
         try:
@@ -1182,21 +1321,46 @@ class WorkerRuntime:
         if not vault or not Path(vault).is_absolute():
             raise ValueError("managed service requires its installed absolute vault binding")
         deadline = Deadline(timeout)
-        await self._spawn(
-            [
-                target["python"],
-                "-I",
-                "-m",
-                "exomem",
-                "maintain",
-                "--vault",
-                vault,
-                "--migrate-state",
-                "--offline",
-                "--json",
-            ]
-        )
-        await asyncio.wait_for(self.child.wait(), deadline.remaining(timeout))
+        command = [
+            target["python"],
+            "-I",
+            "-m",
+            "exomem",
+            "maintain",
+            "--vault",
+            vault,
+            "--migrate-state",
+            "--offline",
+            "--json",
+        ]
+        environment = None
+        collections = (self.collections_migration or {}).get("state") == "requested"
+        if collections:
+            # Read again now: the file may have changed since the declaration was checked.
+            token, problem = self._operator_credential()
+            budget = timeout - MIGRATION_FINISH_SECONDS
+            if problem is None and budget <= 0:
+                problem = "no migration budget left"
+            if problem is not None:
+                self.collections_migration = {"state": "skipped", "reason": problem}
+                collections = False
+            else:
+                # The child abandons what it has not published by its own deadline, so this
+                # wait never ends in a killed migrator that left a migration half done.
+                command += ["--migrate-collections", "--deadline-seconds", f"{budget:.3f}"]
+                environment = {OPERATOR_TOKEN_ENV: token}
+        # A private unlinked file, not a pipe: a pipe could fill before the child exits, and a
+        # descendant holding it open would keep its end from ever arriving.
+        output = tempfile.TemporaryFile() if collections else None
+        try:
+            await self._spawn(command, environment=environment, stdout=output)
+            await asyncio.wait_for(self.child.wait(), deadline.remaining(timeout))
+        finally:
+            if output is not None:
+                with output:
+                    self.collections_migration = {
+                        "state": "ran", "outcome": _migrator_outcome(_pass_through(output)),
+                    }
         if self.child.returncode != 0:
             raise RuntimeError("offline target preparation failed")
         # A completed migrator is not proof its children have stopped.
@@ -1283,6 +1447,14 @@ class WorkerRuntime:
         payload = ready.json()
         return payload if isinstance(payload, dict) else {}
 
+    def _verified_for(self, target: dict[str, Any]):
+        """The verified probe of exactly this target, or None."""
+        verified = self._verified_state_compatibility
+        key = (
+            target.get("python"), target.get("version"), tuple(target.get("state_descriptors") or ())
+        )
+        return verified if verified is not None and verified[0] == key else None
+
     def migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
         """Whether the staged target declares a state migration for this vault.
 
@@ -1291,7 +1463,39 @@ class WorkerRuntime:
         needs a migration, and so does a target whose descriptor set differs
         from the one the manifest was published with. Nothing here runs the
         migrator to find out (`seamless-managed-worker-handoff` D8).
+
+        A target whose own migrator declares the collections migration also needs
+        the migrator while this vault holds the standby's pre-import, if the
+        protected operator file is usable (`move-structured-collections-to-sqlite`
+        §10, D1). That decision is kept in ``collections_migration`` for the
+        migrator and the handoff record. A target that declares no such migration
+        gets exactly the answer it got before the migration existed.
         """
+        migrate, reason = self._state_migration_required(target)
+        self.collections_migration = None
+        vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+        verified = self._verified_for(target)
+        from .collection_store import capability, connection
+
+        if (
+            verified is None
+            or capability.COLLECTIONS_MIGRATE_V1 not in verified[3]
+            or not vault
+            or not Path(vault).is_absolute()
+        ):
+            return migrate, reason
+        if not connection.migration_staging_directories(Path(vault)):
+            self.collections_migration = {"state": "skipped", "reason": "nothing staged"}
+            return migrate, reason
+        _, problem = self._operator_credential()
+        if problem is not None:
+            self.collections_migration = {"state": "skipped", "reason": problem}
+            return migrate, reason
+        self.collections_migration = {"state": "requested"}
+        return True, reason if migrate else "collections migration staged"
+
+    def _state_migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
+        """`migration_required` for the vault's machine-local state families alone."""
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             return True, "vault binding unavailable"
@@ -1304,14 +1508,11 @@ class WorkerRuntime:
         recorded = state_migration.recorded_descriptor_ids(Path(vault))
         physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
         required |= optional
-        verified = self._verified_state_compatibility
-        key = (
-            target.get("python"), target.get("version"), tuple(target.get("state_descriptors") or ())
-        )
-        supported = verified[1] if verified is not None and verified[0] == key else frozenset()
+        verified = self._verified_for(target)
+        supported = verified[1] if verified is not None else frozenset()
         if required - supported:
             raise ValueError("candidate does not support required state compatibility")
-        _require_store_schema(Path(vault), verified[2] if verified is not None and verified[0] == key else None)
+        _require_store_schema(Path(vault), verified[2] if verified is not None else None)
         if recorded is None:
             return True, "state manifest records no descriptor set"
         declared = target.get("state_descriptors")

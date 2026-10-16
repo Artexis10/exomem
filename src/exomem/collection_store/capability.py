@@ -118,6 +118,20 @@ def require_records_summary_route(vault_root, writer, action, values) -> None:
         require_records_summary(vault_root)
 
 
+def collections_migrate_enabled() -> bool:
+    """Whether this release runs collections-migrate-v1; the one place that answers it."""
+    return COLLECTIONS_MIGRATE_V1 in RELEASED
+
+
+def offline_migrations() -> tuple[str, ...]:
+    """The offline migrations this release's managed migrator runs, as the candidate probe declares them.
+
+    A supervisor of an earlier or later release reads this from the candidate interpreter, so
+    only the release that will run the migration decides whether a handoff may run it.
+    """
+    return (COLLECTIONS_MIGRATE_V1,) if collections_migrate_enabled() else ()
+
+
 def require_collections_migrate() -> None:
     """Refuse every migration step while the release keeps collections-migrate-v1 off.
 
@@ -125,7 +139,7 @@ def require_collections_migrate() -> None:
     which only the reverse export (P1b.4) could undo. Firing wrongly costs nothing: it is
     a release constant, the same on every host, and file collections keep working.
     """
-    if COLLECTIONS_MIGRATE_V1 not in RELEASED:
+    if not collections_migrate_enabled():
         raise connection.CollectionStoreError(
             MIGRATION_UNAVAILABLE,
             f"moving file collections into the store is unavailable: this release has not enabled "
