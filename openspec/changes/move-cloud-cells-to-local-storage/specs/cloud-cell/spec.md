@@ -250,6 +250,25 @@ A node-loss drill SHALL be run on disposable infrastructure before any tenant ce
 - **WHEN** etcd is restored from a snapshot older than the latest volume changes
 - **THEN** every logical volume recorded on a cell row is re-adopted with its data, and no logical volume is released except by an operator step on its host
 
+### Requirement: A healthy cell moves to a new claim without losing a write
+
+The operator SHALL be able to move a cell on a healthy node to a new claim on the local cell storage class, by marking the cell's namespace with the volume the cell's row records. cellctl SHALL then stop the cell and take a fresh stopped backup of that volume before it changes the claim. Only once that backup succeeds SHALL it set the old volume's reclaim policy to Retain, delete the claim, release the row's recorded volume, restore that backup into a new claim, and start the cell only after the restore succeeds; the identity check SHALL record the new volume. A failed backup SHALL leave the cell stopped on its untouched claim with a reason on its row, until the operator removes the mark, after which the cell starts on its volume as before. A mark naming any other volume SHALL move nothing. A move SHALL NOT start while another hold is active on the cell, and a deletion SHALL supersede it. A cell's backup Job SHALL run on its volume's node while that node is cordoned, and its restore SHALL NOT, so that a move off a cordoned node binds its new claim elsewhere. With no local class configured, a mark SHALL move nothing.
+
+#### Scenario: Cell moved off its volume
+
+- **WHEN** the operator marks a serving cell's namespace with its recorded volume
+- **THEN** the cell's new claim holds every write it acknowledged before it stopped, its old volume is retained, its row records the new volume, and it accepts recall, governance status and a governed write
+
+#### Scenario: Stopped backup fails
+
+- **WHEN** a move's stopped backup fails
+- **THEN** the cell's claim and its volume are untouched, the cell stays stopped with a reason on its row, and it starts on its volume once the operator removes the mark
+
+#### Scenario: Mark left after the move
+
+- **WHEN** a cell's mark still names its old volume after its move finished
+- **THEN** cellctl moves nothing, and the cell keeps serving from its new volume
+
 ### Requirement: A local cell grows online before it fills
 
 cellctl SHALL grow a running cell's local volume online when its filesystem passes 80% use, observed by its hourly backup. Each growth SHALL add one default cell size, up to a configured cap per cell, and at most one growth SHALL run per backup. cellctl SHALL grow a cell only while its node's published free bytes cover the step and the larger snapshot reserve the new size implies. Otherwise it SHALL raise an alert and leave the size unchanged. A cell past 80% use at its cap SHALL raise the same alert. A grown cell SHALL never be rendered with a smaller claim, and SHALL consume slots for its grown size.

@@ -175,7 +175,7 @@ K3s-in-Docker adaptations are detected, applied only where needed, and each one 
 ## Local-storage node-loss drill
 
 `move-cloud-cells-to-local-storage` task 4, with the rehearsal evidence for
-tasks 2.3, 2.4, 2.9 and 2.10. It needs privileged Docker, loop devices and `sudo`
+tasks 2.3, 2.4, 2.9, 2.10, and the planned move of 6.4 and 7.3. It needs privileged Docker, loop devices and `sudo`
 for `losetup` and `modprobe`, so it runs on a GitHub runner: dispatch the
 `Cloud rehearsal` workflow with `mode` set to `local-storage-drill`.
 
@@ -185,7 +185,8 @@ uv run --frozen exomem-cloud-rehearsal local-storage-drill --report local-storag
 ```
 
 It runs a K3s server with embedded etcd and two agents, each with its own
-loop-device `cells` volume group. TopoLVM, the snapshot controller, the cell
+loop-device `cells` volume group, and a third agent for the planned move.
+TopoLVM, the snapshot controller, the cell
 classes and cellctl come from one render of the platform chart with
 `cellStorage.local.enabled`. The control database holds cellctl's fixture
 schema, and cells are seeded as rows.
@@ -203,6 +204,11 @@ The checks run in order, each on the state the one before leaves:
 6. **2.10:** a filler file beside the first cell's vault takes it past 80% use.
    Its next backup grows it online from 4 to 8 GiB, the drill's cap. Filled
    again, it stays at 8 GiB and cellctl raises `storage-growth-blocked`.
+7. **6.4 and 7.3:** agent B is cordoned, a note is written to the first cell,
+   and the cell is marked for a planned move. cellctl takes a stopped backup
+   on agent B, retains the old volume and restores onto agent C. The cell
+   serves there with the note, its row records the new volume, and it is
+   accepted. The restore waits while only the cordoned agent B has a pool.
 
 The report (`exomem-local-storage-drill-report-v1`) records each check's
 evidence, the measured recovery point and recovery time, and the backup upload
@@ -212,4 +218,69 @@ failed, and 2 the drill itself failed.
 The agents share the runner's kernel, where device-mapper names are global,
 so two `cells/pool0` pools cannot be active at once. Agent B therefore gets
 its volume group only after agent A's disk is destroyed, as replacement
-capacity. The report lists this and every other adaptation.
+capacity. In check 7, agent C gets its volume group only after the move's
+backup succeeded and agent B's pool was deactivated, with the second cell
+stopped first. The report lists this and every other adaptation.
+
+The drill does not move a cell between classes, as the migration from Hetzner
+volumes (task 7.3) does: it has no Hetzner CSI driver, and its cellctl runs
+with the local class as the domain. P3's coexistence configuration (task 7.7)
+has the Hetzner class, on K3s's local-path provisioner, but no agent with a
+local pool. That configuration with a storage-labelled agent and a move check
+for a seeded Hetzner-class cell would rehearse the move between classes.
+
+## Private-link rehearsal (k3s-link)
+
+`move-cloud-cells-to-local-storage` tasks 6.5 (flannel MTU) and 5.7 (agent-token
+rotation). It runs a K3s server with embedded etcd and one agent, with no cell
+images, in about ten minutes. It needs privileged Docker and `uvx`, but no
+`sudo`, so it also runs on a workstation. On a runner, dispatch the
+`Cloud k3s-link rehearsal` workflow. A pull request runs it when the k3s role's
+defaults, its flannel template or re-save helper, the K3s image pin, the
+ansible-core pin or this harness changes.
+
+```
+cd infra/cloud-rehearsal
+uv run --frozen exomem-cloud-rehearsal k3s-link --report k3s-link-report.json
+```
+
+`--label` and `--image-label` add a `key=value` label to every container,
+network and volume it creates, and to the image it builds.
+
+The pinned ansible-core renders the k3s role's flannel configuration and the
+values the checks expect from the role's own template and defaults. It uses the
+role's `k3s_flannel_mtu` once it is set. While it is unset, before the rollout
+commit, the rehearsal uses the smallest dedicated link the role declares
+(`k3s_vswitch_mtu`, `k3s_wireguard_mtu`), the value that commit sets. The run
+stops before any node starts if the K3s image does not report the role's
+`k3s_version`. The Docker network runs at the Hetzner Cloud network's 1450
+bytes, and the agent lowers its interface to a vSwitch's 1400.
+
+It does not exercise the role's handler that recreates `flannel.1`. Both nodes
+start with the flannel configuration present, and a container restart also
+recreates the node's network namespace, so no old device survives a restart.
+
+The checks run in order. A failed 6.5 check blocks only the later 6.5 checks:
+
+1. **6.5:** a ping with fragmentation forbidden crosses the agent's link at
+   1400 bytes and fails at 1450, in both directions.
+2. **6.5:** `flannel.1` and `FLANNEL_MTU` on both nodes equal the role's pod
+   MTU, the values the role's handler asserts.
+3. **6.5:** a pod on each node has `eth0` at the pod MTU, and a ping of that full
+   size with fragmentation forbidden crosses the link both ways.
+4. **5.7:** the server's agent token changes from A to B. The server restarts,
+   then restarts again without the re-save. The check records whether the
+   second restart stops on K3s's `newer than datastore` fatal. If it does, the
+   check removes `server/cred/passwd` and starts the server, as the message
+   directs.
+5. **5.7:** the role's re-save helper leaves the server token file unchanged,
+   and the server then restarts ready.
+6. **5.7:** the supervisor answers `/v1-k3s/readyz` with 401 for token A and
+   200 for token B, each presented alone.
+7. **5.7:** the agent moves to token B, loses its kubelet client certificate,
+   and restarts. It must get a new certificate and run its pod again. With
+   its certificate it would rejoin on that alone.
+
+The report (`exomem-k3s-link-rehearsal-report-v1`) records each check's
+evidence and the rendered configuration. Exit 0 means every check passed, 1
+a check failed, and 2 the rehearsal itself failed.

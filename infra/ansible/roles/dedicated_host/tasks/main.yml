@@ -64,7 +64,8 @@
   failed_when: dedicated_host_md_health.rc not in [0, 1]
 
 # A failed disk does not stop convergence: the run reports it and the runbook
-# replaces the disk. Nothing alerts on it yet (OpenSpec task 5.5).
+# replaces the disk. cellctl's cell-array-degraded alert emails the operator
+# meanwhile (OpenSpec task 5.5).
 - name: Report a degraded array
   ansible.builtin.debug:
     msg: >-

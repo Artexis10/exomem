@@ -7,11 +7,13 @@ library. decide.py never sees it; reconcile.py is the only caller.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
 from datetime import datetime
 
+import httpx
 from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
@@ -67,6 +69,45 @@ REVISION_LABEL = "controller-revision-hash"
 # inside the 120 s liveness bound, instead of blocking the loop until
 # liveness restarts cellctl and discards its in-memory refusal parks.
 API_REQUEST_TIMEOUT = (5, 30)
+
+# Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
+# pod (about 5 KB from node-exporter's mdadm collector, tens of KB from TopoLVM).
+# Every pod is read at once, each inside METRICS_TIMEOUT seconds of wall clock for
+# its connect, response head and body together, so one call takes that long at
+# most. A socket timeout would restart with every byte a pod drips. A pod that
+# misses the bound, or sends more than METRICS_MAX_BYTES, is an unreadable node,
+# never a clean one.
+METRICS_TIMEOUT = 3.0
+METRICS_MAX_BYTES = 256 * 1024
+
+
+async def _read_metrics(targets: dict[str, str], port: int, scraped: dict[str, str]) -> None:
+    """Fills `scraped` with the page of each node in `targets` (node -> pod IP)
+    that answered in time; the others are left out."""
+
+    async def read(client: httpx.AsyncClient, node: str, address: str) -> None:
+        try:
+            async with asyncio.timeout(METRICS_TIMEOUT):
+                async with client.stream("GET", f"http://{address}:{port}/metrics") as response:
+                    response.raise_for_status()
+                    body = b""
+                    # Raw bytes, so the cap counts what the pod sent: a decoded
+                    # stream would inflate a small compressed body before the check.
+                    async for chunk in response.aiter_raw():
+                        body += chunk
+                        if len(body) > METRICS_MAX_BYTES:
+                            raise ValueError("metrics page too large")
+            scraped[node] = body.decode("utf-8")
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError, TimeoutError):
+            pass
+
+    # timeout=None: the asyncio.timeout above is the one bound, covering the phases a socket timeout misses.
+    # Accept-Encoding identity: the exporters then send plain text, and a page that is
+    # compressed anyway fails to decode or parse and reads unreadable.
+    async with httpx.AsyncClient(
+        trust_env=False, timeout=None, headers={"Accept-Encoding": "identity"}
+    ) as client:
+        await asyncio.gather(*(read(client, node, address) for node, address in targets.items()))
 
 
 def _bound_requests(api_client: k8s.ApiClient) -> None:
@@ -172,6 +213,23 @@ class ClusterClient:
         if key not in data:
             raise KeyError(f"secret {namespace}/{name} has no key {key}")
         return base64.b64decode(data[key]).decode("utf-8").strip()
+
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
+        """Tasks 5.5 and 5.6: the `/metrics` text of each node's pod that
+        matches `selector`, read from the pod's own IP, keyed by the node the
+        pod runs on. A pod that is not running, is being deleted, or does not
+        answer leaves its node out: an unreadable node, never a clean one. A
+        failed pod listing raises. The chart grants `list` on pods."""
+
+        targets = {
+            pod.spec.node_name: pod.status.pod_ip
+            for pod in self._core.list_namespaced_pod(namespace, label_selector=selector).items
+            if pod.status.phase == "Running" and not pod.metadata.deletion_timestamp
+            and pod.spec.node_name and pod.status.pod_ip
+        }
+        scraped: dict[str, str] = {}
+        asyncio.run(_read_metrics(targets, port, scraped))
+        return scraped
 
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json
@@ -339,7 +397,9 @@ class ClusterClient:
         self, namespace: str, namespace_obj, pvc, pv, statefulset, pods: list, node_presence=None
     ) -> ClusterObservation:
         namespace_cell_label = namespace_obj.metadata.labels.get(CELL_LABEL) if namespace_obj.metadata.labels else None
-        namespace_volume_lost = (getattr(namespace_obj.metadata, "annotations", None) or {}).get(VOLUME_LOST_ANNOTATION)
+        namespace_annotations = getattr(namespace_obj.metadata, "annotations", None) or {}
+        namespace_volume_lost = namespace_annotations.get(VOLUME_LOST_ANNOTATION)
+        namespace_move_volume = namespace_annotations.get(MOVE_VOLUME_ANNOTATION)
 
         pvc_bound = bool(pvc and pvc.status and pvc.status.phase == "Bound")
         pvc_uid = pvc.metadata.uid if pvc and pvc.metadata else None
@@ -481,6 +541,7 @@ class ClusterClient:
             pv_node_stop_confirmed=pv_node is not None and node_presence is not None and pv_node in node_presence[1],
             pv_node_absent=pv_node is not None and node_presence is not None and pv_node not in node_presence[0],
             namespace_volume_lost=namespace_volume_lost,
+            namespace_move_volume=namespace_move_volume,
             statefulset_exists=statefulset_exists,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
@@ -787,6 +848,11 @@ OUT_OF_SERVICE_TAINT = "node.kubernetes.io/out-of-service"
 # D4: set by the operator on a cell's namespace, naming the recorded volume
 # that no disk holds, so cellctl relocates the cell from its backup.
 VOLUME_LOST_ANNOTATION = "exomem.io/volume-lost"
+# Tasks 6.4 and 7.3: set by the operator, or by remove-agent.yml, on a cell's
+# namespace, naming the volume a healthy cell is on, so cellctl moves the cell
+# to a new claim through a fresh stopped backup. The role default
+# k3s_remove_move_annotation repeats it; test_planned_move checks they agree.
+MOVE_VOLUME_ANNOTATION = "exomem.io/move-volume"
 
 
 def _node_presence(nodes) -> tuple[frozenset[str], frozenset[str]] | None:

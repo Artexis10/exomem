@@ -1,0 +1,77 @@
+name: Cloud k3s-link rehearsal
+
+# move-cloud-cells-to-local-storage tasks 6.5 and 5.7: the flannel MTU and the
+# agent-token rotation on a disposable K3s server and agent, about ten
+# minutes. A pull request reruns it only when the K3s it rehearses or the
+# files it exercises change: the role's defaults (the K3s version pin, MTU
+# and CIDR), the flannel template, the re-save helper, the K3s image pin, the
+# ansible-core pin in tool-versions.env, and the harness. The whole harness
+# directory: its CLI imports every module, and its lockfile pins them all,
+# with cellctl's own dependencies, so cellctl's pyproject and lockfile too.
+on:
+  pull_request:
+    paths:
+      - "infra/ansible/roles/k3s/defaults/main.yml"
+      - "infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2"
+      - "infra/ansible/roles/k3s/files/exomem-k3s-resave-bootstrap.sh"
+      - "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
+      - "infra/tool-versions.env"
+      - "infra/cloud-rehearsal/**"
+      # The rehearsal installs cellctl by path from its lockfile.
+      - "infra/cellctl/pyproject.toml"
+      - "infra/cellctl/uv.lock"
+      - ".github/workflows/cloud-k3s-link.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-k3s-link-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  k3s-link:
+    name: Flannel MTU and agent-token rotation on disposable K3s
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # Exit 1 is a recorded finding, 2 a harness failure; both fail the job.
+      - name: Run the rehearsal
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 25
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/k3s-link-diagnostics
+        run: |
+          uv run --frozen exomem-cloud-rehearsal k3s-link --report "${RUNNER_TEMP}/k3s-link-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/k3s-link-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: k3s-link-report
+          path: |
+            ${{ runner.temp }}/k3s-link-report.json
+            ${{ runner.temp }}/k3s-link-diagnostics
+          if-no-files-found: error
+          retention-days: 30

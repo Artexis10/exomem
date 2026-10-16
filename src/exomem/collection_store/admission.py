@@ -339,6 +339,7 @@ def _resolve(session, *, force=False):
         return previous.status()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
+    _migrate_schema(session, manager)
     raw, marker, fence = _routed_store(session)
     with manager.writer_authority_guard(vault_root=session.root):
         token = manager._fencing_token
@@ -922,6 +923,21 @@ def _publication_custody(session, token):
         return True
     _custody_lost(session, token)
     return False
+
+
+def _migrate_schema(session, manager):
+    """Migrate a store an earlier release wrote, under this host's writer lease, before admission reads it.
+
+    Readers refuse a store below the current schema until its writer migrates it, and
+    every admission read below is one. The migration keeps the store's rows and head,
+    so the takeover that follows decides as it would have on the earlier release.
+    """
+    if not (session.path.exists() and connection.schema_pending(session.path)):
+        return
+    with (manager.writer_authority_guard(vault_root=session.root),
+          manager.consistency_guard(session.root, operation="collection_store_schema"),
+          session.writer(manager._fencing_token)):
+        pass  # open_writer migrates the schema in its own transaction.
 
 
 def _routed_store(session):

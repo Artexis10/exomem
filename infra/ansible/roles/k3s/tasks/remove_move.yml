@@ -1,0 +1,145 @@
+---
+# move-cloud-cells-to-local-storage 6.4: move one cell whose local volume is on
+# the agent being removed to a new claim on another node, through cellctl's
+# planned move. cellctl stops the cell, takes a fresh stopped backup on this
+# agent, retains the old volume, restores the backup into a new claim and
+# starts the cell only after the restore succeeds. remove-agent.yml cordons
+# the agent first, so the new claim cannot bind back onto it.
+#
+# Inputs: k3s_remove_move_namespace (the cell's namespace) and k3s_remove_node.
+- name: Read the cell's claim
+  ansible.builtin.command:
+    argv: >-
+      {{ k3s_remove_kubectl + ['get', 'persistentvolumeclaim', 'cell-data', '--namespace',
+         k3s_remove_move_namespace, '--output', 'jsonpath={.spec.volumeName}'] }}
+  register: k3s_remove_move_claim
+  changed_when: false
+
+# Prints the volume ID, then each node the volume is pinned to.
+- name: Read where the cell's volume is
+  ansible.builtin.command:
+    argv: >-
+      {{ k3s_remove_kubectl + ['get', 'persistentvolume', k3s_remove_move_claim.stdout | trim, '--output',
+         'jsonpath={.spec.csi.volumeHandle} ' ~ k3s_remove_move_pinned_jsonpath] }}
+  register: k3s_remove_move_where
+  changed_when: false
+
+# A cell an earlier run already moved is bound elsewhere, and is skipped.
+- name: Move the cell off the agent
+  when: k3s_remove_node in k3s_remove_move_where.stdout.split()[1:]
+  vars:
+    k3s_remove_move_pv_name: "{{ k3s_remove_move_claim.stdout | trim }}"
+    k3s_remove_move_volume: "{{ k3s_remove_move_where.stdout.split()[0] }}"
+    # The objects of the cell's namespace, from the poll below once it ran.
+    k3s_remove_move_items: >-
+      {{ (((k3s_remove_move_poll.stdout | default('', true) | trim) or '{"items": []}') | from_json)['items'] }}
+    k3s_remove_move_statefulset: >-
+      {{ k3s_remove_move_items | selectattr('kind', 'equalto', 'StatefulSet')
+         | selectattr('metadata.name', 'equalto', 'cell') | first | default({}) }}
+    k3s_remove_move_annotations: >-
+      {{ (k3s_remove_move_statefulset.metadata | default({})).annotations | default({}) }}
+    # Moved: no hold, the claim bound to another volume, and every replica
+    # the StatefulSet asks for ready on its current spec.
+    k3s_remove_move_done: >-
+      {%- set claim = k3s_remove_move_items | selectattr('kind', 'equalto', 'PersistentVolumeClaim')
+            | selectattr('metadata.name', 'equalto', 'cell-data') | first | default({}) -%}
+      {%- set statefulset = k3s_remove_move_statefulset -%}
+      {%- set status = statefulset.status | default({}) -%}
+      {{ statefulset | length > 0
+         and 'exomem.io/hold' not in k3s_remove_move_annotations
+         and (claim.status | default({})).phase | default('') == 'Bound'
+         and (claim.spec | default({})).volumeName | default('') not in ['', k3s_remove_move_pv_name]
+         and status.observedGeneration | default(-1) == (statefulset.metadata | default({})).generation | default(-2)
+         and status.readyReplicas | default(0) == (statefulset.spec | default({})).replicas | default(-1) }}
+    # backup, restore or none. cellctl records a move's failed stopped backup
+    # on its hold; a failed restore Job stays listed for five minutes.
+    k3s_remove_move_failure: >-
+      {%- set failed_restores = [] -%}
+      {%- for job in k3s_remove_move_items if job.kind == 'Job'
+          and ((job.metadata | default({})).labels | default({})).get('exomem.io/cell-job') == 'restore'
+          and ((job.status | default({})).failed | default(0) | int) > 0 -%}
+        {%- set _ = failed_restores.append(job.metadata.name) -%}
+      {%- endfor -%}
+      {%- if k3s_remove_move_annotations.get('exomem.io/hold') == 'move'
+            and k3s_remove_move_annotations.get('exomem.io/backup-outcome') == 'failed' -%}
+        backup
+      {%- elif failed_restores | length > 0 -%}
+        restore
+      {%- else -%}
+        none
+      {%- endif -%}
+  block:
+    - name: Mark the cell to move off its volume
+      ansible.builtin.command:
+        argv: >-
+          {{ k3s_remove_kubectl + ['annotate', 'namespace', k3s_remove_move_namespace,
+             k3s_remove_move_annotation ~ '=' ~ k3s_remove_move_volume, '--overwrite'] }}
+      changed_when: true
+
+    - name: Wait until the cell serves from a new volume, or its move fails
+      ansible.builtin.command:
+        argv: >-
+          {{ k3s_remove_kubectl + ['get', 'statefulsets,persistentvolumeclaims,jobs', '--namespace',
+             k3s_remove_move_namespace, '--output', 'json'] }}
+      register: k3s_remove_move_poll
+      changed_when: false
+      failed_when: false
+      retries: "{{ k3s_remove_move_retries }}"
+      delay: "{{ k3s_remove_move_delay }}"
+      until: k3s_remove_move_done | bool or k3s_remove_move_failure | trim in ['backup', 'restore']
+
+    # The mark stays on a failed move: it is what keeps the cell stopped on
+    # its own volume until the operator decides.
+    - name: Refuse to go on after a move that failed or did not finish
+      ansible.builtin.assert:
+        that:
+          - k3s_remove_move_done | bool
+        fail_msg: "{{ k3s_remove_move_refusals[k3s_remove_move_failure | trim] }}"
+      vars:
+        k3s_remove_move_refusals:
+          backup: >-
+            The move of {{ k3s_remove_move_namespace }} failed before its claim changed: its stopped backup
+            failed (the row shows MOVE_BACKUP_FAILED). The cell is stopped on its volume on {{ k3s_remove_node }},
+            which stays in the cluster. To start the cell there again, run kubectl uncordon {{ k3s_remove_node }},
+            then kubectl annotate namespace {{ k3s_remove_move_namespace }} {{ k3s_remove_move_annotation }}-.
+          restore: >-
+            The move of {{ k3s_remove_move_namespace }} failed after its claim was retired: its restore failed.
+            Its old volume ({{ k3s_remove_move_pv_name }}) is retained on {{ k3s_remove_node }}, which stays in the
+            cluster, cordoned. Follow RESTORE_FAILED in docs/runbooks/cloud-node-loss.md; once the cell serves,
+            remove its mark and run the removal again. To stop the removal instead, run kubectl uncordon
+            {{ k3s_remove_node }}: until then, no other cell on it can start again.
+          none: >-
+            The move of {{ k3s_remove_move_namespace }} did not finish in time; {{ k3s_remove_node }} stays in the
+            cluster, cordoned, and the cell keeps its mark. Read the cell's row and its hold. Once the cell serves,
+            from either volume, run kubectl annotate namespace {{ k3s_remove_move_namespace }}
+            {{ k3s_remove_move_annotation }}-, then run the removal again. To stop the removal instead, run kubectl
+            uncordon {{ k3s_remove_node }}: until then, no other cell on it can start again.
+
+    - name: Read where the cell's new volume is
+      ansible.builtin.command:
+        argv: >-
+          {{ k3s_remove_kubectl + ['get', 'persistentvolume',
+             (k3s_remove_move_items | selectattr('kind', 'equalto', 'PersistentVolumeClaim')
+              | selectattr('metadata.name', 'equalto', 'cell-data') | first).spec.volumeName,
+             '--output', 'jsonpath=' ~ k3s_remove_move_pinned_jsonpath] }}
+      register: k3s_remove_move_new_nodes
+      changed_when: false
+
+    # Prevents: deleting the node a moved cell landed back on, which would
+    # relocate it from its backup and lose its writes since the move.
+    - name: Refuse a move that landed back on the agent
+      ansible.builtin.assert:
+        that:
+          - k3s_remove_move_new_nodes.stdout.split() | length > 0
+          - k3s_remove_node not in k3s_remove_move_new_nodes.stdout.split()
+        fail_msg: >-
+          {{ k3s_remove_move_namespace }}'s new volume is pinned to
+          '{{ k3s_remove_move_new_nodes.stdout | trim }}', not to another node. Check that
+          {{ k3s_remove_node }} is cordoned, and move the cell again.
+
+    - name: Remove the mark from the moved cell
+      ansible.builtin.command:
+        argv: >-
+          {{ k3s_remove_kubectl + ['annotate', 'namespace', k3s_remove_move_namespace,
+             k3s_remove_move_annotation ~ '-'] }}
+      changed_when: true

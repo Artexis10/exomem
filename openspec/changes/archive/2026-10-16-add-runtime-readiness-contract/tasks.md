@@ -21,5 +21,5 @@
 
 - [x] 4.1 Run focused Python, Worker, Ruff, and strict OpenSpec validation.
 - [x] 4.2 Run the broader CI-relevant test set and package checks.
-- [ ] 4.3 Upgrade both live replicas to the compatible release/build before enabling Worker enforcement.
-- [ ] 4.4 Deploy the Worker, prove steady-state admission reuse and incompatible-replica fail-closed behavior, then verify a live MCP read and governed write.
+- [x] 4.3 Obsolete, not performed: the HA edge Worker was removed (#697) and the second replica is decommissioned (docs/deployment.md, "Automatic single-writer lease and laptop takeover"). Upgrade both live replicas to the compatible release/build before enabling Worker enforcement.
+- [x] 4.4 Obsolete, not performed: the Worker this task deploys no longer exists (#697). Deploy the Worker, prove steady-state admission reuse and incompatible-replica fail-closed behavior, then verify a live MCP read and governed write.

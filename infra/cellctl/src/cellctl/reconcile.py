@@ -43,6 +43,7 @@ from .decide import (
     decide,
     hourly_backup_due,
     nightly_backup_due,
+    planned_move_volume,
     relocation_volume,
     storage_receipt,
 )
@@ -80,6 +81,7 @@ from .state import (
     CANARY_PARKED,
     GROWTH_NOT_NEEDED,
     MANIFEST_IMMUTABLE,
+    MOVE,
     RELOCATION_REFUSED,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
@@ -87,6 +89,7 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    row_hold_kind,
 )
 from .storage.interface import CELL_KEY_CAPABILITIES
 from .storage.topolvm import LocalVolumeState, cell_data_absent
@@ -262,6 +265,10 @@ class LoopMemory:
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
     growth_verdicts: dict[str, str] = field(default_factory=dict)
+    # Tasks 5.5 and 5.6: when the dedicated hosts were last read, and the
+    # (bad, unreadable) nodes each host alert last logged: the email names none.
+    host_alerts_at: datetime | None = None
+    host_alert_nodes: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
     # D4: when this process first saw each node absent from the API, until it
     # is seen present again. A restart restarts every clock.
     node_absent_since: dict[str, datetime] = field(default_factory=dict)
@@ -481,6 +488,7 @@ class ClusterGateway:
     ) -> CapacityObservation: ...  # pragma: no cover
     def local_capacity_inputs(self, local: LocalStorage) -> LocalCapacityObservation: ...  # pragma: no cover
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -861,8 +869,11 @@ def _compute_render_digest(
 
 def _claim_class(cluster_config: ClusterConfig, observation: ClusterObservation, *, relocating: bool = False) -> str:
     storage = cluster_config.storage
-    if (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
-        # D4: a relocated cell's new claim is local, whatever the domain.
+    new_claim = observation.pvc_storage_class not in storage.classes
+    if new_claim and (relocating or observation.statefulset_relocation_volume) and storage.local is not None:
+        # D4: a relocated or moved cell's new claim is local, whatever the
+        # domain. Its old claim keeps its own class until it is gone, since
+        # storageClassName is immutable: a planned move leaves a Hetzner one.
         return storage.local.class_name
     return storage.claim_class(observation.pvc_storage_class)
 
@@ -917,10 +928,13 @@ def _select_backup_candidates(
                 chosen.add(row.cell_id)
         rows = [row for row in rows if not local(row)]
 
+    # A move's stopped backup counts as the backup it is, by the same mapping
+    # the row's hold column records it with.
     active = sum(
         1
         for row in rows
-        if _active_hold(row, observations[row.cell_id]) == "backup" and row.cell_id not in statefulset_blocked
+        if row_hold_kind(_active_hold(row, observations[row.cell_id])) == "backup"
+        and row.cell_id not in statefulset_blocked
     )
     # A row that could not be observed this pass counts by its hold column.
     active += sum(1 for row in unobserved if row.hold_kind == "backup")
@@ -1107,6 +1121,7 @@ async def reconcile_once(
     observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _host_alerts(cluster, cluster_config, now, memory)
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
     rows = [row for row in rows if row.cell_id in observations]
@@ -1353,6 +1368,65 @@ async def _growth_alert(
         await _deliver_alert(cluster, cluster_config, memory, alerts.GROWTH_ALERT, firing, now)
 
 
+# The dedicated hosts change slowly and each read is a pod listing and one HTTP
+# request per node, so they are read at most this often, not on every pass.
+HOST_ALERT_INTERVAL = timedelta(minutes=1)
+
+
+async def _host_alerts(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, now: datetime, memory: LoopMemory
+) -> None:
+    """Tasks 5.5 and 5.6: one platform alert while a dedicated host's md array
+    has lost a member, and one while its thin pool's data or metadata use has
+    reached 80%. A host that cannot be read sends nothing (alerts.host_alert_firing).
+    Nothing is read where local storage is not configured, or with no receiver
+    to tell. The nodes go to the log, because the email names none."""
+
+    local = cluster_config.storage.local
+    if local is None or cluster_config.alert_delivery_secret is None:
+        return
+    if memory.host_alerts_at is not None and now - memory.host_alerts_at < HOST_ALERT_INTERVAL:
+        return
+    memory.host_alerts_at = now
+    try:
+        # The nodes that publish a pool are the dedicated hosts, and the Cloud
+        # recovery agent (task 6.3) when it exists. That agent has no md array,
+        # so it must be left out of the array alert's nodes before it is built.
+        observed = await asyncio.to_thread(cluster.local_capacity_inputs, local)
+    except Exception as error:  # noqa: BLE001 - an alert must not take the pass down
+        logger.error("cellctl: the dedicated hosts could not be listed, so no host alert is read: %s", _describe_error(error))
+        return
+    expected = sorted(node for node, free in observed.free_bytes.items() if free is not None)
+
+    async def scrape(selector: str, port: int) -> dict[str, str]:
+        try:
+            return await asyncio.to_thread(cluster.scrape_pod_metrics, local.metrics_namespace, selector, port)
+        except Exception as error:  # noqa: BLE001 - every node then reads as unreadable
+            logger.error("cellctl: the host metrics pods could not be listed: %s", _describe_error(error))
+            return {}
+
+    pool_scrapes = await scrape(local.thin_pool_selector, local.thin_pool_port)
+    array_scrapes = await scrape(local.array_selector, local.array_port)
+    # Parsing is quadratic in a line's length, so it runs off the event loop.
+    readings = (
+        (alerts.THIN_POOL_ALERT, await asyncio.to_thread(
+            alerts.thin_pool_states, expected, pool_scrapes, device_class=local.device_class)),
+        (alerts.ARRAY_ALERT, await asyncio.to_thread(alerts.array_states, expected, array_scrapes)),
+    )
+    for alert, states in readings:
+        bad = sorted(node for node, state in states.items() if state)
+        unreadable = sorted(node for node, state in states.items() if state is None)
+        if (bad, unreadable) != memory.host_alert_nodes.get(alert, ([], [])):
+            memory.host_alert_nodes[alert] = (bad, unreadable)
+            if bad:
+                logger.warning("cellctl: %s on node(s): %s", alert, ", ".join(bad))
+            if unreadable:
+                logger.warning("cellctl: %s could not be read on node(s): %s", alert, ", ".join(unreadable))
+        firing = alerts.host_alert_firing(states)
+        if firing is not None:
+            await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
+
+
 async def _backup_age_alert(
     cluster: ClusterGateway,
     cluster_config: ClusterConfig,
@@ -1469,8 +1543,9 @@ async def _reconcile_row(
         and not start_upgrade
         and not is_render_digest_candidate
         # D4: a converged cell whose volume is lost still has its relocation
-        # to start.
+        # to start, and one the operator marked to move has its move.
         and relocation_volume(row, observation, cluster_config.storage) is None
+        and planned_move_volume(row, observation, cluster_config.storage) is None
     )
     # D4: ready is an observation, never a memory. A served, converged row
     # whose only change is its pod's readiness is observed, not re-applied:
@@ -1739,10 +1814,18 @@ async def _reconcile_row(
             and decision.target_applied_at is not None
         )
         hold_active = observation.statefulset_exists and observation.statefulset_hold_kind is not None
+        manifests = render_cell_manifests(spec)
+        if decision.delete_claim:
+            # D4: a claim deleted this pass is not applied again. This pass
+            # renders the deleted claim's class, and an unused claim is gone
+            # at once, so the apply would recreate it on the old class. The
+            # next pass, seeing no claim, applies the new one.
+            manifests = [manifest for manifest in manifests
+                         if (manifest["kind"], manifest["metadata"]["name"]) != ("PersistentVolumeClaim", spec.pvc_name)]
         refused, statefulset_applied = _apply_cell_manifests(
             cluster,
             row.cell_id,
-            render_cell_manifests(spec),
+            manifests,
             hold_active=hold_active,
             statefulset_exists=observation.statefulset_exists,
         )
@@ -1891,15 +1974,16 @@ def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservati
 def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
     """D3: the hourly hold reads its clone and prunes only on its first run
     after 02:00 UTC; the stopped pre-upgrade backup of a local cell never
-    prunes. Every backup of a Hetzner cell keeps its claim and the nightly
-    prune, as before local storage."""
+    prunes, nor does a planned move's. Every other backup of a Hetzner cell
+    keeps its claim and the nightly prune, as before local storage."""
 
     if decision.hold_kind == SNAPSHOT_BACKUP:
         return {
             "claim_name": hold_job_name(CLONE_CLAIM_NAME, spec.hold_started_at),
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
-    if spec.local_volume and decision.hold_kind == "upgrade":
+    if decision.hold_kind == MOVE or (spec.local_volume and decision.hold_kind == "upgrade"):
+        # A move's cell is down while its backup runs, so it never prunes either.
         return {"retention": None}
     return {"retention": RETENTION_ARGS}
 
