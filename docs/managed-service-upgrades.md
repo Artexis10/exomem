@@ -406,14 +406,30 @@ as `skipped` with the reason `declared_none`, because the store schema is not a
 state migration. The new worker migrates the store itself once it acquires the
 writer lease. Until then, the old worker keeps the lease and serves.
 
-A release from before the schema change cannot open the migrated store. On a
-vault with a collection store fence, its writer gets no lease and every write
-refuses with `WRITER_LEASE_REQUIRED`. After the new worker has migrated the
-store, roll back only to a release at or after the one that migrated it.
-0.119.0 changed the store schema, and the release after it is the first that
-migrates a store from an earlier release. Back up the store with the earlier
-release before the upgrade, as "A release that changes the collection store's
-schema" in `docs/deployment.md` describes.
+A release from before the schema change cannot open the migrated store. When
+the vault's marker routes collections to the store, or the store records a
+pending intent, the supervisor compares the
+newest store schema that an upgrade target reads with the schema of the live
+store. It refuses a target that cannot read the live store before the serving
+worker stops, so that worker keeps serving. Releases 0.114.0 through 0.118.x read
+only up to schema 10, so the supervisor refuses them on a store at schema 11.
+0.119.0 and later read schema 11 and stay valid targets.
+
+The supervisor runs this check, so the supervisor's release decides it. A
+supervisor started on 0.120.0 or earlier does not have the check. After a
+seamless upgrade replaces its worker, it still accepts 0.114.0 through 0.118.x
+until the service unit restarts. After an export to files, no collection routes
+to the store, so the check refuses nothing and an earlier release is the way
+back.
+
+Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
+cannot open it. On a vault with a collection store fence, every write on that
+host then refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover.
+
+0.119.0 changed the store schema, and 0.120.0 is the first release that migrates
+a store from an earlier release. Back up the store with the earlier release
+before the upgrade, as "A release that changes the collection store's schema" in
+`docs/deployment.md` describes.
 
 ### The service environment file
 

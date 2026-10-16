@@ -858,10 +858,9 @@ meanwhile, and the next apply migrates that store with the writes it served.
 
 A release can change the schema of the live collection store. 0.119.0 changed
 it from 10 to 11, but 0.119.0 cannot migrate a store that an earlier release
-wrote. From the release after 0.119.0, the first service that holds the writer
-lease migrates the store before it serves the store's collections. The
-migration keeps every row and the store head, so the coordinator's recorded
-head still matches it.
+wrote. From 0.120.0, the first service that holds the writer lease migrates the
+store before it serves the store's collections. The migration keeps every row
+and the store head, so the coordinator's recorded head still matches it.
 
 Until a writer has migrated the store, the new release does not serve its
 collections:
@@ -869,25 +868,67 @@ collections:
 - In a handoff, the earlier release's worker keeps the lease and serves until it
   stops. The new worker refuses store reads and writes with
   `WRITER_LEASE_REQUIRED`, and it migrates the store once it acquires the lease.
-- An offline owner command, such as `exomem collections backup`, refuses with
-  `COLLECTION_STORE_SCHEMA_PENDING`. Start the service once to migrate the store.
+- An offline owner command that only reads the store, such as
+  `exomem collections backup`, refuses with `COLLECTION_STORE_SCHEMA_PENDING`.
+  Start the service once to migrate the store. `exomem collections create` holds
+  the writer lease itself, so it migrates the store before it creates.
 
 File collections and knowledge writes are not affected.
 
 If the migration fails, it rolls back and leaves the store at its earlier
-schema. The service then refuses the store's collections and tries the
-migration again later. A rollback to the earlier release is safe in that state.
+schema. The service status then reports the store as `schema_pending`, with the
+error in its reason. The service refuses the store's collections with
+`COLLECTION_STORE_SCHEMA_PENDING`. A shutdown or an idle release hands the writer
+lease back at once, not at its expiry. The service tries the migration again on
+the next use, at least 10 seconds later. A rollback to the earlier release is
+safe in that state.
 
-A release from before the schema change cannot open a migrated store. Its writer
-then gets no lease on a vault with a collection store fence, so every write on
-that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover. After
-the new release has migrated the store, roll back only to a release at or after
-the one that migrated it.
+Releases 0.114.0 through 0.118.x read the store only up to schema 10, so they
+cannot open a migrated store. 0.119.0 and later read schema 11, so they stay
+valid rollback targets.
+
+The managed supervisor refuses an upgrade target that cannot read the live
+store when the vault's marker routes collections to the store, or the store
+records a pending intent. It compares the
+newest store schema that the target reads with the schema of the live store, and
+it refuses before the serving worker stops. The serving worker keeps serving.
+
+The supervisor runs this check, so the supervisor's release decides it, not the
+worker's. A supervisor started on 0.120.0 or earlier does not have the check.
+After a seamless upgrade replaces its worker, it still accepts 0.114.0 through
+0.118.x as a target until the service unit restarts.
+
+The check refuses nothing in these cases:
+
+- Without a live store, as in a copy of the vault on a fresh state root, the
+  supervisor has no schema to compare.
+- After an export to files, no collection routes to the store. The exporting
+  host sets its store aside, and every other host keeps its store until
+  `exomem collections export --retire-local`. An earlier release is then the way
+  back.
+- If the supervisor cannot read the store's schema, the target meets the store
+  as any release would. A refusal would also block the release that repairs it.
+
+Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
+cannot open the store. On a vault with a collection store fence, its writer gets
+no lease, so every write on that host refuses with `WRITER_LEASE_REQUIRED`. Roll
+forward to recover.
+
+From schema 12 on, the service also records a state compatibility ID for each
+store schema, such as `collections-store-schema-12`, in the vault's state
+manifest before it migrates the store. A failed migration removes the ID again.
+A release that does not support the ID then refuses at its own startup. Schema
+11 has no ID, because every release since 0.114.0 treats an unknown ID the same
+way, so an ID would also refuse 0.119.0 and later.
+
+If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
+or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
+that the release cannot use. Roll forward to a release that supports it.
 
 If you run 0.119.0 on a store that an earlier release wrote, 0.119.0 cannot back
 it up: its backup refuses with `COLLECTION_STORE_SCHEMA_PENDING`. In step 1, back
 up the store with the release that you ran before 0.119.0, then upgrade straight
-to the release after 0.119.0.
+to 0.120.0 or later.
 
 To upgrade a vault with a collection store to a release that changes its schema:
 

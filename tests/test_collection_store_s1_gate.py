@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
+from test_typed_history_generations import previous_release
 
 from exomem import records, state_migration
 from exomem.cli_ops import OpError
@@ -644,6 +645,14 @@ def _granted_epoch(vault):
         conn.commit()
 
 
+def _newer_schema(vault):
+    newer = str(schema.SCHEMA_VERSION + 1)
+    with closing(sqlite3.connect(replica.replica_path(vault))) as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", (newer, schema.META_SCHEMA_VERSION))
+        conn.execute("UPDATE alembic_version SET version_num=?", (newer,))
+        conn.commit()
+
+
 def _refused_replica(found):
     status = found.open()
     refused(lambda: record_memory(found.root, "query", collection=CID), "")
@@ -653,9 +662,10 @@ def _refused_replica(found):
 @pytest.mark.parametrize(("tamper", "copied", "expected"), [
     (_foreign_store, True, "diverged"), (_missing_marker_collection, True, "sync_pending"),
     (_foreign_lineage, False, "diverged"), (_granted_epoch, False, "diverged"),
+    (_newer_schema, True, "sync_pending"),
 ])
 def test_unverified_replica_is_never_adopted(abc, tmp_path, tamper, copied, expected):
-    """Defect: a foreign, pre-marker, other-lineage or ungranted-epoch replica becomes C's authority."""
+    """Defect: a foreign, pre-marker, other-lineage, ungranted-epoch or newer-schema replica becomes C's authority."""
     abc.release()
     root, where = abc.root, {}
     if copied:
@@ -1417,3 +1427,159 @@ def test_a_missing_marker_is_refused_as_unreadable_not_crashed_on(abc):
     """Callers pass `read_marker` straight through, and it returns None when no marker exists."""
     with pytest.raises(CollectionStoreError, match="unreadable mode marker"):
         authority.parse_marker(abc.root, None)
+
+
+# --- a store that an earlier release wrote: schema guard, migration order and adoption ----------
+
+# The state compatibility ID that schema 11 carries once tests guard it: no ID guards 11 itself,
+# but guarding it exercises the mechanism on the real migration from schema 10.
+SCHEMA_GUARD = "collections-store-schema-11"
+
+
+def _guard_schema_11(patch):
+    patch.setattr(schema, "FIRST_GUARDED_SCHEMA_VERSION", 11)
+
+
+def _earlier_c(found):
+    """C created and written by the schema-10 release, which handed the lease back with its replica."""
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        assert create_c(found)["status"] == "marker_admitted"
+        assert found.write_c(ROW, "Canonical")["outcome"] == "committed"
+        found.release()
+    assert _schema(found.session.path) == 10
+
+
+def _schema(path):
+    with closing(sqlite3.connect(path)) as raw:
+        return schema.schema_version(raw)
+
+
+def _recorded(root):
+    return state_migration.recorded_descriptor_ids(root) or ()
+
+
+class _Crash(BaseException):
+    """The process dies at this instant: no handler below the test runs."""
+
+
+def test_a_crash_right_after_the_migration_leaves_the_schema_guard_recorded(ab, monkeypatch):
+    """Defect: the writer records what the new schema requires only after migrating, so a crash between
+    leaves a migrated store that the launcher still hands to an earlier release, which then deadlocks."""
+    _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
+    ensure = schema.ensure_schema
+
+    def crash_once_migrated(conn):
+        migrating = schema.schema_version(conn.connection.driver_connection) < schema.SCHEMA_VERSION
+        ensure(conn)
+        if migrating:
+            raise _Crash
+
+    monkeypatch.setattr(schema, "ensure_schema", crash_once_migrated)
+    with pytest.raises(_Crash):
+        ab.open()
+    assert _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert SCHEMA_GUARD in _recorded(ab.root)
+
+
+def test_an_admission_that_refuses_leaves_a_store_from_an_earlier_release_unmigrated(ab):
+    """Defect: admission migrates the store before its recovery check, so a store that it then refuses is
+    already out of reach of the earlier release that wrote it."""
+    _earlier_c(ab)
+    # Legacy machine-local state in the vault, as from an old backup, fails the recovery check.
+    (ab.root / "Knowledge Base/.claims.sqlite").write_bytes(b"legacy state")
+    with pytest.raises(state_migration.StateMigrationOfflineRequired, match="OFFLINE_REQUIRED"):
+        ab.open()
+    assert _schema(ab.session.path) == 10
+
+
+def test_a_failed_migration_is_a_pending_takeover_that_hands_back_the_lease_and_retries(ab, monkeypatch):
+    """Defect: a migration that fails leaves no takeover state, so nothing reports why the store is not
+    served, and the lease stays held until it expires; or it leaves the schema guard recorded, so the
+    earlier release that can still open the rolled-back store is refused."""
+    from exomem.collection_store import native_metadata
+
+    _earlier_c(ab)
+    _guard_schema_11(monkeypatch)
+    failing = [True]
+    repair = native_metadata.repair_triggers
+
+    def fail_after_the_ddl(conn):
+        if failing[0]:
+            raise sqlite3.OperationalError("disk I/O error")
+        repair(conn)
+
+    monkeypatch.setattr(native_metadata, "repair_triggers", fail_after_the_ddl)
+    pending = ab.open()
+    assert pending["code"] == "COLLECTION_STORE_SCHEMA_PENDING" and "disk I/O error" in pending["reason"]
+    assert ab.manager.status()["collection_store"]["status"] == "schema_pending"
+    assert "retried" in refused(ab.read_c, "COLLECTION_STORE_SCHEMA_PENDING")
+    assert _schema(ab.session.path) == 10 and SCHEMA_GUARD not in _recorded(ab.root)
+    ab.release()  # nothing to publish, so the lease goes back at once
+    assert ab.manager.client.status().holder is None
+    failing[0] = False
+    assert ab.open() == {"status": "admitted"}
+    assert ab.read_c() == ["Canonical"] and _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert SCHEMA_GUARD in _recorded(ab.root)
+
+
+def test_a_create_that_an_earlier_release_left_pending_finishes_after_the_upgrade(ab):
+    """Defect: a create intent left at the earlier schema is never migrated, so every recovery read refuses
+    COLLECTION_STORE_SCHEMA_PENDING and the create stays pending forever."""
+    publish = replica.publish_replica
+
+    def sync_appears(*args, **kwargs):
+        result = publish(*args, **kwargs)
+        (ab.root / ".stfolder").mkdir(exist_ok=True)
+        return result
+
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        previous.setattr(replica, "publish_replica", sync_appears)
+        refused(lambda: create_c(ab), "COLLECTION_STORE_CUSTODY_REQUIRED")
+    assert _schema(ab.session.path) == 10 and not authority.marker_path(ab.root).exists()
+    (ab.root / ".stfolder").rmdir()
+    ab.session.verify_custody()
+    refused(ab.open, "create recovery owns this store")  # as the service finds it at startup
+    assert admission.resume_local(ab.session, ab.manager, fence_client=ab.operator)["status"] == "marker_admitted"
+    assert _schema(ab.session.path) == schema.SCHEMA_VERSION
+    assert ab.write_c(ROW, "After the upgrade")["outcome"] == "committed"
+
+
+def _copied(found, tmp_path):
+    copy = tmp_path / "copy"
+    shutil.copytree(found.root, copy)
+    return copy
+
+
+def _restored(found, tmp_path):
+    from conftest import _drain_background_threads
+
+    from exomem import vault_portability
+    from exomem.init import init_vault
+
+    init_vault(found.root, force=True)
+    _drain_background_threads()  # Source workers must finish before restore changes the process state root.
+    context = vault_portability.PortabilityContext(
+        cell_id="source-cell", vault_id="logical-vault", operation_id="export-earlier",
+        created_at="2026-10-06T00:00:00+00:00", operator_authorized=True, lifecycle_state="quiesced",
+        routing_stopped=True, active_mutations=0, background_writers_stopped=True, reads_allowed=True)
+    with pytest.MonkeyPatch.context() as previous:
+        previous_release(previous)
+        exported = vault_portability.export_quiesced_vault(found.root, tmp_path / "exports", context=context)
+    prepared = vault_portability.prepare_restore(exported.archive_path, tmp_path / "staging", context=replace(
+        context, lifecycle_state="restore-staging", operation_id="restore-earlier"))
+    assert vault_portability.publish_prepared_restore(prepared, tmp_path / "target").state == "published"
+    return tmp_path / "target"
+
+
+@pytest.mark.parametrize("arrival", [_copied, _restored])
+def test_a_vault_that_an_earlier_release_published_is_adopted_on_a_fresh_host(ab, tmp_path, arrival):
+    """Defect: a fresh host never adopts the replica, and a restore refuses the archive, that an earlier
+    release published, because only a store at the current schema validates."""
+    _earlier_c(ab)
+    vault = arrival(ab, tmp_path)
+    assert _schema(replica.replica_path(vault)) == 10  # the vault keeps the bytes the earlier release published
+    assert run_host(tmp_path, tmp_path / "fresh-state", "fresh", _adopt_fresh_copy, root=vault,
+                    database=tmp_path / "fresh-coordinator.sqlite") == "committed"

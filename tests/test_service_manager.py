@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -443,6 +444,100 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
         assert not state.exists()
 
     asyncio.run(scenario())
+
+
+def _store_reader(tmp_path, ceiling):
+    """This interpreter, posing as a release whose newest collection store schema is ``ceiling``.
+
+    The supervisor runs its probe with ``-I``, so the override rides in a wrapper, not on PYTHONPATH.
+    """
+    prelude = f"import sys, exomem.collection_store.schema as s; s.SCHEMA_VERSION = {ceiling}; exec(sys.argv[1])"
+    wrapper = tmp_path / f"python-store-schema-{ceiling}"
+    wrapper.write_text(f'#!/bin/sh\nshift 2\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(prelude)} "$1"\n')
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
+def _release_of(python):
+    return subprocess.run(
+        [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("candidate", ["earlier-release", "older-store-schema", "first-enrolment"])
+def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_stop(tmp_path, monkeypatch, candidate):
+    """Defect: the supervisor hands a store at schema 11 to a release that reads only schema 10. Its reader
+    refuses the store, so on a fenced vault its writer gets no lease and every write on the host refuses."""
+    import sqlite3
+    from contextlib import closing
+
+    interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
+    if candidate == "earlier-release" and not interpreter:
+        pytest.skip("requires an installed earlier reader")
+    from exomem.collection_store import authority, connection, schema
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    if candidate == "first-enrolment":
+        vault.mkdir()
+    else:
+        _mixed_marker(vault)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    # The live store, as this release migrated it: at the current schema.
+    connection.open_writer(connection.store_path(vault), lease_check=lambda: True).close()
+    if candidate == "first-enrolment":
+        # A first enrolment cut the fence and stopped before it installed the marker.
+        with closing(sqlite3.connect(connection.store_path(vault))) as conn, conn:
+            conn.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)", (authority.PENDING_CREATE, "{}"))
+    python = interpreter if candidate == "earlier-release" else _store_reader(tmp_path, schema.SCHEMA_VERSION - 1)
+
+    async def scenario():
+        runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        serving.inspect = runtime.inspect
+        serving.migration_required = runtime.migration_required
+        result = await manager.upgrade(await runtime.inspect({"python": python, "version": _release_of(python)}))
+        assert not result["ok"], result
+        assert "current admission unchanged" in result["error"], result
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("routed", "recorded", "ceiling"), [
+    pytest.param(True, None, 0, id="same-schema"),
+    # After an export to files the host keeps its store until --retire-local, and an earlier release is the way back.
+    pytest.param(False, None, -1, id="exported-vault"),
+    # A schema the supervisor cannot read refuses nothing, or it would also refuse the release that repairs it.
+    pytest.param(True, "eleven", -1, id="unreadable-schema"),
+])
+def test_the_live_store_schema_leaves_a_candidate_a_target_when_the_store_does_not_need_it(
+    tmp_path, monkeypatch, routed, recorded, ceiling,
+):
+    import sqlite3
+    from contextlib import closing
+
+    from exomem.collection_store import connection, schema
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    if routed:
+        _mixed_marker(vault)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    store = connection.store_path(vault)
+    connection.open_writer(store, lease_check=lambda: True).close()
+    if recorded is not None:
+        with closing(sqlite3.connect(store)) as conn, conn:
+            conn.execute("UPDATE store_meta SET value=? WHERE key=?", (recorded, schema.META_SCHEMA_VERSION))
+    python = _store_reader(tmp_path, schema.SCHEMA_VERSION + ceiling)
+    runtime = module.WorkerRuntime(tmp_path / "candidate.sock", host="127.0.0.1", port=8765)
+    target = asyncio.run(runtime.inspect({"python": python, "version": _release_of(python)}))
+    runtime.migration_required(target)  # The supervisor refuses a candidate with ValueError.
 
 
 def _mixed_marker(vault):

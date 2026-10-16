@@ -382,7 +382,8 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        with closing(connection.open_reader(self.path)) as reader:
+        # A takeover that is pending on the store's migration still releases the lease.
+        with closing(connection.open_head_reader(self.path)) as reader:
             return authority.pending_create(reader) is None
 
     def status(self):
@@ -439,7 +440,7 @@ class CollectionStoreRuntime:
             )
         # A store an earlier release wrote keeps its head where this reads it; its writer
         # migrates the schema once this head lets the lease manager acquire for the store.
-        with closing(connection.open_reader(self.path, pending_schema=True)) as reader:
+        with closing(connection.open_head_reader(self.path)) as reader:
             reader.execute("BEGIN")
             metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
             head = CollectionStoreHead(
@@ -486,13 +487,24 @@ class CollectionStoreRuntime:
         self._identity = (head.store_id, head.instance_id)
 
     def _admit(self, token, *, reads=False):
+        from .takeover import SCHEMA_PENDING
+
         if self.manager.config.enabled:
             self.manager.validate_fencing_token(token)
+        # Reads of an unadmitted copy continue, except while its migration fails: the
+        # refusal then names the failure and its retry, and reads never repeat the attempt.
         if not self.reporting_ready(token) and not (
-            reads and self._takeover is not None and self.path.exists()
+            reads and self._takeover is not None and self._takeover.code != SCHEMA_PENDING and self.path.exists()
         ):
             raise self._refusal()
         self.sample_head()
+
+    def _record_schema(self, token, version, **authority):
+        """Record what a store at ``version`` requires, around this runtime's migration of an earlier store."""
+        from .. import state_migration
+
+        state_migration.record_collection_store_schema(
+            self.root, version=version, authority_check=lambda: self._authority(token, **authority))
 
     def _authority(self, token, *, progress=False, reads=False):
         if progress:
@@ -530,10 +542,16 @@ class CollectionStoreRuntime:
                         if self._handle is None:
                             self.sample_head()
                             # Opening may serve reads of an unadmitted copy; transactions never.
+                            # It migrates a copy an earlier release wrote, after recording the
+                            # new schema's IDs as admission's writer does, so reads continue. That
+                            # can precede a refusal of the pending takeover; the launcher's store
+                            # schema check refuses an earlier release afterwards, as after any migration.
                             opening = [True]
                             self._handle = connection.open_writer(
                                 self.path, lease_check=lambda: self._authority(
-                                    lease.fencing_token, reads=opening[0])
+                                    lease.fencing_token, reads=opening[0]),
+                                schema_guard=lambda version: self._record_schema(
+                                    lease.fencing_token, version, reads=True),
                             )
                             opening[0] = False
                             self._writer_token = lease.fencing_token
@@ -565,7 +583,8 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True))
+        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True),
+                                      schema_guard=lambda version: self._record_schema(token, version, progress=True))
 
     def publish(self, token, *, deadline):
         """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
@@ -762,8 +781,9 @@ def _durable_create(root):
     try:
         if not connection.store_path(root).exists():
             return None
-        with closing(connection.open_reader(connection.store_path(root))) as reader:
+        with closing(connection.open_head_reader(connection.store_path(root))) as reader:
             intent = authority.pending_create(reader)
+    # The head reader denies other columns as sqlite3.Error, so a read past store_meta would look like no intent here.
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
     return None if intent is None else [{"collection_id": entry["collection_id"], "manifest_path": entry["manifest_path"]}
@@ -1103,7 +1123,8 @@ class StoreServer:
         if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            # The resume migrates a store an earlier release left with this intent; until then only its head reads.
+            with closing(connection.open_head_reader(self.runtime.path)) as reader:
                 intent = authority.pending_create(reader)
             if intent is None:
                 self.pending_create = None

@@ -7,6 +7,7 @@ snapshots without requiring a new business transaction or replica publication.
 from __future__ import annotations
 
 import json
+import logging
 import mmap
 import os
 import secrets
@@ -22,6 +23,8 @@ from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
 from .connection import CollectionStoreError
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -164,10 +167,16 @@ class _ProducerSession:
         from .writer import CollectionWriter
 
         self.require(token)
+
+        def record_schema(version):
+            state_migration.record_collection_store_schema(
+                self.root, version=version, authority_check=lambda: self.require(token))
+
         manager_context = writer_lease._ACTIVE_LEASE_MANAGER.set(self.manager)
         fence_context = writer_lease._ACTIVE_WRITE_FENCE.set((self.manager, token))
         try:
-            with connection.open_writer(self.path, lease_check=lambda: self.require(token)) as handle:
+            with connection.open_writer(self.path, lease_check=lambda: self.require(token),
+                                        schema_guard=record_schema) as handle:
                 yield CollectionWriter(self.root, handle)
         finally:
             writer_lease._ACTIVE_WRITE_FENCE.reset(fence_context)
@@ -339,7 +348,6 @@ def _resolve(session, *, force=False):
         return previous.status()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
-    _migrate_schema(session, manager)
     raw, marker, fence = _routed_store(session)
     with manager.writer_authority_guard(vault_root=session.root):
         token = manager._fencing_token
@@ -925,29 +933,37 @@ def _publication_custody(session, token):
     return False
 
 
-def _migrate_schema(session, manager):
-    """Migrate a store an earlier release wrote, under this host's writer lease, before admission reads it.
+def _migrate_schema(session, token):
+    """Migrate a store an earlier release wrote once admission's checks pass; the failure's reason, or None.
 
-    Readers refuse a store below the current schema until its writer migrates it, and
-    every admission read below is one. The migration keeps the store's rows and head,
-    so the takeover that follows decides as it would have on the earlier release.
+    Admission settles under the writer lease and the mutation boundary, after its fence
+    cut and recovery check, which read only the store's head. So it never migrates a store
+    that it then refuses. The writer records the new schema's IDs before it migrates, and
+    the migration keeps the store's rows and head, so the decision it settles still holds.
     """
-    if not (session.path.exists() and connection.schema_pending(session.path)):
-        return
-    with (manager.writer_authority_guard(vault_root=session.root),
-          manager.consistency_guard(session.root, operation="collection_store_schema"),
-          session.writer(manager._fencing_token)):
-        pass  # open_writer migrates the schema in its own transaction.
+    if not connection.schema_pending(session.path):
+        return None
+    try:
+        with session.writer(token):
+            pass  # open_writer migrates the schema in its own transaction.
+    except Exception as error:  # noqa: BLE001 - any failure that left the earlier schema is this pending state
+        if not connection.schema_pending(session.path):
+            raise  # The migration committed; what failed after it is not a pending schema.
+        logger.warning("the collection store schema migration did not commit; it is retried", exc_info=True)
+        return ("the store schema migration did not commit, so the store keeps its earlier schema: "
+                f"{type(error).__name__}: {error}")
+    return None
 
 
 def _routed_store(session):
     """The marker this takeover serves, with the coordinator's store fence bound to it.
 
     A copied vault meeting a fresh coordinator cuts the fence over from its marker,
-    which revokes any earlier token, so this precedes the lease acquisition.
+    which revokes any earlier token, so this precedes the lease acquisition. It reads
+    only the store's head, which a store an earlier release wrote keeps unmigrated.
     """
     if session.path.exists():
-        with closing(connection.open_reader(session.path)) as reader:
+        with closing(connection.open_head_reader(session.path)) as reader:
             intent = authority.pending_create(reader)
             if intent is not None:
                 from .runtime import served
@@ -973,13 +989,13 @@ def _routed_store(session):
 
 
 def _takeover_facts(session, runtime, token, raw, marker, fence):
-    """What the takeover decision reads; none of it needs the mutation boundary."""
+    """What the takeover decision reads; none of it needs the mutation boundary, or the store's migration."""
     recorded = _acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
     signature = takeover.replica_signature(session.root)
     local, relation, diverged = None, None, False
     if session.path.exists():
         local = runtime.sample_head()
-        with closing(connection.open_reader(session.path)) as reader:
+        with closing(connection.open_head_reader(session.path)) as reader:
             diverged = reader.execute("SELECT 1 FROM store_meta WHERE key=?",
                                       (schema.META_REPLICA_DIVERGENCE,)).fetchone() is not None
             if recorded is not None:
@@ -993,6 +1009,11 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
     """Under the boundary: revalidate cheaply what the decision read, then apply it."""
     manager = session.manager
     state_migration._require_collection_store_recovery(session, token)
+    # An adoption replaces the live store with the staged replica, which staging migrated.
+    if action != "adopt" and session.path.exists():
+        failure = _migrate_schema(session, token)
+        if failure is not None:
+            return takeover.SCHEMA_PENDING, failure
     if action == takeover.DIVERGED:
         # Durable once the handle is idle; until then the in-memory verdict refuses writes.
         if runtime.retire_idle_handle():
@@ -1009,6 +1030,8 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
         return takeover.BUSY, "the live store is still borrowed"
     try:
         if action == "adopt":
+            # The installed copy has the current schema, so the manifest records its IDs first.
+            state_migration.record_collection_store_schema(session.root, authority_check=lambda: session.require(token))
             runtime._identity = takeover.install(session, staged, token, check)
         elif action == "continue":
             with session.writer(token) as writer:
@@ -1040,8 +1063,10 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     """Finish the one pending intent, a create or a migration, in the A5 order after its store is live."""
     manager = session.manager
     intent = None
+    # An intent an earlier release left stays at its schema until a writer below migrates it,
+    # so the intent and the head are read through the head reader.
     if session.path.exists():
-        with closing(connection.open_reader(session.path)) as reader:
+        with closing(connection.open_head_reader(session.path)) as reader:
             intent = authority.pending_create(reader)
     if intent is not None and intent["kind"] == authority.EXPORT:
         raise export_pending()
@@ -1051,7 +1076,7 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         else:
             capability.require_records_summary(session.root)
     runtime = session.runtime()
-    with closing(connection.open_reader(session.path)) as reader:
+    with closing(connection.open_head_reader(session.path)) as reader:
         chain.verify_store_chain(reader)
         intent = authority.pending_create(reader)
         if intent is None:
@@ -1068,6 +1093,8 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
+        # This writer may migrate the store, which follows the recovery check as every writer here does.
+        state_migration._require_collection_store_recovery(session, preparation_token)
         # A first cut binds every writer to this store, so a marker that already names another
         # store must refuse before the cut, whoever prepared the store.
         with session.writer(preparation_token) as writer:

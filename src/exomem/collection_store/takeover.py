@@ -36,6 +36,8 @@ DIVERGED = "COLLECTION_STORE_DIVERGED"
 BUSY = "COLLECTION_STORE_BUSY"
 # Single-host custody stopped verifying: publication and writes wait, reads continue.
 CUSTODY_LOST = "COLLECTION_STORE_CUSTODY_UNVERIFIED"
+# The writer's migration of a store an earlier release wrote failed and rolled back; retried when due.
+SCHEMA_PENDING = "COLLECTION_STORE_SCHEMA_PENDING"
 # An unfinished reverse export owns the store: no host serves it until the owner finishes it.
 EXPORTING = "COLLECTION_STORE_EXPORT_PENDING"
 SUPERSEDED = ".superseded-"
@@ -82,7 +84,9 @@ class Pending:
     def error(self):
         remedy = {SYNC_PENDING: REMEDY, BUSY: "reads continue; the takeover is rechecked on next use",
                   CUSTODY_LOST: "reads continue; collection writes and publication resume once "
-                                "single-host custody verifies again"}
+                                "single-host custody verifies again",
+                  SCHEMA_PENDING: "the store keeps its earlier schema, and the migration is retried on the next "
+                                  f"use at least {RECHECK_SECONDS:g} s later"}
         message = (f"{self.reason}; recorded commit_seq {self.recorded}, local commit_seq {self.local}; "
                    + remedy.get(self.code, "reads continue; reconcile before collection writes resume"))
         if self.attention:
@@ -123,8 +127,11 @@ def staged_replica(session, check, heads):
                 os.write(staged.descriptor, chunk)
             os.fsync(staged.descriptor)
             signature = before if _signature(os.fstat(shared.fileno())) == before else None
-        conn = sqlite3.connect(path, isolation_level=None)
+        conn = None
         try:
+            # A replica an earlier release published is migrated in this private copy, never in the vault.
+            snapshot.migrate_copy(path, check)
+            conn = sqlite3.connect(path, isolation_level=None)
             metadata = snapshot._validate(conn, check)
             chain.verify_store_chain(conn)
             marker = authority.parse_marker(session.root, authority.read_marker(session.root))
@@ -141,7 +148,8 @@ def staged_replica(session, check, heads):
         except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.DatabaseError):
             result = Staged(leaf, digest.hexdigest(), signature, {}, {}, {}, [])
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
         yield result
     finally:
         try:
