@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -97,7 +97,9 @@ _REVIEW_FINGERPRINT_UNSET = object()
 _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash", "trash"})
 
 
-def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
+def _prune_identity_census_directory(
+    kb: PurePath, directory: PurePath, name: str
+) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
     if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
         return True
@@ -111,6 +113,26 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
         return vault.is_graph_rebuild_runtime_file_name(name)
     if name.startswith(".lexical.sqlite.rebuild-"):
         return vault.is_lexical_rebuild_runtime_file_name(name)
+    return False
+
+
+def identity_census_prunes(rel_path: str) -> bool:
+    """Whether the stable-identity census walk never reaches this vault path.
+
+    The path form of `_prune_identity_census_directory`, for a reader that
+    holds a vault-relative path rather than a directory listing. It applies
+    the same rule to every segment below the Knowledge Base root, the leaf
+    included, exactly as the walk meets them.
+    """
+    parts = PurePosixPath(str(rel_path).replace("\\", "/")).parts
+    kb = PurePosixPath(kb_dirname())
+    if parts[:1] != kb.parts:
+        return True
+    directory = kb
+    for name in parts[1:]:
+        if _prune_identity_census_directory(kb, directory, name):
+            return True
+        directory = directory / name
     return False
 
 
@@ -277,6 +299,11 @@ class StableIdentityCensus:
     entries: tuple[StableIdentityEntry, ...]
     paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
     _reference_paths: frozenset[str] = field(init=False, repr=False, compare=False)
+    # Every reference path holding each identity, duplicates included: the
+    # projection a reference read answers from without walking the vault.
+    _reference_owners: Mapping[str, tuple[str, ...]] = field(
+        init=False, repr=False, compare=False
+    )
     _canonical_refs_by_path: Mapping[str, str | None] = field(
         init=False, repr=False, compare=False
     )
@@ -323,6 +350,16 @@ class StableIdentityCensus:
             self,
             "_reference_paths",
             frozenset(entry.path for entry in reference_entries),
+        )
+        object.__setattr__(
+            self,
+            "_reference_owners",
+            MappingProxyType(
+                {
+                    identity: tuple(sorted(owners))
+                    for identity, owners in reference_owners.items()
+                }
+            ),
         )
         object.__setattr__(
             self,
@@ -1590,6 +1627,9 @@ class ReferenceIdentitySnapshot:
     checkpoint: freshness.FreshnessCheckpoint
     reference_paths: frozenset[str]
     canonical_refs_by_path: Mapping[str, str | None]
+    # Identity -> every reference path holding it. Unlike
+    # `canonical_refs_by_path`, a duplicated identity keeps all its owners.
+    reference_owners: Mapping[str, tuple[str, ...]]
     _cache_context_identity: object = field(repr=False, compare=False)
 
 
@@ -1675,6 +1715,7 @@ def current_reference_identity_snapshot(
                 checkpoint,
                 identity._reference_paths,
                 identity._canonical_refs_by_path,
+                identity._reference_owners,
                 entry[1],
             )
         if freshness.external_pending(root):
@@ -1706,6 +1747,8 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._reference_paths is snapshot.reference_paths
                 and entry[1].identity_census._canonical_refs_by_path
                 is snapshot.canonical_refs_by_path
+                and entry[1].identity_census._reference_owners
+                is snapshot.reference_owners
             )
 
 
