@@ -371,13 +371,40 @@ marker's raise count as well as its value, so any debt raised after that
 observation survives, including a repeat that leaves the value unchanged. The
 full-marker dispatcher SHALL clear its marker by the same comparison.
 
-A whole-vault pass publishes only when no write lands while it runs, so the
-drain SHALL hold a whole-vault attempt until the vault has been quiet since the
-last write's debt signal for one measured whole-vault pass, or for a 5 s floor
+A whole-vault pass publishes as current only when no write lands while it runs,
+so the drain SHALL hold a whole-vault attempt until the vault has been quiet since
+the last write's debt signal for one measured whole-vault pass, or for a 5 s floor
 before any pass has been measured. The hold SHALL NOT exceed 120 s past the first
 debt signal the attempt was held for; after that the attempt runs, paced by the
 no-progress backoff. A debt signal the drain raises itself SHALL NOT start the
 window, and per-path repair and its drain SHALL NOT be held.
+
+A pass that writes land in SHALL NOT run the whole vault again when the registry
+recorded every change the pass saw. When its caller can report the graph as
+pending (the drain, barrier recovery, a registered rebuild, or the background
+rebuild), and the pass's rows agree with its resolver except for pages that
+resolver never held, the pass SHALL publish behind:
+
+- It drops the rows of those created pages.
+- It publishes with the availability marker withdrawn and the read barrier set.
+- It stores the recall checkpoint that its resolver was proved against, and that
+  resolver's topology.
+- It keeps the live graph_sync acknowledgement.
+- Under the publication hold and before the replacement, it queues the movement:
+  every page that the registry's complete history names since that checkpoint,
+  every page that a standing scoped watcher mark names, every row whose page may
+  have moved since the pass bound its bytes, and every created page.
+- It retires only the whole-vault marker it observed before its epoch sample.
+
+The drain then converges that graph to exactly what a fresh rebuild derives,
+without another whole-vault pass. Until then the graph reports itself not current.
+
+A pass that read a retitled page, or found no file for a page its resolver held,
+SHALL NOT publish behind and SHALL re-target as before. A drain widens a queued
+page by the title and existence that its row stores, so such a graph could serve
+a stale edge as current. A caller whose contract is a converged graph SHALL NOT
+publish behind. A registered rebuild that publishes behind SHALL report its
+waiters pending with `GRAPH_SYNC_REPAIR_QUEUED`, never converged.
 
 #### Scenario: A publication retires the debt it observed and nothing newer
 
@@ -396,6 +423,27 @@ window, and per-path repair and its drain SHALL NOT be held.
 - **AND** if the writes never pause that long, the attempt still starts within
   120 s of the first debt signal it was held for, and later attempts follow the
   no-progress backoff
+
+#### Scenario: A body edit or a create during a pass publishes behind and converges
+
+- **WHEN** a governed write edits a page's body, or creates a page, while a
+  whole-vault pass that the drain started is running
+- **THEN** the pass publishes once, with reads refused and the moved page queued
+- **AND** the drain converges the queue with no second whole-vault pass, to rows
+  equal to a fresh rebuild
+
+#### Scenario: A retitle the pass read is never published behind
+
+- **WHEN** a page is retitled after the pass built its resolver and before the
+  pass read that page
+- **THEN** the pass does not publish behind and re-targets
+- **AND** no edge derived under the old title is served as current
+
+#### Scenario: A page removed before the pass read it is never published behind
+
+- **WHEN** a page that the pass's resolver held is removed before the pass reads it
+- **THEN** the pass does not publish behind and re-targets
+- **AND** no edge that resolved to the removed page is served as current
 
 ### Requirement: A drain keeps the queue converging under a steady writer
 
