@@ -16,6 +16,8 @@ from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
+#: The closed kinds of that one pending intent: admission implements exactly these two flows.
+CREATE, MIGRATE = "create", "migrate"
 #: The semantic profiles a marker entry may record; an entry from before entries carried one has none.
 PROFILES = tuple(collection_profiles.PROFILES)
 MARKER_REQUIRED = "collection_store_marker_required"
@@ -142,6 +144,12 @@ def _overlap(entry, other):
         _owns(other, path) for path, _ in _owned_regions(entry))
 
 
+def file_ownership(manifest):
+    """The namespace a file collection owns, in the shape a marker entry records it."""
+    return {"manifest_path": manifest.path, "source_path": manifest.storage.source,
+            "layout": manifest.storage.strategy}
+
+
 def require_new_file_ownership(root, marker, entry):
     from .preview import unbound
 
@@ -153,9 +161,7 @@ def require_new_file_ownership(root, marker, entry):
     if any(marker is None or selected_entry(root, marker, error.path) is None for error in errors):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "file collection ownership is incomplete")
     for manifest in manifests:
-        other = {"manifest_path": manifest.path, "source_path": manifest.storage.source,
-                 "layout": manifest.storage.strategy}
-        if _overlap(entry, other):
+        if _overlap(entry, file_ownership(manifest)):
             # Prevent taking a file collection's source or audit namespace; a false refusal costs another destination.
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
 
@@ -292,22 +298,52 @@ def required_state_compatibility_ids(root):
                       *([COLLECTION_MARKER_COMPATIBILITY_ID] if marker["version"] == 2 else [])})
 
 
+def _intent_collection(entry):
+    # A migration's entry keeps the collection's file basis until its marker is installed.
+    if (not isinstance(entry, dict) or set(entry) != {"collection_id", "manifest_path", "source_path", "txn_id", "basis"}
+            or not all(isinstance(entry[name], str) and entry[name]
+                       for name in ("collection_id", "manifest_path", "source_path", "basis"))
+            or type(entry["txn_id"]) is not int or entry["txn_id"] < 1):
+        _invalid()
+    return entry
+
+
 def pending_create(conn):
+    """The one pending marker intent, with its closed ``kind`` and the ``collections`` it admits.
+
+    Version 1 is a create of one collection, as every release has written it. Version 2
+    is a migration of existing file collections, each named with its import checkpoint.
+    """
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
     if row is None:
         return None
     try:
         intent = json.loads(row[0])
-        if (type(intent["version"]) is not int or intent["version"] != 1
-                or not all(isinstance(intent[name], str) and intent[name] for name in
-                           ("request_id", "request_hash", "collection_id", "manifest_path",
-                            "source_path", "target_marker"))
-                or type(intent["txn_id"]) is not int or intent["txn_id"] < 1
+        if (type(intent["version"]) is not int or intent["version"] not in (1, 2)
+                or not all(isinstance(intent[name], str) and intent[name]
+                           for name in ("request_id", "target_marker"))
                 or not (intent["expected_marker"] is None or isinstance(intent["expected_marker"], str))):
+            _invalid()
+        if intent["version"] == 1:
+            if (not all(isinstance(intent[name], str) and intent[name] for name in
+                        ("request_hash", "collection_id", "manifest_path", "source_path"))
+                    or type(intent["txn_id"]) is not int or intent["txn_id"] < 1):
+                _invalid()
+            entry = {name: intent[name] for name in ("collection_id", "manifest_path", "source_path", "txn_id")}
+            return {**intent, "kind": CREATE, "collections": [entry]}
+        # Version 2 records only migrations; a create keeps writing version 1.
+        if intent["kind"] != MIGRATE or not isinstance(intent["collections"], list) or not intent["collections"]:
+            _invalid()
+        entries = [_intent_collection(entry) for entry in intent["collections"]]
+        if len({entry["collection_id"] for entry in entries}) != len(entries):
             _invalid()
         return intent
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "invalid pending create intent") from error
+
+
+def intent_collection_ids(intent):
+    return {entry["collection_id"] for entry in intent["collections"]}
 
 
 def marker_status(writer, intent):
@@ -315,13 +351,13 @@ def marker_status(writer, intent):
 
 
 def intent_status(root, conn, intent):
-    """Whether a pending create's marker is admitted, still pending, or in conflict; any connection reads it."""
+    """Whether a pending intent's marker is admitted, still pending, or in conflict; any connection reads it."""
     try:
         target_marker = parse_marker(root, intent["target_marker"])
         sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-        if target_marker["store_id"] != sid or not any(
-                routes(entry, intent["collection_id"], intent["manifest_path"], sid)
-                for entry in target_marker["collections"]):
+        if target_marker["store_id"] != sid or not all(any(
+                routes(entry, pending["collection_id"], pending["manifest_path"], sid)
+                for entry in target_marker["collections"]) for pending in intent["collections"]):
             return "conflict"
         raw = read_marker(root)
         target = intent["target_marker"].encode()
@@ -340,7 +376,7 @@ def intent_status(root, conn, intent):
 
 def projection_eligible(writer, projection):
     intent = pending_create(writer.connection)
-    if intent is not None and projection["collection_id"] == intent["collection_id"]:
+    if intent is not None and projection["collection_id"] in intent_collection_ids(intent):
         return marker_status(writer, intent) == "marker_admitted"
     return collection_admitted(writer, projection["collection_id"])
 

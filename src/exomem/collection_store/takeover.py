@@ -19,7 +19,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from .. import held_fs
@@ -233,6 +233,16 @@ def install(session, staged, token, check):
         conn.execute("BEGIN IMMEDIATE")
         identity = _restamp(conn, staged, token)
         conn.execute("COMMIT")
+    replace_live(session, staged.leaf, check)
+    return identity
+
+
+def replace_live(session, leaf, check, *, subdirectory=None):
+    """Rename a closed, journal-free store file into place as this host's live store.
+
+    ``leaf`` lies in the state directory, or in its private ``subdirectory`` on the same
+    volume. A live store it replaces is kept as the newest superseded store.
+    """
     if session.path.exists():
         # Fold the superseded store's WAL into its own file; any open connection refuses this.
         try:
@@ -254,7 +264,9 @@ def install(session, staged, token, check):
             superseded = f"{session.path.name}{SUPERSEDED}{secrets.token_hex(8)}"
             with fs.file(directory, session.path.name, access="mutate").require() as live:
                 fs.rename(live, directory, superseded, replace=False).require()
-        with fs.file(directory, staged.leaf, access="mutate").require() as adopted:
+        with (nullcontext(directory) if subdirectory is None else fs.parent(
+                f"{session.path.parent.name}/{subdirectory}", access="mutate").require()) as source, \
+                fs.file(source, leaf, access="mutate").require() as adopted:
             os.fsync(adopted.descriptor)
             fs.rename(adopted, directory, session.path.name, replace=False).require()
         fs.flush_directory(directory).require()
@@ -266,4 +278,3 @@ def install(session, staged, token, check):
                 with fs.file(directory, name, access="mutate").require() as old:
                     fs.unlink(old).require()
             fs.flush_directory(directory).require()
-    return identity
