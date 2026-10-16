@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -52,7 +54,6 @@ RELEASE_PR_SKIPPED_JOBS = {
     "product-e2e",
     "onboarding",
 }
-NOT_RELEASE_PR = "${{ github.head_ref != 'release-please--branches--main' }}"
 
 
 def _triggers(workflow: dict) -> dict:
@@ -654,7 +655,8 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
         }
     )
     assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
-    assert all(jobs[name]["if"] == NOT_RELEASE_PR for name in RELEASE_PR_SKIPPED_JOBS)
+    (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
+    assert "github.head_ref != 'release-please--branches--main'" in skip
     assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
 
 
@@ -813,7 +815,8 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
         "github.event.pull_request.head.ref == 'release-please--branches--main' }}"
     )
 
-    (step,) = job["steps"]
+    step, managed_files = job["steps"]
+    assert managed_files["if"] == "github.event_name == 'pull_request'"
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
     base = " ".join(str(step["env"]["BASE_SHA"]).split())
     assert base == "${{ github.event.pull_request.base.sha || '' }}"
@@ -832,6 +835,87 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     assert "gh workflow run ci.yml --ref main" in command
 
     assert "release-evidence" in set(workflow["jobs"]["gate"]["needs"])
+
+
+_RELEASE_CONFIG = {
+    "packages": {
+        ".": {
+            "extra-files": [
+                {"type": "generic", "path": "pyproject.toml"},
+                "src/exomem/__init__.py",
+            ]
+        }
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "head_repo,changed,refused",
+    [
+        (
+            "example/project",
+            [".release-please-manifest.json", "CHANGELOG.md", "pyproject.toml",
+             "src/exomem/__init__.py", "plugins/cloud/generated/release.json"],
+            None,
+        ),
+        (
+            "example/project",
+            ["CHANGELOG.md", "scripts/e2e_product_loop.py"],
+            "scripts/e2e_product_loop.py",
+        ),
+        ("example/project", ["CHANGELOG.md", "src/exomem/cli.py"], "src/exomem/cli.py"),
+        ("fork/project", ["CHANGELOG.md"], "fork/project"),
+    ],
+)
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("jq") is None,
+    reason="executes the Ubuntu workflow's Bash step, which uses jq",
+)
+def test_release_pr_without_test_jobs_must_change_only_release_managed_files(
+    tmp_path: Path, head_repo: str, changed: list[str], refused: str | None
+) -> None:
+    """The release PR runs no test job, so anything else it carries is untested.
+
+    A release PR once carried a hand commit to an E2E script. With the test
+    jobs skipped, that change would have merged with a green gate.
+    """
+    step = _workflow()["jobs"]["release-evidence"]["steps"][1]
+    content = base64.encodebytes(json.dumps(_RELEASE_CONFIG).encode()).decode()
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "endpoint = next(arg for arg in sys.argv[2:] if arg.startswith('repos/'))\n"
+        "if '/contents/release-please-config.json?ref=tested-base' in endpoint:\n"
+        "    print(os.environ['FAKE_CONFIG'], end='')\n"
+        "elif endpoint.endswith('/pulls/7/files'):\n"
+        "    print(os.environ['FAKE_FILES'])\n"
+        "else:\n"
+        "    sys.exit('unexpected gh call ' + endpoint)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "GH_REPO": "example/project",
+        "HEAD_REPO": head_repo,
+        "PR_NUMBER": "7",
+        "BASE_SHA": "tested-base",
+        "FAKE_CONFIG": content,
+        "FAKE_FILES": "\n".join(changed),
+    }
+
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    if refused is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0
+        assert refused in result.stderr
 
 
 def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:

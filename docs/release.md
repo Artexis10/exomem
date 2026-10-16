@@ -184,11 +184,13 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 3. Confirm CI and the pre-release checks above.
 4. **Required: run one full CI pass on `main` and confirm it is green before
    merging the release PR.** The release PR runs lint, build, specs,
-   capabilities and release evidence, and no test job: its diff is version
-   strings, the changelog and the regenerated Cloud archives, and the full run
-   at its base revision is its test evidence. Full CI (retrieval
-   quality/latency, governance wire characterization, semantic write latency, graph convergence, docker) runs on the nightly
-   schedule and on explicit dispatch, never per push to the release branch
+   capabilities and release evidence, and no test job: the full run at its
+   base revision is its test evidence. Release evidence also refuses a release
+   PR that changes any file release-please does not manage, so land a fix
+   through its own pull request, never by a push to the release branch. Full
+   CI (retrieval quality/latency, governance wire characterization, semantic
+   write latency, graph convergence, docker) runs on the nightly schedule and
+   on explicit dispatch, never per push to the release branch
    (each release-PR push used to re-trigger a 46-job full run; 61% of a
    measured day's runner-minutes went to those stampedes while ordinary PRs
    queued). Dispatch, then watch the run this dispatch created — selecting by
