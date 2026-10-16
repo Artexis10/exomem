@@ -13345,13 +13345,10 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="read_media",
                 reason=(
-                    "Sampling video frames needs the same decoding "
-                    "dependencies the cloud image omits."
+                    "Sampling video frames needs video decoding, which the "
+                    "cloud image does not ship."
                 ),
-                lifted_when=(
-                    "a media-capable cloud image ships with the required "
-                    "decoding dependencies"
-                ),
+                lifted_when="the cloud image ships video decoding",
             ),
         )
     }

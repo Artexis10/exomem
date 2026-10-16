@@ -574,6 +574,19 @@ def test_cellctl_renders_the_media_engine_switch_under_the_name_the_runtime_read
     assert rendered == media_engines.ENGINES_ENV
 
 
+def test_chart_schema_names_exactly_the_engines_the_runtime_knows() -> None:
+    """The schema's engine list is a copy of `media_engines.ENGINES`. A name the runtime does
+    not know, in a fleet default, renders into every cell's environment and restarts them all."""
+    from exomem import media_engines
+
+    schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
+    cellctl = schema["properties"]["cellctl"]["properties"]
+    one_definition = {"$ref": "#/$defs/mediaEngineName"}
+    assert cellctl["mediaEngineCellIds"]["propertyNames"] == one_definition
+    assert cellctl["mediaEngineFleetDefault"]["items"] == one_definition
+    assert set(schema["$defs"]["mediaEngineName"]["enum"]) == set(media_engines.ENGINES)
+
+
 def test_disabled_health_jobs_have_no_workload_state_or_alert_target() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     names = {doc["metadata"]["name"] for doc in documents}

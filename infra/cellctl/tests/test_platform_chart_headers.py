@@ -1069,6 +1069,29 @@ def test_dedicated_selection_is_validated_and_delivered_to_cellctl() -> None:
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_media_engine_fleet_default_is_validated_and_delivered_to_cellctl() -> None:
+    def delivered(*extra: str) -> str:
+        deployment = _find(_helm_template(*extra), "Deployment", "cellctl")
+        env = {entry["name"]: entry.get("value")
+               for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        return env["CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT"]
+
+    assert json.loads(delivered()) == []
+    assert json.loads(delivered("--set-json", 'cellctl.mediaEngineFleetDefault=["documents","ocr"]')) == [
+        "documents", "ocr"]
+    for bad in (["Documents"], ["documnets"], ["documents", "documents"], {"documents": []}, "documents"):
+        result = _helm_render("--set-json", "cellctl.mediaEngineFleetDefault=" + json.dumps(bad))
+        assert result.returncode != 0 and "mediaEngineFleetDefault" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_a_misspelt_engine_name_is_refused_in_the_per_cell_selection() -> None:
+    selection = {"documnets": ["aaaaaaaaaaaaaaaa"]}
+    result = _helm_render("--set-json", "cellctl.mediaEngineCellIds=" + json.dumps(selection))
+    assert result.returncode != 0 and "documnets" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_shared_policy_is_typed_delivered_and_confined_to_its_profile() -> None:
     policy = {"mode": "selected", "cell_ids": ["aaaaaaaaaaaaaaaa"], "profile": "qualified-test",
               "topology_key": "topology.kubernetes.io/zone", "topology_value": "test-zone", "occupancy": 2,

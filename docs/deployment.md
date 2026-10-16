@@ -139,8 +139,9 @@ Tesseract's default language. To read Japanese, install the `jpn` and
 `tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
 
 `EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
-Unset, a personal install runs every engine. HEIC photos are not decoded; see
-`docs/runbooks/cloud-media.md`.
+Unset, a personal install runs every engine and a Cloud cell runs none. cellctl
+renders the variable into a Cloud cell, for one cell or as the fleet default.
+HEIC photos are not decoded; see `docs/runbooks/cloud-media.md`.
 
 Lean / CPU-only boxes can skip all of this — set
 `EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
