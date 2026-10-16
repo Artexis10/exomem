@@ -24,6 +24,7 @@ import os
 import secrets
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from . import build, drill, images, infra, k3s_link, platform, substrate, tls
@@ -233,8 +234,7 @@ async def _run(args: argparse.Namespace) -> int:
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
             await ctx.admin_release({"cellImage": built.cell_v1})
-            capacity = await ctx.fetchrow("SELECT sum(cell_slots) AS slots FROM exomem_cloud_capacity")
-            report.stages["release"]["published_cell_slots"] = capacity and capacity["slots"]
+            report.stages["release"]["published_cell_slots"] = await _published_cell_slots(ctx, timeout=120)
         try:
             await run_steps(ctx, only=only)
         finally:
@@ -319,6 +319,19 @@ def _compare_with_known_findings(report: Report, path: Path, only: set[int] | No
         if step.status == "passed" and entry is not None:
             resolved.append({"step": step.number, "baseline": entry["owner"]})
     return {"known_findings": {str(k): v for k, v in known.items()}, "unexpected": unexpected, "resolved_known_findings": resolved}
+
+
+async def _published_cell_slots(ctx: Context, *, timeout: float) -> int:
+    """Substrate admits no one until cellctl publishes free slots, and
+    cellctl's first pass can land after its rollout reports ready."""
+    deadline = time.monotonic() + timeout
+    while True:
+        row = await ctx.fetchrow("SELECT sum(cell_slots) AS slots FROM exomem_cloud_capacity")
+        if row and row["slots"]:
+            return row["slots"]
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"cellctl published no free cell slots within {timeout:.0f}s")
+        await asyncio.sleep(1)
 
 
 def _wait_json(resolver: Resolver, url: str, what: str) -> None:
