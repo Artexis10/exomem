@@ -74,6 +74,10 @@ Never list snapshots through K3s, `k3s etcd-snapshot ls --s3` included. K3s list
 
 Then reconcile the volumes, below.
 
+A snapshot holds the cluster's CAs as they were when it was taken. If the
+snapshot is older than a client-CA rotation, the restore brings back the old
+client CA. Then [rotate the client CA](cloud-dedicated-host.md#rotate-the-client-ca) again.
+
 ## After restoring etcd from an older snapshot
 
 etcd snapshots are taken every 30 minutes. A restore loses the cluster objects of every volume created or relocated since, while the volumes themselves, and the only copy of those writes, are still on the agents' disks. Nothing here may delete a TopoLVM `LogicalVolume` object: on a node whose TopoLVM plugin runs, that destroys the volume, even with its finalizer removed.

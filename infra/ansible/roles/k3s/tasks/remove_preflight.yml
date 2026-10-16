@@ -48,19 +48,27 @@
       {%- endfor -%}
       {{ cells }}
 
-# Only a cell whose live volume is on the target: a cell moved off it before
-# the removal leaves only its retained volume there, and its holds, an hourly
-# backup included, run on its new node, which the drain does not touch.
+# Any hold on a cell whose live volume is on the target. On a cell that left
+# only its retained volume there, every hold but the hourly snapshot backup:
+# that backup runs on the cell's new node, which the drain does not touch,
+# while a move or relocation still restoring may yet need the retained volume,
+# which the removal destroys.
 - name: Find cell maintenance holds in flight on the target
   ansible.builtin.set_fact:
     k3s_remove_holds: >-
-      {{ k3s_remove_statefulsets_doc['items']
-         | selectattr('metadata.namespace', 'in',
-                      k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | list
-                      + k3s_remove_attached_cells)
-         | selectattr('metadata.annotations', 'defined')
-         | selectattr('metadata.annotations', 'contains', 'exomem.io/hold')
-         | map(attribute='metadata.namespace') | list }}
+      {%- set live = k3s_remove_local_cells | rejectattr('retained') | map(attribute='namespace') | list
+            + k3s_remove_attached_cells -%}
+      {%- set retained = k3s_remove_local_cells | selectattr('retained') | map(attribute='namespace') | list -%}
+      {%- set holds = [] -%}
+      {%- for workload in k3s_remove_statefulsets_doc['items'] -%}
+        {%- set annotations = workload.metadata.annotations | default({}) -%}
+        {%- if 'exomem.io/hold' in annotations and (workload.metadata.namespace in live
+            or (workload.metadata.namespace in retained
+                and annotations['exomem.io/hold'] != k3s_snapshot_backup_hold)) -%}
+          {%- set _ = holds.append(workload.metadata.namespace) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ holds }}
 
 - name: Refuse a removal while a cell backup, restore or upgrade holds a cell on the target
   ansible.builtin.assert:

@@ -369,11 +369,11 @@ host. `<new>` and `<surviving>` are whole disks, for example `/dev/nvme1n1` and
 Expected result: `cat /proc/mdstat` shows every array rebuilding, then `[UU]`.
 A `RESOLVED: cell-array-degraded` email follows within a few minutes of the
 rebuild finishing. After the last `site.yml` run, every peer holds the host's new public key and the tunnel is up.
-The removed disk held the old WireGuard key and the agent token
-(`/etc/rancher/k3s/config.yaml`) unencrypted. Unless the provider confirms
-that it destroyed the disk, [rotate the agent token](#rotate-the-agent-token).
-The rotation does not revoke the agent's kubelet client certificate, which the
-same disk held: see [What a lost disk still exposes](#what-a-lost-disk-still-exposes).
+The removed disk held the old WireGuard key, the agent token
+(`/etc/rancher/k3s/config.yaml`) and the agent's kubelet client certificate
+unencrypted. Unless the provider confirms that it destroyed the disk,
+[rotate the agent token](#rotate-the-agent-token), then
+[the client CA](#rotate-the-client-ca).
 
 ## Thin pool at 80%
 
@@ -491,11 +491,11 @@ cannot be accepted.
    kubectl annotate namespace "$NS" exomem.io/move-volume-
    ```
 
-2. Uncordon the old volume's node if it is cordoned, as during a host removal. `OLD_PV` is the retained volume you recorded in step 7 of the move. The old volume is pinned to that node, so the cell's pod cannot start there while it is cordoned:
+2. Uncordon the old volume's node if it is cordoned, as during a host removal. `OLD_PV` is the retained volume you recorded in step 7 of the move. A local volume is pinned to that node, so the cell's pod cannot start there while it is cordoned. A Hetzner volume is pinned to a location, not a node, so `OLD_NODE` stays empty and nothing is uncordoned:
 
    ```bash
-   OLD_NODE=$(kubectl get persistentvolume "$OLD_PV" -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}')
-   kubectl uncordon "$OLD_NODE"
+   OLD_NODE=$(kubectl get persistentvolume "$OLD_PV" -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[*].matchExpressions[?(@.key=="topology.topolvm.io/node")].values[*]}')
+   if [ -n "$OLD_NODE" ]; then kubectl uncordon "$OLD_NODE"; fi
    ```
 
 3. Pause cellctl, and stop the cell:
@@ -608,11 +608,11 @@ Expected result: after step 8, every node has dropped the host's WireGuard
 peer, inter-node rules and Tang rule. If it was the last WireGuard host, every
 node has also stopped `wg-quick@wgexomem` and removed its configuration and
 key. After step 10, `nvme format` has completed on both disks. The WireGuard
-key and the agent token were only on those disks.
-[Rotate the agent token](#rotate-the-agent-token) unless the wipe is confirmed:
-`blkdiscard` and an empty `blkid --probe` do not prove erasure. The rotation does
-not revoke the agent's kubelet client certificate, which the same disks held:
-see [What a lost disk still exposes](#what-a-lost-disk-still-exposes).
+key, the agent token and the agent's kubelet client certificate were only on
+those disks. Unless the wipe is confirmed,
+[rotate the agent token](#rotate-the-agent-token), then
+[the client CA](#rotate-the-client-ca): `blkdiscard` and an empty
+`blkid --probe` do not prove erasure.
 
 ## Rotate the agent token
 
@@ -684,17 +684,124 @@ expected codes swapped.
 
 ### What a lost disk still exposes
 
-The rotation closes the agent token, not the other credentials on the disk.
-The disk also held the agent's kubelet client certificate and key, under
+The agent-token rotation closes the token, not the other credentials on the
+disk. The disk also held the agent's kubelet client certificate and key, under
 `/var/lib/rancher/k3s/agent/`, and its node password,
 `/etc/rancher/node/password`. K3s keeps accepting that certificate after the
-rotation. With it, a caller can get new kube-proxy and k3s-controller client
-certificates from the server. While the host's Node still exists, the
-certificate and the node password also get a new kubelet certificate.
+token rotation. With it, a caller can act as that node in the API server, and
+get new kube-proxy and k3s-controller client certificates from the server.
+While the host's Node still exists, the certificate and the node password also
+get a new kubelet client certificate.
 
 Expiry is therefore no remedy: until a removed host's certificate expires, it
-can get other new certificates, and a host still in the cluster renews its own. Only a
-rotation of the cluster's client CA closes the exposure, and this runbook does
-not cover it yet. The host firewall's rules admit port 6443 from the
-private network only for the other inventoried nodes' addresses, which limits
-who outside the cluster can use these credentials.
+can get other new certificates, and a host still in the cluster renews its
+own. [Rotate the client CA](#rotate-the-client-ca) after the token to close
+this exposure. K3s checks the node password only after a valid token or
+certificate, so the password alone gets nothing once both are rotated. Do not
+delete a node-password Secret by hand. K3s deletes it with its Node, and
+creates it again from the next password that a valid credential presents. The
+host firewall's rules admit port 6443 from the private network only for the
+other inventoried nodes' addresses. This limits who outside the cluster can
+use these credentials.
+
+After both rotations, the disk still holds the agent's kubelet serving
+certificate and key. The server CA signed them, and they stay valid until the
+certificate expires, at most a year after K3s issued it. Only someone who
+takes over the host's private address can use them, to answer the API server
+as that host's kubelet.
+
+## Rotate the client CA
+
+Rotate the cluster's client CA when a disk that held an agent's kubelet client
+certificate leaves your custody unwiped. That is a failed disk the provider
+swapped, or the disks of a removed host whose wipe is not confirmed. Rotate the
+agent token first. Afterwards the cluster refuses every client certificate the
+old client CA signed, the disk's among them.
+
+The k3s role installs the helper `exomem-k3s-rotate-client-ca` on the server.
+It generates a new client CA there and loads it with
+`k3s certificate rotate-ca --force`. Without `--force`, K3s accepts a new CA
+only if it chains to the current one, so that certificates from both stay
+trusted. This rotation must end that trust, so the helper makes an unrelated
+CA. `--force` skips K3s's own checks, so the helper first checks that the new
+key matches its certificate. The new key never leaves the server. K3s keeps it in
+its datastore, encrypted with the escrowed server token, as it keeps the client
+CA it replaces. The `Cloud k3s-link rehearsal` workflow rehearses steps 2 to 6
+on a disposable cluster. In place of the everyday operator certificate, it
+presents a copy of the agent's kubelet client certificate before and after.
+
+Only the client CA changes. The join token's CA hash, the agent token,
+ServiceAccount tokens and the CA that pods trust stay the same. These change:
+
+- From the server's restart until an agent restarts, the API server refuses
+  that agent's kubelet. Kubernetes marks a refused agent NotReady after about a
+  minute, and cellctl then publishes no cell slots for it. `kubectl logs` and
+  `kubectl exec` fail for the agent's pods until it restarts.
+- K3s rewrites the admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`, when the
+  server restarts. A copy taken before the rotation is refused.
+- The everyday operator certificate and every break-glass certificate are
+  refused. Step 8 issues a new everyday operator certificate.
+- An etcd snapshot taken before the rotation holds the old client CA. A
+  restore from one brings the old client CA back, so rotate it again after
+  such a restore.
+
+Step 4 gives new client keys to a host whose disk left custody and that stays
+in the cluster. That disk held its current keys.
+
+Preconditions:
+
+- The agent token is rotated, and step 6 of
+  [Rotate the agent token](#rotate-the-agent-token) printed `401` for the old
+  token. Otherwise the disk's token gets certificates from the new client CA.
+- Every node is Ready, and `ansible k3s_agents -m ansible.builtin.ping`, run in
+  `infra/ansible`, reaches every agent.
+- The everyday operator certificate on the server is not expired. Step 1 uses
+  it as a certificate from before the rotation. If it has expired, issue it
+  again as in
+  [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
+
+Steps:
+
+1. On the server, present the everyday operator certificate, which the old client CA signed. Expect the node list:
+
+   ```bash
+   ssh exomem-admin@<server> 'sudo k3s kubectl --kubeconfig /root/.kube/exomem-operator.kubeconfig get nodes'
+   ```
+
+2. Load a new client CA on the server, and record the directory it prints: `ssh exomem-admin@<server> 'sudo /usr/local/sbin/exomem-k3s-rotate-client-ca'`.
+
+Steps 3 to 5 restart K3s. From the server's restart until an agent restarts,
+the API server refuses that agent's kubelet. Do steps 3 to 5 without a pause.
+
+3. Restart the server: `ssh exomem-admin@<server> 'sudo systemctl restart k3s && sudo k3s kubectl get --raw=/readyz'`.
+4. If the host whose disk left custody stays in the cluster, remove its agent's client keys: `ssh exomem-admin@<host> 'sudo sh -c "rm -f /var/lib/rancher/k3s/agent/client-*.key"'`.
+5. Restart K3s on every agent at once: `cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'`.
+6. Check that every node is Ready: `kubectl get nodes`.
+7. Present the everyday operator certificate again, as in step 1.
+8. Issue a new everyday operator certificate, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
+9. When you accept the rotation, delete the directory that step 2 printed, which holds the old client CA's key: `ssh exomem-admin@<server> 'sudo rm -rf <directory>'`.
+
+Expected result: step 1 lists the nodes. Step 2 prints the SHA-256 fingerprints
+of the old and the new client CA, and the directory that keeps the old pair.
+Step 3 prints `ok`, and step 6 shows every node Ready within a few minutes.
+Step 7 prints `error: You must be logged in to the server (Unauthorized)`: the
+API server refuses that certificate, as it now refuses the lost disk's. A node
+that stays NotReady still runs on certificates from the old client CA: restart
+K3s on it.
+
+If step 2 refuses or fails, the cluster keeps its client CA. Remove the cause
+it prints, and run step 2 again.
+
+If the server does not start in step 3, read its log:
+`sudo journalctl -u k3s`. If K3s cannot start on the new client CA, restore
+etcd from the newest snapshot taken before step 2, as in
+[cloud-node-loss.md](cloud-node-loss.md#restore-etcd-from-an-older-snapshot).
+That restore brings back the old client CA.
+
+To undo the rotation while K3s runs, load the old pair again, then repeat
+steps 3 to 6. The cluster then accepts the old client CA's certificates again,
+the lost disk's among them:
+
+```bash
+ssh exomem-admin@<server> 'sudo /usr/local/sbin/exomem-k3s-rotate-client-ca --restore <directory>'
+```
