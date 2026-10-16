@@ -31,6 +31,11 @@ jobs:
   # tiers plus the latency file partition the previous lean suite exactly.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
+    # The release PR runs no test job: `release-evidence` requires a green
+    # full run at its base revision and refuses a release PR that changes
+    # anything release-please does not manage. Lint, build (packages, Cloud
+    # archives, privacy), specs and capabilities still run.
+    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -133,6 +138,7 @@ jobs:
 
   harness-tests:
     name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -211,6 +217,7 @@ jobs:
 
   windows-held-filesystem:
     name: Windows held filesystem (native NTFS)
+    if: *not-release-pr
     runs-on: windows-latest
     timeout-minutes: 12
     steps:
@@ -268,6 +275,8 @@ jobs:
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_path_alias_guard.py
+          tests/test_artifact_recovery.py::test_retained_copy_rechecks_bytes_even_with_unchanged_mtime
+          tests/test_artifact_recovery.py::test_in_place_rewrite_during_final_origin_check_releases_no_stale_original
           "tests/test_collection_store_service.py::test_projection_admission_accepts_the_served_vault_through_a_root_alias[junction]"
           tests/test_collection_store_replica.py::test_first_and_successive_publish_are_reopenable_business_snapshots
           tests/test_collection_store_replica.py::test_matching_installed_copy_retires_the_still_owned_redundant_stage
@@ -305,6 +314,7 @@ jobs:
 
   tui:
     name: terminal UI (textual, headless + snapshots)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -321,6 +331,7 @@ jobs:
 
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -547,6 +558,7 @@ jobs:
 
   onboarding:
     name: onboarding (wheel path)
+    if: *not-release-pr
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -626,6 +638,8 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
       - name: Validate public build inputs before packaging
         run: python scripts/validate-public-artifacts.py --repository
       - name: Prove the pinned pre-v4 binary is externally fenced
@@ -735,12 +749,40 @@ jobs:
     # Runs on the release PR (where it enforces) and on every non-PR event
     # (where it is a trivial success, so the gate's skip-intolerant full-CI
     # arm never sees a skip). Ordinary PRs skip it and the gate accepts the
-    # skip outside full CI. This is the ONLY permitted appearance of the
-    # release branch name in this workflow — a seconds-class API check, not
-    # the full-CI stampede the guard removal eliminated; the contract test
-    # pins the count.
+    # skip outside full CI. The release branch name appears here and in the
+    # one anchor that keeps the release PR off the test jobs; the contract
+    # test pins the count, so the full-CI stampede cannot return.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'release-please--branches--main' }}
     steps:
+      - name: Check out the release checker at the release base
+        # The base revision, so a release PR cannot edit its own check.
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: |
+            scripts/check_release_pr_files.py
+            release-please-config.json
+          sparse-checkout-cone-mode: false
+      - name: Require that the release PR changes only what release-please writes
+        # The release PR runs no test job, which is sound only while its diff
+        # is release-please's own work (scripts/check_release_pr_files.py).
+        # `shell: bash` adds pipefail; a failed API call must refuse.
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if test "$HEAD_REPO" != "$GH_REPO"; then
+            echo "a release PR must come from $GH_REPO, not $HEAD_REPO" >&2
+            exit 1
+          fi
+          gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/files" --jq '.[] | tojson' \
+            > "$RUNNER_TEMP/pr-files.jsonl"
+          python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl"
       - name: Require a green full run on main at the release base
         env:
           GH_TOKEN: ${{ github.token }}
@@ -768,6 +810,31 @@ jobs:
           echo "dispatch one and let it finish green first: gh workflow run ci.yml --ref main" >&2
           echo "then re-run this job (docs/release.md, release flow)" >&2
           exit 1
+
+  # A dispatched or scheduled full run is a superset of the push run at the
+  # same revision: the same jobs plus the full tier and py3.11. The push run is
+  # cancelled so the same proof does not take the shared job slots twice.
+  # Best effort: an API error must not turn the full run's evidence red.
+  cancel-superseded-push-run:
+    name: cancel the push run this full run supersedes
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel unfinished push runs of this workflow at this revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          runs=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?event=push&head_sha=$GITHUB_SHA&per_page=20" \
+            --jq ".workflow_runs[] | select(.event == \"push\" and .head_sha == \"$GITHUB_SHA\" and .status != \"completed\" and .id != $GITHUB_RUN_ID) | .id")
+          for run in $runs; do
+            gh run cancel "$run" && echo "cancelled push run $run at $GITHUB_SHA" ||
+              echo "push run $run was not cancelled; it may have finished"
+          done
 
   # Engineering-practices quality check (https://github.com/Artexis10/engineering-practices):
   # fails on dead code a pull request adds and posts the Quality report. It informs

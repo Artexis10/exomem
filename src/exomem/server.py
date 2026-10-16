@@ -608,6 +608,49 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
         )
+        from fastmcp.exceptions import ResourceError
+        from fastmcp.resources import ResourceContent, ResourceResult
+
+        from . import artifact_recovery
+
+        @mcp.resource(
+            artifact_recovery.RESOURCE_PREFIX + "{grant}",
+            name="stored_original",
+            description="Exact stored original as a bounded MCP blob; requires its issuing client and live release authority.",
+        )
+        async def stored_original(grant: str):
+            from starlette.concurrency import run_in_threadpool
+
+            from . import auth_sessions, upload_tokens
+            from .governance.principal import effective_principal
+
+            try:
+                if grant != "authorized":
+                    raise artifact_recovery.RecoveryUnavailable
+                grant = artifact_recovery.current_native_grant()
+                descriptor, who, _ = artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
+                caller = effective_principal()
+                if caller != who or descriptor["size"] > artifact_recovery.native_max_bytes():
+                    raise artifact_recovery.RecoveryUnavailable
+                async with artifact_recovery.staged(
+                    runtime.vault_root, descriptor["path"], who, expected=descriptor
+                ) as (copied, _, proofs):
+                    # Only the bounded private copy reaches base64 serialization, never a large canonical original.
+                    content = await run_in_threadpool(copied.private_path.read_bytes)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    revision = await run_in_threadpool(artifact_recovery.require_current, runtime.vault_root, copied, who, byte_proofs=proofs)
+                    artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
+                    if not await auth_sessions.origin_session_active(who):
+                        raise artifact_recovery.RecoveryUnavailable
+                    artifact_recovery.require_revision(runtime.vault_root, who, copied, revision, byte_proofs=proofs)
+                    artifact_recovery.claim(runtime.vault_root, grant, delivery=upload_tokens.ARTIFACT_NATIVE)
+                    result = ResourceResult([ResourceContent(content, mime_type=descriptor["mime_type"])])
+                artifact_recovery.complete_native_grant(grant)
+                return result
+            except artifact_recovery.RecoveryUnavailable:
+                raise ResourceError("original recovery is unavailable") from None
+
         expose_tier2 = register_rest_facade(
             mcp,
             vault_root=runtime.vault_root,

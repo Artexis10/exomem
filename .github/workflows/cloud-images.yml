@@ -1,0 +1,105 @@
+name: Cloud images
+
+# Every release publishes the Exomem Cloud cell and cellctl images for
+# linux/amd64 and linux/arm64 (release-please.yml, build-cloud-images). This
+# workflow builds both images natively on each architecture and runs them, so a
+# binary fetched for the wrong architecture, or a dependency with no build for
+# one of them, fails a pull request instead of a release or a tenant's backup.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "infra/cellctl/Dockerfile"
+      - "infra/cellctl/pyproject.toml"
+      - "infra/cellctl/uv.lock"
+      - "infra/cellctl/src/**"
+      - "tests/test_cloud_image_container.py"
+      - ".github/workflows/cloud-images.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/**"
+      - "infra/cellctl/Dockerfile"
+      - "infra/cellctl/pyproject.toml"
+      - "infra/cellctl/uv.lock"
+      - "infra/cellctl/src/**"
+      - "tests/test_cloud_image_container.py"
+      - ".github/workflows/cloud-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-images-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    name: Cloud images on linux/${{ matrix.arch }}
+    strategy:
+      # Each architecture's result is evidence on its own.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Build the Cloud cell image for this runner's architecture
+        run: |
+          docker build --target cloud \
+            --build-arg EXOMEM_RELEASE_BUILD_TIME=2026-01-01T00:00:00Z \
+            --tag exomem:cloud-smoke .
+          test "$(docker image inspect --format '{{.Architecture}}' exomem:cloud-smoke)" = "${{ matrix.arch }}"
+      - name: restic runs in the Cloud cell image
+        run: docker run --rm --network=none --read-only --entrypoint restic exomem:cloud-smoke version
+      - name: The Exomem CLI identifies itself in Cloud mode
+        run: docker run --rm --network=none --read-only -e EXOMEM_CLOUD_CELL=1 exomem:cloud-smoke --version
+      # Cell init, then remember and ask_memory over MCP HTTP with the cell
+      # bearer, under a read-only root, UID 10001 and no capabilities. The test
+      # skips itself without its opt-in, and a skip must fail this step.
+      - name: A cell saves a note and finds it
+        shell: bash
+        env:
+          RUN_CLOUD_IMAGE_TEST: "1"
+          CLOUD_IMAGE_TAG: exomem:cloud-smoke
+        run: |
+          uv run --frozen python -m pytest -q -rs -p no:cacheprovider \
+            tests/test_cloud_image_container.py | tee "${RUNNER_TEMP}/cloud-image-test.txt"
+          if grep -q '^SKIPPED \[' "${RUNNER_TEMP}/cloud-image-test.txt"; then
+            echo "::error::the cloud image container test was skipped"
+            exit 1
+          fi
+
+      - name: Build the cellctl image for this runner's architecture
+        run: |
+          docker build --tag exomem-cellctl:smoke infra/cellctl
+          test "$(docker image inspect --format '{{.Architecture}}' exomem-cellctl:smoke)" = "${{ matrix.arch }}"
+      # asyncpg and cryptography are the compiled extensions cellctl loads.
+      - name: cellctl and its compiled dependencies import in the cellctl image
+        run: |
+          docker run --rm --network=none --read-only --entrypoint python3 exomem-cellctl:smoke \
+            -c "import asyncpg, cryptography.hazmat.bindings._rust, cellctl.main"

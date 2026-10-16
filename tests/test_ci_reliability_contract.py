@@ -42,6 +42,17 @@ HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
+#: The test jobs the release PR skips. Lint, build, specs, capabilities and
+#: release evidence still run on it; the full run at its base is its test proof.
+RELEASE_PR_SKIPPED_JOBS = {
+    "core-tests",
+    "harness-tests",
+    "windows-held-filesystem",
+    "tui",
+    "product-e2e",
+    "onboarding",
+}
+
 
 def _triggers(workflow: dict) -> dict:
     # PyYAML 1.1 parses the unquoted workflow key `on` as boolean true.
@@ -120,9 +131,8 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     matrix = job["strategy"]["matrix"]
 
     # PRs pay for the newest runtime only; the compatibility runtime joins on
-    # nightly/manual full runs. The release PR runs this same PR tier — the
-    # release-please clause is deliberately gone (see
-    # test_expensive_ci_runs_nightly_and_manually_only).
+    # nightly/manual full runs. The runtime matrix never names the release
+    # branch (see test_expensive_ci_runs_nightly_and_manually_only).
     versions = " ".join(str(matrix["python-version"]).split())
     assert "github.event_name == 'schedule'" in versions
     assert "github.event_name == 'workflow_dispatch'" in versions
@@ -599,9 +609,10 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     which re-ran the full 46-job tier on every push to main (release-please
     force-updates its PR each time): 61% of a measured day's runner-minutes
     went to those stampedes while ordinary PRs queued behind a 20-concurrent-
-    job account cap. The release PR now runs the normal PR tier like any other
-    PR; release evidence is one green manually-dispatched full run on main,
-    documented as a required step in docs/release.md.
+    job account cap. Release evidence is one green dispatched full run on
+    main, documented as a required step in docs/release.md, and the release PR
+    itself runs no test job: its diff is version strings, the changelog and the
+    regenerated Cloud archives.
     """
     workflow = _workflow()
     triggers = _triggers(workflow)
@@ -622,22 +633,29 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     assert "head_ref" not in condition
     assert "release-please" not in condition
 
-    # The clause must not creep back into the expensive tier: its only
-    # permitted appearance in the whole workflow is the release-evidence
-    # job's own guard (pinned exactly in
-    # test_release_evidence_is_enforced_on_the_release_pr) — a seconds-class
-    # API check, not a stampede.
-    assert _workflow_text().count("release-please--branches--main") == 1
+    # The clause must not creep back into the expensive tier. It appears
+    # twice: the release-evidence job's own guard (pinned exactly in
+    # test_release_evidence_is_enforced_on_the_release_pr) and the one anchor
+    # that keeps the release PR off the test jobs.
+    assert _workflow_text().count("release-please--branches--main") == 2
 
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it.
     fast_jobs = (
         set(jobs)
         - FULL_CI_JOBS
-        - {"gate", "release-evidence", "release-evidence-landed", "quality"}
+        - {
+            "gate",
+            "release-evidence",
+            "release-evidence-landed",
+            "cancel-superseded-push-run",
+            "quality",
+        }
     )
-    assert fast_jobs
-    assert all("if" not in jobs[name] for name in fast_jobs)
+    assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
+    (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
+    assert "github.head_ref != 'release-please--branches--main'" in skip
+    assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
 
 
 def _scope_fixture_git(repository: Path, *args: str) -> None:
@@ -795,7 +813,11 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
         "github.event.pull_request.head.ref == 'release-please--branches--main' }}"
     )
 
-    (step,) = job["steps"]
+    checkout, scope, step = job["steps"]
+    # The scope check runs first, from the base revision, under pipefail.
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert scope["shell"] == "bash"
+    assert "scripts/check_release_pr_files.py" in scope["run"]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
     base = " ".join(str(step["env"]["BASE_SHA"]).split())
     assert base == "${{ github.event.pull_request.base.sha || '' }}"
@@ -834,10 +856,12 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
     assert gate["if"] == "${{ !cancelled() }}"
     # release-evidence-landed runs after the gate and depends on it.
     # quality is the shared engineering-practices check, kept out of the required gate so the
-    # required checks stay unchanged; the merge guard reads it.
+    # required checks stay unchanged; the merge guard reads it. The push-run
+    # cancel is a best-effort saving that must not decide evidence.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
+        "cancel-superseded-push-run",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])

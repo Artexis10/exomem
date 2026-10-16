@@ -3643,7 +3643,7 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived token/URL; stores nothing.",
+    "description": "Prepare binary transfer when client file handles are unavailable.\n\nReturns a short-lived handoff; issuance does not prove consumption.\nFor a stored original, download with artifact and optional expected_sha256.\nUse the bounded native MCP resource where supported, or open the HTTPS link.\nNote reads and exports remain separate.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3655,6 +3655,14 @@
           "default": "evidence",
           "description": "Upload target: source (raw) or evidence (proof); token-bound. Ignored for downloads.",
           "type": "string"
+        },
+        "artifact": {
+          "type": "string",
+          "description": "Vault-relative stored original or its custody page for download."
+        },
+        "expected_sha256": {
+          "type": "string",
+          "description": "Optional assertion of the original version to recover."
         },
         "response_detail": {
           "default": "compact",

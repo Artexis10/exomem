@@ -646,25 +646,26 @@ need confirmed `restructure_execution`. An independently authored edge follows t
 
 ## download
 
-**Goal:** Pull a stored vault file *out* into the code sandbox to work on it — the
-reverse of the upload channel. Read-only; the bytes stream out-of-band, never back
-through the model.
-
-### Triggers
-- "open / analyze / re-read that file in the sandbox"
-- needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
+**Goal:** Recover the exact stored original after its external source disappears.
+Notes and exports use their separate read and export paths.
 
 ### Procedure
-1. Call **`transfer_artifact(operation="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
-2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`.
-3. The server resolves the path under the vault root (traversal-safe) and streams the file. An out-of-vault or missing path is refused.
+1. Call `transfer_artifact(operation="download", artifact="<stored artifact or custody page>")` to receive the available delivery paths.
+2. If the client supports MCP blobs, read `deliveries.native_resource.uri` to receive the bounded original.
+3. Otherwise, open `deliveries.https.url` in a browser to download the original without a hidden header.
+4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
+5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
 
-### Notes
-- The token is **download-scoped** — it can read but not write.
-- Whole-vault read, like `read_memory` — datasets and evidence live in sibling folders, all reachable by path.
+Supply `expected_sha256` when a particular version is required. A prepared handoff
+proves no consumption. The link delegates only the named artifact version until
+expiry; current session and disclosure checks still apply. A changed or withheld
+original requires a fresh authorized handoff. Large payloads use HTTPS before
+base64 encoding. Desktop/personal endpoints serve recovery; Cloud outbound delivery
+remains unavailable. Native attachment rendering in other clients remains unverified.
 
-### Writes performed
-- None — read-only.
+Legacy automation can still omit `path` and use the returned token in an
+Authorization header with `download_url?path=...`. Broad legacy tokens remain
+header-only and cannot become clickable grants.
 
 ---
 
