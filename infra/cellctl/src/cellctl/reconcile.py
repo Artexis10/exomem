@@ -875,7 +875,8 @@ def _compute_render_digest(
         material["artifact_broker_url"] = endpoint
     engines = cluster_config.media_engines_for_cell(row.cell_id)
     if engines:
-        # Only a selected cell's digest moves, so a canary restarts one cell.
+        # Only a cell whose engine set changes sees its digest move: a canary restarts
+        # one cell, and a default that names what a cell already runs restarts none.
         material["media_engines"] = engines
     if cluster_config.storage.is_local(storage_class):
         # Only a node-local cell's render depends on its class, so a cell on

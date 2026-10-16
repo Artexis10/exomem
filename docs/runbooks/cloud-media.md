@@ -2,7 +2,7 @@
 
 # Cloud media: documents and OCR
 
-**Status:** written with `add-cloud-multimodal-processing` slice 1 (documents, OCR, memory brakes, switches). The measurements below come from a local cell container built from the Cloud image and run with 2 CPUs and 3 GiB. A QA cell has run documents and OCR since 2026-10-16.
+**Status:** written with `add-cloud-multimodal-processing` slice 1 (documents, OCR, memory brakes, switches). The measurements below come from a local cell container built from the Cloud image and run with 2 CPUs and 3 GiB. Acceptance evidence from a live cell is not recorded here yet.
 
 Media extraction makes uploaded files searchable. The Cloud image carries two engines:
 
@@ -42,17 +42,18 @@ A fleet default runs an engine in every cell, including a cell created later, so
 
 Warning: a cell that `mediaEngineCellIds` does not name restarts at the deploy and starts the engine's backfill. Several such cells start backfill together. cellctl does not check this, so check every cell first.
 
-1. Read the deployed selection: `helm -n exomem-platform get values exomem-platform -o json | jq '.cellctl.mediaEngineCellIds'`.
-2. List the cells: `psql "$EXOMEM_CELLCTL_DSN" -c "select cell_id from exomem_cloud_cells where desired_state <> 'deleted' order by cell_id"`.
-3. Check that the engine's list holds every cell ID from step 2. If one is missing, add it to the per-cell list first, one cell at a time, as in "Switch an engine on for a cell".
+1. Record the live cells: `psql "$EXOMEM_CELLCTL_DSN" -At -c "SELECT cell_id FROM exomem_cloud_cells WHERE desired_state <> 'deleted'" | LC_ALL=C sort > /tmp/cells-before.txt`.
+2. Name the cells that the per-cell list misses, once for each engine you will add: `for ENGINE in documents ocr; do LC_ALL=C comm -23 /tmp/cells-before.txt <(helm -n exomem-platform get values exomem-platform -o json | jq -r --arg e "$ENGINE" '.cellctl.mediaEngineCellIds[$e][]?' | LC_ALL=C sort) | sed "s/^/$ENGINE: /"; done`. Expect no output.
+3. If a line appears, add that cell to the engine's per-cell list first, one cell at a time, as in "Switch an engine on for a cell". Then repeat steps 1 and 2.
 4. Record each cell pod's start time: `kubectl get pods --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,POD:.metadata.name,START:.status.startTime | grep '^exo-cell-' > /tmp/pods-before.txt`.
 5. Choose a time outside the nightly backup window, 02:00-05:00 UTC.
-6. Add the engine to the platform values, for example `mediaEngineFleetDefault: ["documents", "ocr"]`. Keep the per-cell lists.
+6. Add the engines to the platform values, for example `mediaEngineFleetDefault: ["documents", "ocr"]`. Keep the per-cell lists. The chart refuses a name that is not an engine.
 7. Deploy the platform chart through its normal release path.
-8. Repeat the command of step 4 into `/tmp/pods-after.txt`, then run `diff /tmp/pods-before.txt /tmp/pods-after.txt`. Expect no changed line: no cell restarted. A line for a cell created since step 4 is not a restart.
-9. Create a cell, or pick one created after the deploy. Run `exomem status --resources --json` in it and check that `media_engines` shows the engine as `enabled`.
+8. Repeat the command of step 1 into `/tmp/cells-after.txt`. Run `LC_ALL=C comm -13 /tmp/cells-before.txt /tmp/cells-after.txt`. Each line is a cell created since step 1.
+9. Repeat the command of step 4 into `/tmp/pods-after.txt`, then run `diff /tmp/pods-before.txt /tmp/pods-after.txt`. Expect a changed line only for a cell from step 8: no other cell restarted.
+10. Run `exomem status --resources --json` in a cell from step 8, or in a cell you create, and check that `media_engines` shows each engine as `enabled`.
 
-A misspelt engine name in the default runs nothing and shows only in the runtime log, so step 9 is the proof. If a cell restarted at step 8, step 3 missed it. That cell now runs the engine and backfills its media. Wait for the backfill, then check `media.memory_blocked_count` and `media.over_budget_count` as for any switch-on.
+If a cell restarted at step 9, step 2 missed it. That cell now runs the engine and backfills its media. Wait for the backfill, then check `media.memory_blocked_count` and `media.over_budget_count` as for any switch-on.
 
 Leave the engine's entries in `mediaEngineCellIds` after the default holds it: a later switch-off in one cell needs them.
 

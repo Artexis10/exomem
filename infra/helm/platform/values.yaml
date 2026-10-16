@@ -155,8 +155,10 @@ cellctl:
   # Operator-selected cells reserve agents carrying their own cell ID.
   dedicatedCellIds: []
   # Media engine -> the cells it is switched on in (cloud-multimodal-processing
-  # D7), e.g. {"documents": ["<cell id>"], "ocr": ["<cell id>"]}. Every engine
-  # is off in a cell no entry names. A change restarts only the cells it names.
+  # D7), e.g. {"documents": ["<cell id>"], "ocr": ["<cell id>"]}. A cell no entry
+  # names runs none of these engines, unless mediaEngineFleetDefault names them.
+  # A change restarts only the cells whose engine set changes. The schema accepts
+  # only the engine names the runtime knows.
   mediaEngineCellIds: {}
   # Engines every cell runs, including a cell created later, e.g. ["documents", "ocr"].
   # Set an engine here only after mediaEngineCellIds already names every existing cell

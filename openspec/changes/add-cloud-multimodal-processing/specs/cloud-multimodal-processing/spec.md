@@ -275,7 +275,7 @@ An engine whose switch is off, or which the deployment does not ship, SHALL be r
 
 ### Requirement: Existing media is backfilled one cell at a time
 
-When an engine's switch turns on in a cell, the media already in that cell SHALL be queued for that engine automatically, with no operator action per file. Because switches turn on one cell at a time, backfill SHALL never run in every cell at once. A change of image space SHALL re-encode the stored image vectors once, through the same backfill.
+When an engine's switch turns on in a cell, the media already in that cell SHALL be queued for that engine automatically, with no operator action per file. Because switches turn on one cell at a time, backfill SHALL never run in every cell at once. This SHALL hold when an engine is made the fleet default under the precondition of the requirement "Each Cloud engine is off by default and turns on after acceptance in a canary cell", and for a cell created later, which backfills only its own media. A change of image space SHALL re-encode the stored image vectors once, through the same backfill.
 
 #### Scenario: Turning on OCR processes the images already stored
 

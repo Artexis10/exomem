@@ -1079,9 +1079,16 @@ def test_media_engine_fleet_default_is_validated_and_delivered_to_cellctl() -> N
     assert json.loads(delivered()) == []
     assert json.loads(delivered("--set-json", 'cellctl.mediaEngineFleetDefault=["documents","ocr"]')) == [
         "documents", "ocr"]
-    for bad in (["Documents"], ["documents", "documents"], {"documents": []}, "documents"):
+    for bad in (["Documents"], ["documnets"], ["documents", "documents"], {"documents": []}, "documents"):
         result = _helm_render("--set-json", "cellctl.mediaEngineFleetDefault=" + json.dumps(bad))
         assert result.returncode != 0 and "mediaEngineFleetDefault" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_a_misspelt_engine_name_is_refused_in_the_per_cell_selection() -> None:
+    selection = {"documnets": ["aaaaaaaaaaaaaaaa"]}
+    result = _helm_render("--set-json", "cellctl.mediaEngineCellIds=" + json.dumps(selection))
+    assert result.returncode != 0 and "documnets" in result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

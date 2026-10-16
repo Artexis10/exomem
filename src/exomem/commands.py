@@ -13317,25 +13317,21 @@ CLOUD_SURFACE_EXCLUSIONS = MappingProxyType(
             SurfaceExclusion(
                 command="process_media",
                 reason=(
-                    "The `cloud` image installs only the `embeddings-onnx` extra "
-                    "and gates the build on torch being absent, so media "
-                    "extraction has no dependencies in the image."
+                    "Media runs automatically in the cell's own media worker, "
+                    "so the manual media tool is not offered."
                 ),
                 lifted_when=(
-                    "a media-capable cloud image ships with the required "
-                    "decoding dependencies"
+                    "a Cloud tenant needs a manual reconcile or retry that "
+                    "the automatic media worker does not give"
                 ),
             ),
             SurfaceExclusion(
                 command="read_media",
                 reason=(
-                    "Sampling video frames needs the same decoding "
-                    "dependencies the cloud image omits."
+                    "Sampling video frames needs video decoding, which the "
+                    "cloud image does not ship."
                 ),
-                lifted_when=(
-                    "a media-capable cloud image ships with the required "
-                    "decoding dependencies"
-                ),
+                lifted_when="the cloud image ships video decoding",
             ),
         )
     }
