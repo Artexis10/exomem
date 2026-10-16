@@ -42,8 +42,8 @@ HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
-#: The test jobs the release PR skips. Lint, build, specs, capabilities and
-#: release evidence still run on it; the full run at its base is its test proof.
+#: The test jobs that the release PR and an already-tested push skip. Lint,
+#: build, specs, capabilities and release evidence still run on both.
 RELEASE_PR_SKIPPED_JOBS = {
     "core-tests",
     "harness-tests",
@@ -649,12 +649,17 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
             "release-evidence",
             "release-evidence-landed",
             "cancel-superseded-push-run",
+            "tested-tree",
             "quality",
         }
     )
     assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
     (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
     assert "github.head_ref != 'release-please--branches--main'" in skip
+    # A failed or skipped lookup must leave the test jobs running.
+    assert "!cancelled()" in skip
+    assert "needs.tested-tree.outputs.proven != 'true'" in skip
+    assert all(jobs[name]["needs"] == "tested-tree" for name in RELEASE_PR_SKIPPED_JOBS)
     assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
 
 
@@ -677,41 +682,49 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
     )
 
 
-def _installed_journey_scope(repository: Path, event: str) -> tuple[str, str]:
-    scope = next(
-        step
-        for step in _workflow()["jobs"]["product-e2e"]["steps"]
-        if step.get("id") == "journey-scope"
-    )
+#: Jobs whose tests a docs-only pull request narrows (scripts/ci_change_scope.py).
+SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
+
+
+def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
-        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", scope["run"]],
+        [sys.executable, str(ROOT / "scripts" / "ci_change_scope.py")],
         cwd=repository,
-        env={**os.environ, "EVENT_NAME": event, "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)},
+        env={
+            **os.environ,
+            "EVENT_NAME": event,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
         capture_output=True,
         text=True,
         check=True,
     )
     decision = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    return decision["run_journey"], summary.read_text() if summary.exists() else ""
+    return decision, summary.read_text() if summary.exists() else ""
 
 
 @pytest.mark.parametrize(
-    "old_path,new_path,earlier_runtime,expected",
+    "old_path,new_path,earlier_runtime,docs_only",
     [
-        ("openspec/spec.md", "openspec/spec.md", False, "false"),
-        ("openspec/spec.md", None, False, "false"),
-        ("src/example.py", "src/example.py", False, "true"),
-        ("src/example.py", None, False, "true"),
-        ("src/example.py", "openspec/moved.py", False, "true"),
-        ("openspec/spec.md", "src/moved.md", False, "true"),
-        ("openspec/spec.md", "openspec/spec.md", True, "true"),
+        ("openspec/spec.md", "openspec/spec.md", False, True),
+        ("openspec/spec.md", None, False, True),
+        ("docs/guide.md", "docs/guide.md", False, True),
+        ("NOTES.md", "NOTES.md", False, True),
+        # The sdist readme is a package input.
+        ("README.md", "README.md", False, False),
+        ("tests/fixtures/note.md", "tests/fixtures/note.md", False, False),
+        ("src/example.py", "src/example.py", False, False),
+        ("src/example.py", None, False, False),
+        ("src/example.py", "openspec/moved.py", False, False),
+        ("openspec/spec.md", "src/moved.md", False, False),
+        ("openspec/spec.md", "openspec/spec.md", True, False),
     ],
 )
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
-    tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, expected: str
+def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
+    tmp_path: Path, old_path: str, new_path: str | None, earlier_runtime: bool, docs_only: bool
 ) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -739,11 +752,13 @@ def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     _scope_fixture_git(repository, "checkout", "main")
     _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
 
-    decision, summary = _installed_journey_scope(repository, "pull_request")
-    assert decision == expected
-    if expected == "false":
-        assert "Installed journey not run" in summary
+    decision, summary = _change_scope(repository, "pull_request")
+
+    if docs_only:
+        assert decision == {"docs_only": "true", "pytest_args": "-m reads_repository_docs"}
+        assert "Docs-only change" in summary
     else:
+        assert decision == {"docs_only": "false", "pytest_args": ""}
         assert not summary
 
 
@@ -751,8 +766,7 @@ def test_installed_e2e_scope_covers_the_complete_merge_and_both_rename_paths(
     "event,has_parent",
     [("pull_request", False), ("push", True), ("schedule", True), ("workflow_dispatch", True)],
 )
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_events(
+def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
     tmp_path: Path, event: str, has_parent: bool
 ) -> None:
     repository = tmp_path / "repository"
@@ -767,23 +781,25 @@ def test_installed_e2e_scope_retains_execution_for_unknown_history_and_non_pr_ev
         path.write_text("changed\n")
         _scope_fixture_git(repository, "commit", "-am", "spec change")
 
-    decision, summary = _installed_journey_scope(repository, event)
-    assert decision == "true"
+    decision, summary = _change_scope(repository, event)
+
+    assert decision == {"docs_only": "false", "pytest_args": ""}
     assert not summary
 
 
-def test_installed_e2e_scope_uses_merge_checkout_and_omits_only_an_explicit_false() -> None:
-    job = _workflow()["jobs"]["product-e2e"]
+@pytest.mark.parametrize("job_id", SCOPED_JOBS)
+def test_change_scope_compares_the_merge_commit_with_its_base(job_id: str) -> None:
+    """A checkout of the PR head would compare only its last commit."""
+    job = _workflow()["jobs"][job_id]
     checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
-    assert checkout["with"]["fetch-depth"] == 2
     assert "ref" not in checkout["with"]
-    scope = next(step for step in job["steps"] if step.get("id") == "journey-scope")
+    assert checkout["with"]["fetch-depth"] in (0, 2)
+    scope = next(step for step in job["steps"] if step.get("id") == "scope")
+    assert scope["run"] == "python3 scripts/ci_change_scope.py"
     assert scope["env"]["EVENT_NAME"] == "${{ github.event_name }}"
-    journey = next(step for step in job["steps"] if "scripts/e2e_product_loop.py" in step.get("run", ""))
-    assert journey["if"] == "steps.journey-scope.outputs.run_journey != 'false'"
 
 
-def test_installed_e2e_scope_relies_on_openspec_being_outside_package_inputs() -> None:
+def test_change_scope_relies_on_docs_paths_being_outside_package_inputs() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     build = project["tool"]["hatch"]["build"]
     wheel = build["targets"]["wheel"]
@@ -838,6 +854,70 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     assert "release-evidence" in set(workflow["jobs"]["gate"]["needs"])
 
 
+def test_only_a_green_full_tier_run_of_this_repository_records_its_tree() -> None:
+    """A docs-only run proved only the docs tests; a fork chose its own workflow."""
+    steps = {step.get("name"): step for step in _workflow()["jobs"]["gate"]["steps"]}
+    names = list(steps)
+    record = steps["Name the tree this pull request run tested"]
+    assert names.index("Require the selected CI tier to succeed") < names.index(
+        "Name the tree this pull request run tested"
+    )
+    assert "github.event_name == 'pull_request'" in record["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in record["if"]
+    assert "needs.core-tests.outputs.docs_only == 'false'" in record["if"]
+
+
+@pytest.mark.parametrize(
+    "source,proven",
+    [
+        ("pull_request .github/workflows/ci.yml example/project", "true"),
+        ("pull_request .github/workflows/ci.yml fork/project", "false"),
+        ("pull_request .github/workflows/other.yml example/project", "false"),
+        ("push .github/workflows/ci.yml example/project", "false"),
+        (None, "false"),
+    ],
+)
+@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
+def test_a_push_skips_tests_only_for_a_tree_this_repository_already_tested(
+    tmp_path: Path, source: str | None, proven: str
+) -> None:
+    step = _workflow()["jobs"]["tested-tree"]["steps"][0]
+    executable = tmp_path / "gh"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "endpoint = sys.argv[2]\n"
+        "if '/git/commits/' in endpoint:\n"
+        "    print('tree-sha')\n"
+        "elif '/actions/artifacts?name=ci-tested-tree-tree-sha' in endpoint:\n"
+        "    print('' if os.environ['FAKE_SOURCE'] == '-' else '987')\n"
+        "elif endpoint.endswith('/actions/runs/987'):\n"
+        "    print(os.environ['FAKE_SOURCE'])\n"
+        "else:\n"
+        "    sys.exit('unexpected gh call ' + endpoint)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    output = tmp_path / "output"
+    env = {
+        **os.environ,
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "GH_REPO": "example/project",
+        "GITHUB_SHA": "merge-sha",
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "FAKE_SOURCE": source or "-",
+    }
+
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text() == f"proven={proven}\n"
+
+
 def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:
     workflow = _workflow()
 
@@ -862,6 +942,7 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
+        "tested-tree",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
