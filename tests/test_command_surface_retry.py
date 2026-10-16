@@ -770,8 +770,8 @@ def test_real_edit_semantic_preflight_failure_releases_mutation_boundary(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(semantic_writes, "preflight_existing", preflight)
-    with pytest.raises(ValueError, match="STALE_SEMANTIC_WRITE"):
-        bound(**kwargs)
+    refusal = bound(**kwargs)
+    assert refusal["error"]["code"] == "STALE_SEMANTIC_WRITE"
     result = bound(**kwargs)
 
     assert result["path"] == path

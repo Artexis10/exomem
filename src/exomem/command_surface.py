@@ -578,6 +578,16 @@ def bind_vault(
                     )
                     return cli_ops.envelope(False, error=error.as_public_dict())
                 semantic_error = cli_ops.semantic_validation_error_dict(error)
+                if (
+                    semantic_error is None
+                    and cli_ops.leaf_contract_code(error)
+                    and not hasattr(error, "as_public_dict")
+                ):
+                    # A leaf refusal re-wrapped as "CODE: reason" is a coded
+                    # domain answer, not a fault; answer with the same envelope.
+                    # An error that carries its own public payload (a committed
+                    # batch failure) keeps the raise path the replay ledger needs.
+                    semantic_error = cli_ops.error_dict(error)
                 if semantic_error is None:
                     raise
                 _log_tool_failure(

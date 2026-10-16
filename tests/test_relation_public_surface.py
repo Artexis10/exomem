@@ -212,7 +212,6 @@ def test_real_mcp_rest_cli_resolver_rejects_unbounded_and_cross_mode_inputs(
     except ToolError as exc:  # FastMCP may raise or return an error result.
         mcp_error = str(exc)
     else:
-        assert mcp_result.is_error is True
         mcp_error = repr(mcp_result)
     assert code in mcp_error
 
