@@ -114,6 +114,23 @@ def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bo
     return False
 
 
+def identity_census_omits_scanned_pages(vault_root: Path) -> bool:
+    """Whether the Knowledge Base root holds a directory the census prunes but a scan reads.
+
+    `trash/` is the one such name today: the identity census never admits a
+    page there, while `vault.in_excluded_scan_dir` keeps it, so the memory
+    reference scan and sidecar still read its pages. A reader that must answer
+    as the scan does checks this vault-wide fact before it reads the census.
+    Any entry by that name counts, because taking the scan is always correct.
+    """
+    kb = vault.kb_root(Path(vault_root))
+    return any(
+        os.path.lexists(kb / name)
+        for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
+        if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+    )
+
+
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         payload,
@@ -277,6 +294,11 @@ class StableIdentityCensus:
     entries: tuple[StableIdentityEntry, ...]
     paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
     _reference_paths: frozenset[str] = field(init=False, repr=False, compare=False)
+    # Every reference path holding each identity, duplicates included: the
+    # projection a reference read answers from without walking the vault.
+    _reference_owners: Mapping[str, tuple[str, ...]] = field(
+        init=False, repr=False, compare=False
+    )
     _canonical_refs_by_path: Mapping[str, str | None] = field(
         init=False, repr=False, compare=False
     )
@@ -323,6 +345,16 @@ class StableIdentityCensus:
             self,
             "_reference_paths",
             frozenset(entry.path for entry in reference_entries),
+        )
+        object.__setattr__(
+            self,
+            "_reference_owners",
+            MappingProxyType(
+                {
+                    identity: tuple(sorted(owners))
+                    for identity, owners in reference_owners.items()
+                }
+            ),
         )
         object.__setattr__(
             self,
@@ -1573,6 +1605,9 @@ class ReferenceIdentitySnapshot:
     checkpoint: freshness.FreshnessCheckpoint
     reference_paths: frozenset[str]
     canonical_refs_by_path: Mapping[str, str | None]
+    # Identity -> every reference path holding it. Unlike
+    # `canonical_refs_by_path`, a duplicated identity keeps all its owners.
+    reference_owners: Mapping[str, tuple[str, ...]]
     _cache_context_identity: object = field(repr=False, compare=False)
 
 
@@ -1658,6 +1693,7 @@ def current_reference_identity_snapshot(
                 checkpoint,
                 identity._reference_paths,
                 identity._canonical_refs_by_path,
+                identity._reference_owners,
                 entry[1],
             )
         if freshness.external_pending(root):
@@ -1689,6 +1725,8 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._reference_paths is snapshot.reference_paths
                 and entry[1].identity_census._canonical_refs_by_path
                 is snapshot.canonical_refs_by_path
+                and entry[1].identity_census._reference_owners
+                is snapshot.reference_owners
             )
 
 
@@ -3461,8 +3499,11 @@ def _build_identity_census(
                     code,
                     f"could not safely inspect stable identity at {rel}",
                 ) from error
+            # Newlines as `_parse_page_state` and the reference scan read them:
+            # on raw bytes a CR-only page shows no frontmatter, so no identity.
+            logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
             try:
-                frontmatter, _, _ = vault.parse_frontmatter(source, strict=True)
+                frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
             except vault.FrontmatterError as error:
                 raise activation_manifest.ActivationManifestError(
                     error.code,

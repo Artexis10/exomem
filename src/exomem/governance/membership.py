@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .. import find_corpus, memory_refs
+from .. import find_corpus, memory_refs, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import kb_dirname
 from . import companions
@@ -233,7 +233,7 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None
+    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -283,7 +283,7 @@ def evaluate_path_only(
             if identity.kind == "directory":
                 return MembershipOutcome("classified", frozenset(matched))
         try:
-            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path)
+            companion = proposed_companion if proposed_companion is not None else companions.classify(vault_root, rel_path, artifact_copy=artifact_copy)
         except companions.CompanionClassificationError as error:
             # A portable assignment supplies registry metadata only when no
             # companion exists; malformed or conflicting companion data still refuses.

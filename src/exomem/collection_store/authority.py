@@ -6,6 +6,8 @@ preview collections retain their existing behavior until production routing exis
 
 from __future__ import annotations
 
+import copy
+import functools
 import json
 from pathlib import Path
 
@@ -54,7 +56,21 @@ def _object(pairs):
 
 
 def parse_marker(root, raw):
-    """Validate the file-default marker and its complete version-two ownership namespace."""
+    """Validate the file-default marker and its complete version-two ownership namespace.
+
+    Recall checks ownership for every hit and due entry, so validation runs once per
+    marker spelling. Every caller still gets its own copy to change.
+    """
+    if not isinstance(raw, (str, bytes)):
+        # Anything else, a missing marker included, is refused exactly as before, uncached.
+        return _parsed_marker.__wrapped__(str(root), vault.kb_dirname(), raw)
+    return copy.deepcopy(_parsed_marker(str(root), vault.kb_dirname(), raw))
+
+
+# Validation reads only the raw bytes, the root and the kb folder name, so those are the key.
+# A vault has one current marker; a few slots also cover a pending target and its predecessor.
+@functools.lru_cache(maxsize=8)
+def _parsed_marker(root, _kb_dirname, raw):
     try:
         marker = json.loads(raw, object_pairs_hook=_object)
     except (ValueError, UnicodeError, TypeError) as error:
@@ -152,17 +168,32 @@ def require_new_file_ownership(root, marker, entry):
 
 
 def _owns(entry, path):
+    return _owns_key(_entry_regions(entry), collections._portable_path_key(path))
+
+
+def _entry_regions(entry):
+    return _region_keys(entry["manifest_path"], entry["source_path"], entry["layout"])
+
+
+# One entry's namespace, folded once: recall asks about thousands of paths per call.
+# The bound covers every entry of several markers; a miss only refolds one entry.
+@functools.lru_cache(maxsize=256)
+def _region_keys(manifest_path, source_path, layout):
+    regions = _owned_regions({"manifest_path": manifest_path, "source_path": source_path, "layout": layout})
+    keys = [(collections._portable_path_key(root), subtree) for root, subtree in regions]
+    log = collections._portable_path_key(source_path) + "#" if layout == "markdown-log" else None
+    return frozenset(key for key, _ in keys), tuple(key + "/" for key, subtree in keys if subtree), log
+
+
+def _owns_key(regions, key):
     from .. import records
 
-    key = collections._portable_path_key(path)
-    for root, subtree in _owned_regions(entry):
-        root = collections._portable_path_key(root)
-        if key == root or subtree and key.startswith(root + "/"):
-            return True
-    source = collections._portable_path_key(entry["source_path"])
-    if entry["layout"] == "markdown-log" and key.startswith(source + "#"):
+    exact, subtrees, log = regions
+    if key in exact or key.startswith(subtrees):
+        return True
+    if log is not None and key.startswith(log):
         try:
-            records._validate_item_key(key[len(source) + 1:])
+            records._validate_item_key(key[len(log):])
             return True
         except collections.CollectionError:
             pass
@@ -177,7 +208,8 @@ def owned_entry(root, marker, path):
     path = collections._reference_key(Path(root), path)
     if path is None:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "invalid canonical projection path")
-    return next((entry for entry in marker["collections"] if _owns(entry, path)), None)
+    key = collections._portable_path_key(path)
+    return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 
 def upgraded_marker(root, conn, marker):

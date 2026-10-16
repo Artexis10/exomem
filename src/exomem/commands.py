@@ -73,6 +73,7 @@ from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
+from .viewer_map import op_viewer_map
 from . import evolution as evolution_module
 from . import find as find_module
 from . import (
@@ -2075,6 +2076,21 @@ def op_bootstrap(
                     "endpoint": "/upload",
                     "when": "the client cannot supply file handles",
                 },
+            },
+            "original_recovery": {
+                "tool": "transfer_artifact",
+                "when": "recover a stored original through a desktop/personal endpoint",
+                # The tool description, its response and the skill carry these, so compact leaves them out.
+                **(
+                    {
+                        "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
+                        "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
+                        "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
+                    }
+                    if profile != "compact"
+                    else {}
+                ),
+                "cloud": "outbound delivery is unavailable",
             },
         },
         "performance_profiles": {
@@ -4270,9 +4286,11 @@ def op_get(
         NOT_FOUND (no such file); UNREADABLE (parse failure);
         SECRET_BLOCKED (opt-in raw content contains protected material).
     """
-    path = _resolve_memory_identifier(vault_root, path)
+    with call_spans_module.span("read.resolve_identifier"):
+        path = _resolve_memory_identifier(vault_root, path)
     try:
-        prepared = get_page_module.prepare_page_read(vault_root, path=path)
+        with call_spans_module.span("read.prepare"):
+            prepared = get_page_module.prepare_page_read(vault_root, path=path)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     _refuse_policy_tree_read(
@@ -4314,14 +4332,16 @@ def op_get(
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
-    snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
-    released = egress_module.annotate_page(
-        vault_root,
-        out,
-        snapshot_content=result.content,
-        stable_ref=snapshot_ref,
-        include_raw=include_raw,
-    )
+    with call_spans_module.span("read.reference"):
+        snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
+    with call_spans_module.span("read.release"):
+        released = egress_module.annotate_page(
+            vault_root,
+            out,
+            snapshot_content=result.content,
+            stable_ref=snapshot_ref,
+            include_raw=include_raw,
+        )
     if released is None:
         # `result.missing_path` — the EXACT value the genuinely-absent branch
         # raises (`get_page.py:181,194`), so the two are identical by
@@ -8244,17 +8264,28 @@ def op_preserve_artifacts(
 
 
 def op_transfer_artifact(
-    vault_root: Path, operation: str = "upload", lane: str = "evidence"
+    vault_root: Path, operation: str = "upload", lane: str = "evidence",
+    artifact: str | None = None, expected_sha256: str | None = None,
 ) -> dict:
     """Prepare binary transfer when client file handles are unavailable.
 
-    Returns a short-lived token/URL; stores nothing.
+    Returns a short-lived handoff; issuance does not prove consumption.
+    For a stored original, download with artifact and optional expected_sha256.
+    Use the bounded native MCP resource where supported, or open the HTTPS link.
+    Note reads and exports remain separate.
 
     Args:
+        artifact: Vault-relative stored original or its custody page for download.
+        expected_sha256: Optional assertion of the original version to recover.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
-    _ = vault_root
+    if artifact is not None or expected_sha256 is not None:
+        if operation != "download" or not artifact:
+            raise ValueError("INVALID_MODE: original recovery needs download and artifact")
+        from . import artifact_recovery
+
+        return artifact_recovery.prepare(vault_root, artifact, expected_sha256=expected_sha256)
     if operation not in ("upload", "download"):
         raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
     if lane not in upload_tokens.UPLOAD_LANES:
@@ -12476,7 +12507,8 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         # not yet have a query: it resolves what the turn is about and returns a
         # bounded packet, or abstains. The rest of the family assumes the agent
         # already knows what it is looking for.
-        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media"],
+        # These keys route registered product commands, a closed protocol vocabulary.
+        "advanced": ["activate_context", "read_memory", "query_dataset", "read_media", "viewer_map"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
@@ -12627,6 +12659,7 @@ _SPEC: tuple[tuple, ...] = (
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
     ("graph_context", op_graph_context, 1, False, False, "path", _MCRC),
+    ("viewer_map", op_viewer_map, 1, False, False, None, _MCRC),
     ("suggest_relations", op_suggest_relations, 1, False, False, None, _MCRC),
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
@@ -12779,6 +12812,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("overview", "list_directory"),
         {"surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True},
+    ),
+    (
+        "viewer_map",
+        op_viewer_map,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("viewer_map",),
+        {"surface": "advanced", "actions": ("ask",), "first_run_safe": True},
     ),
     (
         "remember",

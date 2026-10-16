@@ -871,6 +871,24 @@ def _reset_corpus_context_cache():
     activation_manifest_module.reset_manifest_cache()
 
 
+@pytest.fixture
+def corpus_cache_on(monkeypatch: pytest.MonkeyPatch):
+    """Opt one test back into the corpus-context cache, cold and unseeded.
+
+    The suite defaults the cache off, so a memory reference read goes through
+    the scan. A test of the identity projection that the cache holds requests
+    this fixture, then makes the projection current itself.
+    """
+    from exomem import freshness
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract_module.reset_corpus_context_cache()
+    freshness.clear()
+    yield
+    semantic_contract_module.reset_corpus_context_cache()
+    freshness.clear()
+
+
 #: The single thread name every graph rebuild runs under, in both the
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).

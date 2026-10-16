@@ -49,6 +49,10 @@ def _add_command():
     return next(command for command in commands.COMMANDS if command.name == "add")
 
 
+# The retry phase is twenty serial real captures: about 0.6 s each on Linux CI
+# and 3 s each on the Windows NTFS runner. Its valve below is sized for the slow
+# runner and stays under this test's own timeout.
+@pytest.mark.timeout(180)
 def test_twenty_concurrent_real_captures_leave_complete_vault_state(
     vault: Path, source_schema
 ) -> None:
@@ -107,7 +111,10 @@ def test_twenty_concurrent_real_captures_leave_complete_vault_state(
         assert not thread.is_alive()
         pending = set(range(20))
         results: dict[int, dict] = {}
-        deadline = time.monotonic() + 45.0
+        # A hang valve, not a speed claim. A wave can commit nothing while a
+        # graph-rebuild thread holds the same boundary, so only the whole retry
+        # phase is bounded.
+        deadline = time.monotonic() + 150.0
         while pending:
             assert time.monotonic() < deadline, "concurrent retry waves did not make progress"
             with ThreadPoolExecutor(max_workers=20) as retry_pool:
