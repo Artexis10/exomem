@@ -951,13 +951,16 @@ class CollectionWriter:
             self._publication.pending = True
             return False
         metadata = metadata.pop()
+        # The hold names the item whose view was edited, so it is withheld wherever that item is.
+        target = self.connection.execute("SELECT item_key FROM items WHERE row_id=?", (projection["row_id"],)).fetchone()
         now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._publication.capture_previous(path)
         self._execute(
             "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
             "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
             "VALUES (?,?,'view-correction',?,?,?,?,?,?,?,?,?)",
-            (reference, projection["collection_id"], code, _json({"action": "view-edit"}), raw,
+            (reference, projection["collection_id"], code,
+             _json({"action": "view-edit", "item_key": None if target is None else target[0]}), raw,
              _json(diagnostics), path, view_stamp.get("v") if view_stamp and type(view_stamp.get("v")) is int else None, now,
              metadata, hashlib.sha256(raw).hexdigest()),
         )

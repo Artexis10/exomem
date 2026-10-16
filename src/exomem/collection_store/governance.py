@@ -28,6 +28,7 @@ from ..governance import (
     lifecycle,
     membership,
     policy,
+    raw_protection,
     store,
 )
 from ..governance.decisions import Decision, decide
@@ -342,20 +343,23 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                            "held-record", raw_metadata, 1, payload, "held")
 
 
-def held_target(conn: sqlite3.Connection, hold: CanonicalSubject) -> CanonicalSubject | None:
-    """The existing item a hold would change, or None when it proposes a new item.
+def held_item_key(candidate_json: str) -> str | None:
+    """The item key a held candidate names, or None for a new item; ValueError when it is unreadable.
 
-    A refused write names its item key; a view correction is held at the item's view path.
+    A refused write and a view correction both record the item they would change here.
     """
-    row = conn.execute("SELECT candidate_json,view_path FROM held_candidates WHERE collection_id=? AND held_id=?",
+    candidate = json.loads(candidate_json)
+    key = candidate.get("item_key") if isinstance(candidate, dict) else ()
+    if key is not None and not isinstance(key, str):
+        raise ValueError("held candidate is unreadable")
+    return key
+
+
+def held_target(conn: sqlite3.Connection, hold: CanonicalSubject) -> CanonicalSubject | None:
+    """The existing item a hold would change, or None when it proposes a new item."""
+    row = conn.execute("SELECT candidate_json FROM held_candidates WHERE collection_id=? AND held_id=?",
                        (hold.collection_id, hold.row_id)).fetchone()
-    if row is None:
-        return None
-    key = json.loads(row[0]).get("item_key")
-    if not isinstance(key, str):
-        found = conn.execute("SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
-                             (hold.collection_id, row[1])).fetchone()
-        key = None if found is None else found[0]
+    key = None if row is None else held_item_key(row[0])
     if key is None:
         return None
     return next(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), None)
@@ -768,7 +772,12 @@ class OperationAuthorization:
         decision = self._subject_decision(subject, session=session)
         if decision.level == 0 or subject.basis.domain != "held":
             return decision
-        target = held_target(self.conn, subject)
+        try:
+            target = held_target(self.conn, subject)
+        except ValueError:
+            # A hold whose item cannot be read could follow any item, so only the owner sees it.
+            owner = raw_protection.is_owner(self.who) and raw_protection.has_unrestricted_access(self.root, self.who)
+            return decision if owner else Decision(0)
         if target is None:
             return decision
         return egress._meet_decisions((decision, self._subject_decision(target, session=session)))
@@ -988,11 +997,18 @@ class OperationAuthorization:
                       and self.decision(subject, session=False).level < 6}
             self.cache._remember(state.summaries, dependency, (denied, {}), 16)
         denied, dirty = state.summaries[dependency]
-        if any(subject is not None and isinstance(subject.row_id, int) for subject in dirty.values()):
+        changed = {identity.rsplit("/", 1)[-1] for identity, subject in dirty.items()
+                   if subject is not None and isinstance(subject.row_id, int)}
+        if changed:
             # An item changes without its holds, whose decisions follow it, so they are decided again.
-            for (held_id,) in self.conn.execute("SELECT held_id FROM held_candidates WHERE collection_id=?", (cid,)):
+            for held_id, candidate in self.conn.execute(
+                    "SELECT held_id,candidate_json FROM held_candidates WHERE collection_id=?", (cid,)):
                 identity = f"exomem://collection-held/{cid}/{held_id}"
-                if identity in state.subjects:
+                try:
+                    follows = held_item_key(candidate) in changed
+                except ValueError:
+                    continue  # An unreadable hold follows no item; its decision cannot change with one.
+                if follows and identity in state.subjects:
                     dirty.setdefault(identity, state.subjects[identity])
         for identity, subject in dirty.items():
             if subject is not None and self.decision(subject, session=False).level < 6:

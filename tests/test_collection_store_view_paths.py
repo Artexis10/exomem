@@ -238,6 +238,47 @@ def test_a_hold_that_targets_a_withheld_item_is_absent(vault):
     assert withheld == [absent, _as(vault, _external(), read)]
 
 
+def test_a_held_view_edit_of_a_withheld_item_is_absent(vault, tmp_path):
+    """A view correction holds the edited bytes, which carry the item's title, at a path of its own."""
+    _add_secret(vault)
+
+    def observe():
+        return [_call(vault, "list_directory", path=WORK, recursive=True),
+                _call(vault, "record_memory", action="inspect")["collections"][0]["held"]]
+
+    absent = _as(vault, _external(), observe)
+    page = vault.root / SECRET
+    page.write_text(page.read_text() + "\nA local edit.\n")
+    inspected = _as(vault, owner_principal(), lambda: _call(vault, "record_memory", action="inspect", collection=CID))
+    version = next(entry["hash"] for entry in inspected["source_versions"] if entry["path"] == SECRET)
+    vault.update_record(CID, item_key=OTHER, changes={"count": 3}, why="count",
+                        expected_container_hash=inspected["lifecycle_guards"]["expected_container_hash"],
+                        expected_item_version=version)
+    vault.reconcile_views()
+    assert _as(vault, _external(), observe) == absent
+    owner = _as(vault, owner_principal(), lambda: _call(vault, "list_directory", path=f"{WORK}/Held"))
+    (held_path,) = [entry["path"] for entry in owner["entries"]]
+    assert "A local edit" in str(_as(vault, owner_principal(), lambda: _call(vault, "get", path=held_path)))
+    withheld = _as(vault, _external(), lambda: _call(vault, "get", path=held_path))
+    (vault.root / held_path).rename(tmp_path / "aside.md")
+    assert _as(vault, _external(), lambda: _call(vault, "get", path=held_path)) == withheld
+
+
+@pytest.mark.parametrize("candidate", ["[1]", "not json"])
+def test_a_hold_whose_item_cannot_be_read_is_withheld_from_all_but_the_owner(vault, candidate):
+    """Such a hold could follow any item; the collection must still list, read and count."""
+    with pytest.raises(collections.CollectionError) as refused:
+        vault.append_record(CID, item={"title": "Open plan", "count": "many"}, item_key=KEY, why="correct")
+    vault.connection.execute("UPDATE held_candidates SET candidate_json=?", (candidate,))
+
+    def observe():
+        answer = _call(vault, "get", path=refused.value.details["held"]["path"])
+        return isinstance(answer, dict), _call(vault, "record_memory", action="inspect")["collections"][0]["held"]
+
+    assert _as(vault, _external(), observe) == (False, 0)
+    assert _as(vault, owner_principal(), observe) == (True, 1)
+
+
 def test_a_warm_release_cache_withholds_a_hold_once_its_item_is_withheld(vault):
     """The cache decides changed rows again; a hold of a changed item must be decided with it."""
     with pytest.raises(collections.CollectionError):
