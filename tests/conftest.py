@@ -970,7 +970,7 @@ def _drain_background_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -
 
 
 @pytest.fixture(autouse=True)
-def _quiesce_graph_rebuilds():
+def _quiesce_graph_rebuilds(monkeypatch: pytest.MonkeyPatch):
     """Let no graph rebuild outlive the test that started it.
 
     Production runs one long-lived process against one vault. The suite runs
@@ -990,8 +990,27 @@ def _quiesce_graph_rebuilds():
     Deliberately not a convergence helper: a test that needs the graph to be
     current asserts that for itself with `graph_sync.await_active_rebuild`.
     This fixture only guarantees that nothing is still running.
+
+    Each test is one lifetime, as each service is. Every coordinator the test
+    creates is bound to the test's stop event, which teardown sets before the
+    drain. A rebuild then stops at its next cancellation point instead of
+    finishing a whole-vault walk that no assertion reads; joining those walks
+    was most of the teardown time in the suite's heaviest modules. A service
+    runtime the test starts binds its own lifetime over this one, as in
+    production.
     """
+    lifetime = threading.Event()
+    create_coordinator = graph_sync_module.GraphRebuildCoordinator.__init__
+
+    def _create_within_test_lifetime(coordinator, vault_root):
+        create_coordinator(coordinator, vault_root)
+        coordinator.bind_shutdown(lifetime)
+
+    monkeypatch.setattr(
+        graph_sync_module.GraphRebuildCoordinator, "__init__", _create_within_test_lifetime
+    )
     yield
+    lifetime.set()
     try:
         _drain_background_threads()
     finally:
