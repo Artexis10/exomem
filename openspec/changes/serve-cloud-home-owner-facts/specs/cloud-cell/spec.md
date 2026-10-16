@@ -23,9 +23,9 @@ Both headers MUST tune eagerness only, never authority.
 ### Requirement: A cloud cell serves its owner's activity and note count through MCP
 
 `bootstrap(profile="compact", section="activity")` SHALL return `{since, as_of, note_count, events}` to the owner and refuse every other principal with `ACTIVITY_OWNER_REQUIRED`.
-`events` SHALL hold at most 20 events, newest first, each `{client, action, items, at}`.
+`events` SHALL hold at most 20 events, newest first, each `{app_id, client, action, items, at}`.
 Only successful calls SHALL become events. `action` SHALL be `recalled` or `saved`, derived from the command registry's product actions and the row's `access`.
-Rows of one client family and action SHALL join the newest event of that pair when they are at most 60 seconds older than its newest row.
+Rows of one validated app ID, client family and action SHALL join the newest event of that key when they are at most 60 seconds older than its newest row.
 `items` SHALL be null when any joined row's count is unknown.
 `note_count` SHALL count every page saved in the Knowledge Base, sources, records and compiled notes alike, without navigation pages or collection manifests.
 `note_count` SHALL be null when any part of the Knowledge Base cannot be read, and MUST NOT be older than a committed write.
@@ -62,3 +62,35 @@ The cell MUST NOT register a route for these facts.
 
 - **WHEN** Home asks an image that predates the section
 - **THEN** the image refuses the unknown section
+
+### Requirement: Cloud actor metadata identifies the authenticated grant
+
+The authenticated gateway SHALL supply the stable OAuth grant UUID in `x-exomem-app-id`.
+It MUST NOT forward a caller's copy of that header or derive its value from handshake names.
+A cloud cell SHALL read the header through its existing trusted cell-bearer boundary, independently of client-name resolution.
+The actor ID SHALL be canonical UUID text parsed by a UUID parser, or null when missing, malformed or unavailable.
+A local server SHALL report null even when a request supplies that header.
+Each owner activity event SHALL expose the validated actor ID as `app_id`, or null for older or unresolved rows.
+Actor metadata MUST NOT change principal resolution, authorization, engagement context or any authority ceiling.
+
+#### Scenario: Two grants share a client family
+
+- **WHEN** two authenticated grants of one client family save within the merge window
+- **THEN** each grant has a separate event with its own `app_id` and item count
+- **AND** later calls from one grant join only that grant's event of the same family and action
+
+#### Scenario: Identity cannot be resolved
+
+- **WHEN** a cloud request lacks a canonical actor header, or its HTTP headers are unavailable
+- **THEN** its row and event report null `app_id` without a client-name fallback
+
+#### Scenario: A local caller supplies an actor ID
+
+- **WHEN** a local request supplies a valid actor header or a matching handshake name
+- **THEN** its row and event report null `app_id`
+
+#### Scenario: Older rows remain unattributed
+
+- **WHEN** a schema 2 row lacks `app_id`
+- **THEN** activity retains its count and reports null `app_id`
+- **AND** it never merges into an event with a resolved actor ID

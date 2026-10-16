@@ -1,5 +1,6 @@
 .venv/
 .venv-*/
+.substrate-test-contract/
 __pycache__/
 *.py[cod]
 .pytest_cache/

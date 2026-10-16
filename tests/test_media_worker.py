@@ -4366,8 +4366,8 @@ def test_the_signature_moves_on_a_real_enqueue(vault) -> None:
 # through the full SQLite owner path every 5 s, forever: 63 of 954 profile
 # samples on an idle cell. While nothing changes it now doubles from 5 s up to
 # 60 s. Any work, any store change and any in-process enqueue put it back at
-# 5 s. The idle interval test advances its polling clock directly. Store-change
-# tests use an accelerated clock, so two real seconds represent 200 s of idle.
+# 5 s. The idle and store-change tests advance their polling clock directly. The
+# enqueue test uses an accelerated clock: two real seconds represent 200 s of idle.
 
 
 def _hundredfold_clock():
@@ -4428,25 +4428,27 @@ def test_a_store_change_puts_the_backed_off_recheck_back_at_five_seconds(
     monkeypatch.setattr(
         worker, "_launch_child", lambda: pytest.fail("idle supervisor launched a child")
     )
-    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.005)
-    monkeypatch.setattr(media_worker, "_clock", _hundredfold_clock())
-    checks = _record_store_checks(monkeypatch, worker)
-    thread = threading.Thread(target=worker._supervise, daemon=True)
-    thread.start()
-    try:
-        # 150 s of idle: the re-check has backed off to 60 s.
-        time.sleep(1.5)
-        # Another process writes the store without creating work for this one.
-        changed_at = media_worker._clock()
-        os.utime(worker._store.path)
-        # 30 s more: one re-check at the floor would land, a backed-off one not.
-        time.sleep(0.3)
-    finally:
-        worker._stop_event.set()
-        worker._wake.set()
-        thread.join(timeout=5)
-    assert not thread.is_alive()
+    now = 0.0
+    changed_at = None
 
+    def poll(_timeout):
+        nonlocal now, changed_at
+        now += 0.5
+        if now == 150.0:
+            # Change the real signature between checks, after the 135 s idle read closed.
+            os.utime(worker._store.path)
+            changed_at = now
+        if now >= 180.0:
+            worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now)
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    checks = _record_store_checks(monkeypatch, worker)
+
+    worker._supervise()
+
+    assert changed_at is not None
     after_change = [check for check in checks if check >= changed_at]
     assert len(after_change) >= 3, (
         f"after the store changed at {changed_at:.1f}s the store was checked at "

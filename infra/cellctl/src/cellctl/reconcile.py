@@ -44,6 +44,7 @@ from .decide import (
     hourly_backup_due,
     nightly_backup_due,
     relocation_volume,
+    storage_receipt,
 )
 from .manifests import (
     BACKUP_JOB_NAME,
@@ -1859,6 +1860,7 @@ async def _reconcile_row(
         await db.write_import(connection, item.import_id, {"observed_state": "discarded", "recipient": None,
                               "upload_id": None, "part_urls": None, "urls_expire_at": None})
     row_updates: dict[str, object] = dict(decision.row_updates)
+    row_updates.update(storage_receipt(row, observation, cluster_config.storage, now=now))
     if refused:
         # D4: the StatefulSet landed but another object was refused. The
         # refusal is what the row records, and nothing converged.

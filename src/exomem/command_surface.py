@@ -669,6 +669,8 @@ def mcp_caller_identity() -> dict[str, str | None]:
 
     The name comes from `clientInfo`, then (cloud mode only) the gateway's
     `cloud_cell.GATEWAY_CLIENT_HEADER`, then `User-Agent`.
+    `app_id` comes only from the Cloud gateway's authenticated grant UUID.
+    It correlates owner activity and never participates in authorization.
 
     Never raises. Outside an MCP call every field is simply `None`.
     """
@@ -677,6 +679,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         "client_version": None,
         "transport": None,
         "session_id": None,
+        "app_id": None,
     }
     try:
         from fastmcp.server.dependencies import get_context, get_http_headers
@@ -703,9 +706,13 @@ def mcp_caller_identity() -> dict[str, str | None]:
         # transport signal; there is no separate flag to read.
         headers = get_http_headers()
         identity["transport"] = "http" if headers else "stdio"
-        if not identity["client_name"]:
-            from . import cloud_cell
+        from . import cloud_cell
 
+        if cloud_cell.cloud_mode_enabled():
+            identity["app_id"] = cloud_cell.canonical_app_id(
+                headers.get(cloud_cell.GATEWAY_APP_ID_HEADER)
+            )
+        if not identity["client_name"]:
             if cloud_cell.cloud_mode_enabled():
                 gateway_client = str(
                     headers.get(cloud_cell.GATEWAY_CLIENT_HEADER, "") or ""

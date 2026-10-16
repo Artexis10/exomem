@@ -70,3 +70,21 @@ Every reader of recent activity SHALL treat the latest such time as a boundary, 
 
 - **WHEN** a recall succeeds but its row cannot be appended
 - **THEN** the next activity interval starts strictly after that recall, or the activity section is unavailable
+
+### Requirement: Actor Metadata Is Additive And Content-Free
+
+Schema 2 rows SHALL carry optional `app_id`, the authenticated gateway's canonical grant UUID or null.
+The actor ID SHALL survive content-private logging and participate in the existing row hash.
+A malformed actor value SHALL become null without losing the call row.
+The ledger SHALL keep older rows byte-exact and verify chains from rows without actor metadata into rows with actor metadata.
+The actor ID MUST NOT change access classification, item counts, disclosure, rotation or authority.
+
+#### Scenario: Private logging keeps actor metadata
+
+- **WHEN** a Cloud call with a valid gateway actor ID completes under content-private logging
+- **THEN** its row retains `app_id` without storing caller content
+
+#### Scenario: Existing schema 2 history verifies
+
+- **WHEN** a writer appends actor metadata after schema 2 rows without it
+- **THEN** the chain verifies and activity retains the older rows' known counts

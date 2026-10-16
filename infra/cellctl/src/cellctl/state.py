@@ -95,6 +95,11 @@ class CellRow:
     # move-cloud-cells-to-local-storage D10: the size cellctl grew the cell's
     # local volume to, or None while it has never grown.
     grown_storage_gib: int | None = None
+    observed_storage_pvc_uid: str | None = None
+    observed_storage_pvc_version: str | None = None
+    observed_storage_capacity_bytes: int | None = None
+    observed_storage_generation: int | None = None
+    observed_storage_at: datetime | None = None
     # Read only: a cell never backed up ages its backup alert from here.
     created_at: datetime | None = None
 
@@ -147,6 +152,9 @@ class ClusterObservation:
     pvc_bound: bool = False
     pvc_volume_id: str | None = None
     pvc_uid: str | None = None
+    pvc_resource_version: str | None = None
+    pvc_capacity_bytes: int | None = None
+    pvc_resize_pending: bool = False
     pv_claim_ref_uid: str | None = None
     pv_storage_class: str | None = None
     pvc_storage_class: str | None = None
