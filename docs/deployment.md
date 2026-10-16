@@ -900,9 +900,11 @@ the backups, and restore a copy taken after the latest migration.
 
 #### When an export cannot finish
 
-An apply that stops leaves its intent in the live store. The store then keeps
-every row and refuses writes, and the services refuse its collections until the
-export finishes or the owner abandons it.
+An apply that stops leaves its intent in the live store. Once the apply has
+published the replica, the replica carries the intent too. The store then keeps
+every row and refuses writes. The services refuse its collections with
+`COLLECTION_STORE_EXPORT_PENDING` until the export finishes or the owner
+abandons it, on this host and on every host that adopts the replica.
 
 - `COLLECTION_STORE_EXPORT_VIEW_EDITED` names each view that changed after the
   export began. To export without the change, put back the bytes of each named

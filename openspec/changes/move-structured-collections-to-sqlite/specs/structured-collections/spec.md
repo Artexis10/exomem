@@ -286,6 +286,10 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **WHEN** the owner previews an export of a vault with a collection that the store created
 - **THEN** the preview is blocked, names that collection, and the vault, its marker and its fence stay as they were
 
+#### Scenario: Another host refuses a store whose export recorded its intent
+- **WHEN** an export recorded its intent and published the replica, then stopped, and another host with its own state adopts the replica
+- **THEN** that host refuses the store's collections with `COLLECTION_STORE_EXPORT_PENDING`, commits nothing and leaves the coordinator's recorded head as it was
+
 #### Scenario: An interrupted export resumes from its intent
 - **WHEN** an export stops after its intent, between a collection's files and its checkpoint, after its fence retire or after its marker retire
 - **THEN** the next apply with the same plan identity finishes to the same files and tombstones without a second checkpoint

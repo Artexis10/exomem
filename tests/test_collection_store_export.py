@@ -11,7 +11,7 @@ import json
 import os
 import shutil
 import uuid
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import replace
 
 import pytest
@@ -331,6 +331,39 @@ def another_host_writes(root, tmp_path):
                  why="a store-mode write on another host")
         finally:
             service.stop()
+
+
+def test_another_host_never_serves_a_store_whose_export_published_its_intent(env, capsys, tmp_path):  # noqa: F811
+    """A host that adopts the vault replica mid-export because the replica lacks the export's intent,
+    then serves the store and commits a row that the exported files will not hold."""
+    from test_collection_store_s1_gate import _until
+
+    root = env
+    migrated_and_written(root, capsys)
+    crash_export(tmp_path, "before-files", preview_id(root, capsys))  # stopped right after its publication
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    recorded = client.status().collection_store_head
+    other = tmp_path / "other"
+    shutil.copytree(root, other)
+    with pytest.MonkeyPatch.context() as there:
+        for name, value in {"EXOMEM_STATE_ROOT": str(tmp_path / "other-state"), "EXOMEM_VAULT_PATH": str(other),
+                            "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-other"),
+                            "EXOMEM_WRITER_LEASE_REPLICA_ID": "other"}.items():
+            there.setenv(name, value)
+        service = Service(other, writer_lease.start_server_lifecycle())
+        try:
+            _until(lambda: service.manager.status().get("collection_store", {}).get("status") in {
+                "admitted", "export_pending"}, seconds=30)
+
+            assert service.manager.status()["collection_store"]["status"] == "export_pending"
+            with pytest.raises((OpError, ValueError, CollectionStoreError)) as refused:
+                call(other, "record_memory", action="append", collection=WORK, item={"title": "Other host row"},
+                     why="a store-mode write on another host")
+            assert "COLLECTION_STORE_EXPORT_PENDING" in str(refused.value)
+        finally:
+            with suppress(OpError):
+                service.stop()
+    assert client.status().collection_store_head == recorded
 
 
 def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it_writes(

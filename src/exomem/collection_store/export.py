@@ -702,12 +702,14 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
                 token = manager._fencing_token
                 with session.writer(token) as writer:
                     if token != begun:
-                        # The intent adds no commit, so the replica publication below copies nothing
-                        # new and the replica lacks it: another host may adopt the replica and write
-                        # once this run's lease lapses. A resume, or a run whose token changed since
-                        # _begin, first proves the coordinator's head is this store's; under _begin's
-                        # own token, _begin's admission of the store proved it.
+                        # Until the publication below copies the intent, the replica lacks it, so
+                        # another host may adopt the replica and write once this run's lease lapses.
+                        # A resume, or a run whose token changed since _begin, first proves the
+                        # coordinator's head is this store's; under _begin's own token, _begin's
+                        # admission of the store proved it.
                         admission._verify_acquisition(writer, runtime, fence, marker)
+                    # The intent adds no commit; the publication copies the store because its intent
+                    # changed, so a host that adopts the replica refuses it as exporting.
                     published = admission._publish_current_epoch(session, writer, token)
                 if published.status != "published":
                     raise CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING",
@@ -820,6 +822,8 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                     conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (
                         schema.META_EXPORT_PARENTS, json.dumps(parents, sort_keys=True, separators=(",", ":"))))
                     conn.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
+                # The copy drops the intent from the replica, so other hosts adopt the store again; a
+                # cut before it heals at the store's next publication, which sees the intent changed.
                 published = admission._publish_current_epoch(session, writer, token)
             if published.status != "published":
                 raise CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING",
