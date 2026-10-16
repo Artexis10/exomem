@@ -191,11 +191,12 @@ INTERRUPTED, NO_BASIS, LIVE_CHANGED = "interrupted_cutover", "no_basis", "live_s
 SET_CHANGED, AUDIT_UNREADABLE, BASIS_CHANGED = "collection_set_changed", "audit_unreadable", "basis_changed"
 
 
-def _carried(root, directory):
+def _carried(root, directory, *, supersede=False):
     """The report for staging that still matches every input it was built from, or why it does not.
 
     Each collection is compared by its own basis, so an unrelated activity-log write does
     not invalidate it; the live store, when one exists, must be unchanged since its copy.
+    ``supersede`` ignores a live store that is this migration's own unadmitted one.
     Returns the report, or None with the reason and the paths of changed collections.
     """
     path = directory / _STAGING
@@ -212,7 +213,7 @@ def _carried(root, directory):
         return None, INTERRUPTED, []
     if basis is None or not _usable(basis):
         return None, NO_BASIS, []
-    live = connection.store_path(root).exists()
+    live = connection.store_path(root).exists() and not supersede
     if (basis["live"] is not None) != live or (
             live and _live_digest(root) != basis["live"]["snapshot_sha256"]):
         return None, LIVE_CHANGED, []
@@ -363,6 +364,19 @@ def _changed_since_publication(root, intent):
         return sorted(changed)
 
 
+def _fenced(session, fence_client):
+    """Whether a lease on this vault needs the store capability, which only a bound runtime sends."""
+    return authority.read_marker(session.root) is not None or fence_client.collection_store_fence().enrolled
+
+
+def _hold_lease(session, manager, root, *, fenced):
+    """Take the writer lease and return its token; it stays held after the authority check."""
+    if fenced:
+        session.runtime()
+    with manager.writer_authority_guard(vault_root=root):
+        return manager._fencing_token
+
+
 def cutover(session, manager, fence_client) -> dict:
     """Make verified staging the live store and admit it, inside the owner's offline session.
 
@@ -385,37 +399,43 @@ def cutover(session, manager, fence_client) -> dict:
             with closing(connection.open_reader(session.path)) as reader:
                 admitted = authority.intent_status(root, reader, pending) == "marker_admitted"
             # Until its marker is installed the files stay canonical, so every collection is
-            # compared with the basis it was imported from, under the mutation boundary.
+            # compared with the basis it was imported from: first without the lease, so a
+            # refusal holds none, then again under it before any fence step or marker.
             changed = [] if admitted else _changed_since_publication(root, pending)
             if not changed:
-                result = admission._resume_locked(session, fence_client)
-                for leftover in _staging_directories(root):
-                    _discard(leftover)
-                return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
-                        "staging": "resumed", **result}
+                token = _hold_lease(session, manager, root, fenced=_fenced(session, fence_client))
+                changed = [] if admitted else _changed_since_publication(root, pending)
+                if not changed:
+                    result = admission._resume_locked(session, fence_client, preparation_token=token)
+                    for leftover in _staging_directories(root):
+                        _discard(leftover)
+                    return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
+                            "staging": "resumed", **result}
             if pending["expected_marker"] is not None or fence_client.collection_store_fence().enrolled:
                 # Once a fence binds the published store, writers inside the writer lease are
                 # fenced from these files, so only a writer outside it changed them. Admitting
                 # would lose that change; refusing keeps the import unadmitted and the files
                 # canonical. The cost is high and the owner pays it: on a first enrolment the cut
                 # fence refuses every lease without the store capability, so every governed
-                # write in the vault waits, and on an S1 vault its store collections are
-                # unavailable. Automation is deferred to tasks P1b.3c: it must supersede the
-                # unadmitted store (a fence CAS to fresh staging on a first enrolment; on S1, a
-                # restore of the superseded store that respects the coordinator's recorded head).
+                # write in the vault waits, though the files can still be read; on an S1 vault
+                # its store collections and the collections the migration names are unavailable.
+                # Automation is deferred to tasks P1b.3c: it must supersede the unadmitted store
+                # (a fence CAS to fresh staging on a first enrolment; on S1, a restore of the
+                # superseded store that respects the coordinator's recorded head).
                 raise CollectionStoreError(STALE, (
                     "these collections changed after the migration published its store, so the store is not "
                     f"admitted: {', '.join(changed)}. Restore their files to the bytes the migration imported "
                     "(from a backup or the sync history), then run `exomem collections migrate --apply` again. "
                     "Until then, writes that need the writer lease wait; a release with the owner step that "
                     "replaces an unadmitted store will offer another way out"))
+        supersede = pending is not None
         raw = authority.read_marker(root)
         marker = None if raw is None else authority.parse_marker(root, raw)
-        # Staging needs only the mutation boundary, which keeps the files and the live store
-        # still; the lease waits until there is a store to publish, because an unadmitted
-        # token cannot hand its lease back and would hide the report behind that refusal.
+        # Staging runs under the mutation boundary alone, which keeps the files and the live
+        # store still only for processes that share this lease state directory. The lease waits
+        # until there is a store to publish, because an unadmitted token cannot hand it back.
         directories = _staging_directories(root)
-        if pending is not None:
+        if supersede:
             # Nothing fences or routes the published store yet: fresh staging supersedes it.
             report, reason, directory = None, BASIS_CHANGED, None
         else:
@@ -423,12 +443,20 @@ def cutover(session, manager, fence_client) -> dict:
                 None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
             directory = directories[0] if report is not None else None
         if report is None:
-            report, directory = _stage(root, base=pending is None)
+            report, directory = _stage(root, base=not supersede)
         if directory is None:
             return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
         runtime = session.runtime() if marker is not None else None
         with manager.writer_authority_guard(vault_root=root):
             token = manager._fencing_token
+            # Staging held no lease, so a lease holder with another state directory may have
+            # written meanwhile. Under the lease none can; only a writer outside it still can.
+            rechecked, why, rechanged = _carried(root, directory, supersede=supersede)
+            if rechecked is None:
+                report, directory = _stage(root, base=not supersede)
+                reason, changed = why, rechanged
+                if directory is None:
+                    return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
             with closing(connection.open_reader(directory / _STAGING)) as staging:
                 _require_current_coordinator(runtime, fence_client, marker, staging)
                 intent = _intent(root, marker, raw, staging)

@@ -422,6 +422,60 @@ def test_staging_whose_basis_lacks_a_field_is_rebuilt(env, capsys):
     assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.NO_BASIS)
 
 
+def write_from_another_state_dir(monkeypatch, tmp_path, module, name, title):
+    """Make ``module.name`` let one writer that keeps its lease state elsewhere append to Work once.
+
+    Such a writer (a system service beside a user shell) does not share the owner's
+    mutation boundary; only the coordinator's writer lease excludes it.
+    """
+    step, written = getattr(module, name), []
+
+    def then_write(*args, **kwargs):
+        found = step(*args, **kwargs)
+        if not written:
+            with pytest.MonkeyPatch.context() as shell:
+                shell.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "other-lease-state"))
+                written.append(append_to_work(args[0], title))
+        return found
+
+    monkeypatch.setattr(module, name, then_write)
+    return written
+
+
+def test_a_write_from_outside_the_owner_boundary_during_staging_reaches_the_store(env, capsys, monkeypatch, tmp_path):
+    """An apply that stages without the writer lease and publishes, losing a write that a writer
+    outside its mutation boundary made meanwhile."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    written = write_from_another_state_dir(monkeypatch, tmp_path, migration, "_carried", "Written during staging")
+    assert migrate(root, "apply") == 0
+    applied = printed(capsys)
+    assert (applied["status"], applied["rebuilt_because"], applied["changed"]) == (
+        "marker_admitted", migration.BASIS_CHANGED, [WORK])
+    service = start_service(root)
+    try:
+        assert written[0] in rows(root, CID)
+    finally:
+        service.stop()
+
+
+def test_a_write_from_outside_the_owner_boundary_before_a_resume_reaches_the_store(env, capsys, monkeypatch, tmp_path):
+    """A resumed cutover that compares the files without the writer lease, then admits an import
+    that a writer outside its mutation boundary has changed since."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-fence")
+    written = write_from_another_state_dir(monkeypatch, tmp_path, migration, "_changed_since_publication",
+                                           "Written before the resume")
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
+    service = start_service(root)
+    try:
+        assert written[0] in rows(root, CID)
+    finally:
+        service.stop()
+
+
 def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
     """Carrying a prepared import forward although its collection changed since, which loses
     the write from the store that becomes canonical."""

@@ -813,10 +813,14 @@ def _offline_owner(root, operation, work):
         try:
             manager.close()
         except OpError as error:
-            if operation != "rollback" or result["status"] != "disabled":
+            if operation == "migrate" and result.get("status") != "marker_admitted":
+                # A migrate that admitted nothing has no head to hand off; the report must not hide.
+                result = {**result, "lease": "expires", "lease_reason": error.code}
+            elif operation != "rollback" or result["status"] != "disabled":
                 raise
-            # The local disable already committed; a failed handoff must not hide it.
-            result = {**result, "publication": "pending", "reason": error.code}
+            else:
+                # The local disable already committed; a failed handoff must not hide it.
+                result = {**result, "publication": "pending", "reason": error.code}
     return result
 
 
