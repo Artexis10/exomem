@@ -9,8 +9,8 @@
 
 - [x] 2.1 Test through a current projection: a visible and hidden twin resolves to the visible page and two visible twins read as ambiguous, both as through the scan; an absent reference and a hidden-only reference give the same response; a pending external edit makes resolution scan and answer; a `.MD` page and a CR-only page resolve alike through both sources; a vault with `trash/` scans once with the projection current and resolves its `trash/` page.
 - [x] 2.2 Extend the scan-count disclosure test: present and absent references cause zero scans with the projection current and one scan with it not current.
-- [ ] 2.3 Run an author-independent review of the diff and recheck each correction.
+- [x] 2.3 Run an author-independent review of the diff and recheck each correction.
 
 ## 3. Closure
 
-- [ ] 3.1 After merge, synchronize these deltas into `openspec/specs/stable-memory-references/spec.md` and `openspec/specs/planning/spec.md`, then archive the change with `openspec archive`.
+- [x] 3.1 After merge, synchronize these deltas into `openspec/specs/stable-memory-references/spec.md` and `openspec/specs/planning/spec.md`, then archive the change with `openspec archive`.
