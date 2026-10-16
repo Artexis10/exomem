@@ -1003,6 +1003,94 @@ def test_store_client_round_trips_heads_and_keeps_operator_release_headless(
         assert client.status().collection_store_head == head
 
 
+def test_a_media_child_without_a_store_runtime_shares_the_lease_under_the_store_fence(
+    monkeypatch, tmp_path
+) -> None:
+    """A media child attaches no store runtime, yet it must still write the vault's files.
+
+    Every process of this release sends store collections to the serving store, so the
+    store fence admits it. The child shares the serving replica's token, and its renewal
+    keeps the head that the store reported.
+    """
+    from io import BytesIO
+
+    from starlette.testclient import TestClient
+
+    from exomem import media_worker
+    from exomem.lease_coordinator import create_app
+    from exomem.writer_lease import (
+        COLLECTION_STORE_CAPABILITY,
+        CollectionStoreHead,
+        LeaseCoordinatorClient,
+        get_manager,
+    )
+
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator"
+    )
+    with TestClient(app) as transport:
+
+        def urlopen(request, timeout):
+            response = transport.request(
+                request.method,
+                request.full_url,
+                content=request.data,
+                headers=dict(request.header_items()),
+            )
+            assert response.status_code == 200
+            return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        config = LeaseConfig(
+            url="https://lease.example", vault_id="main", replica_id="desktop", token="lease"
+        )
+        head = CollectionStoreHead(
+            "a9d3d366-2509-46ca-bc29-3f318ef9d78d",
+            "6044a9ed-b2d4-4c50-b65f-af08c7504dbb",
+            58,
+            "a" * 64,
+        )
+        LeaseCoordinatorClient(replace(config, token="operator")).transition_collection_store_fence(
+            expected_generation=0, store_id=head.store_id
+        )
+        service = LeaseCoordinatorClient(config)
+        held = service.acquire(collection_store_capability=COLLECTION_STORE_CAPABILITY)
+        service.renew(
+            held.fencing_token,
+            collection_store_capability=COLLECTION_STORE_CAPABILITY,
+            collection_store_head=head,
+        )
+        for name, value in {
+            "EXOMEM_WRITER_LEASE_URL": config.url,
+            "EXOMEM_WRITER_LEASE_VAULT_ID": config.vault_id,
+            "EXOMEM_WRITER_LEASE_REPLICA_ID": config.replica_id,
+            "EXOMEM_WRITER_LEASE_TOKEN": config.token,
+            "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease"),
+        }.items():
+            monkeypatch.setenv(name, value)
+        reset_managers_for_tests()
+
+        assert media_worker._probe_writer_authority() is None
+        child = get_manager()
+        assert child._collection_store is None
+        assert child.ensure_writer().fencing_token == held.fencing_token
+
+        class OneRenewal(threading.Event):
+            ticks = 0
+
+            def wait(self, timeout=None):  # noqa: ARG002
+                self.ticks += 1
+                return self.ticks > 1
+
+        child._stop = OneRenewal()
+        child._renew_loop()
+
+        assert child._fencing_token == held.fencing_token
+        status = service.status()
+        assert (status.holder, status.fencing_token) == ("desktop", held.fencing_token)
+        assert status.collection_store_head == head
+
+
 def test_store_client_retires_a_fence_and_re_enrols_at_the_next_generation(
     monkeypatch, tmp_path
 ) -> None:
@@ -1484,7 +1572,7 @@ class FakeClient:
             raise self.record
         return self.record
 
-    def acquire(self) -> LeaseRecord:
+    def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
         self.acquisitions += 1
         record = self._get()
         return LeaseRecord(
@@ -1494,7 +1582,7 @@ class FakeClient:
     def status(self) -> LeaseRecord:
         return self._get()
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
+    def renew(self, fencing_token: int, *, collection_store_capability: str | None = None) -> LeaseRecord:
         return self.acquire()
 
     def release(self, fencing_token: int) -> LeaseRecord:
@@ -1507,13 +1595,13 @@ class StoreClient:
         self.store = store
         self.replica_id = replica_id
 
-    def acquire(self) -> LeaseRecord:
+    def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
         return LeaseRecord.from_json(self.store.acquire("main", self.replica_id, 10))
 
     def status(self) -> LeaseRecord:
         return LeaseRecord.from_json(self.store.status("main"))
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
+    def renew(self, fencing_token: int, *, collection_store_capability: str | None = None) -> LeaseRecord:
         return LeaseRecord.from_json(self.store.renew("main", self.replica_id, fencing_token, 10))
 
     def release(self, fencing_token: int) -> LeaseRecord:
@@ -1524,7 +1612,7 @@ def test_manager_names_schema_fence_refusal_without_acquiring_writer(
     tmp_path: Path,
 ) -> None:
     class RefusingClient:
-        def acquire(self) -> LeaseRecord:
+        def acquire(self, *, collection_store_capability: str | None = None) -> LeaseRecord:
             return LeaseRecord(
                 None,
                 None,
@@ -1560,7 +1648,7 @@ class BlockingRejectedRenewalClient(FakeClient):
         self.renew_started = threading.Event()
         self.resume_renewal = threading.Event()
 
-    def renew(self, fencing_token: int) -> LeaseRecord:
+    def renew(self, fencing_token: int, *, collection_store_capability: str | None = None) -> LeaseRecord:
         assert fencing_token == 1
         self.renew_started.set()
         assert self.resume_renewal.wait(_HOLD_SECONDS)

@@ -4345,10 +4345,11 @@ class LeaseManager:
                     self.config.replica_id, self._expires_at, self._fencing_token, True
                 )
             try:
-                record = self.client.acquire(**(
-                    {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
-                    if self._collection_store is not None else {}
-                ))
+                # Every process of this release honours the store's routing: a store
+                # collection is never written as a file here, with or without an
+                # attached store runtime. So a process that serves no store, such as a
+                # media child, still offers the capability the store fence requires.
+                record = self.client.acquire(collection_store_capability=COLLECTION_STORE_CAPABILITY)
             except OpError as error:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
@@ -6396,7 +6397,8 @@ class LeaseManager:
                 if self._collection_store is not None:
                     self._renew_collection_store(token)
                     continue
-                record = self.client.renew(token)
+                # A holder without a store runtime reports no head, so the recorded one stays.
+                record = self.client.renew(token, collection_store_capability=COLLECTION_STORE_CAPABILITY)
                 with self._lock:
                     if self._fencing_token != token:
                         continue
