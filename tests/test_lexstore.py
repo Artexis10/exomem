@@ -1477,6 +1477,34 @@ def test_emitted_parent_hints_use_json_for_large_path_sets(tmp_path):
     assert result.value == {path: None for path in paths}
 
 
+def test_emitted_parent_hints_probe_each_requested_path_by_key(tmp_path):
+    """Recall passes every lane's candidates here. Driving the join from the
+    in-scope pages rescans the JSON array once per page: a 1,000-path lookup
+    on a 7,000-page vault took 1.4 s instead of ~20 ms."""
+    paths = {f"Knowledge Base/large/page-{number:04d}.md" for number in range(50)}
+    for rel in paths:
+        _write_page(tmp_path, rel, "ordinary page")
+    assert lexstore.search_bm25(tmp_path, "ordinary", k=3, scope="kb")
+
+    conn = sqlite3.connect(lexstore.get_store(tmp_path).path)
+    executed = []
+
+    class _Recording:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            return conn.execute(sql, params)
+
+    try:
+        hints = lexstore.get_store(tmp_path)._emitted_parent_hints_query(_Recording(), paths, "kb")
+        assert hints == {path: None for path in paths}
+        (sql, params), = executed
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        conn.close()
+    pages_steps = [step for step in plan if " p " in f" {step} "]
+    assert pages_steps and all("(path=?)" in step for step in pages_steps), plan
+
+
 def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
     known = _write_page(tmp_path, "Knowledge Base/known.md", "known page")
     out_of_scope = _write_page(tmp_path, "Projects/out-of-scope.md", "outside page")

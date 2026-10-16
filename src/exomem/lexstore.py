@@ -8808,11 +8808,16 @@ class LexicalStore:
         paths: set[str],
         scope: str,
     ) -> dict[str, str | None]:
-        """One JSON-backed scoped query, independent of SQLite bind limits."""
+        """One JSON-backed scoped query, independent of SQLite bind limits.
+
+        CROSS JOIN fixes the loop order: each requested path is one primary-key
+        probe. Left to the planner, SQLite walked every in-scope page and rescanned
+        the whole JSON array for each, so a few hundred candidates cost ~0.2 s.
+        """
         col = "in_vault" if scope == "vault" else "in_kb"
         rows = conn.execute(
-            "SELECT p.path, p.emitted_parent_path FROM pages p "
-            "JOIN json_each(?) requested ON requested.value = p.path "
+            "SELECT p.path, p.emitted_parent_path FROM json_each(?) requested "
+            "CROSS JOIN pages p ON p.path = requested.value "
             f"WHERE p.{col} = 1",
             (json.dumps(sorted(paths), ensure_ascii=False),),
         ).fetchall()
