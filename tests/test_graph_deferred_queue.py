@@ -44,7 +44,7 @@ from typing import Any
 
 import pytest
 
-from exomem import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
+from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
@@ -1062,6 +1062,60 @@ def test_a_late_refresh_behind_a_late_registry_update_repairs_per_path(
     index_sync.drain_graph_work(vault)
     assert EpistemicGraphIndex(vault).available()
     assert passes == [], "a whole-vault pass repaired one late page"
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def test_a_split_checkpoint_converges_through_one_covering_drain_not_a_whole_vault_pass(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipts that retired without an acknowledgement are re-covered, not rebuilt.
+
+    A drain acknowledges only a batch that covers the committed checkpoint's
+    whole path set. A truncated batch and the remainder that follows it each
+    publish their proven rows and retire their receipts without that claim, so
+    the queue empties while the graph stays unreadable. The drain daemon then
+    queued a whole-vault rebuild for a repair that one bounded drain of the
+    committed checkpoint finishes.
+    """
+    # No page links to either of these, so neither drain widens to the other.
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_C: _page("C", "C is a new plain claim."),
+        },
+    )
+    index_sync.drain_graph_work(vault, limit=1)
+    assert len(deferred_index.list_graph_paths(vault)) == 1
+    assert _acknowledged(vault) < committed
+
+    markers: list[int] = []
+    passes: list[int] = []
+    real_mark = deferred_index.mark_graph_full_rebuild
+    real_pass = EpistemicGraphIndex._rebuild_all_pass
+
+    def mark(root: Path, *, generation: int) -> None:
+        markers.append(generation)
+        real_mark(root, generation=generation)
+
+    def counted(self: Any, *args: Any, **kwargs: Any) -> Any:
+        passes.append(1)
+        return real_pass(self, *args, **kwargs)
+
+    monkeypatch.setattr(deferred_index, "mark_graph_full_rebuild", mark)
+    monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", counted)
+    for _ in range(2):
+        graph_drain._work_once(vault)
+        if EpistemicGraphIndex(vault).available():
+            break
+
+    assert markers == [], "drain lag was escalated to a whole-vault rebuild"
+    assert passes == [], "a whole-vault pass repaired a two-page checkpoint"
+    assert EpistemicGraphIndex(vault).available()
+    assert _acknowledged(vault) == committed
+    assert deferred_index.list_graph_paths(vault) == []
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
 

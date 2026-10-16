@@ -8,6 +8,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from . import reserved_paths
+from . import call_spans, reserved_paths
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
@@ -839,10 +840,11 @@ def paths_for_ids_read_only(
 
     The reverse direction of `refs_for_paths`, and read-only in the strict
     sense that separates it from every other resolver here: it never creates,
-    rebuilds, or refreshes the sidecar, so a caller that must leave the vault
-    byte-identical can use it. `.refs.sqlite` is registered internal state and
-    a canonical byte census skips it, which is exactly why an accidental
-    rebuild inside a read has to be impossible rather than merely unlikely.
+    fills, rebuilds, or refreshes the sidecar or any cache, so a caller that
+    must leave the vault byte-identical can use it. `.refs.sqlite` is
+    registered internal state and a canonical byte census skips it, which is
+    exactly why an accidental rebuild inside a read has to be impossible
+    rather than merely unlikely.
 
     Every path holding an id is returned, so a duplicated identity reads as a
     tuple of length two. This function never raises `AMBIGUOUS_REFERENCE`: that
@@ -850,13 +852,17 @@ def paths_for_ids_read_only(
     release decision over those pages, so a caller forbidden to disclose the
     count cannot afford to catch the exception and must see the shape instead.
 
-    Cost is one whole-corpus scan for the entire batch — never one per id, and
-    never a scan chosen by what any faster source already answered. That last
-    point is a disclosure property rather than an optimisation, and it is why
-    there is no sidecar fast path here: work that varies with which ids exist
-    lets a caller infer, from the work performed, that some page carries an id
-    it is not allowed to see. The scan is the same fallback
-    `ReferenceIndex.resolve` takes when the sidecar is absent or incompatible.
+    The answer comes from one of two sources, and the choice is made from
+    vault-wide state alone, before any id is looked up: the server's current
+    in-process identity projection when one exists and is still current
+    afterwards, otherwise one whole-corpus scan for the entire batch. Which
+    ids were asked for, which of them exist, and who may see the pages holding
+    them never choose the source, because work that varies with those lets a
+    caller infer, from the work performed, that some page carries an id it is
+    not allowed to see. Both sources apply one membership rule, so the answer
+    does not depend on which of them ran. A vault whose Knowledge Base root
+    holds a directory that the identity census prunes but the scan reads
+    (`trash/`) always takes the scan, so its answers stay the scan's.
     """
     wanted: list[str] = []
     seen: set[str] = set()
@@ -868,26 +874,63 @@ def paths_for_ids_read_only(
     if not wanted:
         return {}
 
-    # One walk, unconditionally, for the whole batch.
+    # Lazy: `semantic_contract` imports this module.
+    from . import semantic_contract
+
+    root = Path(vault_root)
+    # The source is chosen before any lookup, from vault-wide state alone.
     #
     # A sidecar fast path was tried and removed. Consulting it and scanning
     # only for the ids it could not answer made the corpus walk conditional on
     # whether ANY page — released or not — carried the cited identity: the
     # response stayed byte-identical while a caller who timed the call learned
     # whether a hidden page held the id, needing no authoring prerequisite at
-    # all. Scanning only when no sidecar exists closes that channel but reads a
-    # page written outside a governed write as absent, which is most of an
-    # ordinary vault.
+    # all. The sidecar also reads a page written outside a governed write as
+    # absent, which is most of an ordinary vault.
     #
-    # So the work is a function of the batch alone: how many well-formed ids
-    # were asked for, never which of them exist or who may see them. The cost
-    # is one walk per call for a deliberate, on-demand read.
-    by_id: dict[str, set[str]] = {}
-    for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
-        if status == "valid" and exomem_id is not None:
-            by_id.setdefault(exomem_id, set()).add(path)
-
-    return {identifier: tuple(sorted(by_id.get(identifier, ()))) for identifier in wanted}
+    # The identity projection has neither defect. Governed writes patch it as
+    # they publish their changes, and an edit made behind the server stops it
+    # being current once the watcher reports that edit; until then the read
+    # answers from the projection's last observed state. Whether it is
+    # current is one fact about the vault, the same for every id in every
+    # batch. It answers every id; if it stopped being current during the
+    # lookup, the whole batch falls back to the scan. Either way the work is a
+    # function of vault state and of the batch's size, never of which ids
+    # exist or who may see them. The read only borrows a projection the
+    # server already holds: it never builds, fills, or refreshes one.
+    #
+    # The census never admits a page under the Knowledge Base `trash/`
+    # directory, while the scan reads it and the sidecar hands out its refs.
+    # A vault that holds that directory therefore always scans: its presence
+    # is one more vault-wide fact, and the scan keeps those refs resolving.
+    with call_spans.span("memory_refs.identity_census", {}) as measured:
+        started = time.thread_time_ns()
+        resolved: dict[str, tuple[str, ...]] | None = None
+        snapshot = None
+        if not semantic_contract.identity_census_omits_scanned_pages(root):
+            snapshot = semantic_contract.current_reference_identity_snapshot(root)
+        if snapshot is not None:
+            owners = snapshot.reference_owners
+            answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
+            if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
+                resolved = answered
+        if measured is not None:
+            measured["snapshot"] = int(resolved is not None)
+        if resolved is None:
+            pages = _scan_pages(root)
+            scanned: dict[str, set[str]] = {}
+            for path, exomem_id, _raw, _hash, status in pages:
+                if status == "valid" and exomem_id is not None:
+                    scanned.setdefault(exomem_id, set()).add(path)
+            resolved = {
+                identifier: tuple(sorted(scanned.get(identifier, ())))
+                for identifier in wanted
+            }
+            if measured is not None:
+                measured["pages"] = len(pages)
+        if measured is not None:
+            measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    return resolved
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:
@@ -1170,7 +1213,10 @@ def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return entries
-    for path in sorted(kb.rglob("*.md")):
+    # Any-case suffix, as `_relative_markdown` and the identity census accept:
+    # `rglob("*.md")` matches case-sensitively on POSIX and skipped `.MD` pages.
+    markdown = (path for path in kb.rglob("*") if path.suffix.lower() == ".md")
+    for path in sorted(markdown):
         row = _read_identity(vault_root, path)
         if row is not None:
             entries.append(row)
