@@ -2889,6 +2889,59 @@ def test_supervisor_backs_off_after_transient_child_exit(
     assert not thread.is_alive()
 
 
+def test_supervisor_backs_off_while_children_find_no_writer_authority(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="no-authority.mp3")
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(
+        binary_path=vault / result.path,
+        sidecar_path=vault / result.sidecar_path,
+        media_type="audio",
+    )
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: False)
+    refused = media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _RefusedChild:
+        pid = 2_147_483_645
+        returncode = refused
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        return _RefusedChild()
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.002)
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    thread = threading.Thread(target=worker._supervise)
+    thread.start()
+
+    def settle() -> None:
+        time.sleep(0.15)
+
+    try:
+        settle()
+        assert len(launches) == 1
+        for _ in range(8):  # 80 simulated seconds, one step at a time
+            now[0] += 10
+            settle()
+        # Fixed 5 s pacing would have spawned about sixteen children here.
+        assert len(launches) <= 5
+    finally:
+        worker._stop_event.set()
+        worker._wake.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
 def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)

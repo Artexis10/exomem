@@ -124,6 +124,13 @@ _LOCK_UNAVAILABLE_EXIT_CODE = 76
 _MEMORY_RECYCLE_EXIT_CODE = 77
 #: The cell had no room for the next job's anonymous-memory budget.
 _MEMORY_WAIT_EXIT_CODE = 78
+#: The child started without write authority and claimed nothing. Unlike a transient
+#: stop mid-job, repeating it at a fixed pace spawns a process every few seconds for
+#: as long as the writer lease is elsewhere, so the supervisor backs off.
+_AUTHORITY_UNAVAILABLE_EXIT_CODE = 79
+#: Relaunch delay after consecutive authority refusals: from the follower cadence,
+#: doubling to this ceiling, so a lease that frees up still starts work within it.
+_AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
 #: How long the supervisor waits for room after a refusal or a memory stop. Long
 #: enough for reclaim or a checkpoint to finish; a pending job costs only latency.
 _MEMORY_WAIT_SECONDS = 15.0
@@ -306,6 +313,7 @@ class MediaWorker:
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
+        self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
         self._child_started_at = 0.0
         self._engine_waits: list[_Job] = []
         # The last pressure reading was high; the supervisor then reads it every pass
@@ -1462,6 +1470,13 @@ class MediaWorker:
                     elif returncode == _MEMORY_WAIT_EXIT_CODE:
                         delay = _MEMORY_WAIT_SECONDS
                         log.info("media child found no memory room; retrying after %.1fs", delay)
+                    elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                        delay = self._authority_backoff
+                        self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
+                        log.info(
+                            "media child found no writer authority; retrying after %.1fs",
+                            delay,
+                        )
                     elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
                         delay = (
                             _LOCK_UNAVAILABLE_RECHECK_SECONDS
@@ -1483,6 +1498,8 @@ class MediaWorker:
                         delay = 0.5
                         if brakes:
                             self._reset_memory_recovery()  # the child's job completed
+                    if returncode != _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                        self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
                 if self._child is None and _clock() >= relaunch_after:
@@ -2013,7 +2030,7 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
         log.info("media worker: marked %d retained CUDA runtime failure(s) blocked", recovered_compute)
     if not _writer_authority_available():
         log.info("media worker: writer authority unavailable; leaving work queued")
-        return _TRANSIENT_EXIT_CODE
+        return _AUTHORITY_UNAVAILABLE_EXIT_CODE
     store.set_worker(os.getpid(), idle_seconds)
     # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
     # the nested supervisor is never started because the child calls _process directly.
