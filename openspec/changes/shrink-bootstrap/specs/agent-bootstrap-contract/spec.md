@@ -65,7 +65,7 @@ The `bootstrap` response SHALL surface a recall latency regression only while th
 - **WHEN** the watch reports no breach for the calling client
 - **THEN** the bootstrap response has no `latency` key, on every profile and section
 
-#### Scenario: A breaching client is pointed at what is slow
+#### Scenario: A breaching client is told what is slow
 
 - **WHEN** the calling client's plain recall p90 is over its ceiling with enough samples
 - **THEN** the compact core carries a `latency` pointer line naming `section=diagnostics_reading`
