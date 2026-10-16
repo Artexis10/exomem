@@ -107,6 +107,7 @@ October 4 private runtime/create foundation: independent review approves current
   - On a multi-host vault, preflight explicitly probes `collections-store-v1` and refuses with `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED` until supported, naming the exact release to upgrade to (N3). Ignored extra request fields do not prove support. Red first.
   - Red first: a write during pre-import is re-imported; a handoff delta over budget abandons the upgrade and leaves files canonical; a supported launcher rejects an actual unsupported old interpreter on a migrated vault, including a copied vault with fresh external state.
 - [ ] P1b.3b `exomem collections migrate` for non-managed (stdio MCP) installs: offline, takes the mutation lock, refuses while a service holds the vault, same preflight and proof (A11). It is declared active only at the GA gate (P3.6).
+- [ ] P1b.3c Owner step that supersedes an unadmitted migration store whose fence is already cut, so a `COLLECTION_STORE_MIGRATION_STALE` refusal has an automated way out (A11). On a first enrolment, cut the fence by CAS to fresh staging; on an S1 vault, restore the superseded store, respecting the coordinator's recorded head. Until then, the owner restores the named files to the imported bytes. GA-blocking: P3.6 requires it.
 - [ ] P1b.4 Reverse export `maintain_memory(mode="collections-store-export")`: preview-first, atomic per collection, legacy-valid with a checkpoint event. It sets the mode marker to `exported` and tombstones the replica (A5). Red first: no host adopts a tombstoned replica or a stale local store after export. Round-trip test: files → store → files is byte-equal for collections not written in store mode, and legacy-valid (`acknowledged_gap`) for written ones.
 - [ ] P1b.5 Red, then the snapshot primitive and replica publisher:
   - Verify the supported deployment's actual custody: configured-root non-overlap for single-host/no-sync, or effective incoming/outgoing scratch exclusion at every participating supported sync endpoint plus marker-write quiescence. Unknown/lost custody preserves pending intent and conflicting bytes without blocking unrelated file collections or knowledge. An attestation-only fixture does not prove this gate.
@@ -193,7 +194,8 @@ October 4 private runtime/create foundation: independent review approves current
   - P1a, P1b, P2 and P3 merged;
   - `records-release-acceptance`: installed-wheel proof and disposable live MCP evidence for both built-ins in store mode;
   - current local and Cloud tool schemas keep their supported compatibility, and `minimum_records_reader_version` remains 2;
-  - a dry-run migration of a disposable copy of a real-sized vault with every proof check green.
+  - a dry-run migration of a disposable copy of a real-sized vault with every proof check green;
+  - P1b.3c, the owner step that supersedes an unadmitted migration store whose fence is already cut.
 
   Then `collections-store-v1` is declared in the release's upgrade manifest, and the preview flag is retired.
 

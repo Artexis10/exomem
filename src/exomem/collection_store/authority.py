@@ -128,6 +128,12 @@ def _overlap(entry, other):
         _owns(other, path) for path, _ in _owned_regions(entry))
 
 
+def file_ownership(manifest):
+    """The namespace a file collection owns, in the shape a marker entry records it."""
+    return {"manifest_path": manifest.path, "source_path": manifest.storage.source,
+            "layout": manifest.storage.strategy}
+
+
 def require_new_file_ownership(root, marker, entry):
     from .preview import unbound
 
@@ -139,9 +145,7 @@ def require_new_file_ownership(root, marker, entry):
     if any(marker is None or selected_entry(root, marker, error.path) is None for error in errors):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "file collection ownership is incomplete")
     for manifest in manifests:
-        other = {"manifest_path": manifest.path, "source_path": manifest.storage.source,
-                 "layout": manifest.storage.strategy}
-        if _overlap(entry, other):
+        if _overlap(entry, file_ownership(manifest)):
             # Prevent taking a file collection's source or audit namespace; a false refusal costs another destination.
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
 

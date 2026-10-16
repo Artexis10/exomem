@@ -395,28 +395,40 @@ def cutover(session, manager, fence_client) -> dict:
                         "staging": "resumed", **result}
             if pending["expected_marker"] is not None or fence_client.collection_store_fence().enrolled:
                 # Once a fence binds the published store, writers inside the writer lease are
-                # fenced from these files, so only a writer outside it changed them. Refusing
-                # keeps the stale import unadmitted and the files canonical. It costs the owner
-                # a repair, and on a first enrolment the fenced vault waits for it.
-                raise CollectionStoreError(STALE, "these collections changed after the migration published "
-                                           "its store, so it is not admitted: " + ", ".join(changed))
+                # fenced from these files, so only a writer outside it changed them. Admitting
+                # would lose that change; refusing keeps the import unadmitted and the files
+                # canonical. The cost is high and the owner pays it: on a first enrolment the cut
+                # fence refuses every lease without the store capability, so every governed
+                # write in the vault waits, and on an S1 vault its store collections are
+                # unavailable. Automation is deferred to tasks P1b.3c: it must supersede the
+                # unadmitted store (a fence CAS to fresh staging on a first enrolment; on S1, a
+                # restore of the superseded store that respects the coordinator's recorded head).
+                raise CollectionStoreError(STALE, (
+                    "these collections changed after the migration published its store, so the store is not "
+                    f"admitted: {', '.join(changed)}. Restore their files to the bytes the migration imported "
+                    "(from a backup or the sync history), then run `exomem collections migrate --apply` again. "
+                    "Until then, writes that need the writer lease wait; a release with the owner step that "
+                    "replaces an unadmitted store will offer another way out"))
         raw = authority.read_marker(root)
         marker = None if raw is None else authority.parse_marker(root, raw)
+        # Staging needs only the mutation boundary, which keeps the files and the live store
+        # still; the lease waits until there is a store to publish, because an unadmitted
+        # token cannot hand its lease back and would hide the report behind that refusal.
+        directories = _staging_directories(root)
+        if pending is not None:
+            # Nothing fences or routes the published store yet: fresh staging supersedes it.
+            report, reason, directory = None, BASIS_CHANGED, None
+        else:
+            report, reason, changed = _carried(root, directories[0]) if len(directories) == 1 else (
+                None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
+            directory = directories[0] if report is not None else None
+        if report is None:
+            report, directory = _stage(root, base=pending is None)
+        if directory is None:
+            return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
         runtime = session.runtime() if marker is not None else None
         with manager.writer_authority_guard(vault_root=root):
             token = manager._fencing_token
-            directories = _staging_directories(root)
-            if pending is not None:
-                # Nothing fences or routes the published store yet: fresh staging supersedes it.
-                report, reason, directory = None, BASIS_CHANGED, None
-            else:
-                report, reason, changed = _carried(root, directories[0]) if len(directories) == 1 else (
-                    None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
-                directory = directories[0] if report is not None else None
-            if report is None:
-                report, directory = _stage(root, base=pending is None)
-            if directory is None:
-                return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
             with closing(connection.open_reader(directory / _STAGING)) as staging:
                 _require_current_coordinator(runtime, fence_client, marker, staging)
                 intent = _intent(root, marker, raw, staging)

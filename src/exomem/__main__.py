@@ -2282,8 +2282,10 @@ def _collections_main(argv: list[str]) -> int:
                     Path(args.vault), step="dry-run" if args.dry_run else "prepare" if args.prepare else "apply")
             print(json.dumps(result, sort_keys=True))
             # Unlike create, an apply short of an installed marker exits nonzero, so a script that
-            # starts the service after it never serves a half-migrated vault.
-            if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"):
+            # starts the service after it never serves a half-migrated vault; a vault with nothing
+            # to migrate (none left, or none at all) exits 0, so the script stays idempotent.
+            if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"
+                                                      and result.get("verdict") != "nothing_to_migrate"):
                 return 1
         elif args.command == "create":
             import hashlib

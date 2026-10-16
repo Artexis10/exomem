@@ -227,6 +227,16 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
         service.stop()
 
 
+def test_a_second_apply_on_a_migrated_vault_reports_nothing_to_migrate(env, capsys):
+    """An apply that fails when there is nothing left to migrate, which breaks a script that
+    applies and then starts the service on every upgrade."""
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    routed = authority.read_marker(root)
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["verdict"] == "nothing_to_migrate" and authority.read_marker(root) == routed
+
+
 def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection_and_check(
         env, capsys, monkeypatch):
     """A migration that publishes a store, a marker or a fence cut although one collection's
@@ -340,12 +350,18 @@ def test_a_file_changed_outside_the_lease_after_the_fence_cut_is_never_admitted(
     root = legacy_vault(env)
     crash_apply(tmp_path, "before-marker")
     item = root / "Knowledge Base/Records/Work/Items/Original.md"
+    imported = item.read_bytes()
     item.write_text(item.read_text().replace("Authored body", "Edited by hand"))
     assert migrate(root, "apply") == 1
-    assert migration.STALE in capsys.readouterr().err
+    refusal = capsys.readouterr().err
+    assert migration.STALE in refusal and WORK in refusal
     assert authority.read_marker(root) is None
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         assert authority.pending_create(reader)["kind"] == authority.MIGRATE
+    # The repair the refusal names: the imported bytes back, and the apply resumes.
+    item.write_bytes(imported)
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
 
 
 def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_importing_again(
@@ -446,6 +462,30 @@ def s1(env, tmp_path, monkeypatch, capsys):
         service.stop()
     capsys.readouterr()
     return root
+
+
+def test_a_failed_proof_on_an_s1_vault_reports_it_and_leaves_the_store_marker_and_fence(s1, capsys, monkeypatch):
+    """An apply on a vault with a live S1 store that fails a proof, then loses the report that
+    names the collection and the check behind a lease it cannot hand back."""
+    root = s1
+    marked = authority.read_marker(root)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        head = chain.verify_store_chain(reader)
+    original = legacy_import._prove_round_trip
+
+    def drift(captured, *args):
+        if captured.manifest.collection_id == LEDGER_ID:
+            legacy_import._refuse("b", "render/parse values, body, identity or natural key differ")
+        return original(captured, *args)
+
+    monkeypatch.setattr(legacy_import, "_prove_round_trip", drift)
+    assert migrate(root, "apply") == 1
+    blocked = {row["path"]: row["blocker"]["check"] for row in printed(capsys)["collections"]
+               if row["status"] == "blocked"}
+    assert blocked == {LEDGER_COLLECTION_PATH: "b"}
+    assert authority.read_marker(root) == marked
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert chain.verify_store_chain(reader) == head
 
 
 def test_an_s1_store_keeps_its_summary_rows_head_and_fence(s1, capsys):
