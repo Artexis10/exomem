@@ -322,6 +322,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "index.full_refresh_store",
         "advisory.best_cosine",
         "advisory.overlap_groups",
+        "command.refusal_floor",
         # The write-stage collector's own names, emitted into the ledger
         # unconditionally by `MutationTimings.emit_call_spans`. Recorded
         # through a variable at that seam, so the source pin below finds

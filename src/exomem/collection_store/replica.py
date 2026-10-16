@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -17,7 +18,7 @@ from pathlib import Path
 from .. import held_fs, reserved_paths
 from ..cli_ops import OpError
 from ..kbdir import kb_dirname
-from . import connection, schema, snapshot, tokens
+from . import authority, connection, schema, snapshot, tokens
 
 _OWNER = "collection_store.replica"
 _DESCRIPTOR = "collection-replica"
@@ -25,6 +26,7 @@ _TOKEN = snapshot._TOKEN
 _PENDING = schema.META_PENDING_REPLICA_PUBLICATION
 _DIGEST = schema.META_LAST_PUBLISHED_REPLICA_SHA256
 _PUBLISHED = schema.META_PUBLISHED_REPLICA_HEAD
+_INTENT = schema.META_PUBLISHED_INTENT_SHA256
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,12 @@ def _head(metadata: dict[str, str]) -> dict:
 
 def _json(value: dict) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _intent_digest(metadata: dict[str, str]) -> str | None:
+    """The digest of the store's pending intent row, or None when it has none."""
+    raw = metadata.get(authority.PENDING_CREATE)
+    return None if raw is None else hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class _Publisher:
@@ -503,7 +511,12 @@ class _Publisher:
         # A matching replacement after cleanup still needs its own file flush.
         self.flush_installed(pending["sha256"])
         head = {key: pending[key] for key in self.identity}
-        self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head), _PENDING: None})
+        # Under the boundary the copy holds the intent as it is now. A copy taken outside it may
+        # lack an intent written with a later commit, which the next publication copies for its
+        # head, or hold one resolved meanwhile, which takeover reads as finished. Only an owner
+        # step records an intent without a commit, and an owner step publishes serially.
+        self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head), _PENDING: None,
+                          _INTENT: _intent_digest(_metadata(self.writer))})
         return head
 
     @contextmanager
@@ -572,15 +585,27 @@ class _Publisher:
         self.flush()
         return None
 
+    def carries_intent(self):
+        """Whether the installed replica holds the store's pending intent row as it is now.
+
+        An intent (an export's above all) can change without a commit, so a published head
+        alone does not prove that a host adopting the replica reads it.
+        """
+        metadata = _metadata(self.writer)
+        return _intent_digest(metadata) == metadata.get(_INTENT)
+
     def run(self, stage_new):
-        """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary."""
+        """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary.
+
+        It copies at a published head too when the store's intent changed since that copy.
+        """
         self.check()
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
-            if head == requested or not stage_new:
+            if head == requested and self.carries_intent() or not stage_new:
                 return self.current(digest, head)
-            while head is None or head["commit_seq"] < requested["commit_seq"]:
+            while head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_intent():
                 pending = self.begin()
                 with ExitStack() as staging:
                     artifact = staging.enter_context(snapshot.staged_snapshot(
@@ -602,7 +627,7 @@ class _Publisher:
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
-            if head == requested:
+            if head == requested and self.carries_intent():
                 return self.current(digest, head)
             return self.begin()
 

@@ -212,6 +212,49 @@ def owned_entry(root, marker, path):
     return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 
+VIEW_PATH = "COLLECTION_VIEW_PATH"
+
+
+def refuse_view_paths(root, paths, refusal):
+    """Raise ``refusal(code, reason)`` when the vault's mode marker gives a store collection any of ``paths``.
+
+    The file tools call this. Only the marker is read, so a vault without one opens no
+    store and keeps its file behaviour. Each caller decides a withheld path before this,
+    so a withheld view answers exactly as a missing path does.
+    """
+    try:
+        entry = _owning_entry(Path(root), paths)
+    except CollectionStoreError as error:
+        raise refusal(error.code, error.reason) from None
+    if entry is not None:
+        profile = entry.get("semantic_profile")
+        tool = "its collection's tool" if profile is None else collection_profiles.profile_for(profile).tool
+        raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
+
+
+def _owning_entry(root, paths):
+    # A malformed or legacy marker refuses every placed path here, as it already refuses reads.
+    paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
+             # Marker validation keeps every owned region under the knowledge base folder.
+             if collections._reference_key(root, path) is not None]
+    if not paths:
+        return None
+    try:
+        raw = read_marker(root)
+    except (held_fs.HeldFsError, OSError) as error:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+    if raw is None:
+        return None
+    marker = parse_marker(root, raw)
+    return next((entry for path in paths if (entry := owned_entry(root, marker, path)) is not None), None)
+
+
+def _knowledge_base_spelling(root, path):
+    # A case-folding volume opens another casing of the knowledge base folder as the folder itself.
+    canonical = vault._canonical_kb_segment(path)
+    return canonical if canonical == path or vault.vault_casefolds(root) else path
+
+
 def upgraded_marker(root, conn, marker):
     """Derive ownership only from the validated current canonical declarations."""
     entries = []
@@ -309,10 +352,44 @@ def _intent_collection(entry):
     return entry
 
 
+def _store_head(value):
+    """Validate a store head an intent records: its commit sequence and chain hash, None only at genesis."""
+    if (not isinstance(value, dict) or set(value) != {"commit_seq", "head_hash"}
+            or type(value["commit_seq"]) is not int or value["commit_seq"] < 0
+            or (value["head_hash"] is None) != (value["commit_seq"] == 0)
+            or not (value["head_hash"] is None or isinstance(value["head_hash"], str) and value["head_hash"])):
+        _invalid()
+
+
+def _migrate_fields(intent):
+    """Validate the fields a migration adds when it replaces an unadmitted store of its own (P1b.3c).
+
+    ``supersedes`` names the store and generation a first enrolment's fence binds, which
+    fresh staging replaces; ``base_head`` is the live store's head that a migration over an
+    enrolled store imports onto, so a recovery can prove the store it restores.
+    """
+    if "supersedes" in intent:
+        found = intent["supersedes"]
+        if (intent["expected_marker"] is not None or not isinstance(found, dict)
+                or set(found) != {"store_id", "generation"} or not isinstance(found["store_id"], str)
+                or not found["store_id"] or type(found["generation"]) is not int or found["generation"] < 1):
+            _invalid()
+    if "base_head" in intent:
+        if intent["expected_marker"] is None:
+            _invalid()
+        _store_head(intent["base_head"])
+
+
 def _export_intent(intent):
-    """Validate an export's intent: it retires ``expected_marker`` with its store and fence, so it has no target."""
-    if (set(intent) != {"version", "kind", "request_id", "plan_id", "expected_marker", "exported_at", "why",
-                        "collections"}
+    """Validate an export's intent: it retires ``expected_marker`` with its store and fence, so it has no target.
+
+    ``verified``, once present, records that file mode read every collection as the store
+    served it, so a rerun after the fence retire finishes without reading the files again.
+    """
+    # nosemgrep: ep-word-set -- the closed field names of the intent record this module writes.
+    if (set(intent) - {"verified"} != {"version", "kind", "request_id", "plan_id", "expected_marker", "exported_at",
+                                       "why", "collections"}
+            or intent.get("verified", True) is not True
             or not all(isinstance(intent[name], str) and intent[name]
                        for name in ("request_id", "plan_id", "expected_marker", "exported_at", "why"))
             or not isinstance(intent["collections"], list) or not intent["collections"]):
@@ -360,6 +437,7 @@ def pending_create(conn):
         entries = [_intent_collection(entry) for entry in intent["collections"]]
         if len({entry["collection_id"] for entry in entries}) != len(entries):
             _invalid()
+        _migrate_fields(intent)
         return intent
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "invalid pending create intent") from error

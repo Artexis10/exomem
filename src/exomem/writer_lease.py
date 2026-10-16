@@ -22,6 +22,7 @@ import sqlite3
 import stat
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1911,6 +1912,36 @@ class CollectionStoreFenceState:
 
 
 @dataclass(frozen=True)
+class RetiredCollectionStoreFence:
+    """The newest retired store fence and the head the coordinator recorded for it.
+
+    Generation 0, with no store and no head, means the vault's fence was never retired.
+    """
+
+    store_id: str | None
+    generation: int
+    collection_store_head: CollectionStoreHead | None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> RetiredCollectionStoreFence:
+        # nosemgrep: ep-word-set -- the closed field names of the coordinator's retired-fence response.
+        if not isinstance(data, Mapping) or set(data) != {"store_id", "generation", "collection_store_head"}:
+            raise ValueError("retired collection store fence fields are invalid")
+        generation, head = data["generation"], data["collection_store_head"]
+        if type(generation) is not int or generation < 0:
+            raise ValueError("retired collection store fence generation is invalid")
+        if generation == 0:
+            if data["store_id"] is not None or head is not None:
+                raise ValueError("a never-retired fence names no store")
+            return cls(None, 0, None)
+        store_id = _collection_store_uuid(data["store_id"])
+        head = None if head is None else CollectionStoreHead.from_json(head)
+        if head is not None and head.store_id != store_id:
+            raise ValueError("retired collection store head names another store")
+        return cls(store_id, generation, head)
+
+
+@dataclass(frozen=True)
 class LeaseRecord:
     holder: str | None
     expires_at: float | None
@@ -2294,6 +2325,20 @@ class LeaseCoordinatorClient:
             if state.enrolled or state.generation != expected_generation:
                 raise ValueError("collection store fence retire result is inconsistent")
             return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def retired_collection_store_fence(self) -> RetiredCollectionStoreFence:
+        """The newest retired store fence with its recorded head, on a route only this release calls."""
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/collection-store-fence/retired",
+            None,
+            contract_route="/v1/vaults/<id>/collection-store-fence/retired",
+        )
+        try:
+            return RetiredCollectionStoreFence.from_json(payload)
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
@@ -6724,6 +6769,79 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _restricted_refusal_floor(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Hold a restricted caller's direct-read refusal to the disclosure floor.
+
+    A missing page refuses before any page is read, while a withheld one is
+    read and decided first. Padding every refusal that a restricted caller
+    receives to one floor removes that difference. A success returns at once,
+    notices included. The restriction is asked only after a refusal, so a
+    success never pays for the question. Behind an MCP or REST surface the
+    surface waits, after its own handling of the refusal; elsewhere this
+    thread waits.
+    """
+
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        if (
+            not getattr(command, "restricted_refusal_floor", False)
+            or not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+        ):
+            return function(command, *injected, **kwargs)
+        from .governance import policy
+
+        started_at = time.perf_counter()
+        # A direct read changes no governance, so it decides under one policy load.
+        with policy.request_policy_snapshot():
+            try:
+                return function(command, *injected, **kwargs)
+            except Exception as error:
+                _complete_restricted_refusal(Path(injected[0]), started_at, error)
+                raise
+
+    return wrapped
+
+
+def _complete_restricted_refusal(
+    vault_root: Path, started_at: float, error: BaseException
+) -> None:
+    from .governance import egress, projection_timing
+
+    try:
+        restricted = egress.caller_restricted(vault_root)
+    except Exception:  # noqa: BLE001 - an undecided caller costs only the floor
+        restricted = True
+    if not restricted:
+        return
+    # The finished frames of a withheld read still hold the page it decided.
+    # Freed after the wait, a large page would make its refusal measurably
+    # later than a missing one, so free them inside the floor.
+    seen: set[int] = set()
+    chained: BaseException | None = error
+    while chained is not None and id(chained) not in seen:
+        seen.add(id(chained))
+        traceback.clear_frames(chained.__traceback__)
+        chained = chained.__cause__ or chained.__context__
+    padding_started = time.perf_counter()
+    work_ms = (padding_started - started_at) * 1000.0
+    deferred = projection_timing.defer_refusal_floor(started_at)
+    if not deferred:
+        projection_timing.pad_to_refusal_floor(started_at)
+    # Owner-only ledger span of fixed labels and counts, never caller or vault data.
+    call_spans.record_span(
+        "command.refusal_floor",
+        (time.perf_counter() - padding_started) * 1000.0,
+        {
+            "work_ms": math.ceil(work_ms),
+            "overrun": int(work_ms > projection_timing.RESTRICTED_REFUSAL_FLOOR_MS),
+            "deferred": int(deferred),
+        },
+    )
+
+
 def _note_committed_terminal_targets(terminal: Mapping[str, Any]) -> None:
     """Hand the call ledger the pages this write committed, from the terminal's
     own path projection, so a write whose destination the server derived still
@@ -6793,6 +6911,7 @@ def _foreground_priority_request(func):
 
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_restricted_refusal_floor
 @_request_prominence_context
 @_collection_store_thread
 @_foreground_priority_request

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import random
 import statistics
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from hashlib import sha256
 from types import MappingProxyType
+
+import anyio
 
 from . import projections
 
@@ -744,6 +748,103 @@ def complete_public_request(
         previous = completed
 
 
+#: Disclosure floor for a restricted caller's direct-read refusal; raising it takes a spec change.
+RESTRICTED_REFUSAL_FLOOR_MS = 55
+#: `time.sleep` wakes late by an amount that grows with the time asked for, so
+#: the last stretch of a thread's wait spins and every wait ends on time.
+_REFUSAL_SPIN_TAIL_S = 0.002
+#: The event loop rounds its poll timeout up to whole milliseconds, so
+#: `asyncio.sleep` wakes up to about 2 ms late, by an amount that follows the
+#: fraction of a millisecond left in the wait. A refusal's work time sets that
+#: fraction, so a surface wait ends this much early and finishes on a worker
+#: thread, whose sleep keeps time.
+_LOOP_WAKE_MARGIN_S = 0.003
+
+
+def pad_to_refusal_floor(started_at: float) -> bool:
+    """Hold a refusal on this thread until the floor has passed since ``started_at``.
+
+    Returns True when the refusal work alone ran past the floor. An overrun is
+    never refused: the caller completes late with its original refusal, because
+    a refusal on overrun would itself tell a slow withheld read from a fast
+    missing one.
+    """
+
+    deadline = float(started_at) + RESTRICTED_REFUSAL_FLOOR_MS / 1000.0
+    now = time.perf_counter()
+    if now > deadline:
+        return True
+    while deadline - now > _REFUSAL_SPIN_TAIL_S:
+        time.sleep(deadline - now - _REFUSAL_SPIN_TAIL_S)
+        now = time.perf_counter()
+    while time.perf_counter() < deadline:
+        pass
+    return False
+
+
+@dataclass(slots=True)
+class _SurfaceRefusalFloor:
+    """The clock of a restricted refusal that the request's surface waits out."""
+
+    started_at: float | None = None
+
+
+_SURFACE_REFUSAL_FLOOR: ContextVar[_SurfaceRefusalFloor | None] = ContextVar(
+    "exomem_surface_refusal_floor", default=None
+)
+
+
+def defer_refusal_floor(started_at: float) -> bool:
+    """Hand a restricted refusal's wait to the surface serving the request.
+
+    Returns False when no surface waits for this request, as on the CLI; the
+    caller then waits with `pad_to_refusal_floor`.
+    """
+
+    floor = _SURFACE_REFUSAL_FLOOR.get()
+    if floor is None:
+        return False
+    floor.started_at = float(started_at) if floor.started_at is None else floor.started_at
+    return True
+
+
+@asynccontextmanager
+async def surface_refusal_floor() -> AsyncIterator[None]:
+    """Hold the response of a request whose restricted direct read refused.
+
+    A request surface wraps everything it does for one request in this scope.
+    When a restricted read refuses inside it, the response, an error or a
+    result, leaves no sooner than the floor after the dispatcher started the
+    read. The surface's own handling of the refusal, its logging included,
+    happens inside the floor. The wait is an `await`; only its last
+    `_LOOP_WAKE_MARGIN_S` holds a worker thread.
+    """
+
+    floor = _SurfaceRefusalFloor()
+    token = _SURFACE_REFUSAL_FLOOR.set(floor)
+    try:
+        yield
+    finally:
+        _SURFACE_REFUSAL_FLOOR.reset(token)
+        if floor.started_at is not None:
+            await _wait_until(floor.started_at + RESTRICTED_REFUSAL_FLOOR_MS / 1000.0)
+
+
+async def _wait_until(deadline: float) -> None:
+    # Neither part spins: a spinning thread or loop would stall every request.
+    early = deadline - _LOOP_WAKE_MARGIN_S - time.perf_counter()
+    if early > 0:
+        await asyncio.sleep(early)
+    if deadline > time.perf_counter():
+        await anyio.to_thread.run_sync(_sleep_until, deadline)
+
+
+def _sleep_until(deadline: float) -> None:
+    remaining = deadline - time.perf_counter()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 @contextmanager
 def fixed_public_completion(
     request_class: PublicRequestClass,
@@ -761,6 +862,7 @@ def fixed_public_completion(
 
 __all__ = [
     "PUBLIC_REQUEST_CLASSES",
+    "RESTRICTED_REFUSAL_FLOOR_MS",
     "ProjectedRequestDeadlineExceeded",
     "ProjectedRequestTimingUnavailable",
     "PublicRequestClass",
@@ -770,13 +872,16 @@ __all__ = [
     "WireRouteReport",
     "WireSample",
     "complete_public_request",
+    "defer_refusal_floor",
     "evaluate_wire_differential",
     "evaluate_wire_route",
     "fixed_public_completion",
     "model_runtime_profile_from_environment",
+    "pad_to_refusal_floor",
     "request_class_for_command",
     "request_class_for_find",
     "release_sample_schedule",
+    "surface_refusal_floor",
     "validate_release_manifest",
     "VECTOR_CPU_MODEL_RUNTIME_PROFILE",
 ]

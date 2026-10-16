@@ -123,7 +123,7 @@ class SQLiteLeaseStore:
     @staticmethod
     def _retired_store_fence_row(conn: sqlite3.Connection, vault_id: str):  # noqa: ANN205
         return conn.execute(
-            "SELECT store_id, generation FROM lease_collection_store_fence_history "
+            "SELECT store_id, generation, head_json FROM lease_collection_store_fence_history "
             "WHERE vault_id=? ORDER BY generation DESC LIMIT 1",
             (vault_id,),
         ).fetchone()
@@ -318,6 +318,21 @@ class SQLiteLeaseStore:
             retired = None if row else self._retired_store_fence_row(conn, vault_id)
             conn.execute("COMMIT")
         return self._store_fence_state(row, retired)
+
+    def retired_collection_store_fence(self, vault_id: str) -> dict:
+        """The newest retired store fence and the head recorded when it was retired.
+
+        A separate read from the fence read, whose fields released clients check exactly.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            retired = self._retired_store_fence_row(conn, vault_id)
+            conn.execute("COMMIT")
+        return {
+            "store_id": retired[0] if retired else None,
+            "generation": int(retired[1]) if retired else 0,
+            "collection_store_head": json.loads(retired[2]) if retired and retired[2] else None,
+        }
 
     def transition_collection_store_fence(
         self,
@@ -732,6 +747,12 @@ def create_app(
             )
         return JSONResponse(result)
 
+    async def retired_collection_store_fence(request: Request) -> JSONResponse:
+        # Read as the fence read is: an export that goes forward after a retire checks this head.
+        if not (authorized(request) or operator_authorized(request)):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return JSONResponse(store.retired_collection_store_fence(request.path_params["vault_id"]))
+
     async def retire_collection_store_fence(request: Request) -> JSONResponse:
         # A distinct route, so a coordinator without it answers 404 instead of a same-store replay.
         if not operator_authorized(request):
@@ -855,6 +876,11 @@ def create_app(
                 "/v1/vaults/{vault_id:str}/collection-store-fence/retire",
                 retire_collection_store_fence,
                 methods=["POST"],
+            ),
+            Route(
+                "/v1/vaults/{vault_id:str}/collection-store-fence/retired",
+                retired_collection_store_fence,
+                methods=["GET"],
             ),
             Route(
                 "/v1/vaults/{vault_id:str}/schema-fence",

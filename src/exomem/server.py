@@ -156,6 +156,20 @@ class ExomemFastMCP(FastMCP):
             reset_transport(token)
 
 
+class RefusalFloorMiddleware(Middleware):
+    """Release a restricted direct-read refusal only after its disclosure floor.
+
+    It runs outermost, so FastMCP's error handling and logging, the call trace
+    and the authorization re-check all happen inside the floor.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        from .governance import projection_timing
+
+        async with projection_timing.surface_refusal_floor():
+            return await call_next(context)
+
+
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
@@ -580,6 +594,7 @@ def build_server(*, require_auth: bool, worker_socket: Path | None = None) -> Fa
         icons=server_icons(),
         lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
     )
+    mcp.add_middleware(RefusalFloorMiddleware())
     mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
     # The call-trace middleware runs in its content-free form for a cloud
     # cell too (as `hosted=True` does), so no `query=` is logged (D1.2).

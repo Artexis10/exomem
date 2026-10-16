@@ -2054,6 +2054,28 @@ def test_a_blocked_policy_fails_the_error_path_closed(vault: Path) -> None:
     assert egress.WITHHELD_REFERENCE in text
 
 
+def test_a_page_added_after_an_earlier_error_is_withheld_from_the_next(vault: Path) -> None:
+    """The gate reuses its census of the vault's files between requests.
+
+    A census kept past a change would let the first error that names a new
+    withheld page carry its name. The earlier error runs the gate on the same
+    folder, so the reused census is the one that must see the new page.
+    """
+    _govern_patterns_shut(vault)
+    _seed_volunteered(vault)
+    added = "Knowledge Base/Notes/Patterns/added-after-the-census.md"
+    with _external_scope():
+        egress.postfilter_error("get", ValueError(f"could not read {ERROR_VOLUNTEERED}"), vault)
+    (vault / added).write_text("---\ntype: pattern\n---\nx\n", encoding="utf-8")
+
+    error = ValueError(f"could not read {added}")
+    with _external_scope():
+        egress.postfilter_error("get", error, vault)
+
+    assert "added-after-the-census" not in str(error)
+    assert egress.WITHHELD_REFERENCE in str(error)
+
+
 def test_postfilter_error_redacts_the_exception_in_place(vault: Path) -> None:
     """The load-bearing contract behind the dispatcher's bare `raise`.
 

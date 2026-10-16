@@ -134,6 +134,9 @@ def delete_file(
         raise DeleteFileError(
             "DELETE_FAILED", "held file acquisition was refused"
         ) from None
+    from .collection_store import authority as collection_authority
+
+    collection_authority.refuse_view_paths(vault_root, (rel_path,), DeleteFileError)
 
     try:
         lifecycle.assert_not_protected(vault_root, rel_path)
