@@ -744,6 +744,29 @@ def complete_public_request(
         previous = completed
 
 
+#: Disclosure floor for a restricted caller's direct-read refusal; raising it takes a spec change.
+RESTRICTED_REFUSAL_FLOOR_MS = 50
+
+
+def pad_to_refusal_floor(started_at: float) -> bool:
+    """Hold a refusal until the floor has passed since ``started_at``.
+
+    Returns True when the refusal work alone ran past the floor. An overrun is
+    never refused: the caller completes late with its original refusal, because
+    a refusal on overrun would itself tell a slow withheld read from a fast
+    missing one.
+    """
+
+    deadline = float(started_at) + RESTRICTED_REFUSAL_FLOOR_MS / 1000.0
+    remaining = deadline - time.perf_counter()
+    if remaining < 0:
+        return True
+    while remaining > 0:
+        time.sleep(remaining)
+        remaining = deadline - time.perf_counter()
+    return False
+
+
 @contextmanager
 def fixed_public_completion(
     request_class: PublicRequestClass,
@@ -761,6 +784,7 @@ def fixed_public_completion(
 
 __all__ = [
     "PUBLIC_REQUEST_CLASSES",
+    "RESTRICTED_REFUSAL_FLOOR_MS",
     "ProjectedRequestDeadlineExceeded",
     "ProjectedRequestTimingUnavailable",
     "PublicRequestClass",
@@ -774,6 +798,7 @@ __all__ = [
     "evaluate_wire_route",
     "fixed_public_completion",
     "model_runtime_profile_from_environment",
+    "pad_to_refusal_floor",
     "request_class_for_command",
     "request_class_for_find",
     "release_sample_schedule",

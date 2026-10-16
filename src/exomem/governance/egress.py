@@ -4674,7 +4674,6 @@ def _release_level_for_markdown_snapshot(
     return decision.level
 
 
-@canonical_read(projection=True)
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -4692,6 +4691,57 @@ def annotate_page(
     that never existed. Raw text is assembled only after an L6 decision and
     only when the terminal secret parser accepts the exact snapshot.
     """
+    return _annotate_page(
+        vault_root,
+        page,
+        principal=principal,
+        purpose=purpose,
+        snapshot_content=snapshot_content,
+        stable_ref=stable_ref,
+        include_raw=include_raw,
+    )
+
+
+def page_withheld_entirely(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    snapshot_content: str | bytes | None,
+    stable_ref: str | None = None,
+) -> bool:
+    """Whether `annotate_page` answers this page with `None`, without rendering it.
+
+    The decision, and the withheld receipt it leaves, are `annotate_page`'s
+    own, taken on the same page and snapshot. A page it would serve, a notice
+    included, records nothing here: the later `annotate_page` call decides and
+    receipts it as before.
+    """
+    return (
+        _annotate_page(
+            vault_root,
+            page,
+            snapshot_content=snapshot_content,
+            stable_ref=stable_ref,
+            decide_only=True,
+        )
+        is None
+    )
+
+
+@canonical_read(projection=True)
+def _annotate_page(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    snapshot_content: str | bytes | None = None,
+    stable_ref: str | None = None,
+    include_raw: bool = False,
+    decide_only: bool = False,
+) -> dict[str, Any] | None:
+    """`annotate_page`'s body. `decide_only` stops after the withheld decision
+    and its receipt, and hands a page it would serve back unrendered."""
     vault_root = Path(vault_root)
     rel_path = str(page.get("path") or stable_ref or "")
     if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
@@ -4843,6 +4893,8 @@ def annotate_page(
             ref=stable_ref,
         )
         return None
+    if decide_only:
+        return page
 
     _outcome_for_decision(
         vault_root,

@@ -22,6 +22,7 @@ import sqlite3
 import stat
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -6690,6 +6691,66 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _restricted_refusal_floor(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Hold a restricted caller's direct-read refusal to the disclosure floor.
+
+    A missing page refuses before any page is read, while a withheld one is
+    read and decided first. Padding every refusal that a restricted caller
+    receives to one floor removes that difference. A success returns at once,
+    notices included. The restriction is asked only after a refusal, so a
+    success never pays for the question.
+    """
+
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        if (
+            not getattr(command, "restricted_refusal_floor", False)
+            or not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+        ):
+            return function(command, *injected, **kwargs)
+        started_at = time.perf_counter()
+        try:
+            return function(command, *injected, **kwargs)
+        except Exception as error:
+            _complete_restricted_refusal(Path(injected[0]), started_at, error)
+            raise
+
+    return wrapped
+
+
+def _complete_restricted_refusal(
+    vault_root: Path, started_at: float, error: BaseException
+) -> None:
+    from .governance import egress, projection_timing
+
+    try:
+        restricted = egress.caller_restricted(vault_root)
+    except Exception:  # noqa: BLE001 - an undecided caller costs only the floor
+        restricted = True
+    if not restricted:
+        return
+    # The finished frames of a withheld read still hold the page it decided.
+    # Freed after the wait, a large page would make its refusal measurably
+    # later than a missing one, so free them inside the floor.
+    seen: set[int] = set()
+    chained: BaseException | None = error
+    while chained is not None and id(chained) not in seen:
+        seen.add(id(chained))
+        traceback.clear_frames(chained.__traceback__)
+        chained = chained.__cause__ or chained.__context__
+    padding_started = time.perf_counter()
+    overrun = projection_timing.pad_to_refusal_floor(started_at)
+    # Owner-only ledger span: a fixed label and a 0/1 flag, never caller or vault data.
+    call_spans.record_span(
+        "command.refusal_floor",
+        (time.perf_counter() - padding_started) * 1000.0,
+        {"overrun": int(overrun)},
+    )
+
+
 def _note_committed_terminal_targets(terminal: Mapping[str, Any]) -> None:
     """Hand the call ledger the pages this write committed, from the terminal's
     own path projection, so a write whose destination the server derived still
@@ -6740,6 +6801,7 @@ def _collection_store_thread(func):
 
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_restricted_refusal_floor
 @_request_prominence_context
 @_collection_store_thread
 def invoke_command(

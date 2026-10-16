@@ -327,6 +327,9 @@ class Command:
     routes: tuple[str, ...] = ()
     response_detail: ResponseDetail | None = None
     path_roles: tuple[reserved_paths.PathRole, ...] = ()
+    #: A direct read whose refusals a restricted caller receives no sooner than
+    #: `projection_timing.RESTRICTED_REFUSAL_FLOOR_MS` after dispatch.
+    restricted_refusal_floor: bool = False
     mcp_meta: Mapping[str, tuple[str, ...]] = field(
         default_factory=lambda: types.MappingProxyType({}), hash=False
     )
