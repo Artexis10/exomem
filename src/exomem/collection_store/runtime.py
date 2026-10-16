@@ -426,7 +426,9 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_VAULT_MISMATCH", "the live store placement changed"
             )
-        with closing(connection.open_reader(self.path)) as reader:
+        # A store an earlier release wrote keeps its head where this reads it; its writer
+        # migrates the schema once this head lets the lease manager acquire for the store.
+        with closing(connection.open_reader(self.path, pending_schema=True)) as reader:
             reader.execute("BEGIN")
             metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
             head = CollectionStoreHead(

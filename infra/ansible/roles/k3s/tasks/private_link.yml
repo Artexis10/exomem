@@ -50,7 +50,8 @@
         mode: "0755"
 
     # The private key is created on the node and never leaves it. Deleting
-    # the key file and running site.yml rotates it on every peer.
+    # the key file and running site.yml rotates it on every peer, once the
+    # host list records the new public key.
     - name: Create this node's WireGuard key and read its public key
       ansible.builtin.command:
         argv: [/usr/local/sbin/exomem-wireguard-key, "{{ k3s_wireguard_interface }}"]
@@ -58,11 +59,37 @@
       changed_when: "'created' in k3s_wireguard_pubkey.stderr"
       notify: Restart WireGuard
 
+    # A WireGuard host's key may be recorded in the inventory (task 6.6), so
+    # that a run limited to the server still configures its peer. Prevents: a
+    # stale record, after a key rotation or a rebuild, reaching the peers of a
+    # later --limit run and taking the tunnel down. Fires wrongly: never for a
+    # current record; a host without one is reported below instead.
+    - name: Require the recorded WireGuard key to be this host's key
+      ansible.builtin.assert:
+        that:
+          - k3s_wireguard_public_key == k3s_wireguard_pubkey.stdout
+        fail_msg: >-
+          {{ inventory_hostname }}'s WireGuard public key is {{ k3s_wireguard_pubkey.stdout }},
+          not the wireguard_public_key its host list records. Record this key, regenerate
+          the inventory, and run site.yml again.
+      when:
+        - inventory_hostname in k3s_wireguard_hosts
+        - k3s_wireguard_public_key is defined
+
+    - name: Report a WireGuard key to record in the host list
+      ansible.builtin.debug:
+        msg: >-
+          Record {{ k3s_wireguard_pubkey.stdout }} as {{ inventory_hostname }}'s
+          wireguard_public_key in the dedicated host list.
+      when:
+        - inventory_hostname in k3s_wireguard_hosts
+        - k3s_wireguard_public_key is not defined
+
     - name: Publish this node's WireGuard public key to its peers
       ansible.builtin.set_fact:
         k3s_wireguard_public_key: "{{ k3s_wireguard_pubkey.stdout }}"
 
-    - name: Require every WireGuard peer in this run
+    - name: Require every WireGuard peer in this run or its key in the inventory
       ansible.builtin.assert:
         that:
           - k3s_wireguard_peers | map('extract', hostvars) | selectattr('k3s_wireguard_public_key', 'defined')
@@ -70,8 +97,9 @@
           - k3s_wireguard_hosts | map('extract', hostvars) | selectattr('public_ipv4', 'defined')
             | list | length == k3s_wireguard_hosts | length
         fail_msg: >-
-          WireGuard peers are missing from this run; run site.yml without --limit
-          so every node learns every peer's key.
+          A WireGuard peer is missing from this run and its key is not in the
+          inventory; run site.yml without --limit, or record each WireGuard host's
+          wireguard_public_key in the dedicated host list.
 
     # A key is whatever a peer's helper printed. Prevents: root on one node
     # writing configuration (a PreUp command) into every other node's

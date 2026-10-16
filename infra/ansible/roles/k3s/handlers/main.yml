@@ -7,10 +7,67 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
 
+# Recreating the flannel device below stops and starts K3s, which applies
+# everything a restart would; restarting first as well would only add an outage.
+# tasks/main.yml queues the recreation when the configuration changed or the
+# running device differs from it.
 - name: Restart K3s
   ansible.builtin.systemd_service:
     name: "{{ k3s_service_name }}"
     state: restarted
+  when: not ((k3s_flannel_conf | default({})) is changed or (k3s_flannel_drift | default({})) is changed)
+
+# A new flannel MTU (task 6.5). A restart alone keeps the old one: flannel
+# reads its configuration only at start, and reuses an existing flannel.1
+# because its compatibility check ignores MTU. KillMode=process keeps the
+# cell pods running while K3s is stopped.
+- name: Stop K3s to recreate the flannel device
+  listen: Recreate the flannel device
+  ansible.builtin.systemd_service:
+    name: "{{ k3s_service_name }}"
+    state: stopped
+
+- name: Delete the flannel device
+  listen: Recreate the flannel device
+  ansible.builtin.command:
+    argv: [/usr/sbin/ip, link, delete, flannel.1]
+    removes: /sys/class/net/flannel.1
+
+- name: Start K3s with the new flannel configuration
+  listen: Recreate the flannel device
+  ansible.builtin.systemd_service:
+    name: "{{ k3s_service_name }}"
+    state: started
+
+- name: Wait until flannel runs at the configured MTU
+  listen: Recreate the flannel device
+  ansible.builtin.command:
+    argv: [/usr/bin/cat, /sys/class/net/flannel.1/mtu, /run/flannel/subnet.env]
+  register: k3s_flannel_observed
+  changed_when: false
+  failed_when: false
+  retries: "{{ k3s_join_retries }}"
+  delay: "{{ k3s_join_delay }}"
+  until: >-
+    k3s_flannel_observed.rc == 0
+    and k3s_flannel_observed.stdout_lines[0] == k3s_flannel_pod_mtu | string
+    and ('FLANNEL_MTU=' ~ k3s_flannel_pod_mtu) in k3s_flannel_observed.stdout_lines
+
+# Prevents: a node whose device or pods kept the old MTU while the run reports
+# success, so VXLAN packets overflow the private link. Fires wrongly: never for
+# a node at the configured MTU; the wait above covers a slow flannel start.
+- name: Require flannel.1 and new pods at the configured MTU
+  listen: Recreate the flannel device
+  ansible.builtin.assert:
+    that:
+      - k3s_flannel_observed.rc == 0
+      - k3s_flannel_observed.stdout_lines[0] == k3s_flannel_pod_mtu | string
+      - ('FLANNEL_MTU=' ~ k3s_flannel_pod_mtu) in k3s_flannel_observed.stdout_lines
+    fail_msg: >-
+      flannel did not take k3s_flannel_mtu {{ k3s_flannel_mtu }} on {{ inventory_hostname }}:
+      expected {{ k3s_flannel_pod_mtu }} on flannel.1 and in /run/flannel/subnet.env, read
+      {{ k3s_flannel_observed.stdout_lines | default([]) | join(', ') or k3s_flannel_observed.stderr | default('nothing') }}.
+      Run site.yml again: each run recreates a device left at another MTU.
 
 - name: Restart WireGuard
   ansible.builtin.systemd_service:

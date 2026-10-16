@@ -944,12 +944,24 @@ def _job_volume_mounts(*, data_read_only: bool) -> list[dict]:
     ]
 
 
+# Tasks 6.4 and 7.3: what a backup of a local volume tolerates. The volume's
+# PV pins the Job to its node; this lets it run there while the node is
+# cordoned, as remove-agent.yml does before it moves the node's cells off.
+# The restore never carries it, so a moved cell's new claim, which binds on
+# the node its restore Job schedules to, never lands on a cordoned node.
+# Admission (the platform chart's rule 4c) admits exactly this toleration.
+CORDON_TOLERATION = {"key": "node.kubernetes.io/unschedulable", "operator": "Exists", "effect": "NoSchedule"}
+
+
 def _job_pod_spec(
     spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str,
-    claim_name: str | None = None,
+    claim_name: str | None = None, tolerate_cordon: bool = False,
 ) -> dict:
+    placement = _dedicated_placement(spec)
+    if tolerate_cordon and not placement:
+        placement = {"tolerations": [dict(CORDON_TOLERATION)]}
     return {
-        **_dedicated_placement(spec),
+        **placement,
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,
         "securityContext": _pod_security_context(),
@@ -1040,7 +1052,7 @@ def render_backup_job(
                 "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_BACKUP}},
                 "spec": _job_pod_spec(
                     spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo,
-                    claim_name=claim_name,
+                    claim_name=claim_name, tolerate_cordon=spec.local_volume,
                 ),
             },
         },

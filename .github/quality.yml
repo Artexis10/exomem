@@ -116,6 +116,7 @@ classes:
     - ".github/workflows/ci.yml"
     - ".github/workflows/cell-memory-profile.yml"
     - ".github/workflows/cloud-cellctl.yml"
+    - ".github/workflows/cloud-k3s-link.yml"
     - ".github/workflows/cloud-rehearsal.yml"
     - ".github/workflows/cross-platform.yml"
     - ".github/workflows/frozen-verifier.yml"
