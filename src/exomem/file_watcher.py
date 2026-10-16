@@ -421,10 +421,12 @@ def _observe_publication_intent(
             and proof[0] == intent.content_hash
             and proof[2] == intent.size
         )
+        # The snapshot timestamp echo can be read after installation begins
+        # and before the rename lands; the file still holds the BEFORE bytes.
         matches_before = (
             proof is not None
             and disposition == "active"
-            and phase == "prepared"
+            and phase in _NOT_YET_RENAMED
             and proof[0] == intent.before_content_hash
             and proof[2] == intent.before_size
         )
@@ -436,13 +438,15 @@ def _observe_publication_intent(
             and attempt == 0
         ):
             # Replacement can invalidate an open BEFORE descriptor entirely.
-            # Re-read once after a publication boundary; only exact current
-            # AFTER bytes remain admissible after that boundary.
+            # Re-read once after a publication boundary; after the rename only
+            # exact current AFTER bytes remain admissible.
             continue
         if not (matches_before or matches_after):
             return "external", intent
         if disposition == "active":
-            if matches_after and phase == "prepared":
+            # AFTER bytes before the rename are someone else's, unless the
+            # write leaves the page unchanged and they are also the snapshot.
+            if matches_after and phase == "prepared" and not matches_before:
                 return "external", intent
             return "held", intent
         if disposition == "succeeded" and phase == "postpublish_verified" and matches_after:
@@ -470,6 +474,7 @@ def publication_intent_deadline(intent: _PublicationIntent) -> float | None:
 
 #: Phases in which the destination still holds the bytes the writer
 #: snapshotted: `installing` is entered just before the canonical rename.
+#: Watcher events and registry samples both admit BEFORE bytes only here.
 _NOT_YET_RENAMED = frozenset({"prepared", "installing"})
 #: Phases in which a governed writer may already have renamed its staged bytes
 #: into place. `prepared` precedes the rename, so AFTER bytes on disk then are

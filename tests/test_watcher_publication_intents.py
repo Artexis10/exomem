@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from exomem import file_watcher, freshness
+from exomem import commands, file_watcher, freshness, writer_lease
 from exomem import vault as vault_module
+from exomem.governance.principal import library_scope
 
 
 def _register_active_intent(vault: Path, path: Path, content: bytes):
@@ -722,3 +723,141 @@ def test_failed_corpus_publication_keeps_intent_aborted_and_fallback_enabled(
         "publish_corpus_change": True,
     }
     assert intent.disposition == "aborted"
+
+
+def test_an_unchanged_rewrite_echo_is_held_as_the_writers_own(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch may rewrite a page with the bytes it already holds.
+
+    Hub pages are rewritten this way by every creation. Before the rename the
+    file holds the snapshot, which is also the staged image, and the snapshot
+    timestamp echo used to be fenced as a foreign edit of those bytes.
+    """
+    target = vault / "Knowledge Base" / "Notes" / "unchanged-hub.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("same", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    real_restore = vault_module._restore_bound_source_timestamps
+
+    def restore_and_observe(source, descriptor, atime_ns, mtime_ns):  # noqa: ANN001
+        real_restore(source, descriptor, atime_ns, mtime_ns)
+        watcher._record(source.path, deleted=False)
+
+    monkeypatch.setattr(
+        vault_module, "_restore_bound_source_timestamps", restore_and_observe
+    )
+    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None)
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "same")], vault_root=vault
+    )
+
+    # Read before any flush: a flush acknowledges the mark it would leave.
+    assert freshness.external_pending(vault) is False
+    assert watcher._drain()[1] == []
+
+
+def test_a_snapshot_echo_read_as_installation_begins_is_held(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The echo of the snapshot timestamp restore can reach the watcher late.
+
+    Installation begins just before the rename, so the file can still hold the
+    snapshot bytes when the watcher reads it. Those bytes are the writer's.
+    """
+    target = vault / "Knowledge Base" / "Notes" / "late-snapshot-echo.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    real_begin = file_watcher.begin_publication_installation
+    observed_bytes: list[bytes] = []
+
+    def begin_then_observe(intents):  # noqa: ANN001
+        intents = tuple(intents)
+        real_begin(intents)
+        if any(intent.key[1].endswith("late-snapshot-echo.md") for intent in intents):
+            observed_bytes.append(target.read_bytes())
+            watcher._record(target, deleted=False)
+
+    monkeypatch.setattr(file_watcher, "begin_publication_installation", begin_then_observe)
+    monkeypatch.setattr("exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None)
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "new")], vault_root=vault
+    )
+
+    assert observed_bytes == [b"old"], "the event must be read before the rename"
+    # Read before any flush: a flush acknowledges the mark it would leave.
+    assert freshness.external_pending(vault) is False
+    assert watcher._drain()[1] == []
+
+
+def _remember_reviewed(vault: Path, title: str, slug: str) -> dict:
+    remember = next(c for c in commands.PRODUCT_COMMANDS if c.name == "remember")
+    kwargs = {
+        "content": (
+            f"# {title}\n\n## Observations\n\n"
+            "- [operating constraint] Keep capture off the client #reliability\n"
+        ),
+        "title": title,
+        "slug": slug,
+        "suggestions": False,
+    }
+    validation = commands.op_remember(vault, validate_only=True, **kwargs)
+    kwargs.update(
+        draft_id=validation["draft_id"],
+        draft_hash=validation["draft_hash"],
+        draft_token=validation["draft_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation["draft_hash"],
+        relation_review_reason="No honest relation exists in the isolated fixture.",
+    )
+    with library_scope():
+        return writer_lease.invoke_command(remember, vault, **kwargs)
+
+
+def test_a_running_watcher_admits_none_of_a_remembers_files(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real remember, a running watcher, then one edit made outside Exomem.
+
+    The remember rewrites the new page and the hub pages around it. None of
+    those may reach the external mark. The outside edit is written after the
+    remember returns, so its event arrives after all of the remember's events.
+    It must be the only admission, scoped to exactly its own path.
+    """
+    outside = vault / "Knowledge Base" / "Notes" / "outside-editor-note.md"
+    outside_key = str(outside.resolve())
+    admissions: list[tuple[str, ...]] = []
+    outside_admitted = threading.Event()
+    real_mark = freshness.mark_external_pending
+
+    def recording_mark(vault_root: Path, *, paths=()):  # noqa: ANN001
+        paths = tuple(paths)
+        epoch = real_mark(vault_root, paths=paths)
+        if not outside_admitted.is_set():
+            keys = tuple(sorted(str(Path(path).resolve()) for path in paths))
+            admissions.append(keys)
+            if outside_key in keys:
+                outside_admitted.set()
+        return epoch
+
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.2)
+    assert watcher.start(), "this test needs a running watcher"
+    try:
+        assert watcher._seed_complete.wait(30)
+        monkeypatch.setattr(freshness, "mark_external_pending", recording_mark)
+
+        result = _remember_reviewed(vault, "Watcher probe save", "watcher-probe-save")
+        outside.write_text("# Outside editor note\n\nWritten by hand.\n", encoding="utf-8")
+
+        assert outside_admitted.wait(15), "the watcher never observed the outside edit"
+    finally:
+        watcher.stop()
+
+    assert result["path"].endswith("watcher-probe-save.md")
+    assert admissions == [(outside_key,)], (
+        "the watcher admitted paths other than the outside edit: "
+        f"{[[Path(key).relative_to(vault.resolve()).as_posix() for key in keys] for keys in admissions]}"
+    )
