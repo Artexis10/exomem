@@ -2233,7 +2233,22 @@ def _collections_main(argv: list[str]) -> int:
     rollback = subcommands.add_parser(
         "rollback", help="disable summary access and jobs for this vault; stop the service first"
     )
-    for command in (backup, adopt, create, rollback):
+    migrate = subcommands.add_parser(
+        "migrate",
+        help="move this vault's file Records and Planning collections into the store after proving "
+        "each round trip; vault files are never rewritten",
+    )
+    step = migrate.add_mutually_exclusive_group(required=True)
+    step.add_argument("--dry-run", action="store_true", help="run the read-only preflight; writes nothing")
+    step.add_argument(
+        "--prepare", action="store_true",
+        help="import and prove into private staging beside a running service, for a faster apply",
+    )
+    step.add_argument(
+        "--apply", action="store_true",
+        help="migrate, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    for command in (backup, adopt, create, rollback, migrate):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2261,6 +2276,17 @@ def _collections_main(argv: list[str]) -> int:
             with library_scope():
                 result = admission.rollback_route(Path(args.vault))
             print(json.dumps(result, sort_keys=True))
+        elif args.command == "migrate":
+            with library_scope():
+                result = admission.migrate_route(
+                    Path(args.vault), step="dry-run" if args.dry_run else "prepare" if args.prepare else "apply")
+            print(json.dumps(result, sort_keys=True))
+            # Unlike create, an apply short of an installed marker exits nonzero, so a script that
+            # starts the service after it never serves a half-migrated vault; a vault with nothing
+            # to migrate (none left, or none at all) exits 0, so the script stays idempotent.
+            if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"
+                                                      and result.get("verdict") != "nothing_to_migrate"):
+                return 1
         elif args.command == "create":
             import hashlib
 

@@ -105,6 +105,9 @@ class CapturedLegacyCollection:
     audit_proof: LegacyAuditProof
     log_frame: CapturedLogFrame | None
     input_digest: str
+    #: ``input_digest`` without the vault-wide audit segment census, plus every per-collection
+    #: proof value the checkpoint records: an unrelated activity-log write leaves it unchanged.
+    collection_basis: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +305,14 @@ def capture_legacy_collection(
         "legacy_inspection": inspection,
         "legacy_audit_paths": captured_inspection.influencing_paths,
     }
+    collection_basis = {
+        **{name: value for name, value in basis.items() if name != "audit_inputs"},
+        "manifest_head": proof.manifest_head,
+        "reachable_head": proof.reachable_head,
+        "reachable_count": proof.reachable_count,
+        "exhaustive": [proof.exhaustive_status, proof.scan_complete, proof.gap_count,
+                       proof.discontinuity_count, list(proof.diagnostic_samples)],
+    }
     captured = CapturedLegacyCollection(
         root,
         manifest,
@@ -315,6 +326,7 @@ def capture_legacy_collection(
         proof,
         _capture_log_frame(manifest, snapshot),
         _sha(records._canonical_json(basis)),
+        _sha(records._canonical_json(collection_basis)),
     )
     _recheck(captured)
     audit.require_source_root(root)

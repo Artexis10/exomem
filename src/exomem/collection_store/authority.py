@@ -6,6 +6,8 @@ preview collections retain their existing behavior until production routing exis
 
 from __future__ import annotations
 
+import copy
+import functools
 import json
 from pathlib import Path
 
@@ -14,6 +16,8 @@ from .. import structured_collections as collections
 from .connection import CollectionStoreError
 
 PENDING_CREATE = "pending_collection_create"
+#: The closed kinds of that one pending intent: admission implements exactly these two flows.
+CREATE, MIGRATE = "create", "migrate"
 #: The semantic profiles a marker entry may record; an entry from before entries carried one has none.
 PROFILES = tuple(collection_profiles.PROFILES)
 MARKER_REQUIRED = "collection_store_marker_required"
@@ -51,7 +55,21 @@ def _object(pairs):
 
 
 def parse_marker(root, raw):
-    """Validate the file-default marker and its complete version-two ownership namespace."""
+    """Validate the file-default marker and its complete version-two ownership namespace.
+
+    Recall checks ownership for every hit and due entry, so validation runs once per
+    marker spelling. Every caller still gets its own copy to change.
+    """
+    if not isinstance(raw, (str, bytes)):
+        # Anything else, a missing marker included, is refused exactly as before, uncached.
+        return _parsed_marker.__wrapped__(str(root), vault.kb_dirname(), raw)
+    return copy.deepcopy(_parsed_marker(str(root), vault.kb_dirname(), raw))
+
+
+# Validation reads only the raw bytes, the root and the kb folder name, so those are the key.
+# A vault has one current marker; a few slots also cover a pending target and its predecessor.
+@functools.lru_cache(maxsize=8)
+def _parsed_marker(root, _kb_dirname, raw):
     try:
         marker = json.loads(raw, object_pairs_hook=_object)
     except (ValueError, UnicodeError, TypeError) as error:
@@ -126,6 +144,12 @@ def _overlap(entry, other):
         _owns(other, path) for path, _ in _owned_regions(entry))
 
 
+def file_ownership(manifest):
+    """The namespace a file collection owns, in the shape a marker entry records it."""
+    return {"manifest_path": manifest.path, "source_path": manifest.storage.source,
+            "layout": manifest.storage.strategy}
+
+
 def require_new_file_ownership(root, marker, entry):
     from .preview import unbound
 
@@ -137,25 +161,38 @@ def require_new_file_ownership(root, marker, entry):
     if any(marker is None or selected_entry(root, marker, error.path) is None for error in errors):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "file collection ownership is incomplete")
     for manifest in manifests:
-        other = {"manifest_path": manifest.path, "source_path": manifest.storage.source,
-                 "layout": manifest.storage.strategy}
-        if _overlap(entry, other):
+        if _overlap(entry, file_ownership(manifest)):
             # Prevent taking a file collection's source or audit namespace; a false refusal costs another destination.
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection ownership namespaces overlap")
 
 
 def _owns(entry, path):
+    return _owns_key(_entry_regions(entry), collections._portable_path_key(path))
+
+
+def _entry_regions(entry):
+    return _region_keys(entry["manifest_path"], entry["source_path"], entry["layout"])
+
+
+# One entry's namespace, folded once: recall asks about thousands of paths per call.
+# The bound covers every entry of several markers; a miss only refolds one entry.
+@functools.lru_cache(maxsize=256)
+def _region_keys(manifest_path, source_path, layout):
+    regions = _owned_regions({"manifest_path": manifest_path, "source_path": source_path, "layout": layout})
+    keys = [(collections._portable_path_key(root), subtree) for root, subtree in regions]
+    log = collections._portable_path_key(source_path) + "#" if layout == "markdown-log" else None
+    return frozenset(key for key, _ in keys), tuple(key + "/" for key, subtree in keys if subtree), log
+
+
+def _owns_key(regions, key):
     from .. import records
 
-    key = collections._portable_path_key(path)
-    for root, subtree in _owned_regions(entry):
-        root = collections._portable_path_key(root)
-        if key == root or subtree and key.startswith(root + "/"):
-            return True
-    source = collections._portable_path_key(entry["source_path"])
-    if entry["layout"] == "markdown-log" and key.startswith(source + "#"):
+    exact, subtrees, log = regions
+    if key in exact or key.startswith(subtrees):
+        return True
+    if log is not None and key.startswith(log):
         try:
-            records._validate_item_key(key[len(source) + 1:])
+            records._validate_item_key(key[len(log):])
             return True
         except collections.CollectionError:
             pass
@@ -170,7 +207,8 @@ def owned_entry(root, marker, path):
     path = collections._reference_key(Path(root), path)
     if path is None:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "invalid canonical projection path")
-    return next((entry for entry in marker["collections"] if _owns(entry, path)), None)
+    key = collections._portable_path_key(path)
+    return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 
 def upgraded_marker(root, conn, marker):
@@ -260,22 +298,52 @@ def required_state_compatibility_ids(root):
                       *([COLLECTION_MARKER_COMPATIBILITY_ID] if marker["version"] == 2 else [])})
 
 
+def _intent_collection(entry):
+    # A migration's entry keeps the collection's file basis until its marker is installed.
+    if (not isinstance(entry, dict) or set(entry) != {"collection_id", "manifest_path", "source_path", "txn_id", "basis"}
+            or not all(isinstance(entry[name], str) and entry[name]
+                       for name in ("collection_id", "manifest_path", "source_path", "basis"))
+            or type(entry["txn_id"]) is not int or entry["txn_id"] < 1):
+        _invalid()
+    return entry
+
+
 def pending_create(conn):
+    """The one pending marker intent, with its closed ``kind`` and the ``collections`` it admits.
+
+    Version 1 is a create of one collection, as every release has written it. Version 2
+    is a migration of existing file collections, each named with its import checkpoint.
+    """
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PENDING_CREATE,)).fetchone()
     if row is None:
         return None
     try:
         intent = json.loads(row[0])
-        if (type(intent["version"]) is not int or intent["version"] != 1
-                or not all(isinstance(intent[name], str) and intent[name] for name in
-                           ("request_id", "request_hash", "collection_id", "manifest_path",
-                            "source_path", "target_marker"))
-                or type(intent["txn_id"]) is not int or intent["txn_id"] < 1
+        if (type(intent["version"]) is not int or intent["version"] not in (1, 2)
+                or not all(isinstance(intent[name], str) and intent[name]
+                           for name in ("request_id", "target_marker"))
                 or not (intent["expected_marker"] is None or isinstance(intent["expected_marker"], str))):
+            _invalid()
+        if intent["version"] == 1:
+            if (not all(isinstance(intent[name], str) and intent[name] for name in
+                        ("request_hash", "collection_id", "manifest_path", "source_path"))
+                    or type(intent["txn_id"]) is not int or intent["txn_id"] < 1):
+                _invalid()
+            entry = {name: intent[name] for name in ("collection_id", "manifest_path", "source_path", "txn_id")}
+            return {**intent, "kind": CREATE, "collections": [entry]}
+        # Version 2 records only migrations; a create keeps writing version 1.
+        if intent["kind"] != MIGRATE or not isinstance(intent["collections"], list) or not intent["collections"]:
+            _invalid()
+        entries = [_intent_collection(entry) for entry in intent["collections"]]
+        if len({entry["collection_id"] for entry in entries}) != len(entries):
             _invalid()
         return intent
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "invalid pending create intent") from error
+
+
+def intent_collection_ids(intent):
+    return {entry["collection_id"] for entry in intent["collections"]}
 
 
 def marker_status(writer, intent):
@@ -283,13 +351,13 @@ def marker_status(writer, intent):
 
 
 def intent_status(root, conn, intent):
-    """Whether a pending create's marker is admitted, still pending, or in conflict; any connection reads it."""
+    """Whether a pending intent's marker is admitted, still pending, or in conflict; any connection reads it."""
     try:
         target_marker = parse_marker(root, intent["target_marker"])
         sid = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
-        if target_marker["store_id"] != sid or not any(
-                routes(entry, intent["collection_id"], intent["manifest_path"], sid)
-                for entry in target_marker["collections"]):
+        if target_marker["store_id"] != sid or not all(any(
+                routes(entry, pending["collection_id"], pending["manifest_path"], sid)
+                for entry in target_marker["collections"]) for pending in intent["collections"]):
             return "conflict"
         raw = read_marker(root)
         target = intent["target_marker"].encode()
@@ -308,7 +376,7 @@ def intent_status(root, conn, intent):
 
 def projection_eligible(writer, projection):
     intent = pending_create(writer.connection)
-    if intent is not None and projection["collection_id"] == intent["collection_id"]:
+    if intent is not None and projection["collection_id"] in intent_collection_ids(intent):
         return marker_status(writer, intent) == "marker_admitted"
     return collection_admitted(writer, projection["collection_id"])
 

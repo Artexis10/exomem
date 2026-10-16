@@ -235,24 +235,38 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     expected = authority.read_marker(writer.root)
     old = None if expected is None else authority.parse_marker(writer.root, expected)
     manifest = collections.parse_manifest_bytes(writer.root, manifest_path, manifest_text.encode())
-    if old is not None and old["version"] != 2:
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
-    if old is None:
-        # A first cut lands on the generation after the fence's newest retired one; an
-        # enrolled fence makes no cut, so its basis stays the first generation as before.
-        basis = fence_client.collection_store_fence()
-        fence = {"capability": writer_lease.COLLECTION_STORE_CAPABILITY,
-                 "generation": 1 if basis.enrolled else basis.generation + 1}
-    target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
-              "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
-              "collections": ([] if old is None else old["collections"]) + [authority.marker_entry(
-                  manifest.collection_id, manifest.path, sid, manifest.semantic_profile, manifest.storage.source, manifest.storage.strategy)],
-              "collection_store_fence": fence if old is None else old["collection_store_fence"]}
-    authority.parse_marker(writer.root, json.dumps(target))
+    # Only a first enrolment reads the coordinator's fence, the basis of its cut.
+    fence = fence_client.collection_store_fence() if old is None else None
+    target = target_marker(writer.root, old, sid, [authority.marker_entry(
+        manifest.collection_id, manifest.path, sid, manifest.semantic_profile, manifest.storage.source,
+        manifest.storage.strategy)], fence=fence)
     authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())
+
+
+def target_marker(root, old, sid, entries, *, fence):
+    """The version-two marker that adds ``entries`` to ``old`` (None before first enrolment), validated.
+
+    A first enrolment targets the generation after ``fence``, the coordinator's fence read
+    before its cut: the newest retired generation, or 0 if never enrolled, so a create or a
+    migration after an export re-enrols at the next one. A later enrolment keeps the
+    marker's fence and advances the authority epoch, so it ignores ``fence``.
+    """
+    if old is not None and old["version"] != 2:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
+    if old is None:
+        # An enrolled fence makes no cut, so its basis stays the first generation as before.
+        generation = 1 if fence.enrolled else fence.generation + 1
+    target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+              "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
+              "collections": ([] if old is None else old["collections"]) + list(entries),
+              "collection_store_fence": {"capability": writer_lease.COLLECTION_STORE_CAPABILITY,
+                                         "generation": generation}
+              if old is None else old["collection_store_fence"]}
+    authority.parse_marker(root, json.dumps(target))
+    return target
 
 
 def _replay_create(writer, request_id, receipt):
@@ -267,7 +281,7 @@ def _replay_create(writer, request_id, receipt):
     writer._operation.require_collection(row[1], complete=True)
     intent = authority.pending_create(writer.connection)
     if intent is not None:
-        if intent["request_id"] != request_id:
+        if intent["kind"] != authority.CREATE or intent["request_id"] != request_id:
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "another create is pending")
         return _recover_create(writer)
     if not authority.collection_admitted(writer, row[1]) or authority.read_marker(writer.root) is None:
@@ -568,7 +582,7 @@ def _serving_session(root):
     return session
 
 
-def _require_no_service(config):
+def _require_no_service(config, operation):
     """Refuse an out-of-service apply while any holder's lease is live (A11, as `collections migrate`).
 
     Taking the lease beside a running service would hand its token back under it and
@@ -581,10 +595,11 @@ def _require_no_service(config):
             raise CollectionStoreError(
                 "COLLECTION_STORE_SERVICE_ACTIVE",
                 f"{holder} holds this vault's writer lease; retry once it finishes or its lease expires")
+        served = ("apply through its maintain_memory(mode=\"collections-store-adopt-local\") or "
+                  if operation == "adopt-local" else "")
         raise CollectionStoreError(
             "COLLECTION_STORE_SERVICE_ACTIVE",
-            f"a service ({holder}) holds this vault's writer lease; apply through its "
-            "maintain_memory(mode=\"collections-store-adopt-local\") or stop it first")
+            f"a service ({holder}) holds this vault's writer lease; {served}stop it first")
 
 
 def _apply_step(session, manager, fence_client, step, *, why, preview_id, acknowledge_skipped=False):
@@ -628,6 +643,8 @@ def adopt_local_route(vault_root, *, why=None, preview_id=None, acknowledge_skip
     """
     require_owner(vault_root, "adopt-local")
     root = Path(vault_root).resolve()
+    # The apply would refuse at the store; the preview says so instead of reporting a sync state.
+    _require_no_pending_migration(root)
     step, sealed = _route_step(root)
     if acknowledge_skipped and step != "reconcile":
         if sealed["preview"]["state"] == "in_sync":
@@ -682,6 +699,29 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
         fence_client=fence_client))
 
 
+def migrate_route(vault_root, *, step):
+    """The owner's route behind `exomem collections migrate` (P1b.3b, design §10 and A11).
+
+    ``dry-run`` is the read-only preflight. ``prepare`` pre-imports and proves into private
+    staging and may run beside the service. ``apply`` runs with the service stopped, in its
+    own producer session under the configured lease and the operator credential, as the
+    offline create does, so it may make the coordinator's first store fence cut; it hands
+    the lease back with the flushed head.
+    """
+    require_owner(vault_root, "migrate")
+    capability.require_collections_migrate()  # before any lease, fence or operator credential
+    from . import migration
+
+    root = Path(vault_root).resolve()
+    if step == "dry-run":
+        return migration.dry_run(root)
+    if step == "prepare":
+        return migration.prepare(root)
+    if step == "apply":
+        return _offline_owner(root, "migrate", migration.cutover)
+    raise ValueError("migrate step must be dry-run, prepare or apply")
+
+
 def require_summary_manifest(root, manifest_path, manifest_text):
     """Refuse a production store create whose manifest is not a summary collection (S1).
 
@@ -708,6 +748,23 @@ ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest
 
 ADOPTION_COMMAND = ("exomem collections adopt-local --why REASON --dry-run, then again with --preview-id ID "
                     "instead of --dry-run, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
+def migration_pending():
+    """The refusal for a store an unfinished migration owns: only the owner's apply finishes it."""
+    return CollectionStoreError(
+        "COLLECTION_STORE_LEASE_REQUIRED",
+        "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`")
+
+
+def _require_no_pending_migration(root):
+    """Refuse an owner step on a store an unfinished migration owns, at its preview as at its apply."""
+    path = connection.store_path(root)
+    if path.exists():
+        with closing(connection.open_reader(path)) as reader:
+            intent = authority.pending_create(reader)
+        if intent is not None and intent["kind"] == authority.MIGRATE:
+            raise migration_pending()
 
 
 def adoption_required():
@@ -756,7 +813,7 @@ def _offline_owner(root, operation, work):
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
     config = writer_lease.LeaseConfig.from_env()
-    _require_no_service(config)
+    _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.
     config = replace(config, replica_id=config.replica_id + writer_lease.OFFLINE_OWNER_SUFFIX)
@@ -772,10 +829,14 @@ def _offline_owner(root, operation, work):
         try:
             manager.close()
         except OpError as error:
-            if operation != "rollback" or result["status"] != "disabled":
+            if operation == "migrate" and result.get("status") != "marker_admitted":
+                # A migrate that admitted nothing has no head to hand off; the report must not hide.
+                result = {**result, "lease": "expires", "lease_reason": error.code}
+            elif operation != "rollback" or result["status"] != "disabled":
                 raise
-            # The local disable already committed; a failed handoff must not hide it.
-            result = {**result, "publication": "pending", "reason": error.code}
+            else:
+                # The local disable already committed; a failed handoff must not hide it.
+                result = {**result, "publication": "pending", "reason": error.code}
     return result
 
 
@@ -812,9 +873,12 @@ def _routed_store(session):
             if intent is not None:
                 from .runtime import served
 
-                if served(session.root) and authority.intent_status(session.root, reader, intent) == "pending":
+                if (intent["kind"] == authority.CREATE and served(session.root)
+                        and authority.intent_status(session.root, reader, intent) == "pending"):
                     # The serving store thread resumes it, so the same request succeeds later.
                     raise connection.busy("a collection create is still publishing; retry shortly")
+                if intent["kind"] == authority.MIGRATE:
+                    raise migration_pending()
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
@@ -892,9 +956,17 @@ def _settle(session, runtime, token, facts, staged, action, reason, check):
 
 
 def _resume_locked(session, fence_client, *, preparation_token=None):
-    if session.production:
-        capability.require_records_summary(session.root)
+    """Finish the one pending intent, a create or a migration, in the A5 order after its store is live."""
     manager = session.manager
+    intent = None
+    if session.path.exists():
+        with closing(connection.open_reader(session.path)) as reader:
+            intent = authority.pending_create(reader)
+    if session.production:
+        if intent is not None and intent["kind"] == authority.MIGRATE:
+            capability.require_collections_migrate()
+        else:
+            capability.require_records_summary(session.root)
     runtime = session.runtime()
     with closing(connection.open_reader(session.path)) as reader:
         chain.verify_store_chain(reader)
@@ -911,10 +983,12 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if initial_cut:
         if preparation_token is None:
             preparation_token = manager.ensure_writer().fencing_token
-            with session.writer(preparation_token) as writer:
-                recovered = _recover_create(writer)
-                if recovered["status"] == "conflict":
-                    return recovered
+        # A first cut binds every writer to this store, so a marker that already names another
+        # store must refuse before the cut, whoever prepared the store.
+        with session.writer(preparation_token) as writer:
+            recovered = _recover_create(writer)
+            if recovered["status"] == "conflict":
+                return recovered
         session.require(preparation_token)
     fence = _store_fence(fence_client, fence, target, initial=intent["expected_marker"] is None)
     lease = manager.ensure_writer()
@@ -948,7 +1022,9 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
                 with manager._report_lock:
                     runtime._admitted_token = None
                 return {**recovered, "status": "pending", "reason": error.code}
-            writer.reconcile_views()
+            if intent["kind"] == authority.CREATE:
+                # A migration publishes no view: its imported files are already current.
+                writer.reconcile_views()
             result = _recover_create(writer)
             if result["status"] != "marker_admitted":
                 raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker changed after cutover")
@@ -1055,6 +1131,14 @@ def _require_create_file_ownership(writer, intent):
     target = authority.parse_marker(root, target_raw)
     if target["version"] == 1:
         target = authority.upgraded_marker(root, writer.connection, target)
+    if intent["kind"] == authority.MIGRATE:
+        # The migrated collections leave file authority together, so each is checked only
+        # against the file collections the target marker leaves in files.
+        migrated = authority.intent_collection_ids(intent)
+        for entry in target["collections"]:
+            if entry["collection_id"] in migrated:
+                authority.require_new_file_ownership(root, target, entry)
+        return
     # An interrupted create may wait behind a new file declaration; retaining its intent costs only C publication.
     authority.require_new_file_ownership(root, current, target["collections"][-1])
 
@@ -1124,7 +1208,8 @@ class _CreateAdmission:
             raise collections.CollectionError("INVALID_REQUEST_ID", "deferred create needs a request identity")
         intent = authority.pending_create(self.writer.connection)
         if intent is not None:
-            if (intent["request_id"] != request_id or intent["request_hash"] != request_hash
+            if (intent["kind"] != authority.CREATE or intent["request_id"] != request_id
+                    or intent["request_hash"] != request_hash
                     or intent["expected_marker"] != (None if self.expected is None else self.expected.decode())
                     or intent["target_marker"] != self.target.decode() or replay is None):
                 raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "another create intent or marker basis is pending")
@@ -1181,13 +1266,28 @@ def _prepare_create(writer, manifest_path, manifest_text, *, why, request_id,
 
 
 def _recover_create(writer):
+    """The pending intent's marker status, after proving its transactions are in the current chain."""
     writer.handle.require_write_authority()
     with writer._authorization(), writer.read_snapshot():
         intent = authority.pending_create(writer.connection)
         if intent is None:
             return None
-        writer._operation.require_collection(intent["collection_id"], complete=True)
+        for entry in intent["collections"]:
+            writer._operation.require_collection(entry["collection_id"], complete=True)
         head = chain.verify_store_chain(writer.connection)
+        if intent["kind"] == authority.MIGRATE:
+            for entry in intent["collections"]:
+                if writer.connection.execute(
+                    "SELECT 1 FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
+                    "WHERE t.txn_id=? AND t.operation='legacy_import' AND t.legacy_event_json IS NULL "
+                    "AND c.collection_id=? AND c.manifest_path=? AND c.source_path=? AND c.created_txn=t.txn_id",
+                    (entry["txn_id"], entry["collection_id"], entry["manifest_path"], entry["source_path"]),
+                ).fetchone() is None:
+                    raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT",
+                                               "migration intent lacks its committed import checkpoint")
+            return {"status": authority.marker_status(writer, intent), "kind": authority.MIGRATE,
+                    "collection_ids": sorted(authority.intent_collection_ids(intent)),
+                    "head": {"commit_seq": head[0], "head_hash": head[1]}}
         row = writer.connection.execute(
             "SELECT t.receipt_json FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
             "WHERE t.txn_id=? AND t.operation='create' AND t.request_id=? AND t.request_hash=? "
