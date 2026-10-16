@@ -42,15 +42,14 @@ HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
-#: The test jobs that the release PR and an already-tested push skip. Lint,
-#: build, specs, capabilities and release evidence still run on both.
+#: The test jobs the release PR skips. Lint, build, specs, capabilities and
+#: release evidence still run on it; the full run at its base is its test proof.
 RELEASE_PR_SKIPPED_JOBS = {
     "core-tests",
     "harness-tests",
     "windows-held-filesystem",
     "tui",
     "product-e2e",
-    "onboarding",
 }
 
 
@@ -649,17 +648,12 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
             "release-evidence",
             "release-evidence-landed",
             "cancel-superseded-push-run",
-            "tested-tree",
             "quality",
         }
     )
     assert RELEASE_PR_SKIPPED_JOBS < fast_jobs
     (skip,) = {jobs[name]["if"] for name in RELEASE_PR_SKIPPED_JOBS}
     assert "github.head_ref != 'release-please--branches--main'" in skip
-    # A failed or skipped lookup must leave the test jobs running.
-    assert "!cancelled()" in skip
-    assert "needs.tested-tree.outputs.proven != 'true'" in skip
-    assert all(jobs[name]["needs"] == "tested-tree" for name in RELEASE_PR_SKIPPED_JOBS)
     assert all("if" not in jobs[name] for name in fast_jobs - RELEASE_PR_SKIPPED_JOBS)
 
 
@@ -690,7 +684,7 @@ def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "ci_change_scope.py")],
+        [sys.executable, str(ROOT / "scripts" / "ci_change_scope.py"), "the example check"],
         cwd=repository,
         env={
             **os.environ,
@@ -756,7 +750,7 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
 
     if docs_only:
         assert decision == {"docs_only": "true", "pytest_args": "-m reads_repository_docs"}
-        assert "Docs-only change" in summary
+        assert "Docs-only change: the example check did not run" in summary
     else:
         assert decision == {"docs_only": "false", "pytest_args": ""}
         assert not summary
@@ -795,7 +789,7 @@ def test_change_scope_compares_the_merge_commit_with_its_base(job_id: str) -> No
     assert "ref" not in checkout["with"]
     assert checkout["with"]["fetch-depth"] in (0, 2)
     scope = next(step for step in job["steps"] if step.get("id") == "scope")
-    assert scope["run"] == "python3 scripts/ci_change_scope.py"
+    assert "scripts/ci_change_scope.py" in scope["run"]
     assert scope["env"]["EVENT_NAME"] == "${{ github.event_name }}"
 
 
@@ -854,70 +848,6 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     assert "release-evidence" in set(workflow["jobs"]["gate"]["needs"])
 
 
-def test_only_a_green_full_tier_run_of_this_repository_records_its_tree() -> None:
-    """A docs-only run proved only the docs tests; a fork chose its own workflow."""
-    steps = {step.get("name"): step for step in _workflow()["jobs"]["gate"]["steps"]}
-    names = list(steps)
-    record = steps["Name the tree this pull request run tested"]
-    assert names.index("Require the selected CI tier to succeed") < names.index(
-        "Name the tree this pull request run tested"
-    )
-    assert "github.event_name == 'pull_request'" in record["if"]
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in record["if"]
-    assert "needs.core-tests.outputs.docs_only == 'false'" in record["if"]
-
-
-@pytest.mark.parametrize(
-    "source,proven",
-    [
-        ("pull_request .github/workflows/ci.yml example/project", "true"),
-        ("pull_request .github/workflows/ci.yml fork/project", "false"),
-        ("pull_request .github/workflows/other.yml example/project", "false"),
-        ("push .github/workflows/ci.yml example/project", "false"),
-        (None, "false"),
-    ],
-)
-@pytest.mark.skipif(os.name != "posix", reason="executes the Ubuntu workflow's Bash step")
-def test_a_push_skips_tests_only_for_a_tree_this_repository_already_tested(
-    tmp_path: Path, source: str | None, proven: str
-) -> None:
-    step = _workflow()["jobs"]["tested-tree"]["steps"][0]
-    executable = tmp_path / "gh"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys\n"
-        "endpoint = sys.argv[2]\n"
-        "if '/git/commits/' in endpoint:\n"
-        "    print('tree-sha')\n"
-        "elif '/actions/artifacts?name=ci-tested-tree-tree-sha' in endpoint:\n"
-        "    print('' if os.environ['FAKE_SOURCE'] == '-' else '987')\n"
-        "elif endpoint.endswith('/actions/runs/987'):\n"
-        "    print(os.environ['FAKE_SOURCE'])\n"
-        "else:\n"
-        "    sys.exit('unexpected gh call ' + endpoint)\n",
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
-    output = tmp_path / "output"
-    env = {
-        **os.environ,
-        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-        "GH_REPO": "example/project",
-        "GITHUB_SHA": "merge-sha",
-        "GITHUB_OUTPUT": str(output),
-        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
-        "FAKE_SOURCE": source or "-",
-    }
-
-    result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert output.read_text() == f"proven={proven}\n"
-
-
 def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:
     workflow = _workflow()
 
@@ -942,7 +872,6 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> No
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
-        "tested-tree",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])

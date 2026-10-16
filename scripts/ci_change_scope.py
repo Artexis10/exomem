@@ -9,9 +9,13 @@ runs every test that carries the `reads_repository_docs` marker, and
 `tests/repository_docs_reads.py` fails any test that reads these paths without
 the marker.
 
-Run from a merge checkout with at least two commits of history. It writes
-`docs_only` and `pytest_args` to `$GITHUB_OUTPUT`; any event other than
-`pull_request`, or a history it cannot compare, gives a full run.
+Run from a merge checkout with at least two commits of history, naming what
+the calling job leaves out on a docs-only change. It writes `docs_only` and
+`pytest_args` to `$GITHUB_OUTPUT` and reports the omission in the job summary.
+Any event other than `pull_request`, or a history it cannot compare, gives a
+full run.
+
+Usage: ci_change_scope.py "<what this job omits on a docs-only change>"
 """
 
 from __future__ import annotations
@@ -60,10 +64,11 @@ def docs_only(event_name: str) -> bool:
     if event_name != "pull_request":
         return False
     paths = changed_paths()
+    # An empty merge diff changes nothing that a test could observe.
     return paths is not None and all(is_docs_path(path) for path in paths)
 
 
-def main() -> int:
+def main(omitted: str) -> int:
     only_docs = docs_only(os.environ.get("EVENT_NAME", ""))
     pytest_args = f"-m {DOCS_MARKER}" if only_docs else ""
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -73,11 +78,11 @@ def main() -> int:
     if only_docs and summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(
-                "Docs-only change: tests run only where they read docs, OpenSpec "
-                f"or root Markdown (`{pytest_args}`).\n"
+                f"Docs-only change: {omitted} did not run. Every change is in docs, "
+                "OpenSpec or root Markdown, so this job makes no claim about them.\n"
             )
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1]))

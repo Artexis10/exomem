@@ -7,8 +7,17 @@ without it is skipped on exactly the change that can break it. A Python audit
 hook sees every path this process opens or lists, so a missing marker fails the
 test that needs it on every ordinary run, before a docs-only change relies on it.
 
-Bounds: a child process's reads are invisible here, and so is a relative
-single-component name, which cannot be told apart from a `dir_fd` open.
+Bounds. The guard does not see these, and the full push run on main still
+runs them:
+- a child process's reads;
+- a relative single-component name, which cannot be told apart from a
+  `dir_fd` open;
+- a check that only stats a path (`exists()`, `is_file()`), which raises no
+  audit event;
+- a read during class collection, or from a thread that outlives its test;
+- a cached read (`lru_cache`, a session fixture, an import-time constant):
+  only the first test that triggers it in a process is flagged, so mark every
+  module that depends on the content, not only the first reader.
 """
 
 from __future__ import annotations

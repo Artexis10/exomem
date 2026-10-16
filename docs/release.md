@@ -184,8 +184,8 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 3. Confirm CI and the pre-release checks above.
 4. **Required: run one full CI pass on `main` and confirm it is green before
    merging the release PR.** The release PR runs lint, build, specs,
-   capabilities and release evidence, and no test job: the full run at its
-   base revision is its test evidence. Release evidence also refuses a release
+   capabilities, the wheel onboarding gate and release evidence, and no other
+   test job: the full run at its base revision is its test evidence. Release evidence also refuses a release
    PR that changes any file release-please does not manage, so land a fix
    through its own pull request, never by a push to the release branch. Full
    CI (retrieval quality/latency, governance wire characterization, semantic

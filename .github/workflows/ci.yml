@@ -31,21 +31,14 @@ jobs:
   # tiers plus the latency file partition the previous lean suite exactly.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
-    # Two runs skip every test job, so one condition serves all six.
-    # - The release PR: `release-evidence` requires a green full run at its
-    #   base revision and refuses a release PR that changes anything
-    #   release-please does not manage. Lint, build (packages, Cloud
-    #   archives, privacy), specs and capabilities still run.
-    # - A push whose tree a green full-tier pull request run of this
-    #   repository already tested (`tested-tree`): the same tree holds the
-    #   same workflow, so the push would run the jobs that already passed.
-    needs: tested-tree
-    if: &test-jobs ${{ !cancelled() && needs.tested-tree.outputs.proven != 'true' && github.head_ref != 'release-please--branches--main' }}
+    # The release PR runs no test job: `release-evidence` requires a green
+    # full run at its base revision and refuses a release PR that changes
+    # anything release-please does not manage. Lint, build (packages, Cloud
+    # archives, privacy), specs, capabilities and the wheel onboarding gate,
+    # which runs the packaged demo, still run.
+    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    outputs:
-      # Every shard computes the same value.
-      docs_only: ${{ steps.scope.outputs.docs_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +64,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/ci_change_scope.py
+        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -154,8 +147,7 @@ jobs:
 
   harness-tests:
     name: harness tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
-    needs: tested-tree
-    if: *test-jobs
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -176,7 +168,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/ci_change_scope.py
+        run: python3 scripts/ci_change_scope.py "tests without the reads_repository_docs marker"
       - name: Install pinned Bun runtime
         uses: oven-sh/setup-bun@v2
         with:
@@ -242,8 +234,7 @@ jobs:
 
   windows-held-filesystem:
     name: Windows held filesystem (native NTFS)
-    needs: tested-tree
-    if: *test-jobs
+    if: *not-release-pr
     runs-on: windows-latest
     timeout-minutes: 12
     steps:
@@ -340,8 +331,7 @@ jobs:
 
   tui:
     name: terminal UI (textual, headless + snapshots)
-    needs: tested-tree
-    if: *test-jobs
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -358,8 +348,7 @@ jobs:
 
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
-    needs: tested-tree
-    if: *test-jobs
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -373,7 +362,7 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: python3 scripts/ci_change_scope.py
+        run: python3 scripts/ci_change_scope.py "the installed journey"
       - name: Install uv
         if: steps.scope.outputs.docs_only != 'true'
         uses: astral-sh/setup-uv@v5
@@ -580,8 +569,6 @@ jobs:
 
   onboarding:
     name: onboarding (wheel path)
-    needs: tested-tree
-    if: *test-jobs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -859,41 +846,6 @@ jobs:
               echo "push run $run was not cancelled; it may have finished"
           done
 
-  # A push to main whose tree a green pull request run already tested skips
-  # its test jobs. Best effort: if this lookup fails, the test jobs run.
-  tested-tree:
-    name: find the pull request run that tested this tree
-    if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      proven: ${{ steps.find.outputs.proven }}
-    steps:
-      - name: Look for a green full-tier pull request run of this tree
-        id: find
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          tree=$(gh api "repos/$GH_REPO/git/commits/$GITHUB_SHA" --jq .tree.sha)
-          runs=$(gh api "repos/$GH_REPO/actions/artifacts?name=ci-tested-tree-$tree&per_page=20" \
-            --jq '.artifacts[] | select(.expired | not) | .workflow_run.id')
-          proven=false
-          for run in $runs; do
-            source=$(gh api "repos/$GH_REPO/actions/runs/$run" --jq '[.event, .path, .head_repository.full_name] | join(" ")')
-            if test "$source" = "pull_request .github/workflows/ci.yml $GH_REPO"; then
-              proven=true
-              echo "pull request run $run already tested tree $tree; the test jobs skip" >> "$GITHUB_STEP_SUMMARY"
-              break
-            fi
-          done
-          echo "proven=$proven" >> "$GITHUB_OUTPUT"
-
   # Engineering-practices quality check (https://github.com/Artexis10/engineering-practices):
   # fails on dead code a pull request adds and posts the Quality report. It informs
   # review and is deliberately outside the required CI gate below.
@@ -957,27 +909,6 @@ jobs:
             echo "unexpected CI result for full_ci=$FULL_CI: $result" >&2
             exit 1
           done
-      # Only after the check above: the artifact says this tree passed. Only a
-      # full-tier run of this repository's own branch records it, because a
-      # docs-only run proved only the docs tests.
-      - name: Name the tree this pull request run tested
-        id: tree
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.core-tests.outputs.docs_only == 'false'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          echo "tree=$(gh api "repos/$GH_REPO/git/commits/$GITHUB_SHA" --jq .tree.sha)" >> "$GITHUB_OUTPUT"
-          echo "$GITHUB_SHA" > "$RUNNER_TEMP/tested-merge-commit"
-      - name: Record the tested tree for the push run
-        if: steps.tree.outputs.tree != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-tested-tree-${{ steps.tree.outputs.tree }}
-          path: ${{ runner.temp }}/tested-merge-commit
-          retention-days: 7
-          overwrite: true
 
   # A full run that release-evidence-automation.yml dispatched with
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
