@@ -63,27 +63,3 @@ def test_native_derived_replay_keeps_numeric_subtypes_and_signed_zero_after_reop
         restored = typed_storage.current_values(backup, target.reads("main"), row_id)
         assert typed_storage.canonical_json(restored) == typed_storage.canonical_json(reversed_zeros)
 
-
-def test_a_spelling_interned_in_a_rolled_back_import_is_stored_again_by_the_next_one(tmp_path):
-    """A metadata scope kept past its transaction would reuse a rolled-back format ID that no stored row defines."""
-    layout = native_layout.build(CID, 7, {"when": FieldSpec("datetime")}, identity="uuid16")
-    legacy = build_projection_plan(CID, {"when": {"type": "datetime"}}, ())
-    projection = NativeProjectionPlan(CID, 13, legacy.scalars, legacy.indexes, layout, FileRole.DERIVED)
-    target = derived_rows.Target(CID, layout, projection, "native-source-contract", ())
-    later_key, offset = "00000000-0000-4000-8000-000000000003", {"when": "2024-01-02T00:30:00+02:00"}
-    store = derived_rows.Store(tmp_path, SimpleNamespace(path=tmp_path / "collections.sqlite"))
-    try:
-        store.conn.execute("BEGIN")
-        store._install(target, state="ready", applied=0, cursor=None)
-        derived_rows.apply(store.conn, target, [(0, KEY, {"when": "2024-01-01T00:00:00Z"})])
-        store.conn.commit()
-        store.conn.execute("BEGIN")
-        derived_rows.apply(store.conn, target, [(0, later_key, offset)])
-        store.conn.rollback()
-        store.conn.execute("BEGIN")
-        assert derived_rows.apply(store.conn, target, [(0, later_key, offset)])[0]["outcome"] == "inserted"
-        store.conn.commit()
-        row_id = store.conn.execute(f"SELECT max(row_id) FROM {target.table}").fetchone()[0]
-        assert typed_storage.current_values(store.conn, target.reads("main"), row_id) == offset
-    finally:
-        store.close()

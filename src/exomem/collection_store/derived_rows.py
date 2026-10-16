@@ -326,6 +326,7 @@ class Store:
         # Opened on the writer handle's thread and closed with the handle (``WriterConnection.close``).
         # ``open_store`` rebinds ``handle`` to each checkout that uses it.
         self.root, self.handle, self.path, self.closed = root, handle, path(handle.path), False
+        self._write_scope, self._owns_transaction = None, False
         self.conn = self._open()
         self.readers: dict[str, Any] = {}  # a rebuild's open member reader per collection
 
@@ -376,12 +377,27 @@ class Store:
         with active_manager().mutation_guard(self.root, operation="derived_rows"):
             self.handle.require_write_authority(allow_diverged=True)
             self.conn.execute("BEGIN IMMEDIATE")
+            self._owns_transaction = True
             try:
                 yield self.conn
                 self.conn.execute("COMMIT")
             except BaseException:
                 self.conn.execute("ROLLBACK")
                 raise
+            finally:
+                self._owns_transaction = False
+                if self._write_scope is not None:
+                    self._write_scope.close()
+                    self._write_scope = None
+
+    @property
+    def write_scope(self) -> native_metadata.WriteScope:
+        """This transaction's native metadata scope, opened on first use and closed when the transaction ends."""
+        if not self._owns_transaction:
+            raise RuntimeError("a native metadata scope belongs to this file's open transaction")
+        if self._write_scope is None:
+            self._write_scope = native_metadata.WriteScope(self.conn)
+        return self._write_scope
 
     def state(self, main: sqlite3.Connection, collection_id: str) -> tuple[State, Target | None]:
         goal = target(main, collection_id)
@@ -585,7 +601,7 @@ def _members(goal: Target):
     return members
 
 
-def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]:
+def apply(conn: sqlite3.Connection, goal: Target, items, *, scope=None) -> list[dict[str, Any]]:
     """Upsert ``items`` (``(index, item_key, values)``, in source order) into the collection's rows.
 
     A row's typed columns and its projection keys are one row of the collection's table.
@@ -619,7 +635,6 @@ def apply(conn: sqlite3.Connection, goal: Target, items) -> list[dict[str, Any]]
     update = (f"UPDATE {table} SET row_version=?,{projection_update}"  # noqa: S608
               f"{','.join(c + '=?' for c in columns)} WHERE row_id=?")
     decode, upkeep = _decoder(goal, conn), rollups.Upkeep(conn, members=_members(goal))
-    scope = native_metadata.WriteScope(conn) if native else None
     flagged: dict[int, int] = {}
     touched: set[tuple[int, str, str]] = set()
     outcomes = []
@@ -895,7 +910,8 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import
                     break
-                applied = importer._derived_apply(store.conn, goal, batch, manifest, binding["source"]["ref"], shas)
+                applied = importer._derived_apply(store.conn, goal, batch, manifest, binding["source"]["ref"], shas,
+                                                  scope=store.write_scope)
                 for _, key, payload in applied.entries:
                     importer._extend(tally, key, payload)
                 rows += sum(outcome["outcome"] == "inserted" for outcome in applied.outcomes)

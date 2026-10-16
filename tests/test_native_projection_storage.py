@@ -1,5 +1,6 @@
 """Native indexed operands survive storage transactions and physical file aliases."""
 
+import datetime as dt
 import sqlite3
 import struct
 from contextlib import closing
@@ -26,6 +27,7 @@ from exomem.query_engine.indexes import IndexKey, IndexSpec
 from exomem.structured_collections import FieldSpec
 
 CID = "00000000-0000-4000-8000-000000000001"
+MICROSECOND = dt.timedelta(microseconds=1)
 
 
 def write(conn, plan, ordinal, values):
@@ -322,7 +324,11 @@ def test_a_warm_dense_scan_returns_and_refuses_exactly_what_the_shared_decoders_
         when, amount = current.fields.index("when"), current.fields.index("amount")
         original = conn.execute(f"SELECT v{when},v{amount} FROM {plan.table_name} WHERE row_id=2").fetchone()
         _, delta, format_id = struct.unpack(">Bqq", original[0])
+        # Microseconds from 0001-01-01 UTC: in the calendar, but its +02:00 local time is past the calendar's end.
+        edge = (dt.datetime(9999, 12, 31, 23, 30, tzinfo=dt.UTC) - dt.datetime(1, 1, 1, tzinfo=dt.UTC)) // MICROSECOND
         damaged = ((struct.pack(">Bqq", 1, delta + 1, format_id), original[1]),  # sub-second in a whole-second format
+                   (struct.pack(">Bqq", 1, edge - native_metadata.read_epoch(conn, CID, 7, when), format_id),
+                    original[1]),  # a local time outside the calendar
                    (struct.pack(">Bqq", 1, delta, 99), original[1]),  # a format that no row defines
                    (struct.pack(">Bqq", 1, delta, 1), original[1]),  # the initial format inside a frame
                    (2**62, original[1]),  # an integer instant past the calendar

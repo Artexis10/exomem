@@ -39,7 +39,6 @@ from . import (
     derived_rows,
     governance,
     index_migrations,
-    native_metadata,
     rollups,
     schema,
     summary,
@@ -1922,7 +1921,7 @@ class CollectionWriter:
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans])
-            scope = native_metadata.WriteScope(self.connection)
+            scope = self.handle.write_scope
             for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
                 self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
                                  ordinal=ordinal, queue_log=False, scope=scope)

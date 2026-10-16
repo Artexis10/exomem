@@ -26,12 +26,17 @@ def encode(value: int | float) -> int | float | bytes:
     return bytes((subtype,)) + number_key_bytes_v1(value)
 
 
+def plain(cell: object) -> bool:
+    """Whether a cell is an ordinary INTEGER or REAL, its own value; NaN and infinities fall outside the band."""
+    return (type(cell) is int or type(cell) is float) and LOW <= cell <= HIGH
+
+
 def decode(cell: int | float | bytes, *, digit_budget: int) -> int | float:
     """Restore exact subtype; reject malformed frames before they become values."""
-    if type(cell) in (int, float):
-        if (type(cell) is float and not math.isfinite(cell)) or not LOW <= cell <= HIGH:
-            raise ScalarValueError("ordinary numeric cell is outside its band")
+    if plain(cell):
         return cell
+    if type(cell) in (int, float):
+        raise ScalarValueError("ordinary numeric cell is outside its band")
     if type(cell) is not bytes or len(cell) < 12 or cell[0] not in (INTEGER, FLOAT):
         raise ScalarValueError("invalid typed-v2 numeric frame")
     value = decode_number_overflow_v1(cell[1:], as_float=cell[0] == FLOAT, digit_budget=digit_budget)
