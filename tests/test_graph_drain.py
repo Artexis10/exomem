@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -333,39 +334,61 @@ def test_a_stalled_queue_on_an_unreadable_graph_asks_for_whole_vault_only_after_
     no-progress streak has lasted the whole backoff ladder. Write signals cut
     each backoff wait short, so the bound is wall time, not a count of passes:
     a burst of transient refusals must not buy a whole-vault pass.
+
+    Simulated time: each wait returns at the next write signal, 0.2 s apart,
+    or at its own timeout when that comes first.
     """
+    now = [1000.0]
+    signal_every = 0.2
+    horizon = now[0] + 400.0
+    stop = threading.Event()
+
+    def wait(timeout: float | None = None) -> bool:
+        if now[0] >= horizon:
+            stop.set()
+            return True
+        signalled = timeout is None or signal_every < timeout
+        now[0] += signal_every if signalled else timeout
+        return signalled
+
+    monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(graph_drain._DEBT, "wait", wait)
+    monkeypatch.setattr(graph_drain, "_stop", stop)
+    monkeypatch.setattr(graph_drain, "_PROGRESS", threading.Event())
+    monkeypatch.setattr(graph_drain, "_last_debt", 0.0)
     monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.0)
-    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 0.05)
-    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 0.2)
+    monkeypatch.setattr(graph_drain, "RETRY_SECONDS", 5.0)
+    monkeypatch.setattr(graph_drain, "MAX_RETRY_SECONDS", 120.0)
+    monkeypatch.setattr(epistemic_graph, "last_whole_vault_pass_seconds", lambda _root: None)
+    monkeypatch.setattr(graph_drain, "_requeue_quarantined", lambda _root: None)
     monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
     monkeypatch.setattr(graph_drain, "_availability_pending", lambda _root: True)
-    monkeypatch.setattr(graph_drain, "_whole_vault_pending", lambda _root: False)
     attempts: list[float] = []
     requests: list[float] = []
+    # The requested marker stands from then on, as the real one does.
+    monkeypatch.setattr(graph_drain, "_marker_pending", lambda _root: bool(requests))
 
     def no_progress(_root: Path) -> int:
-        attempts.append(time.monotonic())
+        attempts.append(now[0])
         return 0
 
     def request(_root: Path, **_kwargs: Any) -> bool:
-        requests.append(time.monotonic())
-        return False
+        requests.append(now[0])
+        return True
 
     monkeypatch.setattr(graph_drain, "_work_once", no_progress)
     monkeypatch.setattr(graph_drain, "_request_full_rebuild", request)
 
-    graph_drain.start(tmp_path)
-    _signal_debt_for(0.6, every=0.01)
-    assert _wait_for(lambda: len(requests) >= 1, timeout=5.0)
-    graph_drain.stop()
+    graph_drain._run_owned(tmp_path)
 
-    # The ladder: 0.05 + 0.1, then the 0.2 ceiling, makes 0.35 s.
-    assert requests[0] - attempts[0] >= 0.35, (
-        f"whole-vault requested {requests[0] - attempts[0]:.2f}s into the stall"
+    # The ladder: 5 + 10 + 20 + 40 + 80, then the 120 s ceiling, makes 275 s.
+    assert requests, "a queue that never drained never asked for a whole-vault rebuild"
+    stalled_for = requests[0] - attempts[0]
+    assert stalled_for >= 275.0, f"whole-vault requested {stalled_for:.1f}s into the stall"
+    assert stalled_for < 275.0 + signal_every * 2, (
+        f"whole-vault requested {stalled_for:.1f}s into the stall, well after the ladder"
     )
-    # Unsignalled, the ladder runs four passes in 0.35 s; the writes made more.
-    before = [moment for moment in attempts if moment <= requests[0]]
-    assert len(before) > 6, f"the write signals never cut a backoff short: {len(before)} passes"
+    assert len(requests) == 1, f"{len(requests)} whole-vault requests for one stall"
 
 
 def test_a_failing_drain_never_kills_the_daemon(
