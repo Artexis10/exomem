@@ -76,12 +76,15 @@ def bucket_key(day: dt.date, bucket: str) -> str:
 class Basis:
     """How a row's source-local day and recency order are read from its values."""
 
-    __slots__ = ("field", "kind", "offset")
+    __slots__ = ("field", "kind", "offset", "_native_type")
 
     def __init__(self, field: str, kind: str, offset: str | None = None) -> None:
+        from ..collection_store.native_temporal import TemporalView
+
         if kind not in {"instant", "date"} or (kind == "date" and offset is not None):
             raise ValueError("a day basis is an instant with an optional offset field, or a date")
         self.field, self.kind, self.offset = field, kind, offset
+        self._native_type = TemporalView
 
     def __eq__(self, other):
         return isinstance(other, Basis) and self.describe() == other.describe()
@@ -103,37 +106,55 @@ class Basis:
         With ``ordered=False`` the recency key is None, for a reduction without ``latest``.
         """
         raw = values.get(self.field)
-        if type(raw) is not str:
-            return None
+        native = type(raw) is self._native_type
         if self.kind == "date":
-            if len(raw) != 10:
-                return None
-            try:
-                day = dt.date.fromisoformat(raw)
-            except ValueError:
+            if native:
+                if raw.spelling is not None:
+                    return None
+                day = raw.local
+            elif type(raw) is str and len(raw) == 10:
+                try:
+                    day = dt.date.fromisoformat(raw)
+                except ValueError:
+                    return None
+            else:
                 return None
             return day, (day.toordinal() if ordered else None)
-        try:
-            instant = parse_instant(raw)
-        except ScalarValueError:
+        if native:
+            spelling = raw.spelling
+            if spelling is None:
+                return None
+            instant = raw.local
+            written_day = instant if type(instant) is dt.date else instant.date()
+            utc_spelling = spelling.offset == "Z"
+            own = 0 if utc_spelling else offset_minutes(spelling.offset)
+        elif type(raw) is str:
+            try:
+                instant = parse_instant(raw)
+            except ScalarValueError:
+                return None
+            written_day = dt.date.fromisoformat(raw[:10])
+            utc_spelling = raw[-1] in "Zz"
+            own = 0 if utc_spelling else offset_minutes(raw[-6:])
+        else:
             return None
-        own = 0 if raw[-1] in "Zz" else offset_minutes(raw[-6:])
         if self.offset is not None and values.get(self.offset) is not None:
             minutes = offset_minutes(values[self.offset])
-        elif raw[-1] in "Zz":
+        elif utc_spelling:
             minutes = None if self.offset is not None else 0
         else:
             minutes = own
         if minutes is None:
             return None
-        order = instant_order(instant) if ordered else None
+        order = (raw.instant_order() if native else instant_order(instant)) if ordered else None
         if minutes == own:
-            # The instant's own offset: its local day is the date written in its text.
-            return dt.date.fromisoformat(raw[:10]), order
+            return written_day, order
+        if native:
+            return raw.instant_day(minutes), order
         shift = _SHIFTS.get(minutes)
         if shift is None:
             shift = _SHIFTS[minutes] = dt.timedelta(minutes=minutes)
-        return (instant + shift).date(), order
+        return (instant.astimezone(dt.UTC) + shift).date(), order
 
 
 def group_key(values, names) -> tuple:

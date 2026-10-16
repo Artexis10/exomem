@@ -42,6 +42,7 @@ from . import (
     recall_policy,
     relation_registry,
     reserved_paths,
+    runtime_resources,
     semantic_blocks,
     semantic_index,
     semantic_language_registry,
@@ -2233,6 +2234,7 @@ class EpistemicGraphIndex:
         require_current_projection: bool = True,
         prove: bool | str | None = None,
         live_only: bool = False,
+        allow_cold_projection: bool = True,
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
     ) -> sqlite3.Connection | None:
@@ -2291,19 +2293,22 @@ class EpistemicGraphIndex:
         reader's proof is running, and True waits for that proof. A refusal
         appends ``"unproven"`` to ``outcome_out``.
 
-        ``live_only`` is optional compiler enrichment: require this process's
-        exact checkpoint, refuse publication contention, and never prove or adopt.
-        Refusal omits optional counterparts with an explicit status; ordinary
-        recall keeps its existing path.
+        ``allow_cold_projection=False`` uses only a live event checkpoint for
+        current projection checks, including checkpointless publications.
+        Missing or changed live evidence declines without a source census.
+        It retains every marker and remembered source-proof check above.
+
+        ``live_only`` is optional compiler enrichment on that bounded path: it
+        also requires this process's exact stored checkpoint, refuses
+        publication contention, and never proves or adopts. Refusal omits
+        optional counterparts with an explicit status; ordinary recall keeps
+        its existing path.
         """
         # Optional compiler enrichment must never wait for publication or start cold proof.
         if live_only and not require_current_projection:
             raise ValueError("live_only requires the current graph projection")
-        live_checkpoint = (
-            freshness.live_recall_checkpoint(self.vault_root, "vault") if live_only else None
-        )
-        if live_only and live_checkpoint is None:
-            return None
+        if live_only:
+            allow_cold_projection = False
         if prove is None:
             prove = self._prove_cold_snapshots
         if not graph_enabled():
@@ -2318,6 +2323,14 @@ class EpistemicGraphIndex:
             if refusal_out is not None:
                 refusal_out.append("sidecar_missing")
             return None
+        bounded_checkpoint = None
+        if require_current_projection and not allow_cold_projection:
+            # A false miss costs temporary read unavailability, rather than a cold corpus census.
+            bounded_checkpoint = freshness.live_recall_checkpoint(self.vault_root, "vault")
+            if bounded_checkpoint is None:
+                if outcome_out is not None:
+                    outcome_out.append("live_checkpoint_unavailable")
+                return None
         sidecar_identity = _sidecar_file_identity(self.path)
         # Sampled before any proving starts. Everything below -- the marker
         # reads, the source-bytes proof over the whole corpus -- takes time a
@@ -2334,11 +2347,15 @@ class EpistemicGraphIndex:
         else:
             _await_publication_hold(registry_key)
         try:
+            # Bounded readers decline contention instead of SQLite's default wait.
+            connection_options: dict[str, Any] = (
+                {"timeout": 0.0} if not allow_cold_projection else {}
+            )
             conn = self._connect_existing(
                 readonly=True,
                 factory=_TrackedSidecarConnection,
                 check_same_thread=False,
-                **({"timeout": 0.0} if live_only else {}),
+                **connection_options,
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
@@ -2430,14 +2447,16 @@ class EpistemicGraphIndex:
         if current and require_current_projection and values.get(_READ_BARRIER_KEY) is not None:
             current = False
         if current and require_current_projection:
-            if live_only:
-                current_checkpoint = live_checkpoint
-                if stored_checkpoint is None or stored_checkpoint != live_checkpoint:
+            if bounded_checkpoint is not None:
+                current_checkpoint = bounded_checkpoint
+                # Enrichment trusts only the exact checkpoint this process published.
+                if live_only and stored_checkpoint != bounded_checkpoint:
                     conn.close()
                     return None
                 current_identity = (
-                    live_checkpoint.triple, live_checkpoint.policy_version,
-                    live_checkpoint.access_policy_fingerprint,
+                    bounded_checkpoint.triple,
+                    bounded_checkpoint.policy_version,
+                    bounded_checkpoint.access_policy_fingerprint,
                 )
             else:
                 current_checkpoint = (
@@ -2551,6 +2570,13 @@ class EpistemicGraphIndex:
                     stored_checkpoint,
                     sampled_generation=sampled_generation,
                 )
+        if bounded_checkpoint is not None and (
+            freshness.live_recall_checkpoint(self.vault_root, "vault") != bounded_checkpoint
+        ):
+            if outcome_out is not None:
+                outcome_out.append("live_checkpoint_changed")
+            conn.close()
+            return None
         # The `external_pending` term is the same cheap short-circuit described
         # in this method's docstring (contract D7), re-read after the proof so a
         # Class A/C signal that landed mid-proof still fails closed. Scoped to
@@ -2558,7 +2584,7 @@ class EpistemicGraphIndex:
         if not current or (
             require_current_projection and freshness.external_pending(self.vault_root)
         ) or (live_only and not freshness.recall_checkpoint_is_current(
-            self.vault_root, "vault", live_checkpoint
+            self.vault_root, "vault", bounded_checkpoint
         )):
             conn.close()
             return None
@@ -10254,6 +10280,8 @@ def _structural_edges_for_page(
     source_hash: str,
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
+    check: Callable[[], None] | None = None,
+    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> list[GraphEdge]:
     """Every edge some interpretation of `page` authors, as shared neutral rows.
 
@@ -10282,6 +10310,8 @@ def _structural_edges_for_page(
 
     edges: list[GraphEdge] = []
     for unit in semantic_units.candidate_units(state.candidates):
+        if check is not None:
+            check()
         occurrence = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
         node_key = _candidate_key(rel, occurrence, unit.form)
         anchor = _unit_anchor(unit) or f"line-{unit.line}"
@@ -10293,7 +10323,8 @@ def _structural_edges_for_page(
         ))
         for relation in unit.relations:
             destination = _relation_target(
-                vault_root, relation.target, resolver, visible, source_path=rel
+                vault_root, relation.target, resolver, visible,
+                source_path=rel, check=check, landing=landing,
             )
             if destination is None:
                 continue
@@ -10321,7 +10352,8 @@ def _structural_edges_for_page(
     canonical_lines: set[int] = set()
     for relation in notes.relations:
         destination = _relation_target(
-            vault_root, relation.target, resolver, visible, source_path=rel
+            vault_root, relation.target, resolver, visible,
+            source_path=rel, check=check, landing=landing,
         )
         if destination is None:
             continue
@@ -10343,7 +10375,7 @@ def _structural_edges_for_page(
         ))
     edges.extend(_page_level_edges(
         vault_root, page, page_edge, body=page.body, canonical_lines=canonical_lines,
-        resolver=resolver, visible=visible,
+        resolver=resolver, visible=visible, check=check,
     ))
     return _dedupe_edges(edges)
 
@@ -10355,12 +10387,16 @@ def _relation_target(
     visible: Callable[[str], bool] | None,
     *,
     source_path: str,
+    check: Callable[[], None] | None = None,
+    landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
     A local fragment uses its already-known source parent. Page names still
     resolve through the ordinary audience-aware vault resolver.
     """
+    if check is not None:
+        check()
     target, fragment = _split_target_fragment(raw_target)
     if not target and fragment:
         target = source_path
@@ -10373,8 +10409,9 @@ def _relation_target(
         return None
     if not canonical:
         return None
-    dst_key, dst_page_key, fragment_metadata = _relation_destination(
-        vault_root, canonical, warning, fragment
+    dst_key, dst_page_key, fragment_metadata = (
+        _relation_destination(vault_root, canonical, warning, fragment)
+        if landing is None else landing(canonical, warning, fragment)
     )
     return dst_key, dst_page_key, _target_kind(vault_root, canonical), {
         "target_resolution": "unresolved" if warning else "resolved",
@@ -10391,12 +10428,15 @@ def _page_level_edges(
     canonical_lines: set[int],
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None,
+    check: Callable[[], None] | None = None,
 ) -> list[GraphEdge]:
     """Frontmatter and body-link edges, whose meaning no vocabulary instance changes."""
     rel = page.rel_path
     file_key = _file_key(rel)
     edges: list[GraphEdge] = []
     for occurrence, target in enumerate(_frontmatter_links(page.frontmatter.get("sources"))):
+        if check is not None:
+            check()
         edges.append(
             page_edge(
                 file_key,
@@ -10410,6 +10450,8 @@ def _page_level_edges(
         )
     for field in ("evidence", "evidences", "evidence_paths"):
         for target in _frontmatter_links(page.frontmatter.get(field)):
+            if check is not None:
+                check()
             edges.append(
                 page_edge(
                     file_key,
@@ -10421,6 +10463,8 @@ def _page_level_edges(
                 )
             )
     for target in _frontmatter_links(page.frontmatter.get("supersedes")):
+        if check is not None:
+            check()
         edges.append(
             page_edge(
                 file_key,
@@ -10432,6 +10476,8 @@ def _page_level_edges(
             )
         )
     for target in _frontmatter_links(page.frontmatter.get("superseded_by")):
+        if check is not None:
+            check()
         edges.append(
             page_edge(
                 _file_key(_with_md(target)),
@@ -10443,6 +10489,8 @@ def _page_level_edges(
             )
         )
     for target in _frontmatter_links(page.frontmatter.get("related")):
+        if check is not None:
+            check()
         edges.append(
             page_edge(
                 file_key,
@@ -10454,7 +10502,8 @@ def _page_level_edges(
             )
         )
     for observation in _body_wikilink_observations(
-        vault_root, body, skip_lines=canonical_lines, resolver=resolver, visible=visible
+        vault_root, body, skip_lines=canonical_lines,
+        resolver=resolver, visible=visible, check=check,
     ):
         edges.append(
             page_edge(
@@ -10588,12 +10637,17 @@ def _body_wikilink_observations(
     skip_lines: set[int],
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None = None,
+    check: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """First authored occurrence and spelling for each resolved body target."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for occurrence, match in enumerate(vault_module.find_body_wikilinks(body)):
-        line = body.count("\n", 0, match.start()) + 1
+    line = 1
+    previous = 0
+    for occurrence, match in enumerate(vault_module.iter_body_wikilinks(body, check=check)):
+        # Count each source interval once, including links skipped by the relation grammar.
+        line += body.count("\n", previous, match.start())
+        previous = match.start()
         if line in skip_lines:
             continue
         target = match.group(1).strip()
@@ -11330,6 +11384,11 @@ class GraphView:
         admitted: dict[str, bool] | None = None,
         resolver: vault_module.WikilinkResolver | None = None,
         reads_placeholders: bool = True,
+        check: Callable[[], None] | None = None,
+        checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+        source_limit: int | None = None,
+        summary_limit: int | None = None,
+        preparation_limit: int | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         self.conn = conn
@@ -11346,6 +11405,15 @@ class GraphView:
         )
         self._nodes: dict[str, dict[str, Any] | None] = {}
         self.reads_placeholders = reads_placeholders
+        self.check = check
+        self.checkpoint = checkpoint
+        self.source_limit = source_limit
+        self.summary_limit = summary_limit
+        self.preparation_limit = preparation_limit
+        # One request-local cost verdict per admitted page.
+        # Interruptions never mean unchanged edges.
+        self._preflight: dict[str, bool] = {}
+        self.interrupted: dict[str, str] = {}
         self._resolver = resolver
         self._changes: dict[str, bool] = {}
         self._authored: dict[str, list[dict[str, Any]] | None] = {}
@@ -11353,6 +11421,8 @@ class GraphView:
         self._node_paths: dict[str, str | None] = {}
 
     def _summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
+        if self.source_limit is not None:
+            return self._bounded_summaries(paths)
         return {
             str(path): _json(metadata).get(STRUCTURAL_METADATA) or {}
             for path, metadata in self.conn.execute(
@@ -11361,6 +11431,88 @@ class GraphView:
                 (json.dumps(paths),),
             )
         }
+
+    def _check(self) -> None:
+        if self.check is not None:
+            self.check()
+
+    def _interrupt(self, path: str, reason: str) -> None:
+        self._preflight[path] = False
+        self.interrupted[path] = reason
+
+    def _bounded_summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
+        """Use live point signatures and resident parser facts before any source work."""
+        result: dict[str, Mapping[str, Any]] = {}
+        try:
+            self._check()
+            signatures = freshness.live_signatures(
+                self.vault_root, "vault", (self.vault_root / path for path in paths),
+            )
+            if signatures is None or self.checkpoint is None or (
+                freshness.live_recall_checkpoint(self.vault_root, "vault") != self.checkpoint
+            ):
+                for path in paths:
+                    self._interrupt(path, "live_signature_unavailable")
+                return result
+            sizes = {}
+            for path, signature in zip(paths, signatures, strict=True):
+                if signature is None:
+                    self._interrupt(path, "live_signature_unavailable")
+                elif signature[2] > self.source_limit:
+                    self._interrupt(path, "source_work_limit")
+                else:
+                    sizes[path] = signature[2]
+            # SQLite returns a scalar byte count before it can deliver oversized JSON to Python.
+            for path, size, metadata in self.conn.execute(
+                "SELECT path, length(CAST(metadata AS BLOB)), "
+                "CASE WHEN length(CAST(metadata AS BLOB)) <= ? THEN metadata END "
+                "FROM graph_nodes WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+                (self.summary_limit, json.dumps(list(sizes))),
+            ):
+                self._check()
+                path = str(path)
+                if metadata is None:
+                    self._interrupt(path, "summary_work_limit")
+                    continue
+                summary = _json(metadata).get(STRUCTURAL_METADATA) or {}
+                self._check()
+                structure = summary.get("structure") or {}
+                # Parser facts bound possible edge/interpretation objects,
+                # independent of hidden candidates.
+                items = int(summary.get("body_wikilinks", 0)) + sum(
+                    int(count) for count in (summary.get("frontmatter_link_counts") or {}).values()
+                ) + sum(len(structure.get(field, ())) for field in ("rich", "compact", "notes"))
+                cost = 8 * sizes[path] + 4 * int(size) + 4096 * items
+                if self.preparation_limit is not None and cost > self.preparation_limit:
+                    self._interrupt(path, "preparation_work_limit")
+                    continue
+                self._preflight[path] = True
+                result[path] = summary
+        except TimeoutError:
+            for path in paths:
+                if path not in self._preflight:
+                    self._interrupt(path, "deadline")
+        except sqlite3.DataError:
+            for path in paths:
+                if path not in self._preflight:
+                    self._interrupt(path, "summary_work_limit")
+        for path in paths:
+            if path not in self._preflight:
+                self._interrupt(path, "summary_unavailable")
+        return result
+
+    def preflight(self, paths: Iterable[str]) -> None:
+        """Apply the same source-cost rule to every admitted author before link visibility."""
+        if self.source_limit is None:
+            return
+        wanted = [
+            str(path) for path in paths
+            if path not in self._preflight and self.allowed(str(path))
+        ]
+        if wanted:
+            summaries = self._bounded_summaries(wanted)
+            for path in wanted:
+                self.parents.hold(path, summaries.get(path))
 
     @property
     def unavailable(self) -> set[str]:
@@ -11372,7 +11524,33 @@ class GraphView:
 
     def parent(self, rel_path: str) -> semantic_index.SelectedParent | None:
         """The admitted page's selected interpretation, or None when unavailable."""
-        return self.parents.parent(rel_path)
+        self.preflight([rel_path])
+        if rel_path in self.interrupted:
+            return None
+        try:
+            self._check()
+            if self.source_limit is not None:
+                summary = self.parents._stored.get(rel_path)
+                if summary is not None:
+                    runtime_resources._yaml_expanded_cost(
+                        str(summary.get("frontmatter_yaml") or ""),
+                        maximum=(
+                            self.preparation_limit or runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES
+                        ),
+                        check=self._check,
+                    )
+            parent = self.parents.parent(rel_path)
+            self._check()
+            return parent
+        except TimeoutError:
+            if self.source_limit is None:
+                raise
+            self._interrupt(rel_path, "deadline")
+        except runtime_resources.PreparationBudgetExceeded:
+            if self.source_limit is None:
+                raise
+            self._interrupt(rel_path, "preparation_work_limit")
+        return None
 
     def hold(self, rel_path: str, metadata: str | None) -> None:
         """Keep file-node metadata a caller already read with its page row."""
@@ -11515,6 +11693,12 @@ class GraphView:
 
     def node(self, key: str) -> dict[str, Any] | None:
         if key not in self._nodes:
+            path = self.node_path(key) if self.source_limit is not None else None
+            if path is not None:
+                self.preflight([path])
+                if path in self.interrupted:
+                    return None
+            self._check()
             row = _node_by_key(self.conn, key)
             self._nodes[key] = self.serve(row) if row is not None else None
         return self._nodes[key]
@@ -11645,14 +11829,25 @@ class GraphView:
         """
         if self.keep is None:
             return False
+        self._check()
         changed = self._changes.get(raw_target)
         if changed is None:
             candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
-            if self.reads_placeholders:
-                changed = any(not self.keep(candidate) for candidate in candidates)
+            if self.check is None:
+                if self.reads_placeholders:
+                    changed = any(not self.keep(candidate) for candidate in candidates)
+                else:
+                    seen = [candidate for candidate in candidates if self.keep(candidate)]
+                    changed = 0 < len(seen) < len(candidates)
             else:
-                seen = [candidate for candidate in candidates if self.keep(candidate)]
-                changed = 0 < len(seen) < len(candidates)
+                seen_count = 0
+                for candidate in candidates:
+                    self._check()
+                    seen_count += bool(self.keep(candidate))
+                changed = (
+                    seen_count < len(candidates)
+                    if self.reads_placeholders else 0 < seen_count < len(candidates)
+                )
             self._changes[raw_target] = changed
         return changed
 
@@ -11666,19 +11861,41 @@ class GraphView:
         """
         if rel_path in self._authored:
             return self._authored[rel_path]
-        targets = [
-            str(row[0])
-            for row in self.conn.execute(
+        try:
+            self._check()
+            self.preflight([rel_path])
+            if rel_path in self.interrupted:
+                return []
+            changed = False
+            for (target,) in self.conn.execute(
                 "SELECT DISTINCT raw_target FROM graph_dependencies WHERE source_path = ? "
                 "ORDER BY raw_target",
                 (rel_path,),
-            )
-        ]
-        edges = (
-            self._derive(rel_path)
-            if any(self.target_changes(target) for target in targets)
-            else None
-        )
+            ):
+                self._check()
+                if self.target_changes(str(target)):
+                    changed = True
+                    break
+            edges = self._derive(rel_path) if changed else None
+        except TimeoutError:
+            if self.source_limit is None:
+                raise
+            self._interrupt(rel_path, "deadline")
+            return []
+        except (
+            runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy,
+        ):
+            if self.source_limit is None:
+                raise
+            self._interrupt(rel_path, "preparation_work_limit")
+            return []
+        except vault_module.PathGuardError:
+            if self.source_limit is None:
+                raise
+            self._interrupt(rel_path, "source_changed")
+            return []
+        if rel_path in self.interrupted:
+            return []
         self._authored[rel_path] = edges
         return edges
 
@@ -11691,40 +11908,91 @@ class GraphView:
 
     def _derive(self, rel_path: str) -> list[dict[str, Any]]:
         path = self.vault_root / rel_path
+        bounded = self.source_limit is not None
+        source_hash = None
+        if bounded:
+            row = self.conn.execute(
+                "SELECT source_hash FROM graph_nodes WHERE node_key = ? AND kind = 'file'",
+                (_file_key(rel_path),),
+            ).fetchone()
+            if row is None:
+                self._interrupt(rel_path, "summary_unavailable")
+                return []
+            source_hash = str(row[0])
+        preparation = runtime_resources.semantic_preparation(
+            self.vault_root, path, source_limit=self.source_limit,
+            limit_bytes=self.preparation_limit, check=self._check, expected_hash=source_hash,
+        ) if bounded else nullcontext(None)
         try:
-            raw_bytes = vault_module.read_bytes_without_pinning(path)
-            raw = raw_bytes.decode("utf-8")
-            page = find_module._parse_page(
-                path,
-                path.stat().st_mtime,
-                self.vault_root,
-                content=raw_bytes,
-                resolved_relative=rel_path,
-            )
-        except (OSError, UnicodeDecodeError):
+            with preparation as prepared:
+                self._check()
+                raw = (
+                    prepared.source if prepared is not None
+                    else vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                )
+                page = find_module._parse_page(
+                    path, path.stat().st_mtime, self.vault_root,
+                    content=raw.encode("utf-8"), resolved_relative=rel_path,
+                )
+                if page is None:
+                    if bounded:
+                        self._interrupt(rel_path, "selected_interpretation_unavailable")
+                    return []
+                self._check()
+                state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+                self._check()
+                edges = _structural_edges_for_page(
+                    self.vault_root, page, state,
+                    source_hash=source_hash or vault_module.content_hash(raw),
+                    resolver=self._shared_resolver(), visible=self.keep,
+                    check=self._check if bounded else None,
+                    landing=self._snapshot_landing if bounded else None,
+                )
+                evidence = {}
+                rows = []
+                for edge in edges:
+                    self._check()
+                    if edge.origin in _RESOLVED_LINK_ORIGINS:
+                        evidence[edge.edge_key] = json.loads(json.dumps(
+                            edge.review_evidence or {}, ensure_ascii=False, sort_keys=True,
+                        ))
+                    rows.append(json.loads(json.dumps(edge.as_dict(), sort_keys=True)))
+                if prepared is not None:
+                    prepared.guard.recheck(self.vault_root)
+                self._evidence[rel_path] = evidence
+                return rows
+        except vault_module.PathGuardError:
+            raise
+        except TimeoutError:
+            if bounded:
+                raise
             return []
-        if page is None:
+        except (OSError, UnicodeDecodeError) as error:
+            if bounded:
+                raise vault_module.PathGuardError(
+                    "PATH_GUARD_CONTENT", "graph source changed",
+                ) from error
             return []
-        try:
-            state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
-            edges = _structural_edges_for_page(
-                self.vault_root,
-                page,
-                state,
-                source_hash=vault_module.content_hash(raw),
-                resolver=self._shared_resolver(),
-                visible=self.keep,
-            )
         except ValueError:
+            if bounded:
+                self._interrupt(rel_path, "selected_interpretation_unavailable")
             return []
-        self._evidence[rel_path] = {
-            edge.edge_key: json.loads(
-                json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True)
-            )
-            for edge in edges
-            if edge.origin in _RESOLVED_LINK_ORIGINS
-        }
-        return [json.loads(json.dumps(edge.as_dict(), sort_keys=True)) for edge in edges]
+
+    def _snapshot_landing(
+        self, canonical: str, warning: str | None, fragment: str,
+    ) -> tuple[str, str, dict[str, str]]:
+        """Use the validated target summary instead of parsing target source text."""
+        self._check()
+        page_key = _file_key(_with_md(canonical))
+        if not fragment or warning:
+            return page_key, page_key, {}
+        row = self._land({"dst_key": page_key, "metadata": {
+            "target_fragment": fragment,
+            "fragment_resolution": (
+                "missing" if semantic_units.is_unit_anchor_shaped(fragment) else "not_unit"
+            ),
+        }})
+        return str(row["dst_key"]), page_key, dict(row["metadata"])
 
     def node_path(self, key: str) -> str | None:
         """The page `key` belongs to, or `None` for a key with no node row.

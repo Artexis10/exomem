@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import re
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 MISSING = object()
@@ -68,11 +69,50 @@ def instant_offset_minutes(value: object) -> int:
     return offset_minutes(_INSTANT.fullmatch(value)["offset"])
 
 
-def _number_key(value: int | float) -> str:
+@dataclass(frozen=True, slots=True)
+class InstantSpelling:
+    """Reconstruction fields from this module's single fixed instant grammar."""
+
+    separator: str
+    fraction_separator: str
+    fraction_digits: int
+    offset: str
+
+
+def instant_spelling(value: object) -> tuple[dt.datetime, InstantSpelling]:
+    """Return the existing query instant and its exact lexical representation."""
+    instant = parse_instant(value)
+    matched = _INSTANT.fullmatch(value)
+    fraction = matched["fraction"]
+    return instant, InstantSpelling(value[10], value[19] if fraction is not None else "", len(fraction or ""), matched["offset"])
+
+
+def validate_instant_spelling(spelling: InstantSpelling) -> None:
+    """Validate reconstruction tokens through the sole grammar without padding a long fraction."""
+    if (type(spelling.separator) is not str or type(spelling.fraction_separator) is not str
+            or type(spelling.fraction_digits) is not int or spelling.fraction_digits < 0 or type(spelling.offset) is not str):
+        raise ScalarValueError("invalid instant reconstruction format")
+    # This closed-protocol placeholder stays within range under every admitted offset.
+    text = "2000-01-02" + spelling.separator + "00:00:00"
+    if spelling.fraction_digits:
+        text += spelling.fraction_separator + "0"
+    _, actual = instant_spelling(text + spelling.offset)
+    if actual != replace(spelling, fraction_digits=1 if spelling.fraction_digits else 0):
+        raise ScalarValueError("invalid instant reconstruction format")
+
+
+def number_key_bytes_v1(value: int | float) -> bytes:
+    """Encode the pinned number-key v1 wire shared by comparison and payloads.
+
+    Typed-v2 overflow values make this wire authoritative. A format change
+    needs another version; it must retain this encoder and its inverse.
+    """
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
+        raise ScalarValueError("number-key v1 requires an integer or finite number")
     decimal = Decimal(value) if type(value) is int else Decimal.from_float(value)
     sign, digits, exponent = decimal.as_tuple()
     if not any(digits):
-        return "01"
+        return b"\1"
     adjusted = len(digits) + exponent - 1
     end = len(digits)
     while digits[end - 1] == 0:
@@ -82,8 +122,50 @@ def _number_key(value: int | float) -> str:
     magnitude = (adjusted + 2**63).to_bytes(8, "big")
     magnitude += bytes(digit + 1 for digit in digits[:end]) + b"\0"
     if sign:
-        return (b"\0" + bytes(255 - byte for byte in magnitude)).hex()
-    return (b"\2" + magnitude).hex()
+        return b"\0" + bytes(255 - byte for byte in magnitude)
+    return b"\2" + magnitude
+
+
+def decode_number_overflow_v1(key: bytes, *, as_float: bool, digit_budget: int) -> int | float:
+    """Decode an integer-valued overflow key under the caller's digit budget.
+
+    Outside SQLite's signed-64 range, every finite binary64 value is integral.
+    The v1 sign bands, biased exponent and digit bytes are fixed wire values.
+    """
+    if type(digit_budget) is not int or digit_budget < 1 or type(as_float) is not bool:
+        raise ScalarValueError("number-key v1 requires a decoding budget and subtype")
+    if type(key) is not bytes or len(key) < 11 or key[0] not in (0, 2):
+        raise ScalarValueError("invalid number-key v1 overflow frame")
+    # V1 has one band byte, eight exponent bytes and one terminator byte.
+    if len(key) - 10 > digit_budget:
+        raise ScalarValueError("number-key v1 exceeds the decoding budget")
+    negative = key[0] == 0
+    magnitude = bytes(255 - byte for byte in key[1:]) if negative else key[1:]
+    digits = magnitude[8:-1]
+    if (magnitude[-1] != 0 or not digits or any(not 1 <= byte <= 10 for byte in digits)
+            or digits[0] == 1 or digits[-1] == 1):
+        raise ScalarValueError("invalid number-key v1 coefficient")
+    adjusted = int.from_bytes(magnitude[:8], "big") - 2**63
+    exponent = adjusted - len(digits) + 1
+    if exponent < 0 or len(digits) + exponent > digit_budget:
+        raise ScalarValueError("number-key v1 exceeds the decoding budget")
+    coefficient = 0
+    for byte in digits:
+        coefficient = coefficient * 10 + byte - 1
+    integer = coefficient * 10**exponent
+    if negative:
+        integer = -integer
+    try:
+        value = float(integer) if as_float else integer
+    except OverflowError as error:
+        raise ScalarValueError("number-key v1 does not encode a finite number") from error
+    if (as_float and not math.isfinite(value)) or number_key_bytes_v1(value) != key:
+        raise ScalarValueError("number-key v1 is not an exact canonical value")
+    return value
+
+
+def _number_key(value: int | float) -> str:
+    return number_key_bytes_v1(value).hex()
 
 
 def scalar_key(value: object, kind: str) -> tuple[int, str]:

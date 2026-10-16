@@ -637,7 +637,7 @@ class OperationAuthorization:
         if plan.owner:
             return typed_storage.hydrate(self.conn, rows), snapshot
         layout = (typed_storage.require_layout(self.conn, cid)
-                  if typed_storage.collection_encoding(self.conn, cid) == typed_storage.TYPED_V1 else None)
+                  if typed_storage.collection_encoding(self.conn, cid) != typed_storage.JSON_V1 else None)
         for row in rows:
             if layout is None:
                 values = read_selected_tree(BytesIO(row["values_json"].encode()), plan.fields,

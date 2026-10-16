@@ -55,6 +55,7 @@ from exomem.collection_store import (
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.lease_coordinator import SQLiteLeaseStore
 
 OWNER = owner_principal(surface="mcp")
 DAILY = "66666666-6666-4666-8666-666666666666"
@@ -182,6 +183,38 @@ def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_pa
     marker = authority.parse_marker(root, authority.read_marker(root))
     assert [entry["collection_id"] for entry in marker["collections"]] == [CID]
     assert trashed.read_bytes() == original
+
+
+def test_an_offline_create_after_a_retire_enrols_the_next_fence_generation(tmp_path, monkeypatch):
+    """Defect: a vault whose earlier store fence was retired can never move to the store again,
+    because its first create cuts from generation 0 and refuses the retired generation."""
+    root = tmp_path / "vault"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
+    monkeypatch.delenv(custody.SYNC_ROOTS_ENV, raising=False)
+    (root / "Knowledge Base/_Schema").mkdir(parents=True)
+    (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
+    state_migration.require_vault_state_ready(root)
+    source = tmp_path / "manifest.md"
+    source.write_text(summary_text())
+    for name, value in {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "gate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    # The vault's earlier store was enrolled at generation 1, then retired when it went back to files.
+    leases = SQLiteLeaseStore(tmp_path / "coordinator.sqlite")
+    earlier = {"capability": "collections-store-v1", "store_id": "77777777-7777-4777-8777-777777777777"}
+    leases.transition_collection_store_fence("gate", expected_generation=0, **earlier)
+    leases.retire_collection_store_fence("gate", expected_generation=1, **earlier)
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        assert offline_create(root, source, manifest_path(), why="back to the store") == 0
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    assert marker["collection_store_fence"]["generation"] == 2
+    assert leases.collection_store_fence("gate") == {
+        "capability": "collections-store-v1", "enrolled": True, "store_id": marker["store_id"], "generation": 2}
 
 
 def test_nested_archive_declarations_retain_file_source_ownership(tmp_path):
@@ -572,6 +605,25 @@ def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_ser
             assert titles(root, CID) == ["Canonical"]
         finally:
             adopted.stop()
+
+
+def test_a_host_whose_marker_predates_a_retire_refuses_as_retired_not_adopt_local(service, tmp_path):
+    """Defect: a host still holding the store marker after the coordinator retired the fence says
+    the coordinator never enrolled the store and names adopt-local, which refuses that marker."""
+    root = service.root
+    service.stop()
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    SQLiteLeaseStore(tmp_path / "coordinator.sqlite").retire_collection_store_fence(
+        "gate", expected_generation=marker["collection_store_fence"]["generation"],
+        capability="collections-store-v1", store_id=marker["store_id"])
+    stale = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        with pytest.raises(OpError) as refusal:
+            titles(root, CID)
+    finally:
+        stale.stop()
+    assert refusal.value.code == "COLLECTION_STORE_RETIRED"
+    assert "adopt-local" not in refusal.value.message
 
 
 def _finish_after_restart(found, continuation):

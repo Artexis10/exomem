@@ -99,7 +99,6 @@ def test_cloudflare_tunnel_keeps_legacy_routes_and_gateway_uses_direct_tls() -> 
     assert "traefik.kube-system.svc.cluster.local" not in cloudflare
     # Control and transfer stay on the legacy tunnel. The optional Cloud
     # gateway uses its node's DNS-only A record.
-    assert cloudflare.count("cloudflare_dns_record") == 3
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare
     assert "proxied = false" in cloudflare

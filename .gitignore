@@ -1,3 +1,4 @@
+.uvbin/
 .venv/
 .venv-*/
 .substrate-test-contract/

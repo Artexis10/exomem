@@ -5482,6 +5482,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "review_item_context": "page",
     # Graph -> guarded by `guard_graph_context`.
     "graph_context": "structure",
+    "viewer_map": "structure",
     # Media frames -> gated by `release_allows_frames`; the ToolResult walker
     # scans text blocks only and never the image bytes.
     "get_video_frames": "structure",
@@ -5518,6 +5519,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     **{name: "hits" for name in ("find", "search", "suggest_links", "suggest_relations")},
     **{name: "page" for name in ("get", "fetch", "review_item_context")},
     "graph_context": "graph",
+    "viewer_map": "graph",
     "get_video_frames": "frames",
     **{
         name: "structure"
