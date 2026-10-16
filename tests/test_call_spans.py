@@ -13,6 +13,8 @@ import pytest
 
 from exomem import call_ledger, call_spans, command_surface
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 @pytest.fixture(autouse=True)
 def _isolate_spans():

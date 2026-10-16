@@ -258,6 +258,8 @@ markers = [
     "nli: loads the exact frozen stance-verifier model; run only in its dedicated job",
     "governance_timing_release: exact-capacity actual-wire governance timing characterization",
     "query_deadline: keeps the shipped interactive query deadline instead of the test-wide relaxed one",
+    # tests/repository_docs_reads.py fails a test that reads these paths unmarked.
+    "reads_repository_docs: reads docs/, openspec/ or root Markdown; also runs on docs-only pull requests",
 ]
 
 # Blackwell (RTX 50-series, sm_120 / compute capability 12.0) needs CUDA wheels.

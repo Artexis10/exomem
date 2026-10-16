@@ -12,6 +12,8 @@ import pytest
 
 from exomem import observe_memory, semantic_authoring, semantic_units
 
+pytestmark = pytest.mark.reads_repository_docs
+
 COMPILED_DESTINATIONS = {
     "experiment": "Notes/Experiments",
     "failure": "Notes/Failures",

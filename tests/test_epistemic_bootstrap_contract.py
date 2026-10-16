@@ -27,6 +27,8 @@ import pytest
 from exomem import commands, semantic_blocks, semantic_units, workflow_skills
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
+pytestmark = pytest.mark.reads_repository_docs
+
 #: Every commitment the portable contract has to carry, keyed by payload key.
 _COMMITMENTS = (
     "preserve_the_record",

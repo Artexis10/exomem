@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.reads_repository_docs
+
 
 def _constructor_map():
     """descriptor id -> the path constructors this suite pins for it.

@@ -25,6 +25,7 @@ from benchmark_capabilities import (
     has_posix_interval_timers,
     has_trusted_system_git,
 )
+from repository_docs_reads import RepositoryDocsReads
 
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
@@ -35,6 +36,10 @@ from exomem import semantic_contract as semantic_contract_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.pluginmanager.register(RepositoryDocsReads(), "repository-docs-reads")
 
 
 def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
