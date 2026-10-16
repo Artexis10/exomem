@@ -61,5 +61,4 @@ restart the service reflexively — restarts CAUSE pattern (1) for live sessions
   change as an outside edit, repairs its lexical catalogue, and answers
   `/health/ready` with 503 until the repair proves the catalogue. A cell has
   one replica, so it has no endpoint meanwhile and its clients get 503. Write
-  through the cell's MCP connector or REST API instead, and keep any exec
-  read-only.
+  through the cell's MCP connector instead, and keep any exec read-only.
