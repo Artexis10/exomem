@@ -33,7 +33,8 @@ COLLECTION_VIEWS_V1 = "collection-views-v1"
 
 #: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1; P3.6 adds
 #: COLLECTIONS_MIGRATE_V1; P2.8 adds COLLECTION_VIEWS_V1.
-RELEASED: frozenset[str] = frozenset()
+# Desktop-only acceptance candidate for S1.6/S1.7; never published. See the branch name.
+RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
 DISABLED = "COLLECTION_STORE_DISABLED"
