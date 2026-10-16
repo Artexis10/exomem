@@ -26,3 +26,7 @@ Exomem's HA edge can now avoid ambiguous tool-call replay, but a replica whose c
 - Cloudflare HA Worker origin probes and routing tests.
 - Doctor CLI, tests, deployment documentation, and Worker example configuration.
 - No new model, storage backend, updater, or Syncthing dependency.
+
+## Closure note
+
+At archive, the five requirements that described the HA edge Worker (admission before routing, writer-generation binding, fail-closed routing, no-holder selection and deployment-owned rollout) were dropped, because #697 removed that Worker. The `install-readiness` delta was dropped too, because the canonical requirements had moved past it. Only the three readiness requirements that describe current behaviour were synced.
