@@ -351,9 +351,12 @@ def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
     shared_id = "0b7c6f3e-8d2a-4c1e-9f5b-2a6d8e4c1b3f"
     notes = vault / "Knowledge Base" / "Notes" / "Insights"
     relations = "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n"
-    for name in ("a-copy.md", "one.md"):
-        (notes / name).write_text(
-            f"---\ntitle: {name}\ntype: insight\nstatus: active\nproject: atlas\n"
+    # A copy outside the KB sorts first and has no stable-identity census entry.
+    copy = vault / "Archive" / "copy.md"
+    copy.parent.mkdir()
+    for path in (copy, notes / "one.md"):
+        path.write_text(
+            f"---\ntitle: {path.name}\ntype: insight\nstatus: active\nproject: atlas\n"
             f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n{relations}",
             encoding="utf-8",
         )

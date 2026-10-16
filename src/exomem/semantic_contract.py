@@ -3556,9 +3556,13 @@ def _stable_topology_replacement(
     current = context.pages.get(state.path)
     if current is None:
         return False
-    if state.identity_kind == "exomem_id" and context.identity_census.paths_by_identity.get(
-        state.identity, ()
-    ) != (state.path,):
+    # The same page set the occurrence count runs over, not the KB-only census.
+    if state.identity_kind == "exomem_id" and any(
+        page.identity_kind == "exomem_id"
+        and page.identity == state.identity
+        and page.path != state.path
+        for page in context.pages.values()
+    ):
         return False
     return (
         current.title,
