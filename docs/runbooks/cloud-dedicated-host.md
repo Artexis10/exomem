@@ -795,7 +795,7 @@ the API server refuses that agent's kubelet. Do steps 4 to 6 without a pause.
 
 8. Present the everyday operator certificate again, as in step 1.
 9. Issue a new everyday operator certificate, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
-10. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key, and the local copy of the step 2 snapshot, which scheduled pruning never removes: `ssh exomem-admin@<server> 'sudo rm -rf <directory> /var/lib/rancher/k3s/server/db/snapshots/<name>'`.
+10. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key, and the local copy of the step 2 snapshot, which scheduled pruning never removes: `ssh exomem-admin@<server> 'sudo rm -rf <directory> && sudo rm -f /var/lib/rancher/k3s/server/db/snapshots/<name>'`. Check that `<name>` is the full name step 2 printed: the second command removes one file only.
 
 Expected result: step 1 lists the nodes. Step 2 logs `Snapshot <name> saved.`
 twice with the same name: once for the local copy and once for the S3 copy. One
@@ -814,8 +814,10 @@ If the server does not start in step 4, read its log:
 etcd from the snapshot of step 2, as in
 [cloud-node-loss.md](cloud-node-loss.md#restore-etcd-from-an-older-snapshot).
 Set `SNAPSHOT` to the name that step 2 printed. If step 2 printed its line only
-once, restore the local copy instead: run the restore without `--etcd-s3` and its key options, with
-`--cluster-reset-restore-path=/var/lib/rancher/k3s/server/db/snapshots/<name>`.
+once, restore the local copy instead. The server's `config.yaml` turns S3 on, so
+switch it off on the command line, on the stopped server:
+`sudo k3s server --cluster-reset --etcd-s3=false --cluster-reset-restore-path=/var/lib/rancher/k3s/server/db/snapshots/<name>`.
+The other steps of that procedure still apply.
 The restore brings back the old client CA and loses only what changed after
 step 2. The agents have not
 restarted yet, so they still hold certificates from the old client CA.
