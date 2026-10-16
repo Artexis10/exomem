@@ -20,14 +20,17 @@ is real, but it belongs to a few named waits, not to every write.
   boundary also runs at full speed.
 - Keep the rule that makes this sound: no foreground thread waits on a parked bulk
   pass. A boundary holder never parks. A foreground thread that joins work a bulk
-  pass may own (the resolver single-flight build, the corpus-context flight, a
-  registered graph rebuild, another reader's graph snapshot proof) waits inside
-  `awaiting_bulk()`, which lets every bulk pass run until the wait ends.
+  pass may own (the resolver single-flight build, the corpus-context flight, another
+  reader's graph snapshot proof, the recall replacement lock) waits inside
+  `awaiting_bulk()`, which lets every bulk pass run until the wait ends. A thread
+  that joins a registered rebuild only leaves the in-flight count for the join.
 - Have the graph drain leave its whole batch queued on a readiness refusal (a busy
-  boundary, a held SQLite store, a busy graph epoch), and step aside between isolated
-  receipts when a writer waits on the boundary.
+  boundary, a held SQLite store, a busy graph epoch). Between isolated receipts it
+  steps aside when a writer waits on the boundary, after one replay per pass.
 - Add content-free spans for a page creation's commit stages, the post-commit
   blocks, the default write advisory and the terminal filter on the mutation path.
+- Make a ledger row that drops spans say how many it dropped (`spans_truncated`),
+  and sum spans past the producer's name bound as `spans.overflow`.
 
 ## Capabilities
 
@@ -40,6 +43,8 @@ None.
 - `proportional-write-projections`: in-process bulk passes run behind governed
   writes, boundary holders and reads, and no foreground thread waits on a parked
   bulk pass.
+- `call-ledger`: a row whose spans reached the count bound records how many it
+  dropped.
 
 ## Non-Goals
 

@@ -290,6 +290,56 @@ def test_dispatched_reads_and_writes_keep_their_quiet_speed_beside_a_bulk_pass(
     assert foreground_priority.in_flight() == 0
 
 
+def test_a_rebuild_join_leaves_other_requests_their_priority(tmp_path: Path) -> None:
+    """`reconcile` joins a whole rebuild without a bound. Releasing every pass
+    for that join took priority from every other request, activation included,
+    for the whole rebuild. The joiner holds no boundary, so it only leaves the
+    in-flight count: the rebuild runs unless another request holds it."""
+    from exomem import graph_sync
+
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1, scope="full", mutation_id="a" * 24, paths=(), created_paths=()
+    )
+    building = threading.Event()
+    finish = threading.Event()
+
+    def build(required: graph_sync.GraphSyncCheckpoint) -> graph_sync.GraphBuildOutcome:
+        with foreground_priority.bulk():
+            for _unit in foreground_priority.yielding_in_bulk(itertools.count()):
+                building.set()
+                if finish.is_set():
+                    break
+                sum(i * i for i in range(5_000))
+        return graph_sync.GraphBuildOutcome.covering(required)
+
+    outcomes: list[graph_sync.GraphBuildOutcome] = []
+
+    def reconcile_join() -> None:
+        with foreground_priority.foreground():
+            outcomes.append(coordinator.start_or_join(checkpoint, build).wait(30.0))
+
+    quiet = min(_gil_releasing_phase() for _ in range(3))
+    joiner = threading.Thread(target=reconcile_join, daemon=True)
+    joiner.start()
+    try:
+        assert building.wait(5.0)
+        deadline = time.monotonic() + 5.0
+        while not coordinator.waiter_count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert coordinator.waiter_count == 1
+        requests = []
+        for _ in range(3):
+            with foreground_priority.foreground():
+                requests.append(_gil_releasing_phase())
+    finally:
+        finish.set()
+        joiner.join(10.0)
+
+    assert outcomes and outcomes[0].covers(checkpoint), "the join never completed"
+    assert min(requests) < 2.5 * quiet, (quiet, requests)
+
+
 def test_a_request_following_a_bulk_resolver_build_does_not_wait_out_the_floor(
     tmp_path: Path,
 ) -> None:

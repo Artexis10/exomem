@@ -1171,9 +1171,12 @@ def _drain_graph_work(
         return processed
 
     for done_count, receipt in enumerate(stalled):
-        if index.boundary_waiters():
+        if done_count and index.boundary_waiters():
             # Each replay takes the boundary a writer is waiting on. Step aside;
-            # the rest stay queued untouched for the next pass.
+            # the rest stay queued untouched for the next pass. Never before the
+            # first replay: a page that always fails rotates behind the queue
+            # only when it is replayed, and a writer that waits at every check
+            # would otherwise pin the healthy pages queued behind it.
             log.info(
                 "deferred graph replay yielded to a waiting writer; %d receipt(s) remain queued",
                 len(stalled) - done_count,

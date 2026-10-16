@@ -45,7 +45,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -1747,8 +1747,8 @@ def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each isolated receipt takes the boundary again, so a writer queued on it
-    waits out every replay. Between receipts the drain returns to its loop as
-    soon as a writer waits, and leaves the rest queued untouched."""
+    waits out every replay. After one replay per pass the drain returns to its
+    loop as soon as a writer waits, and leaves the rest queued untouched."""
     committed = _write_without_graph_repair(
         vault,
         monkeypatch,
@@ -1757,48 +1757,81 @@ def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
             PAGE_B: _page("B", "B is revised and cites nothing."),
         },
     )
-    queued = deferred_index.list_graph_paths(vault)
     real_drain = EpistemicGraphIndex.drain_paths
     drains: list[int] = []
+    writers = ExitStack()
+    index = EpistemicGraphIndex(vault)
+
+    def wait_to_write() -> None:
+        with writer_lease.get_manager().mutation_guard(
+            vault, operation="queued_writer", holder_kind="command"
+        ):
+            pass
+
+    waiting_writer = threading.Thread(target=wait_to_write, daemon=True)
 
     def batch_fails(self: Any, paths: list[Path]) -> Any:
-        # The batch fails for a reason that is not readiness, so the drain
-        # turns to isolating its receipts.
         drains.append(len(paths))
         if len(drains) == 1:
+            # Not a readiness refusal, so the drain turns to its receipts.
             raise RuntimeError("the batch pass failed")
-        return real_drain(self, paths)
+        report = real_drain(self, paths)
+        if len(drains) == 2:
+            # A writer queues on the boundary while the first replay finishes.
+            writers.enter_context(_writer_holding_the_boundary(vault))
+            waiting_writer.start()
+            deadline = time.monotonic() + 5.0
+            while not index.boundary_waiters() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert index.boundary_waiters() == 1
+        return report
 
     monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", batch_fails)
     rotations = _counting(monkeypatch, deferred_index, "rotate_graph_receipts")
-    index = EpistemicGraphIndex(vault)
-    waiting_writer: threading.Thread | None = None
-    with _writer_holding_the_boundary(vault):
-
-        def wait_to_write() -> None:
-            with writer_lease.get_manager().mutation_guard(
-                vault, operation="queued_writer", holder_kind="command"
-            ):
-                pass
-
-        waiting_writer = threading.Thread(target=wait_to_write, daemon=True)
-        waiting_writer.start()
-        deadline = time.monotonic() + 5.0
-        while not index.boundary_waiters() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert index.boundary_waiters() == 1
-
+    with writers:
         index_sync.drain_graph_work(vault)
-
     waiting_writer.join(10.0)
-    assert drains == [2], "the drain replayed a receipt while a writer waited"
+
+    assert drains == [2, 1], "the drain kept replaying receipts while a writer waited"
     assert rotations == []
-    assert deferred_index.list_graph_paths(vault) == queued
+    assert len(deferred_index.list_graph_paths(vault)) == 1
 
     index_sync.drain_graph_work(vault)
 
     assert deferred_index.list_graph_paths(vault) == []
     assert _acknowledged(vault) == committed
+
+
+def test_a_page_that_always_fails_cannot_pin_the_healthy_pages_beside_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a writer waiting at every check, stepping aside before the first
+    replay replayed nothing at all: the failing page never rotated behind the
+    queue, so the healthy page batched with it never drained. One replay per
+    pass rotates the failing page, and the next pass replays the healthy one."""
+    _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    real_drain = EpistemicGraphIndex.drain_paths
+    failing = vault / PAGE_A
+
+    def page_a_fails(self: Any, paths: list[Path]) -> Any:
+        if failing in paths:
+            raise RuntimeError("page A cannot be derived")
+        return real_drain(self, paths)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", page_a_fails)
+    # A writer waits on the boundary at every check the drain makes.
+    monkeypatch.setattr(EpistemicGraphIndex, "boundary_waiters", lambda self: 1)
+
+    _drain_ticks(vault, 2)
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
 
 
 def test_a_transient_read_lock_neither_quarantines_nor_drops_a_page(

@@ -47,6 +47,10 @@ _TTL_SECONDS = 300.0
 #: generating names, which is a caller bug; truncate rather than let one call
 #: grow without bound.
 MAX_NAMES_PER_CALL = 64
+#: The last of those slots. Spans under names past the bound are summed here, so
+#: a call that ran out of names reports how many calls and how much time it
+#: could not name instead of dropping them.
+OVERFLOW_SPAN = "spans.overflow"
 #: Calls tracked at once, so a missed pop cannot leak indefinitely. The
 #: middleware pops unconditionally; this and the TTL are independent guards for
 #: paths that never reach it, such as a direct test harness.
@@ -151,9 +155,10 @@ def record_span(
                 _SPANS[token] = entry
             names: dict[str, list[float]] = entry["names"]
             slot = names.get(clean)
+            if slot is None and len(names) >= MAX_NAMES_PER_CALL - 1:
+                clean, fields = OVERFLOW_SPAN, None
+                slot = names.get(clean)
             if slot is None:
-                if len(names) >= MAX_NAMES_PER_CALL:
-                    return
                 names[clean] = [1.0, float(elapsed_ms)]
             else:
                 slot[0] += 1.0

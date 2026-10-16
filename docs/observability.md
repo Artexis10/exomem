@@ -315,7 +315,8 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
 | `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
 | `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Dispatcher stages on the read-only and the mutation path: invoke the command, filter its result or error, then, on a read, emit the disclosure receipt. Failed stages retain their duration. |
-| `egress.cross_check`, `egress.scrub` | Inside `command.terminal_filter`: the withheld cross-check and the credential scrub, beside `egress.artifact_gate`. A raised error has no cross-check; its filter runs the gate and the scrub once per text value. |
+| `egress.cross_check`, `egress.scrub` | The terminal filter's withheld cross-check and credential scrub, beside `egress.artifact_gate`. On MCP the filter runs twice, under `command.terminal_filter` and again under `command.postfilter`, so each sums both passes. A raised error has no cross-check; its filter runs the gate and the scrub once per text value. |
+| `spans.overflow` | Every span recorded under a name past the per-call name bound, summed: how many and how long. Present only when a call ran out of names. |
 | `egress.artifact_gate` | Artifact-gate construction and payload filtering, including failures. Fields report observed `thread_cpu_us`, measured `thread_cpu_calls`, and vault census `index_calls`. |
 | `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 | `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
@@ -344,7 +345,10 @@ so nothing about an existing row changes.
 
 Matrix-load child spans break down the outer load. They do not include the caller's
 lock wait or vector scoring. Snapshot and release each aggregate two intervals.
-The ledger retains only the 32 slowest spans; an omitted phase has no retained duration.
+The ledger retains the 32 slowest spans. A row that dropped any carries
+`spans_truncated`, the number it dropped; a complete row has no such key. An
+omitted phase has no retained duration. A call that records more distinct names
+than that bound sums the rest under `spans.overflow`, its count and time.
 The row fields sum across loads, so `width_sum` equals the vector width only for one load.
 A slow row phase alone does not distinguish storage, row conversion, copying or
 memory pressure.

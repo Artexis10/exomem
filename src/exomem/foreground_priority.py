@@ -20,12 +20,15 @@ bulk pass. Two mechanisms keep it.
 
 * A thread that holds a mutation boundary never parks (`_holds_a_boundary`).
 * A foreground thread that waits on work a bulk pass may own -- a
-  single-flight build, a registered rebuild -- waits inside `awaiting_bulk()`.
-  Every bulk pass runs until that wait ends, so the work finishes at its own
-  speed instead of at the pass's progress floor.
+  single-flight build, a lock a rebuild holds across its walk -- waits inside
+  `awaiting_bulk()`. Every bulk pass runs until that wait ends, so the work
+  finishes at its own speed instead of at the pass's progress floor.
+* A foreground thread that joins a registered rebuild holds no boundary (the
+  rebuild publishes under it), so it only leaves the in-flight count for the
+  join (`outside_foreground()`). Other requests keep their priority.
 
-A new wait on bulk-owned work must take `awaiting_bulk()`, and a new yield in a
-bulk pass must hold no lock that a foreground thread can wait on.
+A new wait on bulk-owned work must take one of the two, and a new yield in a
+bulk pass must hold no other lock that a foreground thread can wait on.
 
 Scheduling only: process-local counters, no content, nothing persisted.
 """
@@ -78,9 +81,9 @@ def _bulk_may_run() -> bool:
 def foreground() -> Iterator[None]:
     """Hold bulk loops at their next yield for the duration of this block."""
     global _in_flight
-    # Counted up and down rather than restored: marks on one thread need not
-    # close in the order they opened. Reserved-state coordination releases its
-    # boundaries out of order.
+    # Counted up and down, never restored from a saved value: marks on one
+    # thread need not close in the order they opened. Reserved-state
+    # coordination releases its boundaries out of order.
     _local.depth = getattr(_local, "depth", 0) + 1
     if _local.depth == 1:
         with _condition:
@@ -100,12 +103,15 @@ def foreground() -> Iterator[None]:
 def awaiting_bulk() -> Iterator[None]:
     """Let every bulk pass run while this foreground thread waits on its work.
 
-    For a wait on work a bulk pass may own: joining a single-flight build or a
-    registered rebuild. Without it the owner parks for this very request and
-    the wait lasts the pass's progress floor (`MAX_WAIT_SHARE`) instead of the
-    work. Every pass is released rather than only the owner, because another
+    For a short wait on work a bulk pass may own, by a thread that may hold a
+    boundary: joining a single-flight build, or a lock a rebuild holds across
+    its walk. Without it the owner parks for this very request and the wait
+    lasts the pass's progress floor (`MAX_WAIT_SHARE`) instead of the work.
+    Every pass is released rather than only the owner, because another
     foreground thread can hold the owner too: a writer queued on the boundary
-    this thread holds. A thread outside `foreground()` claims nothing.
+    this thread holds. No request has priority meanwhile; a long join by a
+    thread that holds no boundary takes `outside_foreground()` instead. A
+    thread outside `foreground()` claims nothing.
     """
     global _awaiting_bulk
     if not getattr(_local, "depth", 0):
@@ -119,6 +125,34 @@ def awaiting_bulk() -> Iterator[None]:
     finally:
         with _condition:
             _awaiting_bulk -= 1
+
+
+@contextmanager
+def outside_foreground() -> Iterator[None]:
+    """Leave the in-flight count while this thread joins a bulk pass's work.
+
+    The pass runs unless another request holds it, and that request keeps its
+    priority. Only for a thread that holds nothing a foreground request waits
+    on; a boundary holder takes `awaiting_bulk()` instead, because a writer
+    queued on its boundary would keep the pass parked. Nothing may open or
+    close a mark inside the block.
+    """
+    global _in_flight
+    depth = getattr(_local, "depth", 0)
+    if not depth:
+        yield
+        return
+    _local.depth = 0
+    with _condition:
+        _in_flight -= 1
+        if _bulk_may_run():
+            _condition.notify_all()
+    try:
+        yield
+    finally:
+        with _condition:
+            _in_flight += 1
+        _local.depth = depth
 
 
 def in_flight() -> int:

@@ -2868,7 +2868,8 @@ class GraphRebuildCoordinator:
         from . import foreground_priority
 
         # The rebuild is a bulk pass, so a foreground joiner must not park it.
-        with foreground_priority.awaiting_bulk(), self._condition:
+        # A joiner holds no boundary: the rebuild publishes under it.
+        with foreground_priority.outside_foreground(), self._condition:
             ready = self._condition.wait_for(
                 lambda: self._error is not None
                 or (self._outcome is not None and self._outcome.covers(checkpoint)),
