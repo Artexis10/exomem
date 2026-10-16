@@ -20,7 +20,7 @@ Removing an agent SHALL, in order:
 
 1. refuse unless the target is an agent, and not a server node;
 2. refuse while a stopping maintenance hold is present on a cell whose volume is on the target; wait for running hourly backups on the target to finish, and start no new one there;
-3. refuse unless every non-deleted cell in the cluster fits the remaining nodes' published slots, computed by storage size as the controller computes them;
+3. refuse unless the cells fit the remaining nodes, each against the storage it uses: every cell on an attachable volume fits the remaining nodes' published attachment slots, as the controller computes them; and each live cell on the target's local storage fits one remaining node's pool, whose published free bytes must still hold the controller's snapshot reserve after the cells placed there. No cell is placed on the target's own pool, or on a node that is not Ready, is cordoned or is reserved;
 4. cordon the agent;
 5. when the remaining nodes cannot reach the target's cell volumes, move each cell on the target to a new claim on another node, one at a time, through a fresh stopped backup and a restore, starting it only after the restore succeeds and waiting until it serves before the next. A failed move SHALL stop the removal with the agent still in the cluster. A target that is not Ready cannot produce that backup: its cells SHALL first be relocated under the node-loss requirement, and cells already bound elsewhere are skipped;
 6. when it is Ready, drain it without force;
@@ -32,8 +32,13 @@ The removal MUST NOT delete the Kubernetes node of an agent whose stop is unconf
 
 #### Scenario: Not enough room elsewhere
 
-- **WHEN** the cluster's non-deleted cells exceed the remaining nodes' slots
+- **WHEN** the cluster's cells on attachable volumes exceed the remaining nodes' attachment slots, or a live cell on the target's local storage fits no remaining node's pool with the snapshot reserve kept
 - **THEN** removal stops before moving or cordoning, and nothing changes
+
+#### Scenario: Removing a local-storage agent where no node has attachment slots
+
+- **WHEN** every cell is on local storage, no node publishes attachment slots, and the target's live cells fit the remaining pools with the snapshot reserve kept
+- **THEN** removal proceeds to cordon the target and move its cells
 
 #### Scenario: A move fails
 

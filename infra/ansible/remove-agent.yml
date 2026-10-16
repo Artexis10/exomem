@@ -66,6 +66,7 @@
             - {name: pvs, args: [persistentvolumes]}
             - {name: pvcs, args: [persistentvolumeclaims, --all-namespaces]}
             - {name: statefulsets, args: [statefulsets, --all-namespaces]}
+            - {name: storageclasses, args: [storageclasses]}
           loop_control:
             label: "{{ item.name }}"
           register: k3s_remove_reads
@@ -79,6 +80,7 @@
             k3s_remove_pvs_doc: "{{ k3s_remove_reads.results[3].stdout | from_json }}"
             k3s_remove_pvcs_doc: "{{ k3s_remove_reads.results[4].stdout | from_json }}"
             k3s_remove_statefulsets_doc: "{{ k3s_remove_reads.results[5].stdout | from_json }}"
+            k3s_remove_storageclasses_doc: "{{ k3s_remove_reads.results[6].stdout | from_json }}"
 
         - name: Refuse unless the cells fit the remaining nodes
           ansible.builtin.include_role:

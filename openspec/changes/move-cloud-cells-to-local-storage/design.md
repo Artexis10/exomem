@@ -142,6 +142,12 @@ TopoLVM's controller would delete every claim on a deleted Node when it finalize
 - **Cost when it fires wrongly:** the removal waits until the cell is relocated under node loss, or its volume released.
 - **Who pays:** the operator. Tenants are not affected.
 
+Before the cordon, the removal also refuses when a cell it would move has nowhere to land. Each cell counts against the storage it uses. A cell on an attachable volume counts against the remaining attachment slots, as before. A live cell on the target's local storage needs one remaining general node whose published free bytes cover its claim size and still hold the D6 snapshot reserve: twice the largest cell, for each backup the node may run at once. cellctl applies the same rule to a cell's growth (D10), and `capacity.pool_takes` is the one place it lives. The playbook cannot import cellctl, so it applies a copy, and a cellctl test checks that the playbook's reserve inputs match the chart's. The playbook places the largest cell first, each on the node with the most room. That can refuse a fit only another packing finds, but it never passes one that does not fit.
+
+- **What it prevents:** a move whose new claim has nowhere to land. The cell would stay stopped until the move's 70-minute wait ran out.
+- **Cost when it fires wrongly:** the operator adds a node or frees room before removing the agent.
+- **Who pays:** the operator. Tenants are not affected.
+
 **Recovery order after a node loss:**
 
 1. The control database is unaffected, since it is on its own server.

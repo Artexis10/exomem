@@ -84,6 +84,16 @@ def snapshot_reserve_bytes(local: LocalStorage, largest_cell_gib: int) -> int:
     return 2 * max(local.default_cell_gib, largest_cell_gib) * GIB * local.backup_concurrency_per_node
 
 
+def pool_takes(local: LocalStorage, *, free_bytes: int | None, added_bytes: int, largest_cell_gib: int) -> bool:
+    """D6: a node's pool takes `added_bytes` more only while its published
+    free bytes still hold the snapshot reserve afterwards. The one place the
+    rule lives: a cell's growth (D10) applies it here, and agent removal
+    (infra/ansible/roles/k3s/tasks/remove_preflight.yml), which cannot import
+    cellctl, applies it to each cell it moves off the agent."""
+
+    return free_bytes is not None and free_bytes >= added_bytes + snapshot_reserve_bytes(local, largest_cell_gib)
+
+
 def compute_local_capacity(
     observation: LocalCapacityObservation, *, local: LocalStorage, cell_sizes: dict[str, int]
 ) -> dict[str, NodeCapacity]:

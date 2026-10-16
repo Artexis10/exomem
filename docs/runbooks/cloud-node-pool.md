@@ -131,9 +131,13 @@ manual host reservation that can drift from that declaration.
 
 Run the removal playbook first, while the entry and its inventory host still
 exist. It refuses while a cell whose volume is on the target holds a
-maintenance hold, and when the cluster's cell volumes would not fit the
-remaining nodes' slots (add a node first). It also refuses while any desired
-cell template selects the target reservation, including a stopped cell;
+maintenance hold, and when the cells would not fit the remaining nodes (add a
+node first). Each cell counts against the storage it uses: a cell on a Hetzner
+volume against the remaining attachment slots, and a cell on the target's
+local storage against one remaining node's pool, which must keep its snapshot
+reserve ([remove a dedicated host](cloud-dedicated-host.md#remove-the-host)).
+It also refuses while any desired cell template selects the target
+reservation, including a stopped cell;
 relocate and clear that selection first. It cordons the agent. On an agent
 with local storage, it then moves each cell whose live volume is on the agent
 to a new claim on another node, one at a time, through a fresh stopped backup

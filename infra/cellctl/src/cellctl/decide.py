@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .backup_window import DEFAULT_BACKUP_WINDOW, within_backup_window
-from .capacity import GIB, snapshot_reserve_bytes
+from .capacity import GIB, pool_takes
 from .rollout import current_image, target_image
 from .state import (
     BACKUP_FAILED,
@@ -886,9 +886,9 @@ def plan_growth(
     if row.size_gib >= local.max_cell_gib:
         return GROWTH_AT_CAP, None
     grown = min(row.size_gib + local.default_cell_gib, local.max_cell_gib)
-    needed = (grown - row.size_gib) * GIB + snapshot_reserve_bytes(local, max(room.largest_cell_gib, grown))
     free = room.free_bytes.get(observation.pv_node) if observation.pv_node else None
-    if free is None or free < needed:
+    if not pool_takes(local, free_bytes=free, added_bytes=(grown - row.size_gib) * GIB,
+                      largest_cell_gib=max(room.largest_cell_gib, grown)):
         return GROWTH_NO_ROOM, None
     return GROWTH_PLANNED, grown
 

@@ -224,6 +224,27 @@ def test_the_removal_playbook_sets_the_mark_cellctl_reads() -> None:
     assert client.observe(CELL_ID, NAMESPACE).namespace_move_volume == "vol-1"
 
 
+def test_the_removal_playbook_reserves_what_cellctl_reserves() -> None:
+    # The playbook applies capacity.pool_takes from its own copy of the
+    # reserve's inputs. A copy that drifts below the chart's lets a removal
+    # move cells onto a node whose hourly backups then have no room.
+    from pathlib import Path
+
+    from cellctl.storage_config import LocalStorage
+
+    root = Path(__file__).parents[3]
+    defaults = yaml.safe_load((root / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+    values = yaml.safe_load((root / "infra/helm/platform/values.yaml").read_text())
+    chart_device_class = next(entry["name"] for entry in values["topolvm"]["lvmd"]["deviceClasses"] if entry.get("default"))
+    local = LocalStorage()
+
+    assert (defaults["k3s_local_backup_concurrency_per_node"]
+            == values["cellStorage"]["local"]["backupConcurrencyPerNode"] == local.backup_concurrency_per_node)
+    assert defaults["k3s_local_default_cell_gib"] == local.default_cell_gib
+    assert defaults["k3s_topolvm_device_class"] == chart_device_class == local.device_class
+    assert defaults["k3s_local_storage_driver"] == local.driver
+
+
 async def test_a_planned_move_through_the_controller_backs_up_first_then_restores_onto_a_local_claim(
     cell_db: CellDatabase,
 ) -> None:

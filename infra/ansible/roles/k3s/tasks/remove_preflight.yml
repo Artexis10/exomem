@@ -1,14 +1,18 @@
 ---
-# add-cloud-node-provisioning N6: refuse a removal that would leave cellctl's
-# admission over-committed. Uses cellctl's own formula (D9):
+# add-cloud-node-provisioning N6: refuse a removal whose cells would not fit
+# the remaining nodes, each cell against the storage it uses. A cell on an
+# attachable volume counts against cellctl's own attachment formula (D9):
 #   cell_slots(node) = allocatable - headroom - non-cell attachments
-# over the remaining Ready, schedulable nodes with a known CSI limit, and
-# counts cell PVCs rather than attachments, because stopped cells still own
-# their volumes. The target's own non-cell volumes must also move.
+# over the remaining Ready, schedulable nodes with a known CSI limit, counting
+# cell PVCs rather than attachments, because stopped cells still own their
+# volumes. The target's own non-cell volumes must also move. A cell on the
+# target's node-local storage moves to another node's pool, and needs room
+# there by D6 (move-cloud-cells-to-local-storage), checked at the end.
 #
 # Inputs (parsed `kubectl get -o json` documents): k3s_remove_nodes_doc,
 # k3s_remove_csinodes_doc, k3s_remove_attachments_doc, k3s_remove_pvs_doc,
-# k3s_remove_pvcs_doc, k3s_remove_statefulsets_doc; and k3s_remove_node.
+# k3s_remove_pvcs_doc, k3s_remove_statefulsets_doc,
+# k3s_remove_storageclasses_doc; and k3s_remove_node.
 - name: Find the cells whose volume is on the target
   ansible.builtin.set_fact:
     # A cell's local volume is pinned to one node, and only its pods and Jobs
@@ -143,11 +147,21 @@
       {%- endfor -%}
       {{ attached }}
 
+- name: Find the storage classes on node-local storage
+  ansible.builtin.set_fact:
+    k3s_remove_local_classes: >-
+      {{ k3s_remove_storageclasses_doc['items'] | selectattr('provisioner', 'equalto', k3s_local_storage_driver)
+         | map(attribute='metadata.name') | list }}
+
 - name: Measure the slots the remaining nodes would publish
   ansible.builtin.set_fact:
+    # A cell claim on node-local storage takes no attachment slot. A claim of
+    # any other class, or of none, counts here as every claim did before.
     k3s_remove_cell_volumes: >-
       {{ k3s_remove_pvcs_doc['items']
-         | selectattr('metadata.namespace', 'match', k3s_cell_namespace_prefix) | list | length }}
+         | selectattr('metadata.namespace', 'match', k3s_cell_namespace_prefix)
+         | map(attribute='spec.storageClassName', default='')
+         | reject('in', k3s_remove_local_classes) | list | length }}
     k3s_remove_target_non_cell: >-
       {{ k3s_remove_attached | selectattr('node', 'equalto', k3s_remove_node)
          | rejectattr('cell') | list | length }}
@@ -189,3 +203,117 @@
     success_msg: >-
       {{ k3s_remove_cell_volumes }} cell volumes fit {{ k3s_remove_remaining_slots }}
       remaining slots.
+
+# move-cloud-cells-to-local-storage D6, for each cell the removal moves. A node
+# takes a volume only while its published free bytes still hold the snapshot
+# reserve afterwards: twice the largest cell for each backup the node may run
+# at once. cellctl.capacity.pool_takes is the one place this rule lives; the
+# playbook cannot import cellctl, so it applies the same rule here.
+- name: Measure room for the cells moving off the target's local storage
+  when: k3s_remove_moves | length > 0
+  block:
+    - name: Read the size of each cell claim on node-local storage
+      ansible.builtin.set_fact:
+        # cellctl renders each cell claim in whole GiB, from the cell's size
+        # (manifests.py). Any other request is not one cellctl wrote.
+        k3s_remove_local_claims: >-
+          {%- set claims = [] -%}
+          {%- for claim in k3s_remove_pvcs_doc['items']
+              if claim.metadata.namespace.startswith(k3s_cell_namespace_prefix)
+              and (claim.spec.storageClassName | default('')) in k3s_remove_local_classes -%}
+            {%- set request = ((claim.spec.resources | default({})).requests | default({})).storage
+                  | default('') | string -%}
+            {%- set _ = claims.append({'namespace': claim.metadata.namespace,
+                                       'gib': request[:-2] | int if request is match('^[0-9]+Gi$') else none}) -%}
+          {%- endfor -%}
+          {{ claims }}
+
+    - name: Size each cell to move
+      ansible.builtin.set_fact:
+        k3s_remove_move_sizes: >-
+          {%- set sizes = [] -%}
+          {%- for cell in k3s_remove_moves -%}
+            {%- set known = k3s_remove_local_claims | selectattr('namespace', 'equalto', cell)
+                  | map(attribute='gib') | list -%}
+            {%- set _ = sizes.append({'namespace': cell,
+                                      'gib': known | max if known and none not in known else none}) -%}
+          {%- endfor -%}
+          {{ sizes }}
+        k3s_remove_unsized: >-
+          {{ (k3s_remove_local_claims | selectattr('gib', 'none') | map(attribute='namespace') | list)
+             | union(k3s_remove_moves | difference(k3s_remove_local_claims | map(attribute='namespace') | list)) }}
+
+    # Fail-closed, as for any parser: an unread size could hide a cell that
+    # has nowhere to land, or a reserve too small for the largest cell.
+    - name: Refuse a local cell claim whose size cellctl did not write
+      ansible.builtin.assert:
+        that:
+          - k3s_remove_unsized | length == 0
+        fail_msg: >-
+          The local claim size of {{ k3s_remove_unsized | join(', ') }} is unreadable or missing;
+          cellctl requests each cell claim in whole GiB. Check those claims before retrying.
+
+    - name: Measure the snapshot reserve
+      ansible.builtin.set_fact:
+        k3s_remove_snapshot_reserve: >-
+          {{ 2 * ([k3s_local_default_cell_gib | int] + k3s_remove_local_claims | map(attribute='gib') | list) | max
+             * 1073741824 * (k3s_local_backup_concurrency_per_node | int) }}
+
+    - name: Measure each remaining node's room beyond the snapshot reserve
+      ansible.builtin.set_fact:
+        # cellctl's general nodes (k8s_client._general_node): Ready,
+        # schedulable, unreserved and without a NoSchedule or NoExecute taint.
+        # Those two effects are Kubernetes' own closed set.
+        k3s_remove_local_rooms: >-
+          {%- set annotation = 'capacity.' ~ k3s_local_storage_driver ~ '/' ~ k3s_topolvm_device_class -%}
+          {%- set rooms = {} -%}
+          {%- for node in k3s_remove_nodes_doc['items'] if node.metadata.name != k3s_remove_node
+              and 'exomem.io/dedicated-cell' not in (node.metadata.labels | default({}))
+              and not (node.spec.taints | default([])
+                       | selectattr('key', 'equalto', 'exomem.io/dedicated-cell') | list)
+              and not (node.spec.taints | default([])
+                       | selectattr('effect', 'in', ['NoSchedule', 'NoExecute']) | list)
+              and not (node.spec.unschedulable | default(false))
+              and (node.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
+                   | map(attribute='status') | first | default('False')) == 'True' -%}
+            {%- set free = (node.metadata.annotations | default({})).get(annotation, '') | string -%}
+            {%- if free is match('^[0-9]+$') -%}
+              {%- set _ = rooms.update({node.metadata.name: free | int - k3s_remove_snapshot_reserve | int}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ rooms }}
+
+    # The largest cell first, each onto the node with the most room. This can
+    # refuse a fit that only another packing finds; it never passes one that
+    # does not fit. The scheduler, not this check, then places each claim.
+    - name: Place each moving cell on a remaining node's pool
+      ansible.builtin.set_fact:
+        k3s_remove_unplaced: >-
+          {%- set rooms = dict(k3s_remove_local_rooms) -%}
+          {%- set unplaced = [] -%}
+          {%- for move in k3s_remove_move_sizes | sort(attribute='namespace') | sort(attribute='gib', reverse=true) -%}
+            {%- set best = rooms | dict2items | sort(attribute='key') | sort(attribute='value', reverse=true)
+                  | first | default(none) -%}
+            {%- if best is not none and best.value >= move.gib * 1073741824 -%}
+              {%- set _ = rooms.update({best.key: best.value - move.gib * 1073741824}) -%}
+            {%- else -%}
+              {%- set _ = unplaced.append(move.namespace) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ unplaced }}
+
+    # Prevents: a move whose new claim has nowhere to land, which leaves its
+    # cell stopped until the move's wait runs out. When it fires wrongly, the
+    # operator adds a node or frees room first; no tenant pays.
+    - name: Refuse a removal whose moving cells would have nowhere to land
+      ansible.builtin.assert:
+        that:
+          - k3s_remove_unplaced | length == 0
+        fail_msg: >-
+          Removing {{ k3s_remove_node }} leaves no remaining node with room for the local volume of
+          {{ k3s_remove_unplaced | join(', ') }}. A node takes a moved cell only while its published
+          free bytes still hold the {{ k3s_remove_snapshot_reserve }}-byte snapshot reserve afterwards;
+          the remaining nodes have {{ k3s_remove_local_rooms }} bytes beyond it. Add a node or free
+          room first.
+        success_msg: >-
+          {{ k3s_remove_moves | length }} moving cells fit the remaining nodes' local pools.

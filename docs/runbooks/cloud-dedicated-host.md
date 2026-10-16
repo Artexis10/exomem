@@ -445,9 +445,13 @@ retained until you delete its PV.
 
 `remove-agent.yml` cordons the host, then moves each cell whose live volume is
 on it to a new claim on another node, one at a time, as in
-[Move a cell to a new claim](#move-a-cell-to-a-new-claim). The other nodes need
-room for those cells. A failed move stops the playbook with the host still in
-the cluster, and its message says what to do. The host must be Ready: the
+[Move a cell to a new claim](#move-a-cell-to-a-new-claim). Before the cordon,
+it refuses unless each of those cells fits one other general node's pool: the
+node's published free bytes must cover the cell's claim and still hold the
+snapshot reserve, twice the largest cell for each backup the node may run at
+once (32 GiB with 8 GiB cells and two backups). The refusal lists the room each
+node has beyond the reserve. A failed move stops the playbook with the host
+still in the cluster, and its message says what to do. The host must be Ready: the
 moves take their backups on it. If it is not, relocate its cells as for a lost
 node first ([cloud-node-loss.md](cloud-node-loss.md)).
 
