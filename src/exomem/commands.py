@@ -78,7 +78,6 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import (
     find_types,
-    foreground_priority,
     note_types,
     query_log,
     retrieval_models,
@@ -6528,13 +6527,10 @@ def op_activate_context(
     bound_token = None
     try:
         bounded = working_set_conversation_module.bound(conversation)
-        # A foreground request: in-process bulk passes (a whole-vault graph
-        # rebuild) pause at their next unit while this runs, instead of taking the
-        # GIL back after every SQLite call the request makes (5-15x per stage,
-        # measured). Activation is read-only and never waits on bulk work.
+        # The dispatcher runs this as a foreground request, ahead of in-process
+        # bulk passes (`writer_lease._foreground_priority_request`).
         with (
             state_paths_module.resolution_scope(),
-            foreground_priority.foreground(),
             working_set_runtime_module.defer_index_refreshes(),
         ):
             if readiness_module.runtime_managed() and request_budget_module.current() is None:

@@ -330,6 +330,25 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "preflight.registries",
         "preflight.relation_review",
         "preflight.validity_token",
+        # A page creation's own stages, and the blocks every write attaches
+        # after its commit, recorded directly rather than by the collector.
+        "commit.source_closure",
+        "commit.relation_review_prepare",
+        "commit.catalog_prepare",
+        "commit.relation_review",
+        "commit.relation_review_attempt",
+        "post_commit.structure_suggestion",
+        "post_commit.records_routing",
+        "post_commit.observation_delta",
+        "post_commit.records_delivery",
+        "post_commit.due_state",
+        "post_commit.capture_sweep",
+        "post_commit.entity_candidate",
+        "advisory.default_sweep",
+        "command.body",
+        "command.terminal_filter",
+        "egress.cross_check",
+        "egress.scrub",
     }
 )
 

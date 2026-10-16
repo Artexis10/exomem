@@ -6772,10 +6772,30 @@ def _collection_store_thread(func):
     return wrapped
 
 
+def _foreground_priority_request(func):
+    """Run every dispatched command, read or write, ahead of in-process bulk work.
+
+    The one mark for commands (`foreground_priority`). Innermost, so it marks
+    the thread that runs the command -- the collection store's thread for a
+    routed call -- and leaves out the fixed public completion that pads a
+    projected read to its class deadline.
+    """
+
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        from . import foreground_priority
+
+        with foreground_priority.foreground():
+            return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
 @_foreground_command_activity
 @_fixed_projected_command_completion
 @_request_prominence_context
 @_collection_store_thread
+@_foreground_priority_request
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -6906,9 +6926,14 @@ def invoke_command(
     # a SystemExit walks straight past is not terminal.
     if not read_only:
         try:
-            return postfilter(command.name, _invoke(), injected[0])
+            # The same fixed phase labels as the read-only path below.
+            with call_spans.span("command.body"):
+                result = _invoke()
+            with call_spans.span("command.terminal_filter"):
+                return postfilter(command.name, result, injected[0])
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            with call_spans.span("command.terminal_filter"):
+                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on

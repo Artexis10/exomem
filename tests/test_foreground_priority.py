@@ -11,14 +11,18 @@ flight, boundedly.
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands, epistemic_graph, foreground_priority
+from exomem import commands, epistemic_graph, find, foreground_priority, mutation_lock
 
 
 def test_yield_is_free_when_no_request_is_in_flight() -> None:
@@ -194,22 +198,130 @@ def test_the_whole_vault_graph_pass_yields_between_pages(
     assert len(calls) >= 3 * 6
 
 
-def test_activation_runs_as_a_foreground_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _gil_releasing_phase(calls: int = 50) -> float:
+    """Seconds for `calls` short blocking calls, each releasing the GIL.
+
+    The shape of a write's syscall-heavy phases: every SQLite statement, stat
+    and fsync releases the GIL. Beside a CPU-bound thread each release costs up
+    to the interpreter's switch interval, because that thread keeps the GIL
+    until it is forced to hand it back. A sleep makes the blocking time fixed,
+    so the comparison does not depend on how fast this machine's disk is.
+    """
+    started = time.perf_counter()
+    for _ in range(calls):
+        time.sleep(0.0001)
+    return time.perf_counter() - started
+
+
+@contextmanager
+def _cpu_bound_bulk_pass() -> Iterator[None]:
+    """A real `bulk()` pass of short CPU-bound units on its own thread, for the block."""
+    stop = threading.Event()
+    running = threading.Event()
+
+    def run() -> None:
+        try:
+            with foreground_priority.bulk(stop=stop):
+                for _unit in foreground_priority.yielding_in_bulk(itertools.count()):
+                    running.set()
+                    sum(i * i for i in range(5_000))
+        except foreground_priority.BulkCancelled:
+            pass
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert running.wait(5.0)
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(5.0)
+    assert not worker.is_alive()
+
+
+def test_a_phase_under_the_mutation_boundary_keeps_its_quiet_speed_beside_a_bulk_pass(
+    tmp_path: Path,
 ) -> None:
-    seen: list[int] = []
+    """Beside an in-process whole-vault pass, a write's syscall-heavy phases pay
+    the switch interval per call, and a drain or publication holding the
+    boundary is slowed the same way while every writer queues behind it. A
+    boundary wait or hold is foreground work, so the pass parks instead."""
+    (tmp_path / "state").mkdir()
+    coordinator = mutation_lock.VaultMutationCoordinator(tmp_path / "state", tmp_path)
+    quiet = min(_gil_releasing_phase() for _ in range(3))
+    held: list[float] = []
+    with _cpu_bound_bulk_pass():
+        unmarked = min(_gil_releasing_phase() for _ in range(2))
+        for _ in range(3):
+            with coordinator.hold(request_id="write", operation="write_probe"):
+                held.append(_gil_releasing_phase())
+    marked = min(held)
 
-    def body(*_args, **_kwargs):
-        seen.append(foreground_priority.in_flight())
-        return {"abstained": True, "abstention": {"reason": "unresolved"}}
+    # Without priority the convoy is there: the comparison below measures it.
+    assert unmarked > 4 * quiet, (quiet, unmarked)
+    assert marked < 2.5 * quiet, (quiet, marked, unmarked)
 
-    monkeypatch.setattr(commands, "_op_activate_context_body", body)
-    monkeypatch.setattr(commands, "_carry_thread_through_abstention", lambda *_a, **_k: None)
-    monkeypatch.setattr(commands, "_withhold_vault_generation", lambda *_a, **_k: None)
-    monkeypatch.setattr(commands.query_log, "log_activation_call", lambda *_a, **_k: None)
-    commands.op_activate_context(tmp_path, turn="where were we?")
-    assert seen == [1]
+
+def test_dispatched_reads_and_writes_keep_their_quiet_speed_beside_a_bulk_pass(
+    vault: Path,
+) -> None:
+    """The dispatcher marks every command, read or write, from one place. A read
+    holds no boundary, so before this mark only activation ran ahead of a pass."""
+    from exomem.writer_lease import invoke_command
+
+    def leaf(*_args, **_kwargs):
+        return {"phase_seconds": _gil_releasing_phase()}
+
+    by_name = {command.name: command for command in commands.COMMANDS}
+    read = replace(by_name["get"], leaf=leaf, cli_writes=False)
+    write = replace(by_name["note"], leaf=leaf, cli_writes=True)
+    quiet = min(_gil_releasing_phase() for _ in range(3))
+    with _cpu_bound_bulk_pass():
+        unmarked = min(_gil_releasing_phase() for _ in range(2))
+        reads = [invoke_command(read, vault, path="x")["phase_seconds"] for _ in range(3)]
+        writes = [
+            invoke_command(write, vault, title="x", body="y")["phase_seconds"] for _ in range(3)
+        ]
+
+    assert unmarked > 4 * quiet, (quiet, unmarked)
+    # A write also holds the boundary around its leaf; a read has only this mark.
+    assert min(writes) < 2.5 * quiet, (quiet, writes, unmarked)
+    assert min(reads) < 2.5 * quiet, (quiet, reads, unmarked)
     assert foreground_priority.in_flight() == 0
+
+
+def test_a_request_following_a_bulk_resolver_build_does_not_wait_out_the_floor(
+    tmp_path: Path,
+) -> None:
+    """A foreground request that joins a single-flight build a bulk pass leads
+    must not park its own leader: the follower would wait the pass's progress
+    floor (a full `MAX_YIELD_SECONDS` grace) instead of the build."""
+    notes = tmp_path / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    for index in range(5):
+        (notes / f"page-{index}.md").write_text(
+            f"---\ntype: note\n---\n\n# Page {index}\n\nSee [[page-{(index + 1) % 5}]].\n",
+            encoding="utf-8",
+        )
+
+    def leader() -> None:
+        with foreground_priority.bulk():
+            find.recall_resolver_snapshot(tmp_path)
+
+    with foreground_priority.foreground():
+        # The leader registers its build, then parks at its first page: this
+        # request is in flight.
+        worker = threading.Thread(target=leader, daemon=True)
+        worker.start()
+        time.sleep(0.3)
+        assert worker.is_alive(), "the leader finished before the follower joined it"
+        started = time.monotonic()
+        resolver = find.recall_resolver_snapshot(tmp_path)
+        waited = time.monotonic() - started
+    worker.join(10.0)
+
+    assert resolver is not None
+    assert waited < foreground_priority.MAX_YIELD_SECONDS / 2, waited
 
 
 def test_a_thread_holding_a_mutation_boundary_never_pauses(tmp_path: Path) -> None:

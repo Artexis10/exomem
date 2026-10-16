@@ -26,6 +26,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import sqlite3
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -1042,6 +1043,35 @@ def clear_deferred_work(
     return cleared
 
 
+#: SQLite's own primary result codes for a database another connection holds:
+#: a closed set the library documents.
+_SQLITE_HELD_CODES: Final = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
+
+def _readiness_refusal(error: BaseException) -> str | None:
+    """The refusal's label when `error` says "not now", never "this page".
+
+    A retryable refusal by its own contract (a busy or timed-out mutation
+    boundary, a corpus still warming), a timed-out vault lock, a graph epoch
+    another writer holds, and a SQLite store another connection holds. The
+    label is a code or class name, so it carries no content.
+    """
+    from . import graph_sync
+    from .cli_ops import OpError
+    from .vault import VaultLockTimeout
+
+    if isinstance(error, OpError):
+        return error.code if error.details.get("status") == "retryable" else None
+    if isinstance(error, (VaultLockTimeout, graph_sync.GraphEpochUnreadable)):
+        return error.code
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, "sqlite_errorcode", None)
+        # An extended result code keeps its primary code in its low 8 bits.
+        if isinstance(code, int) and (code & 0xFF) in _SQLITE_HELD_CODES:
+            return error.sqlite_errorname
+    return None
+
+
 def _drain_graph_work(
     vault_root: Path, *, limit: int | None, requested: set[str] | None
 ) -> int:
@@ -1110,7 +1140,14 @@ def _drain_graph_work(
     batch = [vault_root / receipt.rel_path for receipt in receipts]
     try:
         report = index.drain_paths(batch)
-    except Exception:  # noqa: BLE001 - isolate below rather than lose the queue
+    except Exception as error:  # noqa: BLE001 - isolate below rather than lose the queue
+        refusal = _readiness_refusal(error)
+        if refusal is not None:
+            # Not any page's fault, so no receipt moves: a writer's debt signal
+            # or the drain's backoff retries the whole batch. Isolating would
+            # meet the same refusal once per page, each with a boundary wait.
+            log.info("deferred graph batch refused (%s); work remains queued", refusal)
+            return 0
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
     if report.get("requires_rebuild"):
@@ -1133,13 +1170,30 @@ def _drain_graph_work(
             _republish_graph_availability(index)
         return processed
 
-    for receipt in stalled:
+    for done_count, receipt in enumerate(stalled):
+        if index.boundary_waiters():
+            # Each replay takes the boundary a writer is waiting on. Step aside;
+            # the rest stay queued untouched for the next pass.
+            log.info(
+                "deferred graph replay yielded to a waiting writer; %d receipt(s) remain queued",
+                len(stalled) - done_count,
+            )
+            break
         path = vault_root / receipt.rel_path
         try:
             single = index.drain_paths([path])
-        except Exception:  # noqa: BLE001 - one poison page must not pin the queue
-            # A busy boundary, a locked store, anything raised out of the pass:
-            # a readiness refusal, never the page's fault, so it never counts.
+        except Exception as error:  # noqa: BLE001 - one poison page must not pin the queue
+            refusal = _readiness_refusal(error)
+            if refusal is not None:
+                # The same refusal awaits every later receipt: leave them all.
+                log.info(
+                    "deferred graph replay refused (%s); %d receipt(s) remain queued",
+                    refusal,
+                    len(stalled) - done_count,
+                )
+                break
+            # Anything else raised out of the pass is not proven to be the
+            # page's fault either, so it never counts.
             log.warning(
                 "deferred graph receipt failed; work remains queued", exc_info=True
             )

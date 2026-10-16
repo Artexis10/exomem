@@ -38,9 +38,14 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import sqlite3
+import threading
+import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +53,15 @@ import pytest
 from test_graph_replay_currency import _assert_matches_a_fresh_rebuild
 from test_records_recall_graph import _manifest as _records_manifest
 
-from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
+from exomem import (
+    deferred_index,
+    epistemic_graph,
+    freshness,
+    graph_drain,
+    graph_sync,
+    index_sync,
+    writer_lease,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
@@ -1650,6 +1663,142 @@ def test_a_busy_boundary_never_counts_against_a_page(
     assert _acknowledged(vault) == committed
     assert EpistemicGraphIndex(vault).available()
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+@contextmanager
+def _writer_holding_the_boundary(root: Path) -> Iterator[None]:
+    """A governed writer holds the vault mutation boundary for the block."""
+    held = threading.Event()
+    release = threading.Event()
+
+    def write() -> None:
+        with writer_lease.get_manager().mutation_guard(
+            root, operation="test_writer", holder_kind="command"
+        ):
+            held.set()
+            release.wait(10.0)
+
+    worker = threading.Thread(target=write, daemon=True)
+    worker.start()
+    assert held.wait(5.0)
+    try:
+        yield
+    finally:
+        release.set()
+        worker.join(10.0)
+
+
+def _counting(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str) -> list[int]:
+    """Record the size of every call to `owner.name`, which still runs."""
+    calls: list[int] = []
+    real = getattr(owner, name)
+
+    def counted(*args: Any) -> Any:
+        calls.append(len(args[-1]))
+        return real(*args)
+
+    monkeypatch.setattr(owner, name, counted)
+    return calls
+
+
+def test_a_busy_boundary_refuses_the_whole_batch_and_replays_no_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A writer holding the boundary refuses the drain's batch with MUTATION_BUSY.
+
+    Isolating receipts after that refusal met it again once per page, each with
+    a boundary wait and, once a page got in, a hold that the next writer queued
+    behind. The refusal is about the boundary, not the pages, so every receipt
+    stays exactly where it was and the next pass retries the whole batch.
+    """
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "0.3")
+    writer_lease.reset_managers_for_tests()
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    queued = deferred_index.list_graph_paths(vault)
+    assert sorted(queued) == [PAGE_A, PAGE_B]
+    drains = _counting(monkeypatch, EpistemicGraphIndex, "drain_paths")
+    rotations = _counting(monkeypatch, deferred_index, "rotate_graph_receipts")
+    caplog.set_level(logging.INFO, logger="exomem.index_sync")
+
+    with _writer_holding_the_boundary(vault):
+        assert index_sync.drain_graph_work(vault) == 0
+
+    assert drains == [2], "the drain replayed receipts after a busy boundary"
+    assert rotations == []
+    assert "isolating receipts" not in caplog.text
+    assert "deferred graph batch refused (MUTATION_BUSY)" in caplog.text
+    assert deferred_index.list_graph_paths(vault) == queued
+    assert _failure_attempts(vault, PAGE_A) == _failure_attempts(vault, PAGE_B) == 0
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _acknowledged(vault) == committed
+
+
+def test_receipt_replay_steps_aside_for_a_writer_waiting_on_the_boundary(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each isolated receipt takes the boundary again, so a writer queued on it
+    waits out every replay. Between receipts the drain returns to its loop as
+    soon as a writer waits, and leaves the rest queued untouched."""
+    committed = _write_without_graph_repair(
+        vault,
+        monkeypatch,
+        {
+            PAGE_A: _page("A", "A is revised against [[queue-b]]."),
+            PAGE_B: _page("B", "B is revised and cites nothing."),
+        },
+    )
+    queued = deferred_index.list_graph_paths(vault)
+    real_drain = EpistemicGraphIndex.drain_paths
+    drains: list[int] = []
+
+    def batch_fails(self: Any, paths: list[Path]) -> Any:
+        # The batch fails for a reason that is not readiness, so the drain
+        # turns to isolating its receipts.
+        drains.append(len(paths))
+        if len(drains) == 1:
+            raise RuntimeError("the batch pass failed")
+        return real_drain(self, paths)
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", batch_fails)
+    rotations = _counting(monkeypatch, deferred_index, "rotate_graph_receipts")
+    index = EpistemicGraphIndex(vault)
+    waiting_writer: threading.Thread | None = None
+    with _writer_holding_the_boundary(vault):
+
+        def wait_to_write() -> None:
+            with writer_lease.get_manager().mutation_guard(
+                vault, operation="queued_writer", holder_kind="command"
+            ):
+                pass
+
+        waiting_writer = threading.Thread(target=wait_to_write, daemon=True)
+        waiting_writer.start()
+        deadline = time.monotonic() + 5.0
+        while not index.boundary_waiters() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert index.boundary_waiters() == 1
+
+        index_sync.drain_graph_work(vault)
+
+    waiting_writer.join(10.0)
+    assert drains == [2], "the drain replayed a receipt while a writer waited"
+    assert rotations == []
+    assert deferred_index.list_graph_paths(vault) == queued
+
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert _acknowledged(vault) == committed
 
 
 def test_a_transient_read_lock_neither_quarantines_nor_drops_a_page(

@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from . import (
     activation_manifest,
+    call_spans,
     freshness,
     lifecycle_statuses,
     memory_schema,
@@ -2555,6 +2556,7 @@ def _prepare_markdown_catalog_publication(
     )
 
 
+@call_spans.timed("post_commit.structure_suggestion")
 def _structure_suggestion(
     state: Any,
     corpus: semantic_contract.SemanticCorpusContext | None = None,
@@ -2595,6 +2597,7 @@ def _records_routing_from_terms(
         return None
 
 
+@call_spans.timed("post_commit.records_routing")
 def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
     """Collect only the written compiled page's declared routing vocabulary."""
     return _records_routing_from_terms(
@@ -2602,6 +2605,7 @@ def _records_routing(vault_root: Path, state: Any) -> dict[str, Any] | None:
     )
 
 
+@call_spans.timed("post_commit.records_delivery")
 def _records_routing_for_delivery(
     vault_root: Path,
     routing: Mapping[str, Any] | None,
@@ -2703,6 +2707,7 @@ def _records_routing_terms(state: Any) -> list[str]:
     return [str(getattr(state, "title", "") or ""), *page_tags, *unit_tags]
 
 
+@call_spans.timed("post_commit.observation_delta")
 def _observation_delta(
     vault_root: Path,
     state: Any,
@@ -2728,6 +2733,7 @@ def _observation_delta(
         log.debug("observation due-state delta failed (non-fatal)", exc_info=True)
 
 
+@call_spans.timed("post_commit.due_state")
 def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
     """Update the due-state projection for one written page and return its block.
 
@@ -2767,6 +2773,7 @@ def _due_state_block(vault_root: Path, rel_path: str) -> dict[str, Any] | None:
         return None
 
 
+@call_spans.timed("post_commit.capture_sweep")
 def _capture_sweep_block(
     vault_root: Path,
     state: Any,
@@ -2801,6 +2808,7 @@ def _capture_sweep_block(
         return None
 
 
+@call_spans.timed("post_commit.entity_candidate")
 def _entity_candidate_block(
     vault_root: Path,
     state: Any,
@@ -4621,11 +4629,16 @@ def _commit_creation(
             preflight.contract_result.blocking_findings,
         )
     try:
-        closure_plan = preflight.source_closure_plan or source_closure.prepare_source_closure(
-            root,
-            preflight.source,
-            destination=preflight.destination,
-        )
+        # Fixed phase labels, timing only, for each step before the guard.
+        with call_spans.span("commit.source_closure"):
+            closure_plan = (
+                preflight.source_closure_plan
+                or source_closure.prepare_source_closure(
+                    root,
+                    preflight.source,
+                    destination=preflight.destination,
+                )
+            )
         auxiliaries = source_closure.merge_backref_writes(
             auxiliary_writes,
             closure_plan.backref_writes,
@@ -4647,22 +4660,24 @@ def _commit_creation(
         # Pre-boundary: parse/canonicalize + the preliminary structural and
         # relation-review validation. Any failure here raises before the
         # mutation boundary below is ever acquired.
-        prepared = relation_review.prepare_commit_creation_draft(
-            root,
-            path=preflight.destination,
-            source=preflight.source,
-            draft_id=preflight.draft_id,
-            operation=operation,
-            relation_disposition=relation_disposition,
-            relation_review_hash=relation_review_hash,
-            relation_review_reason=relation_review_reason,
+        with call_spans.span("commit.relation_review_prepare"):
+            prepared = relation_review.prepare_commit_creation_draft(
+                root,
+                path=preflight.destination,
+                source=preflight.source,
+                draft_id=preflight.draft_id,
+                operation=operation,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
                 auxiliary_writes=auxiliaries,
                 derived_auxiliary_writes=derived_auxiliaries,
-            draft_token=preflight.draft_token,
-            predecessor_path=predecessor_path,
-            predecessor_content_hash=predecessor_content_hash,
-        )
-    _prewarm_embeddings()
+                draft_token=preflight.draft_token,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+            )
+    with call_spans.span("commit.embedding_prewarm"):
+        _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id
 
     with active_manager().mutation_guard(
@@ -4715,37 +4730,43 @@ def _commit_creation(
                         create_only=True,
                     )
                 )
-                catalog_target = _prepare_creation_catalog_publication(
-                    root,
-                    destination=preflight.destination,
-                    before_corpus=prepared.preliminary.before_corpus,
-                    semantic_state=prepared.preliminary.candidate,
-                    writes=catalog_writes,
-                )
+                with call_spans.span("commit.catalog_prepare"):
+                    catalog_target = _prepare_creation_catalog_publication(
+                        root,
+                        destination=preflight.destination,
+                        before_corpus=prepared.preliminary.before_corpus,
+                        semantic_state=prepared.preliminary.candidate,
+                        writes=catalog_writes,
+                    )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
                     "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                     str(error),
                 ) from error
-            committed = relation_review.commit_prepared_creation_draft(
-                root,
-                prepared,
-                path=preflight.destination,
-                source=preflight.source,
-                operation=operation,
-                relation_disposition=relation_disposition,
-                relation_review_hash=relation_review_hash,
-                predecessor_path=predecessor_path,
-                predecessor_content_hash=predecessor_content_hash,
-                semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
-                extra_required_guards=vocabulary_guards,
-                origin_required_guards=_origin_commit_guards(
-                    root, preflight.origin_inputs, catalog_writes
-                ),
-                _validate_prepared_bindings=(
-                    lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-                ) if preflight.origin_inputs is not None else None,
-            )
+            # Its in-lock revalidation reports its outcome on the nested
+            # `commit.relation_review_attempt` span.
+            with call_spans.span("commit.relation_review"):
+                committed = relation_review.commit_prepared_creation_draft(
+                    root,
+                    prepared,
+                    path=preflight.destination,
+                    source=preflight.source,
+                    operation=operation,
+                    relation_disposition=relation_disposition,
+                    relation_review_hash=relation_review_hash,
+                    predecessor_path=predecessor_path,
+                    predecessor_content_hash=predecessor_content_hash,
+                    semantic_state=semantic_index.from_semantic_page_state(
+                        preflight.semantic_state
+                    ),
+                    extra_required_guards=vocabulary_guards,
+                    origin_required_guards=_origin_commit_guards(
+                        root, preflight.origin_inputs, catalog_writes
+                    ),
+                    _validate_prepared_bindings=(
+                        lambda: _validate_origin_inputs(root, preflight.origin_inputs)
+                    ) if preflight.origin_inputs is not None else None,
+                )
             try:
                 catalog_publication.publish_markdown_batch(catalog_target)
             except catalog_publication.CatalogPublicationError as error:

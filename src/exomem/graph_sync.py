@@ -2865,7 +2865,10 @@ class GraphRebuildCoordinator:
             self._condition.notify_all()
 
     def _wait(self, checkpoint: GraphSyncCheckpoint, timeout: float | None) -> GraphBuildOutcome:
-        with self._condition:
+        from . import foreground_priority
+
+        # The rebuild is a bulk pass, so a foreground joiner must not park it.
+        with foreground_priority.awaiting_bulk(), self._condition:
             ready = self._condition.wait_for(
                 lambda: self._error is not None
                 or (self._outcome is not None and self._outcome.covers(checkpoint)),
