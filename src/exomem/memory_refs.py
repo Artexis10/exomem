@@ -860,7 +860,9 @@ def paths_for_ids_read_only(
     them never choose the source, because work that varies with those lets a
     caller infer, from the work performed, that some page carries an id it is
     not allowed to see. Both sources apply one membership rule, so the answer
-    does not depend on which of them ran.
+    does not depend on which of them ran. A vault whose Knowledge Base root
+    holds a directory that the identity census prunes but the scan reads
+    (`trash/`) always takes the scan, so its answers stay the scan's.
     """
     wanted: list[str] = []
     seen: set[str] = set()
@@ -896,39 +898,36 @@ def paths_for_ids_read_only(
     # function of vault state and of the batch's size, never of which ids
     # exist or who may see them. The read only borrows a projection the
     # server already holds: it never builds, fills, or refreshes one.
+    #
+    # The census never admits a page under the Knowledge Base `trash/`
+    # directory, while the scan reads it and the sidecar hands out its refs.
+    # A vault that holds that directory therefore always scans: its presence
+    # is one more vault-wide fact, and the scan keeps those refs resolving.
     with call_spans.span("memory_refs.identity_census", {}) as measured:
         started = time.thread_time_ns()
-        by_id: Mapping[str, Iterable[str]] | None = None
-        snapshot = semantic_contract.current_reference_identity_snapshot(root)
+        resolved: dict[str, tuple[str, ...]] | None = None
+        snapshot = None
+        if not semantic_contract.identity_census_omits_scanned_pages(root):
+            snapshot = semantic_contract.current_reference_identity_snapshot(root)
         if snapshot is not None:
             owners = snapshot.reference_owners
             answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
             if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
-                by_id = answered
+                resolved = answered
         if measured is not None:
-            measured["snapshot"] = int(by_id is not None)
-        if by_id is None:
+            measured["snapshot"] = int(resolved is not None)
+        if resolved is None:
             pages = _scan_pages(root)
             scanned: dict[str, set[str]] = {}
             for path, exomem_id, _raw, _hash, status in pages:
                 if status == "valid" and exomem_id is not None:
                     scanned.setdefault(exomem_id, set()).add(path)
-            by_id = scanned
+            resolved = {
+                identifier: tuple(sorted(scanned.get(identifier, ())))
+                for identifier in wanted
+            }
             if measured is not None:
                 measured["pages"] = len(pages)
-        # The identity census never admits a page in a reserved Knowledge Base
-        # namespace such as `trash/`, while the scan and an event-patched
-        # census can hold one. Dropping them here keeps both sources equal.
-        resolved = {
-            identifier: tuple(
-                sorted(
-                    path
-                    for path in by_id.get(identifier, ())
-                    if not semantic_contract.identity_census_prunes(path)
-                )
-            )
-            for identifier in wanted
-        }
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
     return resolved

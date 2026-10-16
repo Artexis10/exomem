@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -97,9 +97,7 @@ _REVIEW_FINGERPRINT_UNSET = object()
 _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash", "trash"})
 
 
-def _prune_identity_census_directory(
-    kb: PurePath, directory: PurePath, name: str
-) -> bool:
+def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
     if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
         return True
@@ -116,24 +114,21 @@ def _prune_identity_census_directory(
     return False
 
 
-def identity_census_prunes(rel_path: str) -> bool:
-    """Whether the stable-identity census walk never reaches this vault path.
+def identity_census_omits_scanned_pages(vault_root: Path) -> bool:
+    """Whether the Knowledge Base root holds a directory the census prunes but a scan reads.
 
-    The path form of `_prune_identity_census_directory`, for a reader that
-    holds a vault-relative path rather than a directory listing. It applies
-    the same rule to every segment below the Knowledge Base root, the leaf
-    included, exactly as the walk meets them.
+    `trash/` is the one such name today: the identity census never admits a
+    page there, while `vault.in_excluded_scan_dir` keeps it, so the memory
+    reference scan and sidecar still read its pages. A reader that must answer
+    as the scan does checks this vault-wide fact before it reads the census.
+    Any entry by that name counts, because taking the scan is always correct.
     """
-    parts = PurePosixPath(str(rel_path).replace("\\", "/")).parts
-    kb = PurePosixPath(kb_dirname())
-    if parts[:1] != kb.parts:
-        return True
-    directory = kb
-    for name in parts[1:]:
-        if _prune_identity_census_directory(kb, directory, name):
-            return True
-        directory = directory / name
-    return False
+    kb = vault.kb_root(Path(vault_root))
+    return any(
+        os.path.lexists(kb / name)
+        for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
+        if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+    )
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
@@ -3504,8 +3499,11 @@ def _build_identity_census(
                     code,
                     f"could not safely inspect stable identity at {rel}",
                 ) from error
+            # Newlines as `_parse_page_state` and the reference scan read them:
+            # on raw bytes a CR-only page shows no frontmatter, so no identity.
+            logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
             try:
-                frontmatter, _, _ = vault.parse_frontmatter(source, strict=True)
+                frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
             except vault.FrontmatterError as error:
                 raise activation_manifest.ActivationManifestError(
                     error.code,
