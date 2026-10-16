@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.118.0](https://github.com/Artexis10/exomem/compare/v0.117.3...v0.118.0) (2026-10-16)
+
+
+### Features
+
+* add attributed context refresh within an agent turn ([#1736](https://github.com/Artexis10/exomem/issues/1736)) ([09e3f18](https://github.com/Artexis10/exomem/commit/09e3f184e4b854f7a6901fd8ce10aa9e1782efe6))
+* **cloud:** add optional functional health jobs ([#1752](https://github.com/Artexis10/exomem/issues/1752)) ([71e2e27](https://github.com/Artexis10/exomem/commit/71e2e271bb98b6704eee8666ef5403017fbf5fc5))
+* **cloud:** observe paid storage expansion ([#1762](https://github.com/Artexis10/exomem/issues/1762)) ([0b442ec](https://github.com/Artexis10/exomem/commit/0b442eca61b0ccf22f11f28ca15f8ebe75499283))
+* identify Cloud Home activity by authenticated app ([#1760](https://github.com/Artexis10/exomem/issues/1760)) ([f11f1f5](https://github.com/Artexis10/exomem/commit/f11f1f5cafbc3fb56382cfc7e907572de380a2b3))
+
+
+### Bug Fixes
+
+* **benchmarks:** bound receipt rename history auditing ([#1768](https://github.com/Artexis10/exomem/issues/1768)) ([facd8a5](https://github.com/Artexis10/exomem/commit/facd8a5f6fea7986fe8473a66e2ae82675a2a0a0))
+* **graph:** log incomplete index components ([#1757](https://github.com/Artexis10/exomem/issues/1757)) ([5242941](https://github.com/Artexis10/exomem/commit/52429412f910edf25f3b6caec27a23446b7ee3e5))
+* **server:** start stdio workers when the pipe opens ([#1769](https://github.com/Artexis10/exomem/issues/1769)) ([62289ed](https://github.com/Artexis10/exomem/commit/62289ed32e4e8d1ad9c201ef54b9367f42cea300))
+
+
+### Performance
+
+* **embeddings:** scan service vectors in physical order ([#1759](https://github.com/Artexis10/exomem/issues/1759)) ([8ab4239](https://github.com/Artexis10/exomem/commit/8ab4239170d5bc32e5633c3e65eae1ccc22d0941))
+* **semantic:** patch one edited page without rebuilding the corpus ([#1771](https://github.com/Artexis10/exomem/issues/1771)) ([9e5ec94](https://github.com/Artexis10/exomem/commit/9e5ec9465af1fd78b6f7cc287ba1fcf6ca9be242))
+
 ## [0.117.3](https://github.com/Artexis10/exomem/compare/v0.117.2...v0.117.3) (2026-10-14)
 
 

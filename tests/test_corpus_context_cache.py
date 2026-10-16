@@ -22,6 +22,7 @@ import pytest
 from exomem import (
     activation_manifest,
     freshness,
+    memory_refs,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
@@ -305,12 +306,64 @@ def test_markdown_delete_reconciles_without_full_rebuild(
     assert all(entry.path != removed for entry in second.identity_census.entries)
 
 
+@pytest.mark.parametrize(
+    ("title", "body", "rebuilds_corpus"),
+    [
+        # A new title can change how every other page's links resolve.
+        ("Incremental", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", True),
+        # An in-place edit re-derives only the edited page's own facts.
+        ("One", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", False),
+    ],
+    ids=["retitled", "edited-in-place"],
+)
 def test_incremental_reconcile_matches_full_rebuild(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    title: str,
+    body: str,
+    rebuilds_corpus: bool,
 ) -> None:
     _shared_context(vault)
-    (vault / _PAGE_REL).write_text(
-        _page(title="Incremental", body="Changed with the same governed rules.\n"),
+    (vault / _PAGE_REL).write_text(_page(title=title, body=body), encoding="utf-8")
+    real_rebuild = semantic_contract._context_from_state_map
+    rebuilt_corpus: list[bool] = []
+
+    def record_rebuild(*args, **kwargs):
+        rebuilt_corpus.append(True)
+        return real_rebuild(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_contract, "_context_from_state_map", record_rebuild)
+        incremental = _shared_context(vault)
+    assert bool(rebuilt_corpus) is rebuilds_corpus
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert rebuilt.relation_facts
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
+def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_id = "0b7c6f3e-8d2a-4c1e-9f5b-2a6d8e4c1b3f"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    relations = "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n"
+    # A copy outside the KB sorts first and has no stable-identity census entry.
+    copy = vault / "Archive" / "copy.md"
+    copy.parent.mkdir()
+    for path in (copy, notes / "one.md"):
+        path.write_text(
+            f"---\ntitle: {path.name}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n{relations}",
+            encoding="utf-8",
+        )
+    _shared_context(vault)
+    (notes / "one.md").write_text(
+        f"---\ntitle: one.md\ntype: insight\nstatus: active\nproject: atlas\n"
+        f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\nEdited.\n\n{relations}",
         encoding="utf-8",
     )
     incremental = _shared_context(vault)
@@ -319,6 +372,7 @@ def test_incremental_reconcile_matches_full_rebuild(
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
     rebuilt = _shared_context(vault)
 
+    assert len({fact.identity for fact in rebuilt.relation_facts}) == 2
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
