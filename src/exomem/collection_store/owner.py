@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
 from . import chain, connection, custody, replica, schema, snapshot, typed_storage
@@ -113,6 +113,10 @@ def _evidence(path: Path, scratch: Path):
             while chunk := shared.read(1 << 20):
                 digest.update(chunk)
                 target.write(chunk)
+        # Evidence an earlier release wrote is read from this private copy at the current schema.
+        # A copy that cannot migrate keeps its schema, which the validation below refuses.
+        with suppress(CollectionStoreError):
+            snapshot.migrate_copy(copy)
         with closing(sqlite3.connect(copy, isolation_level=None)) as conn:
             try:
                 meta = snapshot._validate(conn, lambda: None)

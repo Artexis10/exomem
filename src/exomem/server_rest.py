@@ -31,7 +31,7 @@ from . import (
 )
 from . import commands as commands_module
 from .command_surface import canonical_request_id, compact_input_schema
-from .governance import authorization_request, authorization_transport
+from .governance import authorization_request, authorization_transport, projection_timing
 from .server_transfer import TransferConfig
 
 _log = logging.getLogger(__name__)
@@ -352,7 +352,12 @@ def register_rest_facade(
 
     def _register_rest(cmd: commands_module.Command) -> None:
         @mcp_app.custom_route(f"/api/{cmd.name}", methods=["POST"])
-        async def _handler(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
+        async def _served(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
+            # Everything the handler does with a restricted refusal happens inside its floor.
+            async with projection_timing.surface_refusal_floor():
+                return await _handler(request, _cmd)
+
+        async def _handler(request: Request, _cmd: commands_module.Command) -> JSONResponse:
             # On local ingress the gate in front of this route already verified
             # a local client token; nothing else is accepted there.
             local_grant = local_ingress.current_grant()
@@ -517,7 +522,7 @@ def register_rest_facade(
             finally:
                 _observe_rest(_cmd.name, outcome=outcome, started=t0, request_id=request_id)
 
-        _handler.__name__ = f"_api_{cmd.name}"
+        _served.__name__ = f"_api_{cmd.name}"
 
     for cmd in rest_commands:
         _register_rest(cmd)

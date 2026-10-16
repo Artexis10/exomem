@@ -11,9 +11,26 @@ A request marks itself with `foreground()`. A bulk loop calls
 GIL, while any foreground request is in flight. The wait is bounded, so a
 stream of requests slows bulk work down but can never stop it.
 
-Scheduling only: process-local counters, no content, nothing persisted. Mark
-only work that never waits on bulk work itself (read-only requests), or the
-two would wait on each other until the bound.
+Every dispatched command, read or write, is a foreground request, and so is
+every wait for and hold of a mutation boundary: a drain or publication that
+holds the boundary keeps every writer queued behind it waiting.
+
+The rule that keeps this sound: no foreground thread ever waits on a parked
+bulk pass. Two mechanisms keep it.
+
+* A thread that holds a mutation boundary never parks (`_holds_a_boundary`).
+* A foreground thread that waits on work a bulk pass may own -- a
+  single-flight build, a lock a rebuild holds across its walk -- waits inside
+  `awaiting_bulk()`. Every bulk pass runs until that wait ends, so the work
+  finishes at its own speed instead of at the pass's progress floor.
+* A foreground thread that joins a registered rebuild holds no boundary (the
+  rebuild publishes under it), so it only leaves the in-flight count for the
+  join (`outside_foreground()`). Other requests keep their priority.
+
+A new wait on bulk-owned work must take one of the two, and a new yield in a
+bulk pass must hold no other lock that a foreground thread can wait on.
+
+Scheduling only: process-local counters, no content, nothing persisted.
 """
 
 from __future__ import annotations
@@ -44,31 +61,102 @@ MAX_WAIT_SHARE = 0.5
 MAX_BULK_WORK_SECONDS = 0.05
 
 _condition = threading.Condition()
+#: Threads running foreground work now. A thread counts once however deeply its
+#: marks nest: a write's dispatcher mark encloses its boundary mark.
 _in_flight = 0
+#: Foreground threads waiting on work a bulk pass may own (`awaiting_bulk`).
+#: While any wait, no bulk pass parks.
+_awaiting_bulk = 0
 #: Per-thread foreground depth: a request that runs bulk work inline must never
 #: wait on itself.
 _local = threading.local()
+
+
+def _bulk_may_run() -> bool:
+    """No foreground thread is running, or one is waiting on bulk-owned work."""
+    return _in_flight == 0 or _awaiting_bulk > 0
 
 
 @contextmanager
 def foreground() -> Iterator[None]:
     """Hold bulk loops at their next yield for the duration of this block."""
     global _in_flight
-    with _condition:
-        _in_flight += 1
+    # Counted up and down, never restored from a saved value: marks on one
+    # thread need not close in the order they opened. Reserved-state
+    # coordination releases its boundaries out of order.
     _local.depth = getattr(_local, "depth", 0) + 1
+    if _local.depth == 1:
+        with _condition:
+            _in_flight += 1
     try:
         yield
     finally:
         _local.depth -= 1
+        if _local.depth == 0:
+            with _condition:
+                _in_flight -= 1
+                if _bulk_may_run():
+                    _condition.notify_all()
+
+
+@contextmanager
+def awaiting_bulk() -> Iterator[None]:
+    """Let every bulk pass run while this foreground thread waits on its work.
+
+    For a short wait on work a bulk pass may own, by a thread that may hold a
+    boundary: joining a single-flight build, or a lock a rebuild holds across
+    its walk. Without it the owner parks for this very request and the wait
+    lasts the pass's progress floor (`MAX_WAIT_SHARE`) instead of the work.
+    Every pass is released rather than only the owner, because another
+    foreground thread can hold the owner too: a writer queued on the boundary
+    this thread holds. No request has priority meanwhile; a long join by a
+    thread that holds no boundary takes `outside_foreground()` instead. A
+    thread outside `foreground()` claims nothing.
+    """
+    global _awaiting_bulk
+    if not getattr(_local, "depth", 0):
+        yield
+        return
+    with _condition:
+        _awaiting_bulk += 1
+        _condition.notify_all()
+    try:
+        yield
+    finally:
         with _condition:
-            _in_flight -= 1
-            if _in_flight == 0:
-                _condition.notify_all()
+            _awaiting_bulk -= 1
+
+
+@contextmanager
+def outside_foreground() -> Iterator[None]:
+    """Leave the in-flight count while this thread joins a bulk pass's work.
+
+    The pass runs unless another request holds it, and that request keeps its
+    priority. Only for a thread that holds nothing a foreground request waits
+    on; a boundary holder takes `awaiting_bulk()` instead, because a writer
+    queued on its boundary would keep the pass parked. Nothing may open or
+    close a mark inside the block.
+    """
+    global _in_flight
+    depth = getattr(_local, "depth", 0)
+    if not depth:
+        yield
+        return
+    _local.depth = 0
+    with _condition:
+        _in_flight -= 1
+        if _bulk_may_run():
+            _condition.notify_all()
+    try:
+        yield
+    finally:
+        with _condition:
+            _in_flight += 1
+        _local.depth = depth
 
 
 def in_flight() -> int:
-    """How many foreground requests are running now."""
+    """How many threads are running foreground work now."""
     with _condition:
         return _in_flight
 
@@ -123,7 +211,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """
     check_cancelled()
     budget: _PassBudget | None = getattr(_local, "budget", None)
-    if not _in_flight:  # unlocked read: the common case costs one load
+    if _bulk_may_run():  # unlocked reads: the common case costs two loads
         if budget is not None:
             budget.work_until = 0.0
         return 0.0
@@ -138,7 +226,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
         if limit <= 0.0:
             return 0.0
     with _condition:
-        released = _condition.wait_for(lambda: _in_flight == 0, timeout=limit)
+        released = _condition.wait_for(_bulk_may_run, timeout=limit)
     check_cancelled()
     now = time.monotonic()
     waited = now - started

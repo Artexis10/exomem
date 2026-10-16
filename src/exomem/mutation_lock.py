@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, TypedDict, cast
 
+from . import foreground_priority
 from .cli_ops import OpError
 
 if os.name == "nt":
@@ -1921,6 +1922,9 @@ class _LocalLockState:
         default_factory=lambda: deque(maxlen=_CONTENTION_RECENT_SAMPLES)
     )
     last_holder: dict[str, object] | None = None
+    #: Threads of this process inside `hold()` that do not hold the boundary
+    #: yet. Read by work that can step aside between units (`waiter_count`).
+    waiters: int = 0
 
 
 _LOCAL_STATES: dict[Path, _LocalLockState] = {}
@@ -1935,6 +1939,18 @@ def _note_acquire_attempt(state: _LocalLockState) -> None:
     """
     with state.metadata_guard:
         state.acquire_attempts += 1
+
+
+@contextmanager
+def _waiting(state: _LocalLockState) -> Iterator[None]:
+    """Count this thread among the boundary's waiters for the block."""
+    with state.metadata_guard:
+        state.waiters += 1
+    try:
+        yield
+    finally:
+        with state.metadata_guard:
+            state.waiters -= 1
 
 
 def _note_busy_refusal(
@@ -2090,6 +2106,16 @@ class VaultMutationCoordinator:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
+    def waiter_count(self) -> int:
+        """Threads of this process now waiting to acquire this boundary.
+
+        Process-local, like the contention counters: a waiter in another
+        process is invisible here.
+        """
+        state = _state_for(self.lock_path)
+        with state.metadata_guard:
+            return state.waiters
+
     @contextmanager
     def hold(
         self,
@@ -2106,7 +2132,32 @@ class VaultMutationCoordinator:
         their high-frequency filesystem-identity coordination needs the OS lock,
         not a durable attribution record for every short hold. Command and
         lifecycle mutation boundaries remain attributable.
+
+        The wait and the hold are foreground work (`foreground_priority`), here
+        for every holder: in-process bulk passes pause while a writer waits or
+        a drain, a publication or a command holds the boundary, because every
+        writer queued on it waits out whatever slows its holder.
         """
+        with foreground_priority.foreground(), self._hold(
+            timeout_seconds=timeout_seconds,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+            publish_holder_metadata=publish_holder_metadata,
+        ):
+            yield
+
+    @contextmanager
+    def _hold(
+        self,
+        *,
+        timeout_seconds: float | None,
+        request_id: str | None,
+        operation: str | None,
+        holder_kind: str,
+        publish_holder_metadata: bool,
+    ) -> Iterator[None]:
+        """`hold()` without its foreground mark."""
         if type(publish_holder_metadata) is not bool:
             raise TypeError("holder metadata publication flag must be boolean")
         if not publish_holder_metadata and holder_kind != "reserved-state":
@@ -2141,7 +2192,9 @@ class VaultMutationCoordinator:
         state = _state_for(self.lock_path)
         _note_acquire_attempt(state)
         remaining = max(0.0, deadline - time.monotonic())
-        if not state.guard.acquire(timeout=remaining):
+        with _waiting(state):
+            entered = state.guard.acquire(timeout=remaining)
+        if not entered:
             raise self._refused(wait_start)
         try:
             thread_id = threading.get_ident()
@@ -2156,11 +2209,12 @@ class VaultMutationCoordinator:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
             try:
-                self._acquire_boundary(
-                    handle, metadata_handle, deadline, request_id, operation, holder_kind,
-                    wait_start=wait_start,
-                    publish_holder_metadata=publish_holder_metadata,
-                )
+                with _waiting(state):
+                    self._acquire_boundary(
+                        handle, metadata_handle, deadline, request_id, operation, holder_kind,
+                        wait_start=wait_start,
+                        publish_holder_metadata=publish_holder_metadata,
+                    )
             except Exception:
                 handle.close()
                 metadata_handle.close()

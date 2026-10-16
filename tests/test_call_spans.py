@@ -131,11 +131,15 @@ def test_span_measures_real_elapsed_time(token) -> None:
 
 
 def test_a_call_generating_names_is_truncated_not_unbounded(token) -> None:
-    """Exceeding the name budget is a caller bug; it must not grow the row."""
+    """Exceeding the name budget is a caller bug; it must not grow the row,
+    and the spans it could not name are summed rather than dropped unseen."""
     for index in range(call_spans.MAX_NAMES_PER_CALL + 50):
         call_spans.record_span(f"generated.{index}", 1.0)
 
-    assert len(call_spans.pop_call_spans(token)) == call_spans.MAX_NAMES_PER_CALL
+    spans = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    assert len(spans) == call_spans.MAX_NAMES_PER_CALL
+    assert spans[call_spans.OVERFLOW_SPAN]["count"] == 51
+    assert spans[call_spans.OVERFLOW_SPAN]["ms"] == 51.0
 
 
 def test_a_missed_pop_cannot_leak_indefinitely() -> None:
@@ -204,13 +208,20 @@ def test_an_uninstrumented_call_records_an_empty_span_list(tmp_path, monkeypatch
 
 
 def test_the_row_bounds_spans_independently_of_the_producer() -> None:
-    """The row is hash-chained, so it cannot trust a caller to have bounded itself."""
-    shaped = call_ledger._clip_spans(
-        [{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(200)]
-    )
+    """The row is hash-chained, so it cannot trust a caller to have bounded
+    itself, and a row that dropped spans says how many it dropped."""
+    def row(count: int) -> dict:
+        return call_ledger.build_row(
+            sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="request",
+            tool="read_memory", outcome="ok", duration_ms=1.0,
+            spans=[{"name": f"phase.{i}", "count": 1, "ms": float(i)} for i in range(count)],
+        )
 
-    assert len(shaped) == call_ledger._MAX_SPANS
-    assert shaped[0]["ms"] > shaped[-1]["ms"], "kept the slowest, not the first"
+    clipped = row(200)
+    assert len(clipped["spans"]) == call_ledger._MAX_SPANS
+    assert clipped["spans"][0]["ms"] > clipped["spans"][-1]["ms"], "kept the slowest"
+    assert clipped["spans_truncated"] == 200 - call_ledger._MAX_SPANS
+    assert "spans_truncated" not in row(call_ledger._MAX_SPANS)
 
 
 def test_the_row_rebuilds_span_fields_rather_than_passing_them_through() -> None:
@@ -311,6 +322,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "index.full_refresh_store",
         "advisory.best_cosine",
         "advisory.overlap_groups",
+        "command.refusal_floor",
         # The write-stage collector's own names, emitted into the ledger
         # unconditionally by `MutationTimings.emit_call_spans`. Recorded
         # through a variable at that seam, so the source pin below finds
@@ -330,6 +342,26 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "preflight.registries",
         "preflight.relation_review",
         "preflight.validity_token",
+        # A page creation's own stages, and the blocks every write attaches
+        # after its commit, recorded directly rather than by the collector.
+        "commit.source_closure",
+        "commit.relation_review_prepare",
+        "commit.catalog_prepare",
+        "commit.relation_review",
+        "commit.relation_review_attempt",
+        "post_commit.structure_suggestion",
+        "post_commit.records_routing",
+        "post_commit.observation_delta",
+        "post_commit.records_delivery",
+        "post_commit.due_state",
+        "post_commit.capture_sweep",
+        "post_commit.entity_candidate",
+        "advisory.default_sweep",
+        "command.body",
+        "command.terminal_filter",
+        "egress.cross_check",
+        "egress.scrub",
+        "spans.overflow",
     }
 )
 

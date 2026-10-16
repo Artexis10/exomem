@@ -1949,6 +1949,10 @@ class EpistemicGraphIndex:
                 )
         self._mutation_coordinator = mutation_coordinator
 
+    def boundary_waiters(self) -> int:
+        """Threads of this process waiting on the boundary a drain of this index takes."""
+        return self._mutation_coordinator.waiter_count()
+
     def _canonical_mutation_coordinator(self) -> mutation_lock.VaultMutationCoordinator:
         """Return the boundary bound when this graph work was registered.
 
@@ -2575,8 +2579,10 @@ class EpistemicGraphIndex:
                         # Bounded by one proof this reader would otherwise run
                         # itself; the owner sets the Event in its `finally`. A
                         # timer here re-opens stacking on exactly the vaults
-                        # whose proof is slow (#1454).
-                        in_flight.wait()
+                        # whose proof is slow (#1454). The owner may be a bulk
+                        # pass (startup validation), whose proof walks yield.
+                        with foreground_priority.awaiting_bulk():
+                            in_flight.wait()
                         continue
                     try:
                         decline: list[str] = []

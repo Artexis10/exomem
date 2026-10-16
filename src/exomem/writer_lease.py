@@ -22,6 +22,7 @@ import sqlite3
 import stat
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -4306,6 +4307,8 @@ class LeaseManager:
         self._active_mutations = 0
         self._last_activity_monotonic = time.monotonic()
         self._collection_store = None
+        # Set by start_server_lifecycle: this process serves the store, so it needs its runtime.
+        self._serves_collection_store = False
         self._store_bound = False
         self._store_borrowers: dict[int, int] = {}
         self._store_handoff = False
@@ -4352,6 +4355,42 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - observability must never break the caller
             pass
 
+    def _offers_collection_store_capability(self) -> bool:
+        """Whether this process may pass the vault's collection store fence.
+
+        The fence keeps out releases that do not know the store. In this release, a process
+        that does not serve the store refuses a record_memory or plan_memory request for a
+        collection that the marker routes to the store. A pending create, migration or export
+        names collections whose routing is changing, and a first enrolment cuts the fence
+        before it installs the marker. In those windows the fence alone keeps writers off the
+        files the intent works on, so such a process offers the capability only when a marker
+        exists and the store records no pending intent. The serving process offers it only
+        with its store runtime attached, as before.
+        """
+        if self._collection_store is not None:
+            return True
+        if self._serves_collection_store:
+            return False
+        try:
+            import sqlite3
+            from contextlib import closing
+
+            from .collection_store import authority, connection
+            from .vault import resolve_vault
+
+            root = resolve_vault()
+            if authority.read_marker(root) is None:
+                return False
+            # A plain read of the one intent key, so that a media child loads no store libraries.
+            uri = f"{connection.store_path(root).resolve().as_uri()}?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as store:
+                pending = store.execute(
+                    "SELECT 1 FROM store_meta WHERE key=?", (authority.PENDING_CREATE,)
+                ).fetchone()
+            return pending is None
+        except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
+            return False
+
     def _store_refused(self) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
 
@@ -4391,7 +4430,7 @@ class LeaseManager:
             try:
                 record = self.client.acquire(**(
                     {"collection_store_capability": COLLECTION_STORE_CAPABILITY}
-                    if self._collection_store is not None else {}
+                    if self._offers_collection_store_capability() else {}
                 ))
             except OpError as error:
                 self._record_coordinator_error(error.code)
@@ -6768,6 +6807,79 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _restricted_refusal_floor(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Hold a restricted caller's direct-read refusal to the disclosure floor.
+
+    A missing page refuses before any page is read, while a withheld one is
+    read and decided first. Padding every refusal that a restricted caller
+    receives to one floor removes that difference. A success returns at once,
+    notices included. The restriction is asked only after a refusal, so a
+    success never pays for the question. Behind an MCP or REST surface the
+    surface waits, after its own handling of the refusal; elsewhere this
+    thread waits.
+    """
+
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        if (
+            not getattr(command, "restricted_refusal_floor", False)
+            or not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+        ):
+            return function(command, *injected, **kwargs)
+        from .governance import policy
+
+        started_at = time.perf_counter()
+        # A direct read changes no governance, so it decides under one policy load.
+        with policy.request_policy_snapshot():
+            try:
+                return function(command, *injected, **kwargs)
+            except Exception as error:
+                _complete_restricted_refusal(Path(injected[0]), started_at, error)
+                raise
+
+    return wrapped
+
+
+def _complete_restricted_refusal(
+    vault_root: Path, started_at: float, error: BaseException
+) -> None:
+    from .governance import egress, projection_timing
+
+    try:
+        restricted = egress.caller_restricted(vault_root)
+    except Exception:  # noqa: BLE001 - an undecided caller costs only the floor
+        restricted = True
+    if not restricted:
+        return
+    # The finished frames of a withheld read still hold the page it decided.
+    # Freed after the wait, a large page would make its refusal measurably
+    # later than a missing one, so free them inside the floor.
+    seen: set[int] = set()
+    chained: BaseException | None = error
+    while chained is not None and id(chained) not in seen:
+        seen.add(id(chained))
+        traceback.clear_frames(chained.__traceback__)
+        chained = chained.__cause__ or chained.__context__
+    padding_started = time.perf_counter()
+    work_ms = (padding_started - started_at) * 1000.0
+    deferred = projection_timing.defer_refusal_floor(started_at)
+    if not deferred:
+        projection_timing.pad_to_refusal_floor(started_at)
+    # Owner-only ledger span of fixed labels and counts, never caller or vault data.
+    call_spans.record_span(
+        "command.refusal_floor",
+        (time.perf_counter() - padding_started) * 1000.0,
+        {
+            "work_ms": math.ceil(work_ms),
+            "overrun": int(work_ms > projection_timing.RESTRICTED_REFUSAL_FLOOR_MS),
+            "deferred": int(deferred),
+        },
+    )
+
+
 def _note_committed_terminal_targets(terminal: Mapping[str, Any]) -> None:
     """Hand the call ledger the pages this write committed, from the terminal's
     own path projection, so a write whose destination the server derived still
@@ -6816,10 +6928,31 @@ def _collection_store_thread(func):
     return wrapped
 
 
+def _foreground_priority_request(func):
+    """Run every dispatched command, read or write, ahead of in-process bulk work.
+
+    The one mark for commands (`foreground_priority`). Innermost, so it marks
+    the thread that runs the command -- the collection store's thread for a
+    routed call -- and leaves out the fixed public completion that pads a
+    projected read to its class deadline.
+    """
+
+    @wraps(func)
+    def wrapped(command, *injected, **kwargs):
+        from . import foreground_priority
+
+        with foreground_priority.foreground():
+            return func(command, *injected, **kwargs)
+
+    return wrapped
+
+
 @_foreground_command_activity
 @_fixed_projected_command_completion
+@_restricted_refusal_floor
 @_request_prominence_context
 @_collection_store_thread
+@_foreground_priority_request
 def invoke_command(
     command: Any,
     *injected: Any,
@@ -6950,9 +7083,14 @@ def invoke_command(
     # a SystemExit walks straight past is not terminal.
     if not read_only:
         try:
-            return postfilter(command.name, _invoke(), injected[0])
+            # The same fixed phase labels as the read-only path below.
+            with call_spans.span("command.body"):
+                result = _invoke()
+            with call_spans.span("command.terminal_filter"):
+                return postfilter(command.name, result, injected[0])
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            with call_spans.span("command.terminal_filter"):
+                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
@@ -6989,6 +7127,7 @@ def coordination_status(
 
 def start_server_lifecycle() -> LeaseManager:
     manager = get_manager()
+    manager._serves_collection_store = True
     if manager.config.enabled and manager.config.preferred_writer:
         try:
             manager.ensure_writer()

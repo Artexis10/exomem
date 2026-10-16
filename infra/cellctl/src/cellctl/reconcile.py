@@ -400,6 +400,9 @@ class ClusterConfig:
     isolation_binding_name: str = DEFAULT_ISOLATION_BINDING_NAME
     artifact_broker_url: str = ""
     artifact_broker_cell_ids: tuple[str, ...] = ()
+    # serve-cloud-artifact-handles: one switch for every cell, so a cell created
+    # later needs no edit. The list stays as the canary that precedes it.
+    artifact_broker_all_cells: bool = False
     dedicated_cell_ids: tuple[str, ...] = ()
     # cloud-multimodal-processing D7: engine name -> the cells it is switched on in.
     # A selection, not a chart-wide value, so an engine can canary in one cell.
@@ -432,7 +435,7 @@ class ClusterConfig:
             or len(cell_ids) > 1024
             or any(not isinstance(cell_id, str) or not re.fullmatch(r"[a-z2-7]{16}", cell_id) for cell_id in cell_ids)
             or len(set(cell_ids)) != len(cell_ids)
-            or (cell_ids and not self.artifact_broker_url)
+            or ((cell_ids or self.artifact_broker_all_cells) and not self.artifact_broker_url)
         ):
             raise ValueError("artifact broker activation requires a literal endpoint and unique base32 cell IDs")
         for engine, cell_ids in self.media_engine_cell_ids.items():
@@ -467,7 +470,8 @@ class ClusterConfig:
         return self.resources, {}
 
     def artifact_broker_for_cell(self, cell_id: str) -> str:
-        return self.artifact_broker_url if cell_id in self.artifact_broker_cell_ids else ""
+        selected = self.artifact_broker_all_cells or cell_id in self.artifact_broker_cell_ids
+        return self.artifact_broker_url if selected else ""
 
     def media_engines_for_cell(self, cell_id: str) -> str:
         """The value of the cell's media engine switch; "" when nothing selects an engine for it.

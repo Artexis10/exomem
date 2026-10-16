@@ -4,8 +4,8 @@ Usage: python check-media-samples.py <samples directory> <engines>
 
 `<engines>` is the comma-separated engines this image ships, such as
 `documents,ocr`. Every kind in the media registry whose engine the image ships, or
-which needs no engine, must have a sample, and each sample must extract with the
-phrase `expected.json` gives for it.
+which needs no engine, must have a sample. Each sample must extract to text in which
+find's lexical presence check finds the phrase `expected.json` gives for it.
 
 The Cloud image build runs this with networking off. It is the proof that the image
 reads each format it serves (`cloud-multimodal-processing`, "Cloud engines are
@@ -19,15 +19,17 @@ import importlib.metadata
 import importlib.util
 import json
 import sys
-import unicodedata
 from pathlib import Path
 
-from exomem import extract, media_engines, media_types
+from exomem import extract, find_results, media_engines, media_types
+from exomem.find_types import ParsedPage
 
 
-def _squash(text: str) -> str:
-    # OCR spaces CJK words apart and documents wrap lines; compare without whitespace.
-    return "".join(unicodedata.normalize("NFC", text).split()).casefold()
+def _found(phrase: str, text: str) -> bool:
+    # Find's own lexical presence check, with the query normalised as find does. A line
+    # wrap passes; a CJK phrase that OCR spaced apart fails here, as it fails recall.
+    page = ParsedPage(Path("sample.md"), "sample.md", {}, text, "", 0.0)
+    return find_results.stem_tokens_present(page, phrase.lower().strip())
 
 
 def main(root: Path, engines: set[str]) -> int:
@@ -58,7 +60,7 @@ def main(root: Path, engines: set[str]) -> int:
         except Exception as error:  # noqa: BLE001 - every failure is reported, then the build fails
             failures.append(f"{path.name}: {type(error).__name__}: {error}")
             continue
-        if _squash(phrase) in _squash(result.text):
+        if _found(phrase, result.text):
             print(f"ok {path.name} via {result.engine}")
         else:
             failures.append(f"{path.name}: phrase {phrase!r} missing from {result.text[:160]!r}")

@@ -1494,15 +1494,21 @@ def prepare_restore(
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
         from . import structured_collections as collections
-        from .collection_store import authority, chain, connection, replica
+        from .collection_store import authority, chain, connection, replica, snapshot
 
         try:
             raw_marker = authority.read_marker(temporary)
             marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
             if marker is not None:
-                with closing(connection.open_reader(replica.replica_path(temporary))) as reader:
-                    chain.verify_store_chain(reader)
-                    authority.require_marker(reader, marker, root=temporary)
+                checked = replica.replica_path(temporary)
+                with tempfile.TemporaryDirectory(prefix=".exomem-restore-replica-", dir=destination.parent) as private:
+                    if connection.schema_pending(checked):
+                        # The restore keeps the archived bytes; a private copy at the current schema is checked.
+                        checked = Path(shutil.copyfile(checked, Path(private) / checked.name))
+                        snapshot.migrate_copy(checked)
+                    with closing(connection.open_reader(checked)) as reader:
+                        chain.verify_store_chain(reader)
+                        authority.require_marker(reader, marker, root=temporary)
         except (connection.CollectionStoreError, sqlite3.Error, chain.StoreChainError,
                 collections.CollectionError, ValueError):
             _fail("INVALID_ARCHIVE", "collection store structure is invalid")

@@ -382,7 +382,8 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        with closing(connection.open_reader(self.path)) as reader:
+        # A takeover that is pending on the store's migration still releases the lease.
+        with closing(connection.open_head_reader(self.path)) as reader:
             return authority.pending_create(reader) is None
 
     def status(self):
@@ -439,7 +440,7 @@ class CollectionStoreRuntime:
             )
         # A store an earlier release wrote keeps its head where this reads it; its writer
         # migrates the schema once this head lets the lease manager acquire for the store.
-        with closing(connection.open_reader(self.path, pending_schema=True)) as reader:
+        with closing(connection.open_head_reader(self.path)) as reader:
             reader.execute("BEGIN")
             metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
             head = CollectionStoreHead(
@@ -486,13 +487,24 @@ class CollectionStoreRuntime:
         self._identity = (head.store_id, head.instance_id)
 
     def _admit(self, token, *, reads=False):
+        from .takeover import SCHEMA_PENDING
+
         if self.manager.config.enabled:
             self.manager.validate_fencing_token(token)
+        # Reads of an unadmitted copy continue, except while its migration fails: the
+        # refusal then names the failure and its retry, and reads never repeat the attempt.
         if not self.reporting_ready(token) and not (
-            reads and self._takeover is not None and self.path.exists()
+            reads and self._takeover is not None and self._takeover.code != SCHEMA_PENDING and self.path.exists()
         ):
             raise self._refusal()
         self.sample_head()
+
+    def _record_schema(self, token, version, **authority):
+        """Record what a store at ``version`` requires, around this runtime's migration of an earlier store."""
+        from .. import state_migration
+
+        state_migration.record_collection_store_schema(
+            self.root, version=version, authority_check=lambda: self._authority(token, **authority))
 
     def _authority(self, token, *, progress=False, reads=False):
         if progress:
@@ -530,10 +542,16 @@ class CollectionStoreRuntime:
                         if self._handle is None:
                             self.sample_head()
                             # Opening may serve reads of an unadmitted copy; transactions never.
+                            # It migrates a copy an earlier release wrote, after recording the
+                            # new schema's IDs as admission's writer does, so reads continue. That
+                            # can precede a refusal of the pending takeover; the launcher's store
+                            # schema check refuses an earlier release afterwards, as after any migration.
                             opening = [True]
                             self._handle = connection.open_writer(
                                 self.path, lease_check=lambda: self._authority(
-                                    lease.fencing_token, reads=opening[0])
+                                    lease.fencing_token, reads=opening[0]),
+                                schema_guard=lambda version: self._record_schema(
+                                    lease.fencing_token, version, reads=True),
                             )
                             opening[0] = False
                             self._writer_token = lease.fencing_token
@@ -565,7 +583,8 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True))
+        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True),
+                                      schema_guard=lambda version: self._record_schema(token, version, progress=True))
 
     def publish(self, token, *, deadline):
         """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
@@ -760,8 +779,9 @@ def _durable_create(root):
     try:
         if not connection.store_path(root).exists():
             return None
-        with closing(connection.open_reader(connection.store_path(root))) as reader:
+        with closing(connection.open_head_reader(connection.store_path(root))) as reader:
             intent = authority.pending_create(reader)
+    # The head reader denies other columns as sqlite3.Error, so a read past store_meta would look like no intent here.
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
     return None if intent is None else [{"collection_id": entry["collection_id"], "manifest_path": entry["manifest_path"]}
@@ -916,6 +936,7 @@ class StoreServer:
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
+        self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
@@ -1100,7 +1121,8 @@ class StoreServer:
         if self.runtime is None or self.session is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
-            with closing(connection.open_reader(self.runtime.path)) as reader:
+            # The resume migrates a store an earlier release left with this intent; until then only its head reads.
+            with closing(connection.open_head_reader(self.runtime.path)) as reader:
                 intent = authority.pending_create(reader)
             if intent is None:
                 self.pending_create = None
@@ -1220,38 +1242,58 @@ class StoreServer:
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _views_tick(self):
-        """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.
+        """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
 
-        A committed change leaves summary pages pending; they publish here, after its
-        acknowledgement, through the store's reconcile path, as the in-process owner. A
-        window holds at most ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages
-        at their bounds. A view installed by one pass is confirmed current by the next, so
-        two passes follow each maintenance wake; views still pending then, which cannot
-        publish yet, wait for the next wake or the retry interval.
-        Import status polling preserves these passes and retry deadlines.
+        It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
+        unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
+        (``edit_back``) reads every item and manifest view at its first tick and every 60 s
+        after, outside the write transaction, and turns each settled edit into a governed
+        update or a held correction. Then a committed change's pending views, such as
+        summary pages, publish a window at a time through the store's reconcile path, as
+        the in-process owner. A window holds at most
+        ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
+        view installed by one pass is confirmed current by the next, so two passes follow
+        each maintenance wake; views still pending then, which cannot publish yet, wait for
+        the next wake or the retry interval. Import status polling preserves these passes
+        and retry deadlines.
         """
         from ..governance import principal
-        from . import capability
+        from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None:
             return IMPORT_IDLE_SECONDS
+        views = capability.collection_views_enabled(self.root)
+        if not views and not capability.records_summary_enabled(self.root):
+            return IMPORT_IDLE_SECONDS
+        if views and self._edit_back is None:
+            self._edit_back = edit_back.EditBack()
+        # Without edit-back, the publication pass alone sets the next tick, as before it existed.
+        wait = self._edit_back.wait(time.monotonic()) if views else float("inf")
+        if views and wait <= 0:
+            try:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:
+                                               _mutate(self.root, method, *args, **kwargs))
+            except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
+                logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                wait = IMPORT_RETRY_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
-                    return IMPORT_IDLE_SECONDS
+                    return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
                                  after=self._views_after, pending_only=True)
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None
-            return IMPORT_RETRY_SECONDS
+            return min(wait, IMPORT_RETRY_SECONDS)
         self._views_after = result["next_path"]
         if self._views_after is None:
             self._views_passes += 1
-        return 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS
+        return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)
 
     def _close(self):
         with self._condition:

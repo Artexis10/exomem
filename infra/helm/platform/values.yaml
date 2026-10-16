@@ -249,12 +249,16 @@ cells:
     - 100.64.0.0/10
     - 169.254.0.0/16
 
-# Stage the broker before activating explicit cells with its verified Service IP.
+# Stage the broker before activating cells with its verified Service IP.
+# `cellIds` lists the cells that receive it, such as a canary. `allCells` gives
+# it to every cell, including each cell created later, and works beside the
+# list. Turn `allCells` on only after the broker has served the listed cells.
 artifactBroker:
   enabled: false
   image: ""
   endpoint: ""
   cellIds: []
+  allCells: false
   publicKeySecretName: exomem-artifact-broker-public-key
   publicKeySecretKey: public-key
   resources:

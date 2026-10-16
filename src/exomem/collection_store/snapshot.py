@@ -53,7 +53,12 @@ def _head(commit_seq: int, head: str | None) -> None:
         tokens._hex64(head, "store head")
 
 
-def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[str, str]:
+def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None], *,
+              version: int | None = None) -> dict[str, str]:
+    """The copy's ``store_meta``, once its bytes, head and lineage check out at ``version``.
+
+    ``version`` is the current schema unless ``migrate_copy`` checks an earlier copy first.
+    """
     from .native_operands import FileRole, register_native_operands
 
     # An error from the caller's own check (custody, fencing, a transient read) is re-raised
@@ -81,7 +86,7 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
             raise ValueError("foreign key check failed")
         check()
         metadata = dict(conn.execute("SELECT key,value FROM store_meta"))
-        if schema.schema_version(conn) != schema.SCHEMA_VERSION:
+        if schema.schema_version(conn) != (schema.SCHEMA_VERSION if version is None else version):
             raise ValueError("unsupported schema")
         _uuid(metadata[schema.META_STORE_ID])
         _uuid(metadata[schema.META_INSTANCE_ID])
@@ -122,6 +127,31 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
             raise
         raise connection.CollectionStoreError(
             "COLLECTION_SNAPSHOT_INVALID", "copied store failed snapshot validation"
+        ) from error
+
+
+def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
+    """Bring a private copy of a store that an earlier release wrote to the current schema.
+
+    The copy first passes ``_validate`` at its own schema, so a damaged copy refuses as
+    invalid before anything migrates it. A copy at the current schema stays as it is, and the
+    caller's own validation refuses a newer or unreadable one as before. The migration takes
+    no writer lease and rewrites the file in place, so only a private copy may pass here.
+    """
+    with closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        try:
+            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError):
+            return
+        if not 0 < found < schema.SCHEMA_VERSION:
+            return
+        _validate(conn, check, version=found)
+    try:
+        with connection.staging_store(path):
+            pass  # The staging writer migrates the copy in one transaction.
+    except Exception as error:  # noqa: BLE001 - a copy that cannot migrate is as unusable as a damaged one
+        raise connection.CollectionStoreError(
+            "COLLECTION_SNAPSHOT_INVALID", "copied store failed its schema migration"
         ) from error
 
 

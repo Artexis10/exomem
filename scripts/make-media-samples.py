@@ -1,8 +1,9 @@
 """Write the media sample set that the Cloud image build gate extracts.
 
 The samples live in `tests/fixtures/media-samples/`. `expected.json` maps each file
-to a phrase that its extracted text must contain. The Cloud image build
-(`Dockerfile`, stage `cloud`) and `scripts/check-media-samples.py` read it.
+to a phrase that find's lexical presence check must find in its extracted text.
+The Cloud image build (`Dockerfile`, stage `cloud`) and
+`scripts/check-media-samples.py` read it.
 
 The script needs the document libraries, Pillow, python-docx and a CJK font. Run it
 in a throwaway container, not on the host:
@@ -40,7 +41,7 @@ PHRASES = {
     "sample.ics": "beekeeping guild assembly",
     "ocr-eng.png": "harbour lantern was repaired",
     "ocr-est.png": "Põhjatäht särab öösel",
-    "ocr-jpn.png": "古い地図を見つけました",
+    "ocr-jpn.png": "東京駅の近く",
     "ocr-jpn-vert.png": "静かな朝を過ごしました",
 }
 

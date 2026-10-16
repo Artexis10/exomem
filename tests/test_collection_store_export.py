@@ -139,6 +139,25 @@ def test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_s
     assert export.EXPORTED in applied["marker"]
 
 
+def test_an_export_also_retires_the_store_schema_ids(env, capsys, monkeypatch):  # noqa: F811
+    """Defect: an export leaves a store schema ID recorded, so the earlier release that the
+    export-first downgrade path names still refuses the exported vault at its startup."""
+    from exomem.collection_store import schema
+
+    # Schema 12 is the first with an ID; give the current schema one, as a store migrated to 12 would have.
+    monkeypatch.setattr(schema, "FIRST_GUARDED_SCHEMA_VERSION", schema.SCHEMA_VERSION)
+    root = env
+    migrated_and_written(root, capsys)
+    # What the writer records before it migrates the store from an earlier schema.
+    state_migration.record_collection_store_schema(root, authority_check=lambda: True)
+    guard = set(schema.compatibility_ids())
+    assert guard and guard <= set(state_migration.recorded_descriptor_ids(root))
+
+    assert run_export(root, "--plan-id", preview_id(root, capsys), "--why", "roll back to files") == 0
+
+    assert not guard & set(state_migration.recorded_descriptor_ids(root))
+
+
 def exported(root, capsys):
     """The migrated, written vault exported by its owner; the apply's report."""
     migrated_and_written(root, capsys)

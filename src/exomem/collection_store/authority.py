@@ -212,6 +212,49 @@ def owned_entry(root, marker, path):
     return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 
+VIEW_PATH = "COLLECTION_VIEW_PATH"
+
+
+def refuse_view_paths(root, paths, refusal):
+    """Raise ``refusal(code, reason)`` when the vault's mode marker gives a store collection any of ``paths``.
+
+    The file tools call this. Only the marker is read, so a vault without one opens no
+    store and keeps its file behaviour. Each caller decides a withheld path before this,
+    so a withheld view answers exactly as a missing path does.
+    """
+    try:
+        entry = _owning_entry(Path(root), paths)
+    except CollectionStoreError as error:
+        raise refusal(error.code, error.reason) from None
+    if entry is not None:
+        profile = entry.get("semantic_profile")
+        tool = "its collection's tool" if profile is None else collection_profiles.profile_for(profile).tool
+        raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
+
+
+def _owning_entry(root, paths):
+    # A malformed or legacy marker refuses every placed path here, as it already refuses reads.
+    paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
+             # Marker validation keeps every owned region under the knowledge base folder.
+             if collections._reference_key(root, path) is not None]
+    if not paths:
+        return None
+    try:
+        raw = read_marker(root)
+    except (held_fs.HeldFsError, OSError) as error:
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+    if raw is None:
+        return None
+    marker = parse_marker(root, raw)
+    return next((entry for path in paths if (entry := owned_entry(root, marker, path)) is not None), None)
+
+
+def _knowledge_base_spelling(root, path):
+    # A case-folding volume opens another casing of the knowledge base folder as the folder itself.
+    canonical = vault._canonical_kb_segment(path)
+    return canonical if canonical == path or vault.vault_casefolds(root) else path
+
+
 def upgraded_marker(root, conn, marker):
     """Derive ownership only from the validated current canonical declarations."""
     entries = []

@@ -6124,7 +6124,10 @@ def recall_resolver_snapshot(
                 leader = True
         if leader:
             break
-        if not building.wait(follower_wait):
+        # The leader may be a bulk pass: the resolver warm or a graph rebuild.
+        with foreground_priority.awaiting_bulk():
+            settled = building.wait(follower_wait)
+        if not settled:
             if not allow_fallback:
                 # Declining beats both alternatives: blocking past the client's
                 # deadline answers nobody, and building our own here would pay

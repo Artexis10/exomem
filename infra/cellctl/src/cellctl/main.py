@@ -131,6 +131,9 @@ def build_cluster_config() -> ClusterConfig:
     artifact_cell_ids = json.loads(os.environ.get("CELLCTL_ARTIFACT_BROKER_CELL_IDS", "[]"))
     if not isinstance(artifact_cell_ids, list):
         raise ValueError("artifact broker cell IDs must be a JSON array")
+    artifact_all_cells = json.loads(os.environ.get("CELLCTL_ARTIFACT_BROKER_ALL_CELLS", "false"))
+    if not isinstance(artifact_all_cells, bool):
+        raise ValueError("artifact broker all-cells switch must be a JSON boolean")
     dedicated_cell_ids = json.loads(os.environ.get("CELLCTL_DEDICATED_CELL_IDS", "[]"))
     if not isinstance(dedicated_cell_ids, list):
         raise ValueError("dedicated cell IDs must be a JSON array")
@@ -169,6 +172,7 @@ def build_cluster_config() -> ClusterConfig:
         shared_worker=shared,
         artifact_broker_url=os.environ.get("CELLCTL_ARTIFACT_BROKER_URL", ""),
         artifact_broker_cell_ids=tuple(artifact_cell_ids),
+        artifact_broker_all_cells=artifact_all_cells,
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),

@@ -147,7 +147,8 @@ def _require_stageable(root):
             raise CollectionStoreError(takeover.SYNC_PENDING, "this vault routes collections to a store it has "
                                        "not opened here; adopt its replica, then migrate")
         return None
-    with closing(connection.open_reader(path)) as reader:
+    # A cutover an earlier release left stays at its schema until the resume's writer migrates it.
+    with closing(connection.open_head_reader(path)) as reader:
         intent = authority.pending_create(reader)
     if intent is not None and intent["kind"] == authority.EXPORT:
         raise admission.export_pending()
@@ -572,7 +573,10 @@ def _unproven(changed=()):
 
 
 def _fenced(session, fence_client):
-    """Whether a lease on this vault needs the store capability, which only a bound runtime sends."""
+    """Whether a lease on this vault needs the store capability.
+
+    While an intent is pending, only a process with a bound store runtime sends it.
+    """
     return authority.read_marker(session.root) is not None or fence_client.collection_store_fence().enrolled
 
 
@@ -606,7 +610,7 @@ def cutover(session, manager, fence_client) -> dict:
         pending = _require_stageable(root)
         changed, supersedes, restored = [], None, None
         if pending is not None:
-            with closing(connection.open_reader(session.path)) as reader:
+            with closing(connection.open_head_reader(session.path)) as reader:
                 admitted = authority.intent_status(root, reader, pending) == "marker_admitted"
             # Until its marker is installed the files stay canonical, so every collection is
             # compared with the basis it was imported from: first without the lease, so a

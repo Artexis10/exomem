@@ -53,6 +53,7 @@ from ..collection_store.preview import bound_writer, canonical_read, projection_
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import (
+    artifact_census,
     authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
@@ -1577,6 +1578,7 @@ _DECISION_MEMO: OrderedDict[tuple[Any, ...], Decision] = OrderedDict()
 
 def clear_decision_memo() -> None:
     _DECISION_MEMO.clear()
+    artifact_census.clear()
 
 
 def decision_memo_size() -> int:
@@ -4674,7 +4676,6 @@ def _release_level_for_markdown_snapshot(
     return decision.level
 
 
-@canonical_read(projection=True)
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -4692,6 +4693,59 @@ def annotate_page(
     that never existed. Raw text is assembled only after an L6 decision and
     only when the terminal secret parser accepts the exact snapshot.
     """
+    return _annotate_page(
+        vault_root,
+        page,
+        principal=principal,
+        purpose=purpose,
+        snapshot_content=snapshot_content,
+        stable_ref=stable_ref,
+        include_raw=include_raw,
+    )
+
+
+def page_withheld_entirely(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    snapshot_content: str | bytes | None,
+    stable_ref: str | None = None,
+) -> bool:
+    """Whether `annotate_page` answers this page with `None`.
+
+    The decision, and the withheld receipt it leaves, are `annotate_page`'s
+    own, taken on the same page and snapshot. It stops at the decision, so an
+    ordinary page is not rendered; a collection's generated summary page is,
+    because one step renders it and decides its release. A page it would
+    serve, a notice included, records nothing here: the later `annotate_page`
+    call decides, renders and receipts it as before.
+    """
+    return (
+        _annotate_page(
+            vault_root,
+            page,
+            snapshot_content=snapshot_content,
+            stable_ref=stable_ref,
+            decide_only=True,
+        )
+        is None
+    )
+
+
+@canonical_read(projection=True)
+def _annotate_page(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    snapshot_content: str | bytes | None = None,
+    stable_ref: str | None = None,
+    include_raw: bool = False,
+    decide_only: bool = False,
+) -> dict[str, Any] | None:
+    """`annotate_page`'s body. `decide_only` returns right after the withheld
+    decision and its receipt; see `page_withheld_entirely`."""
     vault_root = Path(vault_root)
     rel_path = str(page.get("path") or stable_ref or "")
     if rel_path and lifecycle.is_tombstoned(vault_root, rel_path):
@@ -4843,6 +4897,8 @@ def annotate_page(
             ref=stable_ref,
         )
         return None
+    if decide_only:
+        return page
 
     _outcome_for_decision(
         vault_root,
@@ -5198,10 +5254,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
                 result = dict(result)
                 result.pop("revision_history")
     artifact_scan_demand = _ArtifactScanDemand()
-    result = _withheld_cross_check(
-        vault_root, result, _artifact_scan_demand=artifact_scan_demand,
-        _current_parent_binding=parent_binding,
-    )
+    # Fixed phase labels, timing only: the cross-check, the artifact gate (its
+    # own `egress.artifact_gate`) and the scrub.
+    with call_spans.span("egress.cross_check"):
+        result = _withheld_cross_check(
+            vault_root, result, _artifact_scan_demand=artifact_scan_demand,
+            _current_parent_binding=parent_binding,
+        )
     from ..collection_store import governance as canonical_governance
 
     inspection_evidence = canonical_governance._inspection_evidence(result)
@@ -5214,11 +5273,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
             or artifact_scan_demand.required):
         result = gate_artifact_references(vault_root, result, scan_all=scan_all)
     if hasattr(result, "content") and hasattr(result, "structured_content"):
-        cleaned, blocked = _scrub_tool_result(result, vault_root)
+        with call_spans.span("egress.scrub"):
+            cleaned, blocked = _scrub_tool_result(result, vault_root)
         if blocked:
             _record_credential_block()
         return cleaned
-    cleaned, blocked = scrubber.scrub_value(result)
+    with call_spans.span("egress.scrub"):
+        cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
@@ -5377,8 +5438,11 @@ def postfilter_error(
 
     def _clean(value: Any) -> Any:
         nonlocal blocked
-        cleaned = gate.gate_payload(value, scan_strings=True)
-        cleaned, hit = scrubber.scrub_value(cleaned)
+        # The same fixed labels as `postfilter`, aggregated across values.
+        with call_spans.span("egress.artifact_gate"):
+            cleaned = gate.gate_payload(value, scan_strings=True)
+        with call_spans.span("egress.scrub"):
+            cleaned, hit = scrubber.scrub_value(cleaned)
         blocked = blocked or hit
         return cleaned
 
@@ -6342,8 +6406,6 @@ def _binary_boundary(
 WITHHELD_REFERENCE = "[withheld]"
 
 _WRAPPED_ARTIFACT_REFERENCE = re.compile(r"\[\[[^\[\]]+\]\]|exomem://[^\s\"'<>)\]]+", re.IGNORECASE)
-
-
 class _ArtifactReferenceGate:
     """Resolve and gate references against the vault's actual artifact set.
 
@@ -6371,73 +6433,49 @@ class _ArtifactReferenceGate:
         self.grants_hash = "" if self.fail_closed else _grants_hash(self.policy)
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
         self.verdicts: dict[str, bool] = {}
-        self.by_path: dict[str, list[str]] = {}
-        self.by_name: dict[str, list[str]] = {}
-        self.by_stem: dict[str, list[str]] = {}
-        self.literal_aliases: set[str] = set()
+        self.census = artifact_census.ArtifactCensus.empty()
+        self.tombstone_paths: dict[str, list[str]] = {}
+        self.tombstone_literals = artifact_census.LiteralAliases()
         self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
+        self._ungoverned: bool | None = None
         self._indexed = False
         self._index_entered = False
+
+    def _policy_empty(self) -> bool:
+        # One request decides under one policy and one bound writer.
+        if self._ungoverned is None:
+            self._ungoverned = _file_policy_empty(self.vault_root, self.policy)
+        return self._ungoverned
 
     def _ensure_index(self) -> None:
         # Structured results need no artifact census unless they carry free text.
         if self._indexed:
             return
         self._indexed = True
-        if not _file_policy_empty(self.vault_root, self.policy) or self.tombstones:
+        if not self._policy_empty() or self.tombstones:
             self._index()
-
-    def _add(self, table: dict[str, list[str]], alias: str, rel: str) -> None:
-        key = alias.casefold()
-        rows = table.setdefault(key, [])
-        if rel not in rows:
-            rows.append(rel)
 
     def _index(self) -> None:
         self._index_entered = True
+        self.census = artifact_census.vault_census(self.vault_root)
         kb_prefix = f"{kb_dirname()}/"
-        try:
-            paths = sorted(path for path in self.vault_root.rglob("*") if path.is_file())
-        except OSError:
-            paths = []
-        for path in paths:
-            try:
-                rel = path.relative_to(self.vault_root).as_posix()
-            except ValueError:
-                continue
-            aliases = {rel, unquote(rel)}
-            if rel.startswith(kb_prefix):
-                aliases.add(rel[len(kb_prefix) :])
-            # `.as_posix()`, not `str()`: `str(WindowsPath)` re-spells the
-            # separators, so on Windows this alias was stored with backslash
-            # separators and never matched the forward-slash token
-            # `resolve` normalises to. An extensionless
-            # full-path wikilink to a withheld page -- the ordinary shape of
-            # frontmatter provenance -- therefore resolved to nothing there, and
-            # a reference that names it survived redaction. `rel` above already
-            # uses `as_posix` for exactly this reason.
-            without_suffix = Path(rel).with_suffix("").as_posix() if path.suffix else rel
-            aliases.add(without_suffix)
-            for alias in aliases:
-                self._add(self.by_path, alias, rel)
-                if len(alias) >= 3:
-                    self.literal_aliases.add(alias)
-            self._add(self.by_name, path.name, rel)
-            self._add(self.by_stem, path.stem, rel)
-            if len(path.name) >= 3:
-                self.literal_aliases.add(path.name)
+        literal_aliases: set[str] = set()
         for rel in self.tombstones:
             if rel.startswith(("exomem://", "sha256:")):
                 continue
             path = Path(rel)
             aliases = {rel, unquote(rel), path.name, path.stem}
-            kb_prefix = f"{kb_dirname()}/"
             if rel.startswith(kb_prefix):
                 aliases.add(rel[len(kb_prefix) :])
             for alias in aliases:
-                self._add(self.by_path, alias, rel)
+                artifact_census.add_alias(self.tombstone_paths, alias, rel)
                 if len(alias) >= 3:
-                    self.literal_aliases.add(alias)
+                    literal_aliases.add(alias)
+        self.tombstone_literals = artifact_census.LiteralAliases.build(literal_aliases)
+
+    def _paths_for(self, alias: str) -> tuple[str, ...]:
+        key = alias.casefold()
+        return tuple(sorted({*self.census.by_path.get(key, ()), *self.tombstone_paths.get(key, ())}))
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -6467,20 +6505,20 @@ class _ArtifactReferenceGate:
         token = unquote(token).replace("\\", "/").strip().strip("/")
         if not token:
             return ()
-        direct = self.by_path.get(token.casefold())
+        direct = self._paths_for(token)
         if direct:
-            return tuple(sorted(direct))
+            return direct
         if directory is not None and "/" not in token:
             sibling = f"{directory.rstrip('/')}/{token}" if directory else token
-            direct = self.by_path.get(sibling.casefold())
+            direct = self._paths_for(sibling)
             if direct:
-                return tuple(sorted(direct))
+                return direct
         if "/" not in token:
-            named = self.by_name.get(token.casefold())
+            named = self.census.by_name.get(token.casefold())
             if named:
                 return tuple(sorted(named))
             if wikilink or "." not in token:
-                stemmed = self.by_stem.get(Path(token).stem.casefold())
+                stemmed = self.census.by_stem.get(Path(token).stem.casefold())
                 if stemmed:
                     return tuple(sorted(stemmed))
         return ()
@@ -6531,12 +6569,11 @@ class _ArtifactReferenceGate:
                     WITHHELD_REFERENCE if raw_protection.PREFIX in line.casefold() else line
                     for line in text.split("\n")
                 )
-        if not text or (_file_policy_empty(self.vault_root, self.policy) and not self.tombstones):
+        if not text or (self._policy_empty() and not self.tombstones):
             return text
         self._ensure_index()
 
-        def _replace_token(match: re.Match[str]) -> str:
-            token = match.group(0)
+        def _replace_token(token: str) -> str:
             if self.exempt:
                 canonical = _canonical_reference(token)
                 # Compare both forms: the caller may have supplied either the
@@ -6552,19 +6589,20 @@ class _ArtifactReferenceGate:
                 return WITHHELD_REFERENCE
             return token
 
-        out = _WRAPPED_ARTIFACT_REFERENCE.sub(_replace_token, text)
-        if not self.literal_aliases:
-            return out
-        literal_pattern = re.compile(
-            r"(?<![\w./-])(?:"
-            + "|".join(
-                re.escape(alias)
-                for alias in sorted(self.literal_aliases, key=lambda item: (-len(item), item))
-            )
-            + r")(?![\w./-])",
-            re.IGNORECASE,
+        out = _WRAPPED_ARTIFACT_REFERENCE.sub(lambda match: _replace_token(match.group(0)), text)
+        spans = artifact_census.literal_alias_spans(
+            out, (self.census.literals, self.tombstone_literals)
         )
-        return literal_pattern.sub(_replace_token, out)
+        if not spans:
+            return out
+        pieces: list[str] = []
+        cursor = 0
+        for start, end in spans:
+            pieces.append(out[cursor:start])
+            pieces.append(_replace_token(out[start:end]))
+            cursor = end
+        pieces.append(out[cursor:])
+        return "".join(pieces)
 
     def gate_payload(self, value: Any, *, scan_strings: bool = False) -> Any:
         if isinstance(value, str):

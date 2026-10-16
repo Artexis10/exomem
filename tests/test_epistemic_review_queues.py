@@ -303,6 +303,10 @@ def test_default_attention_union_is_pinned() -> None:
     Claims-derived observation gaps join after their 24-hour grace window.
     Collection-candidate suggestions remain opt-in. Authored role and current-state
     review join by the surface-artifact-role-and-transient-state-review contract.
+
+    `collection_view_corrections` joins last by the move-structured-collections-to-sqlite
+    `attention-queue` delta: a held view correction is the owner's own edit waiting
+    on the owner, which neither expires nor is inferred.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -317,6 +321,7 @@ def test_default_attention_union_is_pinned() -> None:
         "unreflected_observations",
         "artifact_role_promotion",
         "transient_state_review",
+        "collection_view_corrections",
     )
 
 

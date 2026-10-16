@@ -278,6 +278,9 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
 | `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
 | `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
+| `commit.source_closure`, `commit.relation_review_prepare`, `commit.catalog_prepare`, `commit.relation_review`, `commit.relation_review_attempt` | A page creation's commit stages, recorded directly. Before the guard: the source closure, the relation-review preparation and the model warm-up (`commit.embedding_prewarm`). Inside it: the catalog preparation and the relation-review commit. `commit.relation_review_attempt` is the commit's in-lock revalidation, with one field for its outcome: `reused`, `revalidated` or `unavailable`. |
+| `post_commit.structure_suggestion`, `post_commit.records_routing`, `post_commit.observation_delta`, `post_commit.records_delivery`, `post_commit.due_state`, `post_commit.capture_sweep`, `post_commit.entity_candidate` | The advisory blocks a write attaches after its commit, one span each, for a page creation and an existing-page commit alike. |
+| `advisory.default_sweep` | The whole default duplicate and overlap sweep that a write runs after its commit. `advisory.best_cosine` and `advisory.overlap_groups` are parts of it. |
 | `derived.receipt_prepare`, `derived.receipt_proof`, `derived.acknowledgement`, `derived.pending_visibility` | The receipt and acknowledgement path. |
 | `index.upsert_after_write` | The whole derived fan-out, and the sum the per-component spans below break down. |
 | `index.completion_check` | Verifying full-index completion after component dispatch, including current publication state. `paths` counts the written paths checked. |
@@ -311,7 +314,10 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `recall.due_state` | Serving the advisory due-state block a recall carries. On a memo hit its re-checks are `recall.due_state.verdicts` (`paths` = release verdicts re-asked), `recall.due_state.role` and `recall.due_state.exists` (`rows`); on a miss, `recall.due_state.build`. |
 | `recall.due_state.emit` | Deciding whether that block is new to the session and recording its delivery. |
 | `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
-| `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Read-only dispatcher stages: invoke the command, filter its result or error, then emit the disclosure receipt. Failed stages retain their duration. |
+| `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Dispatcher stages on the read-only and the mutation path: invoke the command, filter its result or error, then, on a read, emit the disclosure receipt. Failed stages retain their duration. |
+| `command.refusal_floor` | A restricted caller's direct-read refusal, held to the fixed disclosure floor. `work_ms` is the refusal's work, from dispatch to the refusal, rounded up to whole milliseconds. `overrun` is 1 when that work alone ran past the floor, so the refusal completed late, and 0 otherwise. `deferred` is 1 when the MCP or REST surface waits out the floor after its own handling of the refusal; the span's duration is then near 0. Otherwise the dispatcher's thread waits, and the duration is that wait. Absent on successes and on owner refusals. |
+| `egress.cross_check`, `egress.scrub` | The terminal filter's withheld cross-check and credential scrub, beside `egress.artifact_gate`. On MCP the filter runs twice, under `command.terminal_filter` and again under `command.postfilter`, so each sums both passes. A raised error has no cross-check; its filter runs the gate and the scrub once per text value. |
+| `spans.overflow` | Every span recorded under a name past the per-call name bound, summed: how many and how long. Present only when a call ran out of names. |
 | `egress.artifact_gate` | Artifact-gate construction and payload filtering, including failures. Fields report observed `thread_cpu_us`, measured `thread_cpu_calls`, and vault census `index_calls`. |
 | `lexical.publication_wait` | Time a request spent waiting for the lexical publication barrier, with `timeout_ms` (the bound it chose) and `acquired` (1 or 0). Recorded only on the MCP path. |
 | `recall.pack.parents`, `recall.pack.units`, `recall.pack.neighborhood`, `recall.pack.tension` | The deep pack's phases: reading the packed parents, extracting claims and packing semantic units, the one-hop wikilink neighbourhood, and supersession plus proximity tension (the sidecar reads). `recall.graph_enrich` remains the fifth. |
@@ -319,7 +325,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `index.embeddings.reuse` | Inside `index.embeddings`, once for the page's chunks and once for its semantic units: `texts` the write needed vectors for and `reused` how many came from the page's published rows instead of the encoder. `reused` near `texts` is an append; `reused` 0 on a long page is a first index or a rewrite. `reused` counts only texts whose vector came from the page's own published rows, the same meaning as on `advisory.best_cosine`. `recalled`, when present and disjoint from `reused`, counts texts that took an advisory sweep's just-encoded vector instead: an `add` commit taking the vectors its pre-commit sweep encoded. The encoder was handed `texts` minus both. |
 | `read.page`, `read.history`, `read.links` | Decode the prepared page, read the edit log (`entries`), and build the wikilink summary (`inbound`, `outbound`). Page preparation precedes `read.page`. |
 | `read.resolve_identifier`, `memory_refs.identity_census` | Resolve the requested page identifier. A valid memory UUID resolves from the server's current identity projection when one exists, otherwise from one full-KB scan. Vault state alone chooses between the two, so present and absent identities take the same path. The nested span reports `snapshot` (1 when the projection answered, 0 when the scan ran), `cpu_ms` (thread CPU time of the resolution) and, after a scan, the completed readable `pages`. It carries no paths or identities. Fields sum across the span's calls. |
-| `read.prepare`, `read.reference`, `read.release` | Acquire the page snapshot, resolve its stable reference and pending custody, then apply its release policy. These phases sit outside `read.page`; their durations include any waits. |
+| `read.prepare`, `read.reference`, `read.release` | Acquire the page snapshot, resolve its stable reference and pending custody, then apply its release policy. These phases sit outside `read.page`; their durations include any waits. For a restricted caller, `read.release` also runs before `read.history` and `read.links` to refuse a withheld page early, so a read that is not refused counts it twice. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
@@ -340,7 +346,10 @@ so nothing about an existing row changes.
 
 Matrix-load child spans break down the outer load. They do not include the caller's
 lock wait or vector scoring. Snapshot and release each aggregate two intervals.
-The ledger retains only the 32 slowest spans; an omitted phase has no retained duration.
+The ledger retains the 32 slowest spans. A row that dropped any carries
+`spans_truncated`, the number it dropped; a complete row has no such key. An
+omitted phase has no retained duration. A call that records more distinct names
+than that bound sums the rest under `spans.overflow`, its count and time.
 The row fields sum across loads, so `width_sum` equals the vector width only for one load.
 A slow row phase alone does not distinguish storage, row conversion, copying or
 memory pressure.
