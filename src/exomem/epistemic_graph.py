@@ -25,7 +25,6 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, NamedTuple
-from urllib.parse import quote
 
 from . import (
     access,
@@ -2277,6 +2276,7 @@ class EpistemicGraphIndex:
         *,
         require_current_projection: bool = True,
         prove: bool | str | None = None,
+        live_only: bool = False,
         allow_cold_projection: bool = True,
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
@@ -2340,7 +2340,19 @@ class EpistemicGraphIndex:
         current projection checks, including checkpointless publications.
         Missing or changed live evidence declines without a source census.
         It retains every marker and remembered source-proof check above.
+
+        ``live_only`` is optional compiler enrichment on that bounded path: it
+        also requires this process's exact stored checkpoint, refuses
+        publication contention, and never proves or adopts. Refusal omits
+        optional counterparts with an explicit status; ordinary recall keeps
+        its existing path.
         """
+        # Optional compiler enrichment must never wait for publication or start cold proof.
+        if live_only and not require_current_projection:
+            raise ValueError("live_only requires the current graph projection")
+        if live_only:
+            # live_only is the bounded path plus stricter rules, so it never allows cold projection.
+            allow_cold_projection = False
         if prove is None:
             prove = self._prove_cold_snapshots
         if not graph_enabled():
@@ -2372,7 +2384,12 @@ class EpistemicGraphIndex:
         sampled_generation = freshness.recall_generation(self.vault_root, "vault")
         conn: sqlite3.Connection | None = None
         registry_key = _sidecar_registry_key(self.path)
-        _await_publication_hold(registry_key)
+        if live_only:
+            with _SIDECAR_READERS_CHANGED:
+                if registry_key in _SIDECAR_PUBLICATION_HOLDS:
+                    return None
+        else:
+            _await_publication_hold(registry_key)
         try:
             # Bounded readers decline contention instead of SQLite's default wait.
             connection_options: dict[str, Any] = (
@@ -2386,6 +2403,12 @@ class EpistemicGraphIndex:
             )
             conn.__dict__["_exomem_registry_key"] = registry_key
             _register_sidecar_reader(registry_key, conn)
+            if live_only:
+                with _SIDECAR_READERS_CHANGED:
+                    publishing = registry_key in _SIDECAR_PUBLICATION_HOLDS
+                if publishing:
+                    conn.close()
+                    return None
             graph_sync.limit_graph_metadata_read(conn)
             conn.execute("BEGIN")
             # This marker validation MUST remain the first read in the transaction.
@@ -2429,7 +2452,26 @@ class EpistemicGraphIndex:
             # do it (`seamless-managed-worker-handoff` D2).
             current = current and stored_projection is not None
         graph_sync_state, required_graph_sync = graph_sync.checkpoint_state(self.vault_root)
-        graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
+        if live_only:
+            acknowledgement = _graph_sync_acknowledgement(values)
+            acknowledgement_state = (
+                "valid" if acknowledgement is not None else "malformed"
+                if any(key in values for key in (
+                    "graph_sync_generation", "graph_sync_digest", "graph_sync_checkpoint"
+                )) else "absent"
+            )
+            # Reuse the epoch classifier with the marker already read; no second SQLite wait.
+            epoch = graph_sync._classify_epoch_states(
+                *graph_sync.floor_state(self.vault_root),
+                graph_sync_state, required_graph_sync, acknowledgement_state,
+                graph_sync.GraphBuildOutcome.covering(acknowledgement)
+                if acknowledgement is not None else None,
+            )
+            graph_sync_current = epoch.kind == "legacy" or (
+                epoch.kind == "coherent" and acknowledgement == epoch.checkpoint
+            )
+        else:
+            graph_sync_current = graph_sync.status(self.vault_root)["state"] == "current"
         if graph_sync_state == "malformed":
             graph_sync_current = False
         elif required_graph_sync is not None:
@@ -2451,6 +2493,10 @@ class EpistemicGraphIndex:
         if current and require_current_projection:
             if bounded_checkpoint is not None:
                 current_checkpoint = bounded_checkpoint
+                # Enrichment trusts only the exact checkpoint this process published.
+                if live_only and stored_checkpoint != bounded_checkpoint:
+                    conn.close()
+                    return None
                 current_identity = (
                     bounded_checkpoint.triple,
                     bounded_checkpoint.policy_version,
@@ -2482,7 +2528,7 @@ class EpistemicGraphIndex:
             exact_live_checkpoint = (
                 stored_checkpoint is not None
                 and current_checkpoint is not None
-                and freshness.recall_is_live(self.vault_root, "vault")
+                and (live_only or freshness.recall_is_live(self.vault_root, "vault"))
                 and stored_checkpoint == current_checkpoint
             )
             if current and not exact_live_checkpoint:
@@ -2551,7 +2597,7 @@ class EpistemicGraphIndex:
                                     _PROOFS_IN_FLIGHT.pop(registry_key, None)
                             mine.set()
                     break
-            if current and stored_checkpoint is not None:
+            if current and stored_checkpoint is not None and not live_only:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
                 # projecting. Say so to the registry, so the *next* bounded
@@ -2581,7 +2627,9 @@ class EpistemicGraphIndex:
         # public readers for the reason the head of this method gives.
         if not current or (
             require_current_projection and freshness.external_pending(self.vault_root)
-        ):
+        ) or (live_only and not freshness.recall_checkpoint_is_current(
+            self.vault_root, "vault", bounded_checkpoint
+        )):
             conn.close()
             return None
         return conn
@@ -8917,7 +8965,7 @@ def graph_context(
                         },
                     )
                     continue
-                if status == "scope_violation":
+                if not relation_registry.traversable_resolution_status(status):
                     excluded_scope += 1
                     continue
                 authored = view.registry_for(str(edge.get("source_path") or ""))
@@ -10327,7 +10375,8 @@ def _structural_edges_for_page(
         ))
         for relation in unit.relations:
             destination = _relation_target(
-                vault_root, relation.target, resolver, visible, check=check, landing=landing,
+                vault_root, relation.target, resolver, visible,
+                source_path=rel, check=check, landing=landing,
             )
             if destination is None:
                 continue
@@ -10355,7 +10404,8 @@ def _structural_edges_for_page(
     canonical_lines: set[int] = set()
     for relation in notes.relations:
         destination = _relation_target(
-            vault_root, relation.target, resolver, visible, note=True, check=check, landing=landing,
+            vault_root, relation.target, resolver, visible,
+            source_path=rel, check=check, landing=landing,
         )
         if destination is None:
             continue
@@ -10388,21 +10438,23 @@ def _relation_target(
     resolver: vault_module.WikilinkResolver,
     visible: Callable[[str], bool] | None,
     *,
-    note: bool = False,
+    source_path: str,
     check: Callable[[], None] | None = None,
     landing: Callable[[str, str | None, str], tuple[str, str, dict[str, str]]] | None = None,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
-    A note row with no page part keeps resolving its whole target, as the note
-    grammar always has; a unit relation's same-page fragment names no page.
+    A local fragment uses its already-known source parent. Page names still
+    resolve through the ordinary audience-aware vault resolver.
     """
     if check is not None:
         check()
     target, fragment = _split_target_fragment(raw_target)
+    if not target and fragment:
+        target = source_path
     try:
         canonical, warning = vault_module.normalize_wikilink(
-            (target or raw_target) if note else target, vault_root, resolver=resolver,
+            target, vault_root, resolver=resolver,
             strict=False, visible=visible,
         )
     except Exception:  # noqa: BLE001 - malformed links are ignored
@@ -10552,7 +10604,9 @@ def _edges_for_page(
     for unit in document.rich_units:
         block_key = _unit_candidate_key(rel, unit)
         for relation in unit.relations:
-            destination = _relation_target(vault_root, relation.target, resolver, None)
+            destination = _relation_target(
+                vault_root, relation.target, resolver, None, source_path=rel
+            )
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
@@ -10568,7 +10622,7 @@ def _edges_for_page(
             ))
     canonical_lines: set[int] = set()
     for relation in document.note_relations:
-        destination = _relation_target(vault_root, relation.target, resolver, None, note=True)
+        destination = _relation_target(vault_root, relation.target, resolver, None, source_path=rel)
         if destination is None:
             continue
         if relation.canonical:
@@ -10700,15 +10754,14 @@ def _links_from_string(value: str) -> list[str]:
 def _split_target_fragment(raw: str) -> tuple[str, str]:
     """`[[Page#unit|alias]]` as (`Page`, `unit`).
 
-    A same-page `#unit` names no other page, so it carries no fragment here: the
-    relation graph has never given it a destination of its own.
+    Local fragments retain their identity; the caller supplies the source parent.
     """
     text = str(raw).strip()
     if text.startswith("[[") and text.endswith("]]"):
         text = text[2:-2]
     page, _separator, fragment = text.split("|", 1)[0].partition("#")
     page = page.strip()
-    return page, fragment.strip() if page else ""
+    return page, fragment.strip()
 
 
 def _relation_destination(
@@ -11776,6 +11829,11 @@ class GraphView:
                 "resolver_source_kind": source_kind,
                 "metadata": metadata,
             }
+        definition = self.registry_for(str(row.get("source_path") or "")).definition(
+            str(row.get("relation_type") or "")
+        )
+        if definition is not None:
+            row = {**row, "metadata": {**metadata, "relation_family": definition.family}}
         if metadata.get("target_fragment"):
             row = self._land(row)
         return row
@@ -11792,16 +11850,13 @@ class GraphView:
         outcome = str(metadata.get("fragment_resolution") or "")
         dst_key = page_key
         if target_path and target is not None and target.structure.parent_ref:
-            fragment = str(metadata["target_fragment"]).removeprefix("^")
-            requested = f"{target.structure.parent_ref}#{quote(fragment, safe='')}"
-            matches = [unit for unit in target.structure.units if unit.unit_ref == requested]
-            if len(matches) == 1:
-                dst_key = _candidate_key(target_path, matches[0].occurrence_key, matches[0].form)
+            resolution = target.structure.resolve_fragment(str(metadata["target_fragment"]))
+            if resolution.index is not None:
+                unit = target.structure.units[resolution.index]
+                dst_key = _candidate_key(target_path, unit.occurrence_key, unit.form)
                 outcome = "unit"
-            elif matches:
-                outcome = "ambiguous"
-            elif outcome == "unit" or not target.structure.complete:
-                outcome = "missing" if target.structure.complete else "unavailable"
+            elif resolution.status in {"ambiguous", "unavailable"} or outcome == "unit":
+                outcome = resolution.status
         elif outcome == "unit":
             outcome = "unavailable"
         metadata["fragment_resolution"] = outcome
@@ -12037,12 +12092,14 @@ class GraphView:
         }
 
     def neighbor_edges(
-        self, frontier: set[str], *, limit: int
+        self, frontier: set[str], *, limit: int,
+        accept: Callable[[dict[str, Any]], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Live edges touching `frontier`, interpreted before the inspection cap.
 
         SQL rows are transport; a candidate that is no fact in its page's
-        selected interpretation spends no inspection slot.
+        selected interpretation spends no inspection slot. Optional exact-unit
+        admission also precedes this cap, so withheld units cannot crowd it.
         """
         rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
         if self.keep is not None:
@@ -12075,7 +12132,7 @@ class GraphView:
         live: list[dict[str, Any]] = []
         for row in rows:
             served = self.edge(row)
-            if served is None:
+            if served is None or (accept is not None and not accept(served)):
                 continue
             live.append(served)
             if len(live) > limit:

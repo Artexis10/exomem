@@ -37,6 +37,12 @@ propose an edge between the two pages.
 
 ## What Changes
 
+- The follow-on correction work resolves local `#fragment` targets through the
+  known source parent. Qualification compares exact endpoints, so two distinct
+  units on one page can relate while an actual self-edge remains invalid.
+- Validation, graph projection and compiler currency share exact unit identity.
+  Graph fallback preserves legacy connectivity but cannot establish an exact
+  claim correction.
 - A relation target MAY carry a `#fragment`. When it resolves to exactly one
   addressable unit on the target page, the edge's destination is that unit's
   node rather than the page's.

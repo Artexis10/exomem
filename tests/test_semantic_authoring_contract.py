@@ -23,8 +23,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    7,
-    "sha256:d24af455f8e0e09831f07fd273dfd1812e029046ef512b69524a3f206c51b5f2",
+    8,
+    "sha256:4f1a876ac71d48ed55481e9083522afb38393521c8c64b37e73800bb3028ec7d",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -71,7 +71,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 7
+    assert contract["version"] == 8
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -162,7 +162,11 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "relation or the rich form."
         ),
     }
-    assert contract["rich"] == {
+    rich = dict(contract["rich"])
+    # The normative digest pins guidance prose; this check covers structural fields.
+    assert rich.pop("correction_rule")
+    assert rich.pop("correction_detail", "omitted in compact projection")
+    assert rich == {
         "heading_syntax": "## <Governed Kind>",
         "kind_vocabulary": "governed",
         "metadata_syntax": [
@@ -171,6 +175,8 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "- tags: <comma-separated tags>",
             "- context: <context>",
             "- relations: <relation-type>: [[Target]]",
+            "- verdict: <epistemic outcome>",
+            "- check_by: <ISO revisit date>",
         ],
         "accepted_metadata_order": "flexible while rows remain leading",
         "canonical_metadata_order": [
@@ -179,10 +185,12 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "tags",
             "context",
             "relations",
+            "verdict",
+            "check_by",
         ],
         "metadata_rule": (
             "Metadata rows are optional and leading; the canonical writer emits category, "
-            "id, tags, context, then relations; category defaults to the governed kind "
+            "id, tags, context, relations, verdict and check_by; category defaults to the governed kind "
             "when omitted."
         ),
         "body_rule": (
@@ -639,6 +647,8 @@ def test_rich_contract_matches_canonical_writer_metadata_order_and_parser() -> N
         "tags",
         "context",
         "relations",
+        "verdict",
+        "check_by",
     )
 
     document = semantic_units.parse_semantic_units(rendered, path="synthetic.md")
@@ -676,9 +686,13 @@ def test_bootstrap_projection_first_positional_is_contract_and_profile_is_keywor
     assert projected != semantic_authoring.bootstrap_projection(original)
 
     # Profile stays keyword-only and defaults to full; compact drops only the
-    # rich example. Positional contract and keyword profile compose cleanly.
+    # rich example and explanatory correction detail. The actionable correction rule remains.
     full = semantic_authoring.bootstrap_projection(profile="full")
     compact = semantic_authoring.bootstrap_projection(profile="compact")
+    assert full["rich"]["correction_detail"]
+    assert "correction_detail" not in compact["rich"]
+    assert compact["rich"]["correction_rule"] == full["rich"]["correction_rule"]
+    assert "profile=full" in compact["rich"]["correction_rule"]
     assert set(full["portable_categories"]["examples"]) == {
         "role",
         "domain",

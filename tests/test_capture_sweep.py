@@ -570,7 +570,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         sizes[name] = len(block.rstrip().encode("utf-8"))
         assert "Never save transcripts." in block, name
 
-    assert sizes == {"maximal": 1483, "balanced": 1494}, sizes
+    assert sizes == {"maximal": 1483, "balanced": 1485}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
     assert 1500 - sizes["maximal"] >= 16, sizes

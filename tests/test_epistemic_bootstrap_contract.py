@@ -176,7 +176,6 @@ def test_compact_bootstrap_teaches_the_v1_vocabulary_consideration_loop(vault: P
     assert workflow["authority"] == {
         "contract_version": "v1",
         "scoped_delegation": False,
-        "rule": "Decision not permission; v1 writers retain confirmation.",
     }
 
 

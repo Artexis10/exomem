@@ -457,9 +457,50 @@ def build_packet(
     conversation_inferred: bool = False,
     promoted_paths: frozenset[str] = frozenset(),
     status_basis: lifecycle_statuses.Basis | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Order, cap and budget the lane output into the packet the caller sees."""
     status_basis = status_basis or lifecycle_statuses.Basis(None)
+    correction_status = None
+    if status_basis.root is not None and any(item.level == "unit" for item in items):
+        from . import find, unit_corrections
+
+        seeds = {item.ref: item for item in reversed(items) if item.level == "unit" and item.ref}
+        parent_reads = find.UnitParentReads()
+        visible = visible if visible is not None else unit_corrections.reader_view(status_basis.root)
+        tentative: dict[str, LaneItem] = {}
+
+        def admit_counterpart(candidate: dict[str, Any]) -> bool:
+            hit = parent_reads.exact(
+                status_basis.root, candidate["path"], candidate["unit_ref"],
+                candidate["fingerprint"], visible=visible,
+            )
+            if hit is None:
+                return False
+            seed = seeds[candidate["corrects"]]
+            item = _unit_items(None, [hit], parent_reads=parent_reads)[0]
+            item = replace(
+                item, role=seed.role, promoted=seed.promoted,
+                relevance_order=seed.relevance_order, request_anchors=seed.request_anchors,
+                provenance={**item.provenance, "corrects": seed.ref,
+                            "relation": candidate["relation"], "family": candidate["family"]},
+            )
+            if not _reader_admitted((item,), visible):
+                return False
+            tentative[item.ref] = item
+            return True
+
+        discovered = unit_corrections.discover(
+            status_basis.root, tuple(seeds), accept=admit_counterpart, keep=visible,
+        )
+        correction_status = discovered["status"]
+        # Only a stable, completed discovery may contribute candidates or lifecycle inputs.
+        incoming = {row["unit_ref"]: tentative[row["unit_ref"]] for row in discovered["units"]}
+        items = tuple(
+            replace(item, provenance={**item.provenance, **{
+                key: incoming[item.ref].provenance[key] for key in ("corrects", "relation", "family")
+            }}) if item.ref in incoming else item for item in items
+        ) + tuple(item for ref, item in incoming.items() if ref not in seeds)
     limit = clamp_budget(max_chars)
     promoted_share = limit // PROMOTED_SHARE_DIVISOR
     promoted_used = 0
@@ -511,11 +552,17 @@ def build_packet(
     # the first role in registry priority order that reached it — the most
     # specific lens that asked. A `level`-less or ref-less item is left
     # alone: its identity is not its ref.
-    ordered = _without_lede_repeats(
-        _deduplicated(
-            sorted(working_set_currency.annotate(items, status_basis=status_basis), key=_sort_key)
+    try:
+        current_items = working_set_currency.annotate(items, status_basis=status_basis, visible=visible)
+    except working_set_currency.CurrencyUnavailable:
+        return abstained_packet(
+            reason=activation_result.UNAVAILABLE, max_chars=limit,
+            generation={**generation, **({"correction_context": correction_status}
+                                        if correction_status is not None else {})},
+            anchors=anchors, ambiguity=ambiguity, missing=missing, recent_context=recent_context,
+            conversation_inferred=conversation_inferred, status_basis=status_basis,
         )
-    )
+    ordered = _without_lede_repeats(_deduplicated(sorted(current_items, key=_sort_key)))
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -706,7 +753,8 @@ def build_packet(
         ],
         "ambiguity": listed_ambiguity,
         "budget": {"limit_chars": limit, "used_chars": used},
-        "generation": dict(generation),
+        "generation": {**generation, **({"correction_context": correction_status}
+                                      if correction_status is not None else {})},
         "abstained": status != "resolved",
     }
     if packet["abstained"]:
@@ -1365,6 +1413,7 @@ def _units_lane(
     # One row past the limit, then sliced. Reading exactly `UNIT_LANE_LIMIT` rows
     # cannot distinguish "there was more" from "that was all", so the marker would
     # over-report on a corpus that happens to hold exactly the limit.
+    parent_reads = parent_reads or find_module.UnitParentReads()
     snapshot = freshness_snapshot or find_module.FreshnessSnapshot(Path(vault_root))
     plan = structured_filters.compile_filter(
         None,
@@ -1400,7 +1449,7 @@ def _units_lane(
     )
     if admit is not None:
         hits = [hit for hit in hits if admit(hit.parent_path, hit)]
-    return LaneResult(_unit_items(role, hits), truncated)
+    return LaneResult(_unit_items(role, hits, parent_reads=parent_reads), truncated)
 
 
 def _restricted(visible: Callable[[str], bool] | None) -> bool:
@@ -1424,7 +1473,7 @@ def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> 
 
 
 def _unit_items(
-    role: context_roles.ContextRole | None, hits: Sequence[Any]
+    role: context_roles.ContextRole | None, hits: Sequence[Any], *, parent_reads: Any = None,
 ) -> tuple[LaneItem, ...]:
     out: list[LaneItem] = []
     for hit in hits:
@@ -1433,7 +1482,12 @@ def _unit_items(
         lifecycle = (
             "superseded" if superseded_by else str(getattr(hit, "parent_status", None) or "active")
         )
-        supersedes = working_set_currency.relation_targets(getattr(hit, "relations", None))
+        held = parent_reads.parents.get(parent) if parent_reads is not None else None
+        definitions = held.state.definitions if held is not None and held.state is not None else None
+        selected_registry = definitions.snapshots["relations"].typed if definitions is not None else None
+        supersedes = working_set_currency.relation_targets(
+            getattr(hit, "relations", None), registry=selected_registry,
+        )
         out.append(
             LaneItem(
                 role=role.id if role is not None else "",
@@ -1452,6 +1506,9 @@ def _unit_items(
                 provenance={
                     "category": str(getattr(hit, "category", "") or ""),
                     "kind": str(getattr(hit, "kind", "") or ""),
+                    "source_hash": str(getattr(hit, "source_hash", "") or ""),
+                    **({"verdict": hit.verdict} if getattr(hit, "verdict", None) else {}),
+                    **({"check_by": hit.check_by} if getattr(hit, "check_by", None) else {}),
                     "superseded_by": superseded_by,
                     "page_updated": str(getattr(hit, "parent_updated", "") or ""),
                     "supersedes_targets": list(supersedes),
@@ -2852,6 +2909,7 @@ def _carried_packet(
                 status="resolved" if items else "unresolved",
                 recent_context=recent_context,
                 status_basis=status_basis,
+                visible=visible,
             )
 
         packet = build()
@@ -3401,6 +3459,7 @@ def _follow_up_packet(
                     status="resolved",
                     recent_context=recent_context,
                     status_basis=status_basis,
+                    visible=visible,
                 )
     if packet is not None:
         return packet
@@ -4527,6 +4586,7 @@ def _compile_packet(
             recent_context=recent,
             promoted_paths=promoted_paths,
             status_basis=status_basis,
+            visible=visible,
         )
     return packet
 

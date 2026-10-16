@@ -76,7 +76,7 @@ Use this loop whenever a durable conclusion should enter Exomem:
    claim explicitly; never recreate an "original" from the derivative. If the
    conclusion came from live work with nothing external captured, `sources: []`
    is honest and valid.
-4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
+4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `observe_memory` or `edit_memory` for guarded corrections, `replace_memory` for supersession.
 5. Reuse meaningful links established by the current search/read context. When
    connections remain unknown, use `connect_memory(operation="suggest-links")`
    on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
@@ -451,13 +451,39 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
   page content hash. The alternative is a typed `## Relations` entry
   (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
 
+### Correcting existing knowledge
+
+When new evidence changes a durable conclusion, inspect each affected claim and its sources.
+Distinguish what someone attested from what the evidence establishes.
+Use the suitable existing home; a correction does not need another page by default.
+
+1. Read the affected units and parent hashes; the exact propositions are visible.
+2. Judge each proposition against the evidence; its support and uncertainty are explicit.
+3. Update wording or author a verdict with guarded writers; anchored identities remain stable.
+4. Add distinct corrective units and justified exact relations; readers can follow the correction.
+5. Read the current units and bounded context; the requested state and citations are verified.
+
+Preserve false historical propositions when their history matters, and mark their verdict.
+A refuted claim keeps active standing and full rank as negative knowledge.
+Contradiction and refutation do not imply supersession.
+Use replacement only when another page should become the current answer, under the active engagement policy.
+
+The semantic writer keeps prior Markdown in the correction's atomic transition.
+`read_memory(include_history=true)` returns `revision_history` separately from the existing page operation log.
+Add `unit_ref` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
+Entity and legacy corrections use their existing authorized edit owner.
+Records corrections use `record_memory(action="update")` and its retained row history.
+For observed-state corrections, follow the independent Records discovery route in
+`references/planning-records.md`; Note recall alone does not search structured items.
+A surface without the required edit owner reports that limit; it does not invent another home.
+
 ### Updating one unit with `observe_memory`
 
 An update rebuilds the whole unit. `verdict`, `check_by` and `id` are
 preserve-on-omit (pass an empty string to clear `verdict` or `check_by`), and
 metadata rows the tool does not own are carried through. `tags`, `context` and
 `relations` are replace-on-omit: omitting one clears it, so resend what should
-stay. `verdict` is a categorical lifecycle state (abandoned, confirmed,
+stay. `verdict` is a categorical epistemic outcome (abandoned, confirmed,
 inconclusive, qualified, refuted), never a confidence score. `update` and
 `remove` need `expected_fingerprint` and `expected_hash`; `after_hash` from the
 result is the next call's `expected_hash`.

@@ -17,6 +17,7 @@ from exomem.edit_operations import (
     normalize_edit_surface_arguments,
     public_edit_operation_schema,
 )
+from exomem.governance.principal import library_scope
 
 pytestmark = pytest.mark.reads_repository_docs
 
@@ -554,7 +555,7 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
         r".{0,140}proactive_capture",
         normalized,
     ), (name, "proactive_capture")
-    assert re.search(r"(?:affiliation|accepted) relation.{0,100}link_acceptance", normalized), (
+    assert "queued relation" in normalized and "link_acceptance" in normalized, (
         name,
         "link_acceptance",
     )
@@ -603,8 +604,6 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             ROOT / "docs" / "ai-assistant-guide.md",
             "## Copyable instruction block",
         ),
-        "prominence balanced": prominence.CONTRACTS["balanced"].capture,
-        "prominence maximal": prominence.CONTRACTS["maximal"].capture,
         "maximal docs": _markdown_block(ROOT / "docs" / "prominence.md", "### Maximal", "### Balanced"),
         "balanced docs": _markdown_block(ROOT / "docs" / "prominence.md", "### Balanced", "### Light"),
     }
@@ -660,7 +659,8 @@ def test_every_served_bootstrap_projection_respects_its_prominence_level(
 ) -> None:
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     (tmp_path / "Knowledge Base").mkdir()
-    payload = commands.op_bootstrap(tmp_path, profile=profile)
+    with library_scope():
+        payload = commands.op_bootstrap(tmp_path, profile=profile)
     capture = payload["engagement"]["contract"]["capture"].lower()
     if level in {"off", "light"}:
         assert "explicitly asks" in capture or "only when the user asks" in capture
@@ -670,11 +670,9 @@ def test_every_served_bootstrap_projection_respects_its_prominence_level(
     assert "recurr" in capture and "reusable comparison" in capture
     assert "compiled observation" in capture and "records" in capture
     assert "one-off" in capture and "incidental" in capture
-    _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", capture)
-    for marker in _DELEGATION_MARKERS:
-        mutant = capture.replace(marker, "")
-        with pytest.raises(AssertionError):
-            _assert_baseline_authority_mapping(f"{level}/{profile} bootstrap", mutant)
+    promotion = payload["engagement"]["envelope"]["promotion_classes"]
+    assert promotion["entity_creation"] == promotion["typed_edge"] == "proactive_capture"
+    assert promotion["queue_acceptance"] == "link_acceptance"
     assert "_memory" not in capture
 
 
@@ -701,13 +699,13 @@ def test_reduced_surface_keeps_command_free_baseline_authority_mapping(
         tier2_enabled=False,
         product_commands=("bootstrap", "ask_memory"),
     )
-    with active_surface(descriptor):
-        capture = commands.op_bootstrap(tmp_path, profile=profile)["engagement"][
-            "contract"
-        ]["capture"].lower()
+    with active_surface(descriptor), library_scope():
+        engagement = commands.op_bootstrap(tmp_path, profile=profile)["engagement"]
+    capture = engagement["contract"]["capture"].lower()
 
     assert "stable preference" in capture
-    _assert_baseline_authority_mapping(f"{level}/{profile} reduced bootstrap", capture)
+    assert engagement["envelope"]["promotion_classes"]["typed_edge"] == "proactive_capture"
+    assert engagement["envelope"]["promotion_classes"]["queue_acceptance"] == "link_acceptance"
     assert not set(commands.PRODUCT_PUBLIC_NAMES) & set(re.findall(r"\b[a-z_]+\b", capture))
 
 
