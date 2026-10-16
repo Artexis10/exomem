@@ -1407,3 +1407,9 @@ def test_a_callers_change_to_a_parsed_marker_never_reaches_the_next_caller(abc):
     again = authority.parse_marker(abc.root, raw)
     assert again == json.loads(raw)
     assert authority.owned_entry(abc.root, again, "Knowledge Base/Records/Elsewhere/Items/x.md") is None
+
+
+def test_a_missing_marker_is_refused_as_unreadable_not_crashed_on(abc):
+    """Callers pass `read_marker` straight through, and it returns None when no marker exists."""
+    with pytest.raises(CollectionStoreError, match="unreadable mode marker"):
+        authority.parse_marker(abc.root, None)

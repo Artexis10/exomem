@@ -58,11 +58,14 @@ def parse_marker(root, raw):
     Recall checks ownership for every hit and due entry, so validation runs once per
     marker spelling. Every caller still gets its own copy to change.
     """
-    key = raw if isinstance(raw, (str, bytes)) else bytes(raw)
-    return copy.deepcopy(_parsed_marker(str(root), vault.kb_dirname(), key))
+    if not isinstance(raw, (str, bytes)):
+        # Anything else, a missing marker included, is refused exactly as before, uncached.
+        return _parsed_marker.__wrapped__(str(root), vault.kb_dirname(), raw)
+    return copy.deepcopy(_parsed_marker(str(root), vault.kb_dirname(), raw))
 
 
 # Validation reads only the raw bytes, the root and the kb folder name, so those are the key.
+# A vault has one current marker; a few slots also cover a pending target and its predecessor.
 @functools.lru_cache(maxsize=8)
 def _parsed_marker(root, _kb_dirname, raw):
     try:
@@ -166,6 +169,7 @@ def _entry_regions(entry):
 
 
 # One entry's namespace, folded once: recall asks about thousands of paths per call.
+# The bound covers every entry of several markers; a miss only refolds one entry.
 @functools.lru_cache(maxsize=256)
 def _region_keys(manifest_path, source_path, layout):
     regions = _owned_regions({"manifest_path": manifest_path, "source_path": source_path, "layout": layout})
