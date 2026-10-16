@@ -272,17 +272,19 @@ def prepare(vault_root) -> dict:
 def _require_current_coordinator(runtime, fence_client, marker, staging):
     """Refuse before any live change unless the coordinator's fence and head fit the staging store.
 
-    Without a marker the fence must be unenrolled, so the first cut succeeds; with one the
+    Without a marker the fence must be unenrolled (never, or retired by an export), so the
+    first cut succeeds at the next generation; with one the
     fence must bind its store, the store must record no divergence, and the head the
     coordinator recorded must be in the staging chain from this instance. This prevents installing a store whose admission can
     never finish; a false refusal costs the owner a retry once the vault replica arrives.
+    Returns the fence it read, the basis of a first enrolment's target marker.
     """
     fence = fence_client.collection_store_fence()
     if marker is None:
-        if fence.enrolled or fence.generation != 0:
+        if fence.enrolled:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT",
                                        "the coordinator already fences a store for this vault, which has no marker")
-        return
+        return fence
     admission._require_fence(fence, marker)
     meta = dict(staging.execute("SELECT key,value FROM store_meta"))
     if schema.META_REPLICA_DIVERGENCE in meta:
@@ -290,21 +292,22 @@ def _require_current_coordinator(runtime, fence_client, marker, staging):
                                    "run adopt-local, then migrate")
     recorded = admission._acquired(runtime, fence, "COLLECTION_STORE_LEASE_REQUIRED").collection_store_head
     if recorded is None:
-        return
+        return fence
     if (recorded.store_id != meta[schema.META_STORE_ID] or recorded.instance_id != meta[schema.META_INSTANCE_ID]
             or chain.head_relation(staging, recorded.commit_seq, recorded.head_hash) not in ("same", "ancestor")):
         raise CollectionStoreError(takeover.SYNC_PENDING, "the coordinator's recorded head is not in this store; "
                                    "wait for the vault replica, open the store, then migrate again")
+    return fence
 
 
-def _intent(root, marker, raw, staging):
-    """The migration intent and target marker for a verified staging store."""
+def _intent(root, marker, raw, staging, fence):
+    """The migration intent and target marker for a verified staging store, against ``fence``."""
     sid = staging.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     recorded = _read_basis(staging)["collections"]
     entries = [authority.marker_entry(cid, entry["manifest_path"], sid, entry["semantic_profile"],
                                       entry["source_path"], entry["layout"])
                for cid, entry in sorted(recorded.items(), key=lambda item: item[1]["manifest_path"])]
-    target = admission.target_marker(root, marker, sid, entries)
+    target = admission.target_marker(root, marker, sid, entries, fence=fence)
     for entry in entries:
         # Prevents a migrated collection from taking a file collection's namespace; a false
         # refusal leaves the vault in files until the overlap is repaired.
@@ -458,8 +461,8 @@ def cutover(session, manager, fence_client) -> dict:
                 if directory is None:
                     return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
             with closing(connection.open_reader(directory / _STAGING)) as staging:
-                _require_current_coordinator(runtime, fence_client, marker, staging)
-                intent = _intent(root, marker, raw, staging)
+                fence = _require_current_coordinator(runtime, fence_client, marker, staging)
+                intent = _intent(root, marker, raw, staging, fence)
             _seal(directory, intent)
             if runtime is not None and not runtime.retire_idle_handle():
                 raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")

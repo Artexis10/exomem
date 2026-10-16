@@ -47,7 +47,7 @@ A call that did not succeed has a null count.
 ### Activity
 
 The action comes from the command registry's `product_actions` and the row's `access`: a read that asks is `recalled`; a write that saves, records or updates is `saved`.
-Rows of one client family and action join the newest event of that pair when they are at most 60 seconds older than its newest row.
+Rows of one app ID, client family and action join the newest event of that key when they are at most 60 seconds older than its newest row.
 An event's `items` is null when any joined row's count is null.
 `since` is the oldest row the returned list accounts for, or the ledger writer's start when there is none.
 The reader stops at the first row the list cannot represent, so `since` never covers an omitted row:
@@ -138,3 +138,15 @@ The reader then skips the partial last line as a row still being appended, and t
 `reserved_paths.matches` takes about 44 % of a corpus walk: a 10,000-page walk calls it 342,176 times.
 It checks every registry descriptor's trees and patterns against every entry.
 Compiling the static registry once, into an exact set, a tree trie and one combined pattern per kind, keeps every decision and speeds up every `walk_md` caller, including the note count.
+
+### Stable actor metadata for Home
+
+Home app rows identify OAuth grants by UUID, while client families identify software shared by many grants.
+The authenticated gateway supplies that grant UUID in `x-exomem-app-id`; it never forwards a caller's copy.
+A cloud cell trusts the header on the existing cell-bearer boundary, independently of handshake names and client detection.
+One UUID validator accepts only canonical UUID text for caller identity, ledger rows and activity keys.
+Missing, malformed, unavailable or local identity becomes null; it never falls back to a client name.
+The optional `app_id` stays in schema 2, survives content-private logging and participates in the row hash.
+Older rows remain byte-exact and verifiable, retain their counts, and expose null actor metadata.
+Activity groups by app ID, client family and action while keeping its existing count and coverage rules.
+The actor ID is owner-private metadata and never enters principal resolution or authorization.

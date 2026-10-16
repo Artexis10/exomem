@@ -593,6 +593,34 @@ def test_receipt_git_history_allows_one_pending_to_acknowledged_transition(
     )
 
 
+@pytest.mark.parametrize("inherit_through_merge", [False, True])
+def test_receipt_git_history_refuses_a_renamed_introduction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inherit_through_merge: bool,
+) -> None:
+    history = _real_history(tmp_path, monkeypatch)
+    repo = history["repo"]
+    _real_git(repo, "checkout", "-b", "rename-receipt", history["amended_revision"])
+    (repo / "pending-receipt.json").write_bytes(history["amendment"])
+    _real_commit(repo, "stage receipt under another name")
+    _real_git(
+        repo, "mv", "pending-receipt.json",
+        str(history["amendment_path"].relative_to(repo)),
+    )
+    pin = _real_commit(repo, "rename receipt into contract directory")
+
+    if inherit_through_merge:
+        _real_git(repo, "checkout", "-b", "integration", history["amended_revision"])
+        (repo / "unrelated.txt").write_text("unrelated change\n", encoding="utf-8")
+        _real_commit(repo, "advance integration branch")
+        _real_git(repo, "merge", "--no-ff", "--no-edit", "rename-receipt")
+        pin = _real_git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(history["contracts"].ContractIdentityError, match="rename ambiguity"):
+        history["contracts"].derive_preregistration_identity(repo, contract_revision=pin)
+
+
 @pytest.mark.parametrize("field", ["rationale", "effective_policy"])
 def test_receipt_git_history_refuses_later_amendment_receipt_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str

@@ -214,6 +214,38 @@ async def _converged_cell(connection, cluster: FakeClusterGateway, b2: FakeB2, n
     return (await db.select_all_rows(connection))[0].b2_key_id
 
 
+async def test_paid_size_waits_for_real_claim_capacity_before_its_generation_is_satisfied(cell_db: CellDatabase) -> None:
+    await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "paid-resize")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    cluster = FakeClusterGateway()
+    b2 = FakeB2()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    try:
+        await _converged_cell(connection, cluster, b2, now)
+        await app.execute("UPDATE exomem_cloud_cells SET storage_gib=20 WHERE cell_id='aaaaaaaaaaaaaaaa'")
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", pvc_resource_version="41", pvc_capacity_bytes=10 * 1024**3,
+        )
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now)
+        pending = (await db.select_all_rows(connection))[0]
+        claim = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "PersistentVolumeClaim", "cell-data")]
+        assert claim["spec"]["resources"]["requests"]["storage"] == "20Gi"
+        assert pending.observed_storage_capacity_bytes == 10 * 1024**3
+        assert pending.observed_storage_generation is None
+        cluster.observations["aaaaaaaaaaaaaaaa"] = _observed_from_applied(
+            cluster, "aaaaaaaaaaaaaaaa", pvc_resource_version="42", pvc_capacity_bytes=20 * 1024**3,
+        )
+        await reconcile.reconcile_once(connection, cluster, b2, FakeHetznerVolumeProvider(), _secrets_config(), _cluster_config(), now=now + timedelta(seconds=1))
+        expanded = (await db.select_all_rows(connection))[0]
+        assert expanded.observed_storage_capacity_bytes == 20 * 1024**3
+        assert expanded.observed_storage_generation == expanded.generation
+        assert expanded.observed_storage_pvc_uid == "pvc-uid-1"
+    finally:
+        await app.close()
+        await connection.close()
+
+
 def _rendered_b2_key_id(cluster: FakeClusterGateway) -> str:
     secret = cluster.applied[(namespace_name("aaaaaaaaaaaaaaaa"), "Secret", "cell-credentials")]
     return base64.b64decode(secret["data"]["b2-key-id"]).decode("utf-8")
