@@ -48,6 +48,14 @@ The keep-vault state-adoption remedy SHALL refuse an enrolled optional
 collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
+Each live store schema from 11 on SHALL have one optional compatibility ID,
+`collections-store-schema-<N>`, because every store reader refuses a newer
+schema. A release SHALL support the IDs up to its own store schema. A writer
+SHALL record the current schema's IDs before it migrates a store or installs a
+migrated copy, and every store admission SHALL record them. A migration that
+rolls back SHALL record the earlier schema's IDs again. A release that does not
+support a recorded ID SHALL refuse before it opens the store.
+
 Supported Exomem launchers SHALL derive required store compatibility from the
 existing vault-side authority marker before fresh external-state bootstrap,
 candidate admission and copied/restored-vault activation, even when the
@@ -121,6 +129,13 @@ No plugin bit, declaration, or boolean override SHALL grant custody.
 
 - **WHEN** a mixed/store vault is copied or restored with a fresh external state root and a supported launcher is asked to start an actual interpreter without its required store capability
 - **THEN** the launcher derives that requirement from the authority marker and refuses before vault access or retiring the current serving worker, without relying on a previously enrolled external manifest
+
+#### Scenario: A store at a newer schema refuses an earlier release
+
+- **WHEN** a writer migrates a vault's store to a schema whose compatibility ID an earlier release does not support
+- **THEN** the state manifest records that ID before the migration commits, so no crash leaves a migrated store without it
+- **AND** a supported launcher refuses the earlier release as a candidate before the serving worker stops, and the earlier release's own startup gate refuses the manifest
+- **AND** a migration that rolls back records the earlier schema's IDs again, so the release that wrote the store can still start
 
 #### Scenario: Unknown replication custody does not disable file knowledge
 

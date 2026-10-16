@@ -324,7 +324,7 @@ def test_head_identity_and_tail_are_sampled_from_one_snapshot(runtime, monkeypat
     _create(runtime)
     before = runtime.sample_head()
     metadata_read, resume = threading.Event(), threading.Event()
-    original_open = connection.open_reader
+    original_open = connection.open_head_reader
 
     class PausedReader:
         def __init__(self, reader):
@@ -343,7 +343,7 @@ def test_head_identity_and_tail_are_sampled_from_one_snapshot(runtime, monkeypat
         reader = original_open(*args, **kwargs)
         return PausedReader(reader) if threading.current_thread().name.startswith("snapshot") else reader
 
-    monkeypatch.setattr(connection, "open_reader", open_reader)
+    monkeypatch.setattr(connection, "open_head_reader", open_reader)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot") as pool:
         sample = pool.submit(runtime.sample_head)
         assert metadata_read.wait(2)

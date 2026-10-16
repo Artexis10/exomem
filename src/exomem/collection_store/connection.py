@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -379,6 +379,7 @@ class WriterConnection:
 def open_writer(
     path: Path, *, vault_root: Path | None = None,
     lease_check: Callable[[], bool] | None = None,
+    schema_guard: Callable[[int], None] | None = None,
 ) -> WriterConnection:
     """Open the vault's single writer, under its mutation boundary.
 
@@ -387,6 +388,12 @@ def open_writer(
     require that boundary. The opening thread owns this connection until close.
     ``lease_check`` is a trusted adapter/test seam: its caller must supply the
     exact store's scoped authority, never the process-wide scheduler predicate.
+    ``schema_guard(version)`` runs under that authority around the migration of a
+    store that an earlier release wrote. A vault's writer passes it to make the
+    vault state manifest record what a store at ``version`` requires of a release:
+    the current schema before migrating, so a crash between the two never leaves a
+    migrated store without that record, and the earlier schema again after a
+    migration that rolled back, so the release that wrote the store may open it.
     """
     check_sqlite_version()
     load_store_libraries()
@@ -410,7 +417,20 @@ def open_writer(
         _apply_writer_pragmas(conn.connection.driver_connection)
         _require_lease(check)
         try:
-            schema.ensure_schema(conn)
+            raw = conn.connection.driver_connection
+            found = schema.schema_version(raw, ceiling=schema.SCHEMA_VERSION)
+            guarded = schema_guard is not None and 0 < found < schema.SCHEMA_VERSION
+            if guarded:
+                schema_guard(schema.SCHEMA_VERSION)
+                _require_lease(check)
+            try:
+                schema.ensure_schema(conn)
+            except BaseException:
+                # A guard that cannot lower the record keeps it: refusing an earlier release is the safe side.
+                with suppress(Exception):
+                    if guarded and schema.schema_version(raw) == found:
+                        schema_guard(found)
+                raise
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
         except schema.SchemaMetadataError as error:
@@ -428,15 +448,54 @@ def open_writer(
         raise
 
 
-def open_reader(
-    path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS, pending_schema: bool = False,
-) -> sqlite3.Connection:
-    """Open an existing store read-only at the current schema version.
+def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    """Open an existing store read-only at the current schema version."""
+    conn, found = _open_read_only(path, busy_timeout_ms)
+    if found < schema.SCHEMA_VERSION:
+        conn.close()
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SCHEMA_PENDING",
+            "the collection store has not been migrated by its writer yet",
+        )
+    return conn
 
-    ``pending_schema`` also opens a store an earlier release wrote, before its writer
-    migrates it. Only a reader of what every schema version keeps may pass it: the
-    head in ``store_meta`` and ``txns``, which the writer needs before it can open.
+
+# What every schema version keeps unchanged: the store's metadata and the columns of its commit chain.
+_HEAD_COLUMNS = {
+    "store_meta": frozenset({"key", "value"}),
+    "txns": frozenset({"commit_seq", "event_hash", "store_head_hash"}),  # nosemgrep: ep-word-set -- chain columns
+}
+_HEAD_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_FUNCTION})
+
+
+def _head_only(action: int, table: str | None, column: str | None, *_: object) -> int:
+    if action == sqlite3.SQLITE_READ:
+        return sqlite3.SQLITE_OK if column in _HEAD_COLUMNS.get(table, ()) else sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK if action in _HEAD_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def open_head_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    """Open a store at its current or an earlier schema, able to read only its head.
+
+    A store that an earlier release wrote keeps ``store_meta`` and the ``txns`` chain in
+    every schema, so its identity, head, chain and pending intent read the same before its
+    writer migrates it. SQLite refuses any other table or column, so no row reader can see
+    a store that its writer has not migrated yet. A newer schema refuses as in ``open_reader``.
     """
+    conn, _ = _open_read_only(path, busy_timeout_ms)
+    conn.set_authorizer(_head_only)
+    return conn
+
+
+def schema_pending(path: Path) -> bool:
+    """Whether the store an earlier release wrote still awaits its writer's migration."""
+    conn, found = _open_read_only(path, BUSY_TIMEOUT_MS)
+    conn.close()
+    return found < schema.SCHEMA_VERSION
+
+
+def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:
+    """An existing store opened read-only at any schema up to the current one, with that schema."""
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
     check_sqlite_version()
@@ -458,21 +517,10 @@ def open_reader(
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         except schema.SchemaVersionError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", str(error)) from error
-        if found < schema.SCHEMA_VERSION and not pending_schema:
-            raise CollectionStoreError(
-                "COLLECTION_STORE_SCHEMA_PENDING",
-                "the collection store has not been migrated by its writer yet",
-            )
     except BaseException:
         conn.close()
         raise
-    return conn
-
-
-def schema_pending(path: Path) -> bool:
-    """Whether the store an earlier release wrote still awaits its writer's migration."""
-    with closing(open_reader(path, pending_schema=True)) as reader:
-        return schema.schema_version(reader, ceiling=schema.SCHEMA_VERSION) < schema.SCHEMA_VERSION
+    return conn, found
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

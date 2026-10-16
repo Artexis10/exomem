@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import held_fs, state_paths
+from .collection_store import schema as store_schema
 from .kbdir import kb_dirname
 
 log = logging.getLogger("exomem.state_migration")
@@ -44,9 +45,12 @@ _BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
 CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 # The marker schema fixes this optional format ID; the coordinator still uses collections-store-v1.
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
+# What an enrolled store and its marker require; the store's schema adds its own generation IDs.
+_COLLECTION_STORE_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
+# The closed catalog this release recognizes; an earlier release reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = frozenset({
-    "collections-store-v1", "raw-protection-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-    CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+    *_COLLECTION_STORE_IDS, "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+    *store_schema.compatibility_ids(),
 })
 
 
@@ -235,7 +239,7 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
 
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-        CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+        CONNECTOR_BOUNDARY_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -267,13 +271,15 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
+        if (physical != set(_descriptor_ids()) or optional - _COLLECTION_STORE_IDS - set(store_schema.compatibility_ids())
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
             raise StateMigrationOfflineRequired("collection-store recovery requires ready families")
-        if optional:
-            with closing(connection.open_reader(session.path)) as reader:
+        # A schema ID alone is recorded before an adopted replica is installed, so no store need exist yet.
+        if optional & _COLLECTION_STORE_IDS:
+            # This check precedes admission's migration, so it reads only the head of an earlier schema.
+            with closing(connection.open_head_reader(session.path)) as reader:
                 chain.verify_store_chain(reader)
                 intent = authority.pending_create(reader)
                 raw = intent["target_marker"] if intent is not None else authority.read_marker(session.root)
@@ -292,8 +298,32 @@ def record_collection_store_compatibility(
     The trusted caller must prove its mutation authority by returning True on
     each check. It owns store custody, fencing, durable recovery intent and
     old-process exclusion; this seam establishes none of those boundaries.
+    Every admission calls it, so a store that an earlier release of this schema
+    migrated gains its schema IDs at its next admission.
     """
 
+    _record_optional(vault_root, authority_check, add=_COLLECTION_STORE_IDS | set(store_schema.compatibility_ids()))
+
+
+def record_collection_store_schema(
+    vault_root: Path, *, authority_check: Callable[[], bool], version: int | None = None,
+) -> None:
+    """Make the recorded store schema IDs those of a store at ``version``, the current schema by default.
+
+    A writer records the current schema's IDs before it migrates a store or installs a
+    migrated copy: an earlier release cannot open that store, and with the IDs recorded
+    its startup gate and the managed launcher refuse it instead. After a migration that
+    rolled back, the writer records the earlier schema again. The caller's authority is
+    the same as for ``record_collection_store_compatibility``.
+    """
+
+    wanted = frozenset(store_schema.compatibility_ids(version))
+    _record_optional(vault_root, authority_check, add=wanted,
+                     drop=frozenset(store_schema.compatibility_ids()) - wanted)
+
+
+def _record_optional(vault_root: Path, authority_check: Callable[[], bool], *,
+                     add: frozenset[str], drop: frozenset[str] = frozenset()) -> None:
     if not callable(authority_check):
         raise StateMigrationOfflineRequired("collection-store authority is absent")
     state_dir = state_paths.vault_state_dir(vault_root)
@@ -313,9 +343,8 @@ def record_collection_store_compatibility(
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority was lost")
         try:
-            required = {"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID}
-            if required - optional:
-                manifest["descriptors"] = sorted(set(manifest["descriptors"]) | required)
+            if add - optional or drop & optional:
+                manifest["descriptors"] = sorted((set(manifest["descriptors"]) - drop) | add)
                 _write_manifest(state_dir, manifest)
         finally:
             # Publication can succeed before a final durability check raises.

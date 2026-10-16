@@ -115,6 +115,8 @@ def _evidence(path: Path, scratch: Path):
                 target.write(chunk)
         with closing(sqlite3.connect(copy, isolation_level=None)) as conn:
             try:
+                # Evidence an earlier release wrote is read from this private copy at the current schema.
+                snapshot.migrate_copy(copy)
                 meta = snapshot._validate(conn, lambda: None)
                 chain.verify_store_chain(conn)
             except (CollectionStoreError, chain.StoreChainError, sqlite3.DatabaseError):

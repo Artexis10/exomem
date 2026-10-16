@@ -815,20 +815,47 @@ collections:
 - In a handoff, the earlier release's worker keeps the lease and serves until it
   stops. The new worker refuses store reads and writes with
   `WRITER_LEASE_REQUIRED`, and it migrates the store once it acquires the lease.
-- An offline owner command, such as `exomem collections backup`, refuses with
-  `COLLECTION_STORE_SCHEMA_PENDING`. Start the service once to migrate the store.
+- An offline owner command that only reads the store, such as
+  `exomem collections backup`, refuses with `COLLECTION_STORE_SCHEMA_PENDING`.
+  Start the service once to migrate the store. `exomem collections create` holds
+  the writer lease itself, so it migrates the store before it creates.
 
 File collections and knowledge writes are not affected.
 
 If the migration fails, it rolls back and leaves the store at its earlier
-schema. The service then refuses the store's collections and tries the
-migration again later. A rollback to the earlier release is safe in that state.
+schema. The service status then reports the store as `schema_pending`, with the
+error in its reason. The service refuses the store's collections with
+`COLLECTION_STORE_SCHEMA_PENDING`. A shutdown or an idle release hands the writer
+lease back at once, not at its expiry. The service tries the migration again on
+the next use, at least 10 seconds later. A rollback to the earlier release is
+safe in that state.
 
-A release from before the schema change cannot open a migrated store. Its writer
-then gets no lease on a vault with a collection store fence, so every write on
-that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to recover. After
-the new release has migrated the store, roll back only to a release at or after
-the one that migrated it.
+A release from before the schema change cannot open a migrated store. A release
+with the schema guard makes such a release refuse the vault before it opens the
+store. Each store schema from 11 on has a state compatibility ID, such as
+`collections-store-schema-11`. The service records that ID in the vault's state
+manifest before it migrates the store. It also records the ID when it admits a
+store that is already at that schema, as one that a release without the guard
+migrated. A failed migration removes the ID again.
+
+A release that does not support the ID refuses the vault:
+
+- The managed launcher refuses that release as an upgrade target before the
+  serving worker stops. The serving worker keeps serving.
+- Started by hand, 0.117.3 and 0.118.x refuse at startup with
+  `STATE_MIGRATION_MANIFEST_INVALID`, because they read the ID as an unknown state
+  family. An older release that cannot read the store's marker, such as 0.106.0,
+  refuses the marker first with `COLLECTION_STORE_MARKER_CONFLICT`.
+
+Every release without the guard refuses, including 0.119.0, which can read
+schema 11 but does not support the ID. After the service has recorded the ID,
+roll back only to a release with the schema guard. The ID lives in the external
+state root, so a copy of the vault on a fresh state root does not carry it.
+
+A release from before the guard that already started on a migrated store cannot
+open it. On a vault with a collection store fence, its writer gets no lease, so
+every write on that host refuses with `WRITER_LEASE_REQUIRED`. Roll forward to
+recover.
 
 If you run 0.119.0 on a store that an earlier release wrote, 0.119.0 cannot back
 it up: its backup refuses with `COLLECTION_STORE_SCHEMA_PENDING`. In step 1, back

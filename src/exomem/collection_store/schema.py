@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 SCHEMA_VERSION = 11
+#: The first schema that the vault state manifest guards: releases that read schema 10 refuse it.
+FIRST_GUARDED_SCHEMA_VERSION = 11
 
 META_SCHEMA_VERSION = "schema_version"
 META_STORE_ID = "store_id"
@@ -934,6 +936,20 @@ class SchemaVersionError(RuntimeError):
         )
         self.found = found
         self.supported = supported
+
+
+def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
+    """The state compatibility ids that a store at ``version`` requires of a release that opens it.
+
+    Every reader refuses a schema newer than its own, so each schema from the first guarded
+    one on is its own generation with one id, and the set is closed by this module's own
+    migrations. A release supports the ids up to its ``SCHEMA_VERSION``. The vault state
+    manifest records them before a writer migrates a store, so the managed launcher and the
+    startup gate of an earlier release refuse that release instead of letting it deadlock.
+    """
+    version = SCHEMA_VERSION if version is None else version
+    return tuple(f"collections-store-schema-{generation}"
+                 for generation in range(FIRST_GUARDED_SCHEMA_VERSION, version + 1))
 
 
 def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> int:
