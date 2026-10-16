@@ -444,7 +444,8 @@ retained until you delete its PV.
 ## Remove the host
 
 `remove-agent.yml` cordons the host, then moves each cell whose live volume is
-on it to a new claim on another node, one at a time, as in
+on it to a new claim on another node, one at a time and the largest claim
+first, as in
 [Move a cell to a new claim](#move-a-cell-to-a-new-claim). Before the cordon,
 it refuses unless each of those cells fits one other general node's pool: the
 node's published free bytes must cover the cell's claim and still hold the

@@ -1108,9 +1108,12 @@ GIB = 1024**3
     ({"spare": 20}, [], [4], [], 1, None),
     ({"spare": 18}, [], [4], [], 1, "with room for the local volume"),
     ({"spare": 20}, [], [4], [], 0, "cell slots"),
+    # The removal moves the largest claim first, the order the placement
+    # assumes, so an early small cell cannot take a later large one's room.
+    ({"spare": 100}, [], [4, 8, 4], [], None, None),
 ], ids=["local-with-room", "local-without-room", "room-split-across-nodes", "larger-cell-elsewhere",
         "target-excluded", "cordoned-node-excluded", "mixed-with-room", "mixed-without-local-room",
-        "mixed-without-attachment-slots"])
+        "mixed-without-attachment-slots", "largest-claim-moves-first"])
 def test_removal_counts_each_cell_against_the_storage_it_uses(
     tmp_path: Path, pools: dict[str, int], cordoned: list[str], moving: list[int], elsewhere: list[int],
     hetzner_slots: int | None, refusal: str | None,
@@ -1169,9 +1172,14 @@ def test_removal_counts_each_cell_against_the_storage_it_uses(
         "k3s_remove_pvcs_doc": {"items": claims},
         "k3s_remove_statefulsets_doc": {"items": []},
     }
+    # What remove-agent.yml loops its moves over, evaluated after the preflight.
+    tasks = {task["name"]: task for task in _tasks_in_order(_yaml(ANSIBLE / "remove-agent.yml"))}
+    moves = tasks["Move each cell off the agent's local storage"]["loop"].strip()[2:-2]
+    order = [f"exo-cell-{'abcd'[i] * 16}" for i in sorted(range(len(moving)), key=lambda i: (-moving[i], i))]
     play = tmp_path / "preflight.yml"
     play.write_text(yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "vars": variables,
-        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")}]}]))
+        "tasks": [{"ansible.builtin.include_tasks": str(K3S_ROLE / "tasks/remove_preflight.yml")},
+                  {"ansible.builtin.assert": {"that": [f"({moves}) == {order}"]}}]}]))
 
     result = subprocess.run([str(ANSIBLE_PLAYBOOK), "-i", "localhost,", "-c", "local", str(play)],
                             capture_output=True, text=True)

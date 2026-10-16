@@ -253,6 +253,15 @@
           The local claim size of {{ k3s_remove_unsized | join(', ') }} is unreadable or missing;
           cellctl requests each cell claim in whole GiB. Check those claims before retrying.
 
+    # remove-agent.yml moves the cells in this order, and the placement below
+    # assumes it: largest claim first, so an early small cell cannot take the
+    # room a later large one needs.
+    - name: Order the moves largest claim first
+      ansible.builtin.set_fact:
+        k3s_remove_moves: >-
+          {{ k3s_remove_move_sizes | sort(attribute='namespace') | sort(attribute='gib', reverse=true)
+             | map(attribute='namespace') | list }}
+
     - name: Measure the snapshot reserve
       ansible.builtin.set_fact:
         k3s_remove_snapshot_reserve: >-
@@ -283,7 +292,7 @@
           {%- endfor -%}
           {{ rooms }}
 
-    # The largest cell first, each onto the node with the most room. This can
+    # In the move order, each cell onto the node with the most room. This can
     # refuse a fit that only another packing finds; it never passes one that
     # does not fit. The scheduler, not this check, then places each claim.
     - name: Place each moving cell on a remaining node's pool
@@ -291,13 +300,15 @@
         k3s_remove_unplaced: >-
           {%- set rooms = dict(k3s_remove_local_rooms) -%}
           {%- set unplaced = [] -%}
-          {%- for move in k3s_remove_move_sizes | sort(attribute='namespace') | sort(attribute='gib', reverse=true) -%}
+          {%- for cell in k3s_remove_moves -%}
+            {%- set need = (k3s_remove_move_sizes | selectattr('namespace', 'equalto', cell) | first).gib
+                  * 1073741824 -%}
             {%- set best = rooms | dict2items | sort(attribute='key') | sort(attribute='value', reverse=true)
                   | first | default(none) -%}
-            {%- if best is not none and best.value >= move.gib * 1073741824 -%}
-              {%- set _ = rooms.update({best.key: best.value - move.gib * 1073741824}) -%}
+            {%- if best is not none and best.value >= need -%}
+              {%- set _ = rooms.update({best.key: best.value - need}) -%}
             {%- else -%}
-              {%- set _ = unplaced.append(move.namespace) -%}
+              {%- set _ = unplaced.append(cell) -%}
             {%- endif -%}
           {%- endfor -%}
           {{ unplaced }}

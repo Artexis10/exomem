@@ -98,8 +98,9 @@
           changed_when: "'already cordoned' not in k3s_remove_cordon.stdout"
 
         # move-cloud-cells-to-local-storage 6.4: after the cordon, so no moved
-        # cell's new claim binds back onto the agent. One cell at a time, and
-        # a failed move stops the removal with the agent still in the cluster.
+        # cell's new claim binds back onto the agent. One cell at a time, the
+        # largest claim first (the preflight orders them), and a failed move
+        # stops the removal with the agent still in the cluster.
         - name: Move each cell off the agent's local storage
           ansible.builtin.include_role:
             name: k3s
