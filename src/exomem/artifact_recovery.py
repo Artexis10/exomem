@@ -59,7 +59,10 @@ class _CapabilityRedaction(logging.Filter):
                         target = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "grant=artifact-capability-removed", ""))
                 except ValueError:
                     target = "artifact-request-target-removed"
+                target = _CAPABILITY.sub("artifact-capability-removed", target)
+                # Uvicorn's AccessFormatter unpacks these five arguments positionally.
                 record.args = (client, method, target, version, status)
+                return True
         record.msg = _CAPABILITY.sub("artifact-capability-removed", record.getMessage())
         record.args = ()
         return True

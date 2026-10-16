@@ -496,11 +496,12 @@ def test_authority_changed_during_staging_refuses_before_headers(
 
 
 @pytest.mark.parametrize("encoded", ["value", "key", "both"])
-def test_application_logs_remove_encoded_artifact_authority(vault, monkeypatch, caplog, encoded):
+def test_application_logs_remove_encoded_artifact_authority(vault, monkeypatch, encoded):
     import logging
     from urllib.parse import unquote
 
     from starlette.requests import Request
+    from uvicorn.logging import AccessFormatter
     from uvicorn.protocols.utils import get_path_with_query_string
 
     from exomem import artifact_recovery, upload_tokens
@@ -523,17 +524,27 @@ def test_application_logs_remove_encoded_artifact_authority(vault, monkeypatch, 
     scope = {"type": "http", "path": "/download", "query_string": query.encode()}
     accepted = Request(scope).query_params["grant"]
     assert artifact_recovery.claim(vault, accepted, delivery=upload_tokens.ARTIFACT_HTTPS)[0] == descriptor
+    for name in ("fastmcp.server.server", "uvicorn.access", "uvicorn.error"):
+        # Installation is process-wide; restore each logger's filters for later tests.
+        monkeypatch.setattr(logging.getLogger(name), "filters", [])
     artifact_recovery.install_log_redaction()
-    with caplog.at_level(logging.WARNING):
-        logging.getLogger("uvicorn.access").warning(
-            '%s - "%s %s HTTP/%s" %d', "127.0.0.1", "GET",
-            get_path_with_query_string(scope), "1.1", 200,
-        )
-        logging.getLogger("fastmcp.server.server").warning(
-            "Resource %s", artifact_recovery.RESOURCE_PREFIX + token
-        )
-    assert token not in unquote(caplog.text)
-    assert "artifact-capability-removed" in caplog.text
+    access = logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 0, '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1", "GET", get_path_with_query_string(scope), "1.1", 200), None,
+    )
+    assert logging.getLogger("uvicorn.access").filter(access)
+    # Uvicorn's own access formatter must still read the redacted record.
+    access_line = AccessFormatter(use_colors=False).format(access)
+    assert token not in unquote(access_line)
+    assert "grant=artifact-capability-removed" in access_line
+    # FastMCP's logging setup stops propagation to the root, so check its logger's own filter.
+    resource = logging.LogRecord(
+        "fastmcp.server.server", logging.WARNING, __file__, 0, "Resource %s",
+        (artifact_recovery.RESOURCE_PREFIX + token,), None,
+    )
+    assert logging.getLogger("fastmcp.server.server").filter(resource)
+    assert token not in resource.getMessage()
+    assert "artifact-capability-removed" in resource.getMessage()
 
 
 def test_raw_release_and_receipt_use_the_computed_copy_digest(vault, monkeypatch, tmp_path):
