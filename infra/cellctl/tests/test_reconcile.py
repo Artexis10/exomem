@@ -16,7 +16,7 @@ import asyncpg
 import pytest
 
 from cellctl import db, reconcile
-from cellctl.capacity import CapacityObservation
+from cellctl.capacity import CapacityObservation, LocalCapacityObservation
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
@@ -111,6 +111,12 @@ class FakeClusterGateway:
         self, *, csi_driver: str
     ) -> tuple[dict[str, int | None], dict[str, int], dict[str, int], set[str]]:
         return CapacityObservation()
+
+    def local_capacity_inputs(self, local) -> LocalCapacityObservation:
+        return LocalCapacityObservation()
+
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
+        return {}
 
 
 def _secrets_config() -> reconcile.SecretsConfig:

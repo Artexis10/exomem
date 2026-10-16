@@ -37,6 +37,16 @@ class LocalStorage:
     default_cell_gib: int = 4
     # D10: a cell grows online one default size at a time, never past this.
     max_cell_gib: int = 20
+    # Tasks 5.5 and 5.6: the pods cellctl reads for the host alerts, and where.
+    # The chart names them (templates/_cell-storage.tpl) from the same values it
+    # renders those pods with, so the two cannot disagree. Both are Prometheus
+    # `/metrics` endpoints on the pod's own IP: TopoLVM's node plugin (the thin
+    # pool) and node-exporter's mdadm collector (the cell array).
+    metrics_namespace: str = "exomem-platform"
+    thin_pool_selector: str = "app.kubernetes.io/name=topolvm,app.kubernetes.io/component=node"
+    thin_pool_port: int = 8080
+    array_selector: str = "app.kubernetes.io/name=exomem-cell-array-exporter"
+    array_port: int = 9100
 
     def __post_init__(self) -> None:
         for name in (self.class_name, self.clone_class, self.snapshot_class, self.driver, self.device_class):
@@ -50,6 +60,14 @@ class LocalStorage:
             raise ValueError("the default cell size must be a positive number of GiB")
         if type(self.max_cell_gib) is not int or self.max_cell_gib < self.default_cell_gib:
             raise ValueError("the largest a cell grows to must be a whole number of GiB, at least the default size")
+        if not isinstance(self.metrics_namespace, str) or not _NAME.fullmatch(self.metrics_namespace):
+            raise ValueError("the metrics namespace must be a DNS subdomain name")
+        for selector in (self.thin_pool_selector, self.array_selector):
+            if not isinstance(selector, str) or not selector:
+                raise ValueError("a metrics pod selector must be a non-empty label selector")
+        for port in (self.thin_pool_port, self.array_port):
+            if type(port) is not int or not 0 < port < 65536:
+                raise ValueError("a metrics port must be a TCP port number")
 
     @property
     def capacity_annotation(self) -> str:

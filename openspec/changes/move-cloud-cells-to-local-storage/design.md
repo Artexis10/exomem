@@ -103,6 +103,10 @@ Each hourly backup is a new hold kind, `snapshot-backup`, that does not stop the
   - cleanup: 1.6–2.2 s.
   The cost is per cell, not per byte, so one node can back up about 200 lightly changed cells an hour, one at a time. The repository sat on the runner's disk, so upload to B2 is not in these numbers; the drill measures it. A second slot keeps one slow cell from delaying the rest.
 - **Alerting:** cellctl raises one platform alert while any serving cell's last successful backup is older than two hours. It posts the same content-free transition as the hosted scheduler evaluator to the existing alert receiver, which emails only on a change of state. The Role `cellctl-alert-delivery` lets cellctl read that receiver's URL from its one Secret. The stale cells go to cellctl's log by id.
+  Two dedicated-host alerts go the same way: `cell-array-degraded` while an md array is inactive, has a failed member, or has fewer active members than it requires (task 5.5), and `thin-pool-high` while a thin pool's data or metadata use is at 80% or more (task 5.6).
+  Their sources are node-exporter's mdadm collector alone, run unprivileged on the nodes where TopoLVM's node plugin runs because `/proc/mdstat` is not namespaced, and that plugin's `topolvm_thinpool_data_percent` and `topolvm_thinpool_metadata_percent`.
+  cellctl lists those pods by label, reads each pod's `/metrics` by pod IP once a minute, and parses the text with a Prometheus parser.
+  An alert is true when any expected node reads bad, unknown (nothing sent, never resolved) when any expected node cannot be read, and false only when every expected node reads clean. The expected nodes are the ones that publish a local pool, so a node with a pool and no md array, such as the Cloud recovery agent (D8), must be excluded from the array alert's expected nodes.
 - **Cells on Hetzner volumes:** those volumes can't take CSI snapshots, and cells stay on them until their own migration, which waits on the hardware purchase. A cell whose class has no snapshot support therefore keeps the nightly stopped backup, its window, concurrency 1 and its prune, and its backup-age alert fires at 26 hours.
 
 **Targets:**
@@ -274,6 +278,15 @@ A 4 GiB default only holds if a cell that fills grows without an operator. cellc
 - **Recorded on the row:** cellctl records the grown size on the cell's row, in a column it owns, and renders the claim at the larger of that and `storage_gib`. A later pass therefore never renders a smaller claim, which Kubernetes refuses. The column needs a Substrate migration.
 - **Capacity:** a grown cell consumes `ceil(size / default)` slots, as any larger cell does (D6), so admission sees the growth on the next capacity pass.
 - **Not shrunk:** a cell never shrinks automatically. Kubernetes cannot shrink a claim, and a smaller size needs a backup and a restore.
+
+### D11. Capacity grows by adding mid-sized nodes on demand
+
+Cells are created automatically on any node with a free slot. Nodes are added by the operator when demand needs them, not by an autoscaler, because a dedicated server is a monthly commitment.
+
+- **Node shape:** any provider's server with a mirrored NVMe pair qualifies. It joins over vSwitch on Hetzner, or over WireGuard elsewhere (D8). Nodes stay mid-sized, because node-loss recovery time grows with the cells a node holds (D4). Capacity grows by adding nodes, not by building bigger ones.
+- **When to add one:** the operator orders the next node while a few free places remain, not when none do, because the join and its checks take days on new hardware. A signal for low free places belongs where free places are computed, with the operator's other alerts; it is outside this change.
+- **Bursts:** before the cutover, a Hetzner Cloud node can serve as temporary overflow on the Hetzner class. Its cells move to a local node by the per-cell migration (D7), and the overflow node is then removed. After the cutover only local-storage nodes publish slots (D7).
+- **A tenant that needs more:** a cell grows its storage online (D10). A cell that needs a node to itself uses the existing per-cell reservation: an agent labelled and tainted `exomem.io/dedicated-cell` with the cell's id publishes no general slots.
 
 ### Archive order
 

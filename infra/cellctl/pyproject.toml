@@ -9,6 +9,7 @@ dependencies = [
     "cryptography>=48.0.1,<51",
     "httpx>=0.28,<1",
     "kubernetes>=35.0,<36",
+    "prometheus-client>=0.26,<1",
 ]
 
 [project.scripts]

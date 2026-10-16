@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -1652,3 +1653,301 @@ def test_a_cell_on_a_hetzner_volume_never_grows() -> None:
     decision = _measure(hetzner)
 
     assert decision.grow_storage_gib is None
+
+
+# --- 5.5, 5.6: the dedicated-host alerts -----------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+# node-exporter's real output for a clean pair of arrays and for one that has lost a member.
+ARRAYS_CLEAN = (FIXTURES / "node_exporter_mdadm_clean.txt").read_text(encoding="utf-8")
+ARRAYS_DEGRADED = (FIXTURES / "node_exporter_mdadm_degraded.txt").read_text(encoding="utf-8")
+ARRAYS_INACTIVE = (FIXTURES / "node_exporter_mdadm_inactive.txt").read_text(encoding="utf-8")
+
+
+def _pool_page(data: float, metadata: float, device_class: str = "thin") -> str:
+    # Built from the series names TopoLVM 0.41.1 documents (docs/topolvm-node.md);
+    # its pinned image could not be run here without a lvmd to feed the plugin.
+    return "\n".join(
+        f'{name}{{device_class="{device_class}",node="agent-1"}} {value}'
+        for name, value in (("topolvm_thinpool_data_percent", data), ("topolvm_thinpool_metadata_percent", metadata))
+    ) + "\n"
+
+
+def _arrays_page(*, required: int, active: int, failed: int) -> str:
+    return (f'node_md_disks_required{{device="md0"}} {required}\n'
+            f'node_md_disks{{device="md0",state="active"}} {active}\n'
+            f'node_md_disks{{device="md0",state="failed"}} {failed}\n'
+            'node_md_state{device="md0",state="inactive"} 0\n')
+
+
+@pytest.mark.parametrize(("data", "metadata"), [(80.0, 1.0), (1.0, 80.0)], ids=["data", "metadata"])
+def test_a_thin_pool_at_80_percent_of_its_data_or_its_metadata_fires(data: float, metadata: float) -> None:
+    # Either series alone must fire: a pool full of metadata refuses writes
+    # with its data nearly empty.
+    from cellctl import alerts
+
+    states = alerts.thin_pool_states(["agent-1"], {"agent-1": _pool_page(data, metadata)}, device_class="thin")
+
+    assert alerts.host_alert_firing(states) is True
+
+
+def test_thin_pools_just_under_80_percent_resolve_the_alert() -> None:
+    from cellctl import alerts
+
+    pages = {"agent-1": _pool_page(79.9, 79.9), "agent-2": _pool_page(3.0, 0.2)}
+    states = alerts.thin_pool_states(["agent-1", "agent-2"], pages, device_class="thin")
+
+    assert alerts.host_alert_firing(states) is False
+
+
+@pytest.mark.parametrize(
+    "page",
+    [None, "not prometheus text {\n", _pool_page(1.0, 1.0, device_class="other")],
+    ids=["no-answer", "unparseable", "no-series-for-the-device-class"],
+)
+def test_a_thin_pool_that_cannot_be_read_sends_nothing_and_never_resolves(page: str | None) -> None:
+    # False here would email "resolved" for a pool nobody could see.
+    from cellctl import alerts
+
+    pages = {"agent-1": _pool_page(1.0, 1.0)} | ({"agent-2": page} if page is not None else {})
+    states = alerts.thin_pool_states(["agent-1", "agent-2"], pages, device_class="thin")
+
+    assert alerts.host_alert_firing(states) is None
+
+
+def test_a_full_thin_pool_fires_even_while_another_node_cannot_be_read() -> None:
+    from cellctl import alerts
+
+    states = alerts.thin_pool_states(["agent-1", "agent-2"], {"agent-1": _pool_page(95.0, 1.0)}, device_class="thin")
+
+    assert alerts.host_alert_firing(states) is True
+
+
+def test_an_array_that_node_exporter_reports_with_a_failed_member_fires() -> None:
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": ARRAYS_DEGRADED})
+
+    assert alerts.host_alert_firing(states) is True
+
+
+def test_an_inactive_array_fires_although_it_reports_no_failed_or_missing_disk() -> None:
+    # An inactive array reports zero required, active and failed disks, so only
+    # its state shows it is down: a "resolved" email would be false.
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": ARRAYS_INACTIVE})
+
+    assert alerts.host_alert_firing(states) is True
+
+
+def test_arrays_that_node_exporter_reports_clean_resolve_the_alert() -> None:
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": ARRAYS_CLEAN})
+
+    assert alerts.host_alert_firing(states) is False
+
+
+def test_an_array_with_a_disk_pulled_and_no_failed_flag_still_fires() -> None:
+    # A removed member leaves no failed one: only fewer active than required shows it.
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": _arrays_page(required=2, active=1, failed=0)})
+
+    assert alerts.host_alert_firing(states) is True
+
+
+@pytest.mark.parametrize("page", [None, "node_exporter_build_info 1\n"], ids=["no-answer", "no-array-shown"])
+def test_an_array_page_that_cannot_be_read_sends_nothing_and_never_resolves(page: str | None) -> None:
+    from cellctl import alerts
+
+    states = alerts.array_states(["agent-1"], {"agent-1": page} if page is not None else {})
+
+    assert alerts.host_alert_firing(states) is None
+
+
+def test_with_no_dedicated_host_to_read_no_alert_is_sent() -> None:
+    # A first "resolved" would email an operator about an alert that never fired.
+    from cellctl import alerts
+
+    assert alerts.host_alert_firing(alerts.array_states([], {})) is None
+
+
+class _HostGateway(FakeClusterGateway):
+    """A server with no pool and one dedicated host, whose pages the test sets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pool_page: str | None = None
+        self.array_page: str | None = None
+        self.scrapes: list[tuple[str, str, int]] = []
+
+    def local_capacity_inputs(self, local: LocalStorage):
+        from cellctl.capacity import LocalCapacityObservation
+
+        return LocalCapacityObservation(free_bytes={"agent-1": 80 * GIB, "server": None})
+
+    def read_secret_value(self, namespace: str, name: str, key: str) -> str:
+        return "https://receiver.example/alerts/token"
+
+    def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
+        self.scrapes.append((namespace, selector, port))
+        page = self.pool_page if port == LOCAL.thin_pool_port else self.array_page
+        return {} if page is None else {"agent-1": page}
+
+
+async def test_a_degraded_array_and_a_full_pool_each_fire_once_and_resolve_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole path: the host's pages, the alert rules, the memory that folds
+    # a repeated state, and the receiver. The server has no pool, so it must
+    # not count as a host that cannot be read.
+    from cellctl import alerts
+
+    delivered: list[tuple[str, bool]] = []
+    monkeypatch.setattr(alerts, "deliver", lambda url, *, alert, active, observed_at: delivered.append((alert, active)))
+    cluster = _HostGateway()
+    config = ClusterConfig(object_storage_bucket="b", storage=MIGRATING,
+                           alert_delivery_secret=("exomem-platform", "exomem-hosted-alert-delivery", "url"))
+    memory = reconcile.LoopMemory()
+
+    async def read_at(seconds: int) -> None:
+        await reconcile._host_alerts(cluster, config, NOW + timedelta(seconds=seconds), memory)
+
+    cluster.pool_page, cluster.array_page = _pool_page(85.0, 2.0), ARRAYS_DEGRADED
+    await read_at(0)
+    await read_at(10)  # inside the interval: not read again
+    assert len(cluster.scrapes) == 2
+    cluster.pool_page = cluster.array_page = None
+    await read_at(70)  # unreadable: nothing is sent, nothing resolves
+    cluster.pool_page, cluster.array_page = _pool_page(85.0, 2.0), ARRAYS_DEGRADED
+    await read_at(140)  # the same state again: folded
+    cluster.pool_page, cluster.array_page = _pool_page(10.0, 2.0), ARRAYS_CLEAN
+    await read_at(210)
+
+    assert delivered == [(alerts.THIN_POOL_ALERT, True), (alerts.ARRAY_ALERT, True),
+                         (alerts.THIN_POOL_ALERT, False), (alerts.ARRAY_ALERT, False)]
+    assert {(namespace, port) for namespace, _selector, port in cluster.scrapes} == {
+        (LOCAL.metrics_namespace, LOCAL.thin_pool_port), (LOCAL.metrics_namespace, LOCAL.array_port)}
+
+
+async def test_with_local_storage_off_nothing_is_scraped_or_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Production runs without local storage: a scrape there would list pods
+    # for hosts that do not exist, and an alert would email about them.
+    from cellctl import alerts
+    from cellctl.storage_config import DEFAULT_STORAGE
+
+    sent: list[str] = []
+    monkeypatch.setattr(alerts, "deliver", lambda url, *, alert, active, observed_at: sent.append(alert))
+    cluster = _HostGateway()
+    cluster.pool_page, cluster.array_page = _pool_page(99.0, 99.0), ARRAYS_DEGRADED
+    config = ClusterConfig(object_storage_bucket="b", storage=DEFAULT_STORAGE,
+                           alert_delivery_secret=("exomem-platform", "exomem-hosted-alert-delivery", "url"))
+
+    await reconcile._host_alerts(cluster, config, NOW, reconcile.LoopMemory())
+
+    assert cluster.scrapes == [] and sent == []
+
+
+def test_each_node_is_read_from_its_running_pod_and_a_pod_that_is_down_leaves_its_node_out() -> None:
+    # The boundary to the real HTTP page: a node keyed by the pod's node, and
+    # one that does not answer missing rather than read as clean.
+    import http.server
+    import threading
+    from types import SimpleNamespace as NS
+
+    from cellctl.k8s_client import ClusterClient
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
+            body = ARRAYS_DEGRADED.encode() if self.path == "/metrics" else b""
+            self.send_response(200 if body else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    closed = http.server.HTTPServer(("127.0.0.1", 0), Page)
+    closed_port = closed.server_address[1]
+    closed.server_close()
+
+    def pod(node: str, *, phase: str = "Running", deleting: bool = False) -> NS:
+        return NS(metadata=NS(deletion_timestamp="now" if deleting else None),
+                  spec=NS(node_name=node), status=NS(phase=phase, pod_ip="127.0.0.1"))
+
+    class Core:
+        def list_namespaced_pod(self, namespace, label_selector):
+            assert (namespace, label_selector) == (LOCAL.metrics_namespace, LOCAL.array_selector)
+            return NS(items=[pod("agent-1"), pod("agent-2", phase="Pending"), pod("agent-3", deleting=True)])
+
+    client = ClusterClient.__new__(ClusterClient)
+    client._core = Core()
+    try:
+        read = client.scrape_pod_metrics(LOCAL.metrics_namespace, LOCAL.array_selector, server.server_address[1])
+        none = client.scrape_pod_metrics(LOCAL.metrics_namespace, LOCAL.array_selector, closed_port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert read == {"agent-1": ARRAYS_DEGRADED}
+    assert none == {}
+
+
+@pytest.mark.parametrize("phase", ["head", "body"])
+def test_a_pod_that_drips_its_response_is_cut_off_at_the_bound_and_its_node_reads_unreadable(
+    phase: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A socket timeout restarts with every byte, so a pod sending one every
+    # 0.2 s would hold the pass for as long as its head or page lasts (10 s here,
+    # minutes for a real one) while the liveness probe counts down.
+    import http.server
+    import threading
+    import time
+    from types import SimpleNamespace as NS
+
+    from cellctl import alerts, k8s_client
+
+    class Drip(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - the http.server hook name
+            if phase == "head":
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Pad: ")
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", "50")
+                self.end_headers()
+            try:
+                for _ in range(50):
+                    self.wfile.write(b"#")
+                    time.sleep(0.2)
+            except OSError:
+                pass  # the reader gave up, as it should
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Drip)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    pod = NS(metadata=NS(deletion_timestamp=None), spec=NS(node_name="agent-1"),
+             status=NS(phase="Running", pod_ip="127.0.0.1"))
+
+    class Core:
+        def list_namespaced_pod(self, namespace, label_selector):
+            return NS(items=[pod])
+
+    monkeypatch.setattr(k8s_client, "METRICS_TIMEOUT", 0.6)
+    client = k8s_client.ClusterClient.__new__(k8s_client.ClusterClient)
+    client._core = Core()
+    started = time.monotonic()
+    try:
+        read = client.scrape_pod_metrics(LOCAL.metrics_namespace, LOCAL.array_selector, server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert time.monotonic() - started < 3
+    assert read == {}
+    assert alerts.host_alert_firing(alerts.array_states(["agent-1"], read)) is None
