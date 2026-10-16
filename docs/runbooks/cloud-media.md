@@ -2,7 +2,7 @@
 
 # Cloud media: documents and OCR
 
-**Status:** written with `add-cloud-multimodal-processing` slice 1 (documents, OCR, memory brakes, switches). The measurements below come from a local cell container built from the Cloud image and run with 2 CPUs and 3 GiB. No live cell has run media yet.
+**Status:** written with `add-cloud-multimodal-processing` slice 1 (documents, OCR, memory brakes, switches). The measurements below come from a local cell container built from the Cloud image and run with 2 CPUs and 3 GiB. A QA cell has run documents and OCR since 2026-10-16.
 
 Media extraction makes uploaded files searchable. The Cloud image carries two engines:
 
@@ -13,9 +13,9 @@ Plain text, email and calendar files need no engine and are always read. Image v
 
 ## Switch an engine on for a cell
 
-Every engine is off in a Cloud cell by default. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`exomem status --resources`) and `exomem doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
+Every engine is off in a Cloud cell unless the platform values switch it on, for one cell or for the fleet. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`exomem status --resources`) and `exomem doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
 
-cellctl renders `EXOMEM_MEDIA_ENGINES` into the cells that `cellctl.mediaEngineCellIds` names. A change restarts only the cells whose selection changed.
+cellctl renders `EXOMEM_MEDIA_ENGINES` into the cells that `cellctl.mediaEngineCellIds` names, and into every cell for an engine in `cellctl.mediaEngineFleetDefault`. A change restarts only the cells whose engine set changed.
 
 1. Choose a time outside the nightly backup window, 02:00-05:00 UTC.
 2. Set the selection in the platform values: `mediaEngineCellIds: {documents: ["<cell id>"], ocr: ["<cell id>"]}`.
@@ -30,9 +30,31 @@ Expect the search to find both files within a few minutes.
 
 To switch an engine off, remove the cell ID from its list and deploy. At the next start the media supervisor drops each job that is blocked because that engine could not load. It first shows the job's sidecar as pending again, so no old install instruction stays. A queued job of a switched-off engine runs no extraction when its turn comes, and its sidecar stays pending. Switching the engine on again queues these files.
 
+An engine in the fleet default has no per-cell opt-out. To switch it off in one cell, remove it from `mediaEngineFleetDefault` and name it in `mediaEngineCellIds` for every other cell, in the same deploy. Those cells keep their engine set and restart nothing.
+
 A job that waited on a missing engine returns to the queue at the next start, once the engine is switched on and its tools are present.
 
 With `documents` on and `ocr` off, a PDF that has no text layer at all waits for OCR instead of completing with no text. Runtime status shows it as pending and counts it in `media.engine_waiting_count`. When OCR is switched on, the next start returns it to the queue. A PDF with some text pages completes with that text.
+
+## Make an engine the fleet default
+
+A fleet default runs an engine in every cell, including a cell created later, so a new tenant needs no per-cell edit. Make an engine the default only after it passed its acceptance and runs in every existing cell through `mediaEngineCellIds`. The default then changes no existing cell.
+
+Warning: a cell that `mediaEngineCellIds` does not name restarts at the deploy and starts the engine's backfill. Several such cells start backfill together. cellctl does not check this, so check every cell first.
+
+1. Read the deployed selection: `helm -n exomem-platform get values exomem-platform -o json | jq '.cellctl.mediaEngineCellIds'`.
+2. List the cells: `psql "$EXOMEM_CELLCTL_DSN" -c "select cell_id from exomem_cloud_cells where desired_state <> 'deleted' order by cell_id"`.
+3. Check that the engine's list holds every cell ID from step 2. If one is missing, add it to the per-cell list first, one cell at a time, as in "Switch an engine on for a cell".
+4. Record each cell pod's start time: `kubectl get pods --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace,POD:.metadata.name,START:.status.startTime | grep '^exo-cell-' > /tmp/pods-before.txt`.
+5. Choose a time outside the nightly backup window, 02:00-05:00 UTC.
+6. Add the engine to the platform values, for example `mediaEngineFleetDefault: ["documents", "ocr"]`. Keep the per-cell lists.
+7. Deploy the platform chart through its normal release path.
+8. Repeat the command of step 4 into `/tmp/pods-after.txt`, then run `diff /tmp/pods-before.txt /tmp/pods-after.txt`. Expect no changed line: no cell restarted. A line for a cell created since step 4 is not a restart.
+9. Create a cell, or pick one created after the deploy. Run `exomem status --resources --json` in it and check that `media_engines` shows the engine as `enabled`.
+
+A misspelt engine name in the default runs nothing and shows only in the runtime log, so step 9 is the proof. If a cell restarted at step 8, step 3 missed it. That cell now runs the engine and backfills its media. Wait for the backfill, then check `media.memory_blocked_count` and `media.over_budget_count` as for any switch-on.
+
+Leave the engine's entries in `mediaEngineCellIds` after the default holds it: a later switch-off in one cell needs them.
 
 ## Memory brakes
 

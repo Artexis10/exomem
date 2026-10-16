@@ -182,6 +182,10 @@
             "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
           }
         },
+        "mediaEngineFleetDefault": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$"}
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},

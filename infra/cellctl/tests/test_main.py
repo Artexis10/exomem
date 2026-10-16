@@ -137,6 +137,20 @@ def test_a_cell_token_key_that_is_not_64_hex_fails_at_settings_load(monkeypatch,
         main.build_secrets_config()
 
 
+@pytest.mark.parametrize("fleet_default", [{}, [1], ["doc,ocr"], ["documents", "documents"]])
+def test_invalid_media_engine_fleet_default_fails_at_startup(monkeypatch, fleet_default) -> None:
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", json.dumps(fleet_default))
+    with pytest.raises(ValueError, match="fleet default"):
+        main.build_cluster_config()
+
+
+def test_a_media_engine_fleet_default_loads_as_given(monkeypatch) -> None:
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", json.dumps(["ocr", "documents"]))
+    assert main.build_cluster_config().media_engine_fleet_default == ("ocr", "documents")
+
+
 @pytest.mark.parametrize("selection", [{}, "aaaaaaaaaaaaaaaa", ["bad"], [1],
                                      ["aaaaaaaaaaaaaaaa"] * 2, ["aaaaaaaaaaaaaaaa"] * 1025])
 def test_invalid_dedicated_selection_fails_at_startup(monkeypatch, selection) -> None:

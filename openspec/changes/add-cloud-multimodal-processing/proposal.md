@@ -90,7 +90,7 @@ Invited friends write in Japanese and other languages, so these gaps are part of
 - **Capacity:** measured warm peaks per cell rise, so fewer friends fit on one node before the 20% headroom rule closes admission. Acceptance measures this before any switch is turned on.
 - **Depends on:** the `shared-model-runtime` capability of `ship-models-as-shared-onnx`, which states the shared-weights rule that the media engines follow.
 - **Tool surface:** the Cloud exclusions of `process_media` and `read_media` name a media-capable image as their lift condition. That requirement lives in the active change `adopt-exomem-cloud-plain-cells`, so any lift is amended there, not here.
-- **cellctl:** a per-engine cell-ID selection renders each engine's switch into the selected cells only. The chart-level `model_env` map applies to every cell at once, so it cannot hold a canary.
+- **cellctl:** a per-engine cell-ID selection renders each engine's switch into the selected cells only. The chart-level `model_env` map applies to every cell at once, so it cannot hold a canary. After an engine is on in every existing cell, a fleet default renders it into every cell, including cells created later.
 - **Unchanged:**
   - quotas, holds, backups and the image rollout procedure;
   - the media Markdown sidecar format, and every field search reads. Only the image vector sidecar gains a record of its vector space.
