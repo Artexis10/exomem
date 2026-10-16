@@ -9,8 +9,8 @@ watch SHALL be bounded in entries, SHALL hold no query text, path, excerpt or
 argument value, and SHALL follow the ledger's own rule that a failure in it
 never breaks or slows the call. The watch SHALL report, per tool, client and
 deep flag over a trailing window, the sample count and the p50 and p90 of
-`total_ms`, SHALL compare the p90 against a ceiling held as a provisional
-constant in one module, SHALL require a minimum sample count before reporting a
+`total_ms`, SHALL compare the p90 against a ceiling read from one packaged
+source, SHALL require a minimum sample count before reporting a
 breach, SHALL exclude samples recorded within a startup grace period from the
 verdict, and SHALL name the stage spans that dominate the calls over the
 ceiling. When a (tool, client, deep) first breaches its ceiling the watch SHALL
