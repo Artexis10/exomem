@@ -152,6 +152,38 @@ def test_record_memory_rejects_cross_action_arguments_before_defaults(
         record_memory(tmp_path, **kwargs)
 
 
+def test_record_memory_unknown_argument_refusal_lists_what_the_action_accepts(
+    tmp_path: Path,
+) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as describe:
+        record_memory(tmp_path, action="describe", collection="x")
+    with pytest.raises(OpError) as inspect:
+        record_memory(tmp_path, action="inspect", limit=5)
+
+    assert "unexpected for describe: collection" in describe.value.message
+    assert "describe allowed: none" in describe.value.message
+    assert "unexpected for inspect: limit" in inspect.value.message
+    assert "inspect allowed: collection" in inspect.value.message
+
+
+def test_record_memory_missing_argument_refusal_lists_required_arguments(
+    tmp_path: Path,
+) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    with pytest.raises(OpError) as raised:
+        record_memory(tmp_path, action="append", item={"title": "x"}, why="log it")
+
+    message = raised.value.message
+    assert "missing for append: collection" in message
+    assert "append requires: collection, why" in message
+    assert "item_key" in message.split("allowed:")[1]
+
+
 def test_record_memory_update_names_the_unexpected_argument(tmp_path: Path) -> None:
     """Twin of plan_memory's update-surplus refusal: name the offending field."""
     from exomem.cli_ops import OpError

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -432,7 +433,23 @@ def test_plan_memory_update_names_the_unexpected_argument(tmp_path: Path) -> Non
 
     assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
     assert "unexpected for update: item" in raised.value.message
+    assert "update allowed: " in raised.value.message
     assert "not allowed here" not in raised.value.message
+
+
+def test_plan_memory_argument_refusal_stays_within_the_message_cap(tmp_path: Path) -> None:
+    """The worst case sends every argument that the action does not accept."""
+    from exomem import plan_memory as planning_command
+
+    names = set(inspect.signature(planning_command.plan_memory).parameters) - {"vault_root", "action"}
+    for action in sorted(planning_command.ACTIONS):
+        surplus = names - planning_command._ACTION_FIELDS[action]
+        with pytest.raises(OpError) as raised:
+            planning_command.plan_memory(tmp_path, action, **dict.fromkeys(surplus, "x"))
+
+        size = len(raised.value.message.encode("utf-8"))
+        assert size <= 512, (action, size)
+        assert f"unexpected for {action}: " in raised.value.message
 
 
 def test_plan_memory_update_names_the_missing_argument(tmp_path: Path) -> None:
