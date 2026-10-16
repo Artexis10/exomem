@@ -7,13 +7,16 @@ import json
 import sqlite3
 from dataclasses import replace
 
-from . import index_migrations, native_identity, native_layout, tokens, typed_storage
+from . import (
+    index_migrations,
+    native_identity,
+    native_layout,
+    native_metadata,
+    tokens,
+    typed_storage,
+)
 from .native_operands import FileRole
 from .native_projections import NativeProjectionPlan
-
-
-def _raw(conn):
-    return conn.connection if isinstance(conn, index_migrations.AccountedWriter) else conn
 
 
 def _candidate(conn, cid):
@@ -117,7 +120,7 @@ def _canonical(raw, table, name, row_id):
 
 def _extent(conn, source, row_id):
     """Inspect lengths before fetching values, including the source proof's key and body."""
-    raw = _raw(conn)
+    raw = native_metadata.sqlite_connection(conn)
     with raw.blobopen("items", "item_key", row_id, readonly=True) as key, \
             raw.blobopen("items", "body", row_id, readonly=True) as body:
         size = len(key) + len(body)

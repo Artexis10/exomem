@@ -195,8 +195,8 @@ def snapshot_fields(conn, collection_id: str, generation: int, ordinals, *, data
     return {ordinal: ReadMetadata(ordinal) for ordinal in ordinals}
 
 
-def _sqlite(connection):
-    # The writer routes statements through an accounting wrapper that names its sqlite3 connection.
+def sqlite_connection(connection):
+    """The sqlite3 connection under the writer's accounting wrapper, for blob handles and identity checks."""
     return getattr(connection, "connection", connection)
 
 
@@ -214,7 +214,7 @@ class WriteScope:
 
         if not connection.in_transaction:
             raise RuntimeError("native metadata scope requires a writer transaction")
-        self._memo, self._canonical, self._sqlite = _Memo(), canonical_json, _sqlite(connection)
+        self._memo, self._canonical, self._sqlite = _Memo(), canonical_json, sqlite_connection(connection)
         self._open, self._checked = True, None
 
     def close(self) -> None:
@@ -226,7 +226,7 @@ class WriteScope:
         if not self._open or not connection.in_transaction:
             raise RuntimeError("native metadata scope outlived its writer transaction")
         if connection is not self._checked:
-            if _sqlite(connection) is not self._sqlite:
+            if sqlite_connection(connection) is not self._sqlite:
                 raise RuntimeError("native metadata scope belongs to another connection's transaction")
             self._checked = connection
         return _ScopedField(self._memo, self._canonical, connection, (collection_id, generation, ordinal))

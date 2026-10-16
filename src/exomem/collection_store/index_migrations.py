@@ -15,7 +15,7 @@ from ..query_engine.indexes import (
     require_index_dependencies,
 )
 from ..query_engine.scalars import ScalarValueError
-from . import query_freshness, rollups, typed_storage
+from . import native_metadata, query_freshness, rollups, typed_storage
 from .query_indexes import ProjectionPlan, build_projection_plan
 
 _MAX_CELL_BYTES = 256 * 1024
@@ -265,7 +265,7 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
     typed = {row["row_id"]: row["values_json"] for row in typed_storage.hydrate(conn, [
         {"row_id": row[0], "collection_id": collection_id, "encoding": row[3], "values_json": None}
         for row in rows if reads and row[3] != typed_storage.JSON_V1])}
-    raw = conn.connection if isinstance(conn, AccountedWriter) else conn
+    raw = native_metadata.sqlite_connection(conn)
     total = 0
     try:
         for row_id, key, version, _ in rows:
