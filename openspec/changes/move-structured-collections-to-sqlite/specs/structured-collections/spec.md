@@ -75,8 +75,12 @@ Index synchronization of views SHALL NOT be on the acknowledgement path. Structu
 - **THEN** no view shows the uncommitted values, and the staging file is removed by bounded crash recovery
 
 #### Scenario: File tools cannot delete a view
-- **WHEN** a file tool is asked to delete or move an item view
+- **WHEN** a file tool is asked to delete, move or restore a path that the vault's mode marker gives a store collection: a view, a folder that holds one, or a move or restore destination inside the collection
 - **THEN** it refuses with `COLLECTION_VIEW_PATH`, and the store and view are unchanged
+
+#### Scenario: File tools keep file behaviour without a marker
+- **WHEN** a vault has no mode marker and a file tool deletes, moves or restores a file, including a file collection's item
+- **THEN** the tool behaves exactly as before and opens no collection store
 
 #### Scenario: Projection resumes after a crash
 - **WHEN** the process stops after a commit but before the view is written

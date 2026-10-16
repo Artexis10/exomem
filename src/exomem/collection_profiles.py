@@ -19,6 +19,8 @@ class CollectionProfile:
     manifest_audit_property: str
     item_audit_marker: str
     activity_prefix: str
+    #: The product tool that changes this profile's items.
+    tool: str
 
 
 RECORDS_PROFILE = CollectionProfile(
@@ -30,6 +32,7 @@ RECORDS_PROFILE = CollectionProfile(
     manifest_audit_property="record_audit",
     item_audit_marker="exomem-record-audit",
     activity_prefix="Records audit-v1 ",
+    tool="record_memory",
 )
 PLANNING_PROFILE = CollectionProfile(
     name="planning",
@@ -40,6 +43,7 @@ PLANNING_PROFILE = CollectionProfile(
     manifest_audit_property="plan_audit",
     item_audit_marker="exomem-plan-audit",
     activity_prefix="Planning audit-v1 ",
+    tool="plan_memory",
 )
 PROFILES: Mapping[str, CollectionProfile] = MappingProxyType(
     {RECORDS_PROFILE.name: RECORDS_PROFILE, PLANNING_PROFILE.name: PLANNING_PROFILE}

@@ -891,7 +891,10 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 - Audit rows are redacted by the same subject rules (history pages §5; `inspect` history §7).
 
 **10. Deletion and trash.** Records and Planning have no item deletion today, and this change adds none.
-- The file tools (`delete_file`, `move_file`, `delete_directory`, `recover_from_trash`) refuse on paths that `projection_state` owns, with `COLLECTION_VIEW_PATH` and a remediation naming the collection operation.
+- The file tools (`delete_file`, `move_file`, `delete_directory`, `recover_from_trash`) refuse on paths that the vault's mode marker gives a store collection, with `COLLECTION_VIEW_PATH` and a remediation naming `record_memory` or `plan_memory`.
+  - The marker's ownership regions (manifest, source, held and history) contain every `projection_state` path. They also cover an unbound file, a folder that holds a view, and a move or restore destination inside a collection.
+  - Only the marker is read, so a vault without one opens no store and keeps its file behaviour. A marker that cannot place a path refuses it with the marker's own code.
+  - Each tool decides its withheld-as-missing check first, so a withheld view answers exactly as a missing path. The destination check runs before any destination existence check.
 - If a view is removed outside Exomem, the deletion is held as `VIEW_DELETED` and the view is re-rendered.
 - The trash never holds canonical collection data, so trash recovery has nothing to restore for collections.
 
@@ -1069,7 +1072,7 @@ Earlier, §12 assumed uniformly released collections. Two changes fix that:
   - `move_file` / `delete_file` refusal messages;
   - attention-queue and due-state entries;
   - history-page links;
-  - held-correction views;
+  - held-correction views: a hold is released no further than the existing item it would change, whatever selector withholds that item;
   - activation item anchors (for types that surface);
   - inventory counts;
   - sync-conflict copies of views.
