@@ -2308,6 +2308,7 @@ class EpistemicGraphIndex:
         if live_only and not require_current_projection:
             raise ValueError("live_only requires the current graph projection")
         if live_only:
+            # live_only is the bounded path plus stricter rules, so it never allows cold projection.
             allow_cold_projection = False
         if prove is None:
             prove = self._prove_cold_snapshots
