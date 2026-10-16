@@ -690,10 +690,6 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
         fence_client=fence_client))
 
 
-#: The closed steps of `exomem collections migrate`, as its mutually exclusive flags name them.
-MIGRATE_STEPS = ("dry-run", "prepare", "apply")
-
-
 def migrate_route(vault_root, *, step):
     """The owner's route behind `exomem collections migrate` (P1b.3b, design §10 and A11).
 
@@ -703,8 +699,6 @@ def migrate_route(vault_root, *, step):
     offline create does, so it may make the coordinator's first store fence cut; it hands
     the lease back with the flushed head.
     """
-    if step not in MIGRATE_STEPS:
-        raise ValueError(f"migrate step must be one of {', '.join(MIGRATE_STEPS)}")
     require_owner(vault_root, "migrate")
     capability.require_collections_migrate()  # before any lease, fence or operator credential
     from . import migration
@@ -714,7 +708,9 @@ def migrate_route(vault_root, *, step):
         return migration.dry_run(root)
     if step == "prepare":
         return migration.prepare(root)
-    return _offline_owner(root, "migrate", migration.cutover)
+    if step == "apply":
+        return _offline_owner(root, "migrate", migration.cutover)
+    raise ValueError("migrate step must be dry-run, prepare or apply")
 
 
 def require_summary_manifest(root, manifest_path, manifest_text):
