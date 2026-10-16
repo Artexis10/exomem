@@ -1125,24 +1125,7 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
-        current = self.pages.get(state.path)
-        if current is not None and (
-            current.title,
-            current.identity_kind,
-            current.identity,
-            current.page_type,
-            current.projects,
-            current.language_registry_hash,
-            current.relation_registry_hash,
-        ) == (
-            state.title,
-            state.identity_kind,
-            state.identity,
-            state.page_type,
-            state.projects,
-            state.language_registry_hash,
-            state.relation_registry_hash,
-        ):
+        if _stable_topology_replacement(self, state):
             return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
@@ -2431,7 +2414,8 @@ def _reconcile_markdown_delta(
     validation types instead of blessing partial state.
     """
     states = dict(context.pages)
-    identities = {entry.path: entry for entry in context.identity_census.entries}
+    previous_identities = {entry.path: entry for entry in context.identity_census.entries}
+    identities = dict(previous_identities)
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     for rel_path in changed_paths:
         source_path = root / rel_path
@@ -2469,6 +2453,19 @@ def _reconcile_markdown_delta(
             identities[rel_path] = StableIdentityCensus.from_states((state,)).entries[0]
         else:
             identities.pop(rel_path, None)
+
+    # A governed commit, and most watcher events, edit one page in place. When
+    # its title, identity and registries hold, the resolver and every other
+    # page's facts still hold, so re-derive that page alone, not the corpus.
+    if len(changed_paths) == 1:
+        rel_path = changed_paths[0]
+        state = states.get(rel_path)
+        if (
+            state is not None
+            and identities.get(rel_path) == previous_identities.get(rel_path)
+            and _stable_topology_replacement(context, state)
+        ):
+            return _context_with_stable_topology_candidate(context, state)
 
     return _context_from_state_map(
         root,
@@ -3554,6 +3551,45 @@ def _context_from_state_map(
         resolver=resolver,
         facts=facts,
         writer_visibility=writer_visibility,
+    )
+
+
+def _stable_topology_replacement(
+    context: SemanticCorpusContext, state: SemanticPageState
+) -> bool:
+    """Whether `state` can replace its page without re-deriving any other page's facts.
+
+    Relation fact identities count occurrences per authored identity across the
+    whole corpus, so a page that shares its `exomem_id` with another page is
+    never re-derived alone.
+    """
+    current = context.pages.get(state.path)
+    if current is None:
+        return False
+    # The same page set the occurrence count runs over, not the KB-only census.
+    if state.identity_kind == "exomem_id" and any(
+        page.identity_kind == "exomem_id"
+        and page.identity == state.identity
+        and page.path != state.path
+        for page in context.pages.values()
+    ):
+        return False
+    return (
+        current.title,
+        current.identity_kind,
+        current.identity,
+        current.page_type,
+        current.projects,
+        current.language_registry_hash,
+        current.relation_registry_hash,
+    ) == (
+        state.title,
+        state.identity_kind,
+        state.identity,
+        state.page_type,
+        state.projects,
+        state.language_registry_hash,
+        state.relation_registry_hash,
     )
 
 
