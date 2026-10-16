@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1003,6 +1004,126 @@ def test_the_resave_helper_reports_any_change_to_the_server_token(tmp_path: Path
         assert result.returncode != 0 and "refused" in result.stderr and not ran.exists()
 
 
+# Plays `k3s certificate rotate-ca`: records its arguments and a copy of the
+# staged pair, file times included, and exits with the status in exit-status.
+_ROTATE_CA_K3S = r"""#!/usr/bin/env python3
+import json, shutil, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[1:]
+stage = next(arg for arg in args if arg.startswith("--path=")).removeprefix("--path=")
+shutil.copytree(Path(stage) / "tls", here / "staged")
+(here / "rotate-ca.json").write_text(json.dumps(args))
+sys.exit(int((here / "exit-status").read_text()))
+"""
+
+
+def _openssl(*args: str) -> str:
+    return subprocess.run(["openssl", *args], check=True, capture_output=True, text=True).stdout
+
+
+def _invented_ca(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(directory / "client-ca.key"))
+    _openssl("req", "-x509", "-new", "-days", "1", "-subj", f"/CN={name}", "-key", str(directory / "client-ca.key"),
+             "-out", str(directory / "client-ca.crt"))
+
+
+def _client_ca_helper(tmp_path: Path, exit_status: int = 0) -> tuple[Path, Path, list[str]]:
+    """The role's client-CA helper pointed at tmp_path/server, and a PATH whose k3s is the stand-in."""
+    server, bin_dir = tmp_path / "server", tmp_path / "bin"
+    _invented_ca(server / "tls", "invented-live-client-ca")
+    bin_dir.mkdir()
+    (bin_dir / "k3s").write_text(_ROTATE_CA_K3S)
+    (bin_dir / "k3s").chmod(0o755)
+    (bin_dir / "exit-status").write_text(str(exit_status))
+    helper = tmp_path / "helper.sh"
+    helper.write_text(_read(K3S_ROLE / "files/exomem-k3s-rotate-client-ca.sh").replace(
+        "/var/lib/rancher/k3s/server", str(server)))
+    return server, bin_dir, ["sh", str(helper)]
+
+
+def test_the_client_ca_helper_loads_a_new_ca_and_keeps_the_one_it_replaces(tmp_path: Path) -> None:
+    # rotate-ca --force skips K3s's own checks: a staged key that does not
+    # match, or a certificate that is not a CA, would leave a server that signs
+    # client certificates nothing accepts. The kept pair is the undo.
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+
+    result = subprocess.run(helper, capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode == 0, result.stderr
+    args = json.loads((bin_dir / "rotate-ca.json").read_text())
+    assert args[:2] == ["certificate", "rotate-ca"] and args[3:] == ["--force"]
+    staged = bin_dir / "staged"
+    assert sorted(path.name for path in staged.iterdir()) == ["client-ca.crt", "client-ca.key"]
+    assert (_openssl("x509", "-noout", "-pubkey", "-in", str(staged / "client-ca.crt"))
+            == _openssl("pkey", "-pubout", "-in", str(staged / "client-ca.key")))
+    assert "CA:TRUE" in _openssl("x509", "-noout", "-ext", "basicConstraints", "-in", str(staged / "client-ca.crt"))
+    new = _openssl("x509", "-noout", "-fingerprint", "-sha256", "-in", str(staged / "client-ca.crt")).split("=")[1]
+    assert f"new client CA: {new}" in result.stdout
+    [kept] = server.glob("client-ca-before-*")
+    for name in ("client-ca.crt", "client-ca.key"):
+        assert (kept / name).read_bytes() == (server / "tls" / name).read_bytes()
+    # The staged key goes with the run.
+    assert not list(server.glob("rotate-client-ca.*"))
+
+
+def test_the_client_ca_helper_undoes_a_rotation_with_files_newer_than_the_disk(tmp_path: Path) -> None:
+    # At start K3s stops on a file on disk newer than its datastore copy. A
+    # kept pair loaded with its old times would stop the restarted server.
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+    kept = server / "client-ca-before-20260101T000000Z"
+    _invented_ca(kept, "invented-earlier-client-ca")
+    for name in ("client-ca.crt", "client-ca.key"):
+        os.utime(kept / name, (1_700_000_000, 1_700_000_000))
+
+    result = subprocess.run([*helper, "--restore", str(kept)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode == 0, result.stderr
+    for name in ("client-ca.crt", "client-ca.key"):
+        staged = bin_dir / "staged" / name
+        assert staged.read_bytes() == (kept / name).read_bytes()
+        assert staged.stat().st_mtime >= (server / "tls" / name).stat().st_mtime
+
+
+@pytest.mark.parametrize(("pair", "refusal"), [
+    ("mismatched", "key does not match its certificate"),
+    ("live", "already uses this client CA"),
+])
+def test_the_client_ca_helper_refuses_a_pair_k3s_would_take_under_force(
+    tmp_path: Path, pair: str, refusal: str
+) -> None:
+    server, bin_dir, helper = _client_ca_helper(tmp_path)
+    restore = tmp_path / "restore"
+    if pair == "live":
+        shutil.copytree(server / "tls", restore)
+    else:
+        _invented_ca(restore, "invented-client-ca")
+        _invented_ca(tmp_path / "other", "invented-other-client-ca")
+        shutil.copy(tmp_path / "other" / "client-ca.key", restore / "client-ca.key")
+
+    result = subprocess.run([*helper, "--restore", str(restore)], capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode != 0 and refusal in result.stderr, result.stderr
+    assert not (bin_dir / "rotate-ca.json").exists()
+
+
+def test_the_client_ca_helper_keeps_no_copy_when_k3s_refuses_the_rotation(tmp_path: Path) -> None:
+    # The cluster keeps its CA, so a kept copy would be one more copy of a live key.
+    server, bin_dir, helper = _client_ca_helper(tmp_path, exit_status=1)
+
+    result = subprocess.run(helper, capture_output=True, text=True,
+                            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    assert result.returncode != 0 and "keeps its client CA" in result.stderr
+    assert not list(server.glob("client-ca-before-*"))
+    assert not list(server.glob("rotate-client-ca.*"))
+
+
 @pytest.mark.parametrize(
     "device,subnet_env,passes",
     [
@@ -1216,6 +1337,72 @@ def test_the_removal_preflight_runs_alone_and_changes_nothing(tmp_path: Path) ->
         "Refuse unless the cells fit the remaining nodes",
     ]
 
+
+# Answers the removal playbook's reads from a scenario, logs every call, and
+# refuses anything but `kubectl get`.
+_READ_ONLY_K3S = r"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+
+here = Path(__file__).parent
+args = sys.argv[1:]
+with (here / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+if args[:2] != ["kubectl", "get"]:
+    sys.exit("refused: the preflight may only read")
+scenario = json.loads((here / "scenario.json").read_text())
+print(json.dumps(scenario["node"] if args[2] == "node" else {"items": scenario[args[2]]}))
+"""
+
+
+@pytest.mark.parametrize(("free_gib", "outcome"), [
+    (100, "moving cells fit the remaining nodes' local pools"),
+    (10, "leaves no remaining node with room for the local volume"),
+], ids=["fits", "no-room"])
+def test_the_removal_preflight_refuses_on_its_own_and_only_reads(tmp_path: Path, free_gib: int, outcome: str) -> None:
+    # The operator runs `--tags preflight` alone to check room before moving
+    # cells by hand. The room check sits in an included task file, which runs
+    # under the tag only through the include's `apply`; without it, this run
+    # would skip the check and pass.
+    if ANSIBLE_PLAYBOOK is None:
+        pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
+    k3s = tmp_path / "k3s"
+    k3s.write_text(_READ_ONLY_K3S)
+    k3s.chmod(0o755)
+    target = {"metadata": {"name": "exomem-agent-01", "labels": {"exomem.io/node-pool": "agent"}}, "spec": {},
+              "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    spare = {"metadata": {"name": "exomem-agent-02", "labels": {"exomem.io/node-pool": "agent"},
+                          "annotations": {"capacity.topolvm.io/thin": str(free_gib * 1024**3)}},
+             "spec": {}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    (tmp_path / "scenario.json").write_text(json.dumps({
+        "node": target, "nodes": [target, spare], "csinodes": [], "volumeattachments": [],
+        "persistentvolumes": [_local_volume("a" * 16, "exomem-agent-01", "Bound")],
+        "persistentvolumeclaims": [{"metadata": {"namespace": f"exo-cell-{'a' * 16}", "name": "cell-data"},
+                                    "spec": {"storageClassName": "exomem-cloud-local",
+                                             "resources": {"requests": {"storage": "4Gi"}}}}],
+        "statefulsets": [],
+        "storageclasses": [{"metadata": {"name": "exomem-cloud-local"}, "provisioner": "topolvm.io"}],
+    }))
+    playbook = tmp_path / "remove-agent.yml"
+    playbook.write_text(_read(ANSIBLE / "remove-agent.yml").replace("/usr/local/bin/k3s", str(k3s)))
+    local = {"ansible_connection": "local", "ansible_python_interpreter": "{{ ansible_playbook_python }}"}
+    inventory = tmp_path / "inventory.yml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {"hosted_nodes": {
+        "hosts": {"server": local}, "children": {"k3s_agents": {"hosts": {"exomem-agent-01": local}}}}}}}))
+
+    result = subprocess.run(
+        [str(ANSIBLE_PLAYBOOK), "--tags", "preflight", "-i", str(inventory), str(playbook),
+         "-e", "k3s_remove_node=exomem-agent-01", "-e", "ansible_become=false"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env={**os.environ, "ANSIBLE_ROLES_PATH": str(ANSIBLE / "roles")},
+    )
+
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert all(call[:2] == ["kubectl", "get"] for call in calls), calls
+    assert outcome in result.stdout, result.stdout + result.stderr
+    assert (result.returncode == 0) == (outcome.startswith("moving")), result.stdout + result.stderr
+
+
 def test_remove_stop_kills_containers_unmounts_and_closes_volume_mappings() -> None:
     stop = _read(K3S_ROLE / "tasks/remove_stop.yml")
     defaults = _read(K3S_ROLE / "defaults/main.yml")
@@ -1390,26 +1577,30 @@ def _local_volume(cell: str, node: str, phase: str) -> dict:
             "status": {"phase": phase}}
 
 
-@pytest.mark.parametrize(("hold_on", "volume_phase", "target_ready", "refusal", "moves"), [
+@pytest.mark.parametrize(("hold_on", "hold", "volume_phase", "target_ready", "refusal", "moves"), [
     # An hourly backup on another node's cell no longer blocks the removal...
-    ("shared", "Bound", "True", None, []),
+    ("shared", "snapshot-backup", "Bound", "True", None, []),
     # ...one on a cell whose live volume is on the target still does...
-    ("target", "Bound", "True", "maintenance is in flight", None),
+    ("target", "snapshot-backup", "Bound", "True", "maintenance is in flight", None),
     # ...but not one on a cell moved off the target before the removal, which
     # left only its retained volume there and backs up on its new node.
-    ("target", "Released", "True", None, []),
+    ("target", "snapshot-backup", "Released", "True", None, []),
+    # A move or relocation still restoring after it released its old volume
+    # may yet need that volume, which the removal destroys.
+    ("target", "restore", "Released", "True", "maintenance is in flight", None),
     # A cell still living on the target moves off it before the node goes:
     # deleting the Node would relocate it from its last backup.
-    (None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
+    (None, None, "Bound", "True", None, ["exo-cell-aaaaaaaaaaaaaaaa"]),
     # A target that is not Ready cannot take the move's stopped backup.
-    (None, "Bound", "Unknown", "is not Ready", None),
+    (None, None, "Bound", "Unknown", "is not Ready", None),
     # A volume a relocation or a move retained holds no live cell.
-    (None, "Released", "True", None, []),
-], ids=["hold-elsewhere", "hold-on-target", "hold-on-a-cell-moved-off-the-target", "live-volume-on-target",
+    (None, None, "Released", "True", None, []),
+], ids=["hold-elsewhere", "hold-on-target", "hourly-backup-of-a-cell-moved-off-the-target",
+        "restore-of-a-cell-that-released-its-volume-on-the-target", "live-volume-on-target",
         "live-volume-on-a-target-not-ready", "retained-volume-on-target"])
 def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
-    tmp_path: Path, hold_on: str | None, volume_phase: str, target_ready: str, refusal: str | None,
-    moves: list[str] | None,
+    tmp_path: Path, hold_on: str | None, hold: str | None, volume_phase: str, target_ready: str,
+    refusal: str | None, moves: list[str] | None,
 ) -> None:
     if ANSIBLE_PLAYBOOK is None:
         pytest.skip("set ANSIBLE_PLAYBOOK_BIN for local role execution")
@@ -1422,13 +1613,14 @@ def test_removal_refuses_only_for_cells_whose_volume_is_on_the_target(
     claims = [{"metadata": {"namespace": f"exo-cell-{held}", "name": "cell-data"},
                "spec": {"storageClassName": "exomem-cloud-local", "resources": {"requests": {"storage": "4Gi"}}}}]
     statefulsets = [] if hold_on is None else [{
-        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": "snapshot-backup"}},
+        "metadata": {"namespace": f"exo-cell-{held}", "annotations": {"exomem.io/hold": hold}},
         "spec": {"replicas": 1, "template": {"spec": {}}},
     }]
     variables = {
         "k3s_remove_node": "target", "k3s_cell_namespace_prefix": "exo-cell-",
         "k3s_csi_driver": "csi.hetzner.cloud", "k3s_remove_headroom": 5,
         "k3s_local_storage_driver": "topolvm.io", "k3s_local_storage_topology_key": "topology.topolvm.io/node",
+        "k3s_snapshot_backup_hold": _yaml(K3S_ROLE / "defaults/main.yml")["k3s_snapshot_backup_hold"],
         "k3s_remove_nodes_doc": {"items": nodes},
         "k3s_remove_csinodes_doc": {"items": [{"metadata": {"name": n["metadata"]["name"]},
             "spec": {"drivers": [{"name": "csi.hetzner.cloud", "allocatable": {"count": 16}}]}}

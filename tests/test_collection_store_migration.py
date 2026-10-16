@@ -119,8 +119,8 @@ REPRESENTATION = ("item_version", "inferred")
 
 def rows(root, collection):
     """Each row's content by its key, as the dispatcher answers a query through its profile's tool."""
-    tool = "plan_memory" if collection == PLANNING else "record_memory"
-    return {row["record_id"]: {name: value for name, value in row.items() if name not in REPRESENTATION}
+    tool, identity = ("plan_memory", "plan_id") if collection == PLANNING else ("record_memory", "record_id")
+    return {row[identity]: {name: value for name, value in row.items() if name not in REPRESENTATION}
             for row in call(root, tool, action="query", collection=collection)["rows"]}
 
 

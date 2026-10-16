@@ -204,6 +204,8 @@ spec:
               value: {{ .Values.cellctl.dedicatedCellIds | toJson | quote }}
             - name: CELLCTL_MEDIA_ENGINE_CELL_IDS
               value: {{ .Values.cellctl.mediaEngineCellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT
+              value: {{ .Values.cellctl.mediaEngineFleetDefault | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
               value: INFO
             - name: CELLCTL_HEARTBEAT_PATH

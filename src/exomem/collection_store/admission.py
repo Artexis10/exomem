@@ -413,6 +413,8 @@ def rollback_slice(session, manager):
                 raise connection.busy("the live store is still borrowed")
             with session.writer(token) as writer:
                 intent = authority.pending_create(writer.connection)
+                if intent is not None and intent["kind"] == authority.EXPORT:
+                    raise export_pending()
                 if intent is not None:
                     # Reject unestablished custody; a false refusal delays the owner's
                     # narrowing operation, but cannot authorize a first cutover.
@@ -723,6 +725,36 @@ def migrate_route(vault_root, *, step):
     raise ValueError("migrate step must be dry-run, prepare or apply")
 
 
+def export_route(vault_root, *, plan_id=None, why=None, retire_local=False):
+    """The owner's route behind `exomem collections export` and its maintain_memory mode (P1b.4).
+
+    Without ``plan_id`` it previews, read-only and without the lease. Applying runs only
+    offline: with the service stopped, in its own producer session under the
+    configured lease and the operator credential, as the offline migrate does, so it may
+    retire the coordinator's store fence. A process that serves the vault refuses it.
+    ``retire_local`` is the step for every other host once the exported vault reached it.
+    """
+    require_owner(vault_root, "export")
+    from . import export
+
+    root = Path(vault_root).resolve()
+    if retire_local:
+        # Reading the fence needs only the writer credential, and the step changes this host alone.
+        return _offline_owner(root, "export", export.retire_local, operator=False)
+    if plan_id is None:
+        return export.preview(root)
+    from .runtime import served
+
+    if served(root):
+        # Retiring the fence revokes the lease this service writes under.
+        raise CollectionStoreError(
+            "COLLECTION_STORE_SERVICE_ACTIVE",
+            "an export applies only offline: stop the service, then run `exomem collections export --plan-id ID "
+            "--why REASON` with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+    return _offline_owner(root, "export", lambda session, manager, fence_client: export.apply(
+        session, manager, fence_client, plan_id=plan_id, why=why))
+
+
 def require_summary_manifest(root, manifest_path, manifest_text):
     """Refuse a production store create whose manifest is not a summary collection (S1).
 
@@ -758,14 +790,24 @@ def migration_pending():
         "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`")
 
 
+def export_pending():
+    """The refusal for a store an unfinished reverse export owns: only the owner's export finishes it."""
+    return CollectionStoreError(
+        takeover.EXPORTING,
+        "an unfinished export to files owns this store; finish it with `exomem collections export --plan-id ID "
+        "--why REASON`, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
+
+
 def _require_no_pending_migration(root):
-    """Refuse an owner step on a store an unfinished migration owns, at its preview as at its apply."""
+    """Refuse an owner step on a store an unfinished migration or export owns, at its preview as at its apply."""
     path = connection.store_path(root)
     if path.exists():
         with closing(connection.open_reader(path)) as reader:
             intent = authority.pending_create(reader)
         if intent is not None and intent["kind"] == authority.MIGRATE:
             raise migration_pending()
+        if intent is not None and intent["kind"] == authority.EXPORT:
+            raise export_pending()
 
 
 def adoption_required():
@@ -804,16 +846,18 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work):
-    """Run ``work(session, manager, operator_client)`` as the owner's offline store step.
+def _offline_owner(root, operation, work, *, operator=True):
+    """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
-    lease, which it hands back with the flushed head.
+    lease, which it hands back with the flushed head. ``operator=False`` is for a step
+    that only reads the fence: its client carries the writer credential, not the operator's.
     """
-    fence_client = writer_lease.configured_schema_fence_operator_client()
+    config = writer_lease.LeaseConfig.from_env()
+    fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
+                    else writer_lease.LeaseCoordinatorClient(config) if config.enabled else None)
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
-    config = writer_lease.LeaseConfig.from_env()
     _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.
@@ -895,6 +939,8 @@ def _routed_store(session):
                     raise connection.busy("a collection create is still publishing; retry shortly")
                 if intent["kind"] == authority.MIGRATE:
                     raise migration_pending()
+                if intent["kind"] == authority.EXPORT:
+                    raise export_pending()
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
@@ -978,6 +1024,8 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
     if session.path.exists():
         with closing(connection.open_reader(session.path)) as reader:
             intent = authority.pending_create(reader)
+    if intent is not None and intent["kind"] == authority.EXPORT:
+        raise export_pending()
     if session.production:
         if intent is not None and intent["kind"] == authority.MIGRATE:
             capability.require_collections_migrate()

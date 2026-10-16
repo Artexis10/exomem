@@ -2,6 +2,9 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": ["platformJobs", "scheduler", "observability"],
+  "$defs": {
+    "mediaEngineName": {"enum": ["documents", "ocr", "speech"]}
+  },
   "allOf": [{"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}}],
   "properties": {
     "runtime": false,
@@ -176,11 +179,15 @@
         },
         "mediaEngineCellIds": {
           "type": "object",
-          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+          "propertyNames": {"$ref": "#/$defs/mediaEngineName"},
           "additionalProperties": {
             "type": "array", "maxItems": 1024, "uniqueItems": true,
             "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
           }
+        },
+        "mediaEngineFleetDefault": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/mediaEngineName"}
         },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},

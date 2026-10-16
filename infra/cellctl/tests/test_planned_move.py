@@ -260,6 +260,19 @@ def test_the_removal_playbook_sets_the_mark_cellctl_reads() -> None:
     assert client.observe(CELL_ID, NAMESPACE).namespace_move_volume == "vol-1"
 
 
+def test_the_removal_playbook_names_the_hourly_backup_hold_as_cellctl_does() -> None:
+    # The removal ignores only this hold on a cell that left nothing but a
+    # retained volume on the agent. A copy that drifts makes it ignore a
+    # restore that may still need that volume, or refuse over hourly backups.
+    from pathlib import Path
+
+    from cellctl.state import SNAPSHOT_BACKUP
+
+    defaults = yaml.safe_load((Path(__file__).parents[3] / "infra/ansible/roles/k3s/defaults/main.yml").read_text())
+
+    assert defaults["k3s_snapshot_backup_hold"] == SNAPSHOT_BACKUP
+
+
 def test_the_removal_playbook_reserves_what_cellctl_reserves() -> None:
     # The playbook applies capacity.pool_takes from its own copy of the
     # reserve's inputs. A copy that drifts below the chart's lets a removal

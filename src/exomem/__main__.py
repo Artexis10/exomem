@@ -2248,7 +2248,24 @@ def _collections_main(argv: list[str]) -> int:
         "--apply", action="store_true",
         help="migrate, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
     )
-    for command in (backup, adopt, create, rollback, migrate):
+    export = subcommands.add_parser(
+        "export",
+        help="return this vault's store collections to file-canonical files, then retire the store; "
+        "preview first",
+    )
+    export_step = export.add_mutually_exclusive_group(required=True)
+    export_step.add_argument("--dry-run", action="store_true", help="preview the export; writes nothing")
+    export_step.add_argument(
+        "--plan-id",
+        help="apply exactly the preview with this identity, with the service stopped and "
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    export_step.add_argument(
+        "--retire-local", action="store_true",
+        help="on another host, once the exported vault reached it: retire this host's stale store",
+    )
+    export.add_argument("--why", help="reason recorded with each collection's checkpoint (required with --plan-id)")
+    for command in (backup, adopt, create, rollback, migrate, export):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2286,6 +2303,16 @@ def _collections_main(argv: list[str]) -> int:
             # to migrate (none left, or none at all) exits 0, so the script stays idempotent.
             if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"
                                                       and result.get("verdict") != "nothing_to_migrate"):
+                return 1
+        elif args.command == "export":
+            if args.plan_id is not None and not args.why:
+                print("collections export: --plan-id needs --why", file=sys.stderr)
+                return 2
+            with library_scope():
+                result = admission.export_route(Path(args.vault), plan_id=args.plan_id, why=args.why,
+                                                retire_local=args.retire_local)
+            print(json.dumps(result, sort_keys=True))
+            if result.get("verdict") == "blocked":
                 return 1
         elif args.command == "create":
             import hashlib
