@@ -358,12 +358,14 @@ def leaf_contract_code(exc: BaseException) -> str | None:
     ability to see anything other than a code — every exception must map to
     *some* code, so `error_dict` accepts a small amount of misattribution
     risk (see below) in exchange for never leaving a request unanswered.
-    This function feeds the mutation journal instead, whose entire job is
+    This function feeds the mutation journal, whose entire job is
     separating genuine refusals from genuine bugs — a code that looks
     like a refusal but was actually produced by a bug is worse here than a
     class name that's merely uninformative, because it hides the bug inside
-    what reads as normal traffic. So where the two intentionally diverge,
-    this function is the more conservative one:
+    what reads as normal traffic. Through `public_refusal` it also decides
+    whether MCP answers an exception with the error envelope or lets it
+    raise as a fault. So where the two intentionally diverge, this function
+    is the more conservative one:
 
     1. The semantic chain walk uses `_semantic_validation_error_dict_cause_only`
        (walks `exc.__cause__` only), NOT `error_dict`'s
@@ -437,6 +439,22 @@ def leaf_contract_code(exc: BaseException) -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+def public_refusal(exc: Exception) -> dict[str, Any] | None:
+    """Return the public error block for a coded refusal, or `None` for a fault.
+
+    A refusal is an `OpError`, a semantic refusal on the exception chain, or an
+    exception that `leaf_contract_code` finds a code on: a public-dict carrier
+    such as a committed batch failure, or the "CODE: reason" convention. The
+    block is the one `error_dict` builds, so it reads the same on every facade.
+    An exception without a code is a fault and returns `None`.
+    """
+    if isinstance(exc, OpError):
+        return exc.as_public_dict()
+    if semantic_validation_error_dict(exc) is None and leaf_contract_code(exc) is None:
+        return None
+    return error_dict(exc)
 
 
 def http_status_for(code: str) -> int:

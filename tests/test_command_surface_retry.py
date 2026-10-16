@@ -1213,6 +1213,26 @@ def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
         bound()
 
 
+def test_bound_mcp_tool_keeps_lost_authority_a_native_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The error carries a public dict, yet it must not become a coded refusal."""
+    from exomem.governance.authorization_request import AuthorizationContextUnavailable
+
+    def leaf(vault):  # noqa: ANN001, ARG001
+        raise AssertionError("invoke seam should replace the leaf")
+
+    command = SimpleNamespace(name="mutate", leaf=leaf, read_only=False)
+    bound = command_surface.bind_vault(leaf, object(), command=command)
+    monkeypatch.setattr(
+        "exomem.writer_lease.invoke_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AuthorizationContextUnavailable()),
+    )
+
+    with pytest.raises(AuthorizationContextUnavailable):
+        bound()
+
+
 def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1370,17 +1390,15 @@ def test_bound_mcp_committed_failure_replays_sanitized_without_second_leaf_call(
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "session:one")
     bound = command_surface.bind_vault(leaf, object(), command=command)
 
-    with pytest.raises(vault_module.BatchWriteError) as first:
-        bound()
-    with pytest.raises(ValueError) as replay:
-        bound()
+    first = bound()
+    replay = bound()
 
-    assert first.value.as_public_dict() == original.as_public_dict()
-    assert replay.value.as_public_dict() == original.as_public_dict()
-    assert str(first.value) == str(replay.value)
+    assert first == {"success": False, "error": original.as_public_dict()}
+    assert first["error"]["code"] == "BATCH_CLEANUP_INCOMPLETE"
+    assert first["error"]["outcome"]["committed"] is True
+    assert replay == first
     for secret in (str(tmp_path), ".exomem-batch-", "stage-0.tmp", "low-level detail"):
-        assert secret not in str(first.value)
-        assert secret not in str(replay.value)
+        assert secret not in json.dumps(first)
     assert calls == 1
 
 

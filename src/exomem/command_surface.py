@@ -567,38 +567,28 @@ def bind_vault(
                 from . import cli_ops
 
                 duration_ms = round((time.perf_counter() - t0) * 1000, 2)
-                if isinstance(error, cli_ops.OpError):
-                    _log_tool_failure(
-                        tool=tool_name,
-                        request_id=request_id,
-                        code=error.code,
-                        duration_ms=duration_ms,
-                        message=error.message,
-                        retry_scope=retry_scope,
-                    )
-                    return cli_ops.envelope(False, error=error.as_public_dict())
-                semantic_error = cli_ops.semantic_validation_error_dict(error)
-                if (
-                    semantic_error is None
-                    and cli_ops.leaf_contract_code(error)
-                    and not hasattr(error, "as_public_dict")
+                if isinstance(
+                    error,
+                    (
+                        authorization_request.AuthorizationContextUnavailable,
+                        authorization_request.AuthorizationRouteUnclassified,
+                    ),
                 ):
-                    # A leaf refusal re-wrapped as "CODE: reason" is a coded
-                    # domain answer, not a fault; answer with the same envelope.
-                    # An error that carries its own public payload (a committed
-                    # batch failure) keeps the raise path the replay ledger needs.
-                    semantic_error = cli_ops.error_dict(error)
-                if semantic_error is None:
+                    # Lost authority answers with the content-free native tool
+                    # error that the authorization middleware also raises.
+                    raise
+                refusal = cli_ops.public_refusal(error)
+                if refusal is None:
                     raise
                 _log_tool_failure(
                     tool=tool_name,
                     request_id=request_id,
-                    code=str(semantic_error.get("code") or "OP_ERROR"),
+                    code=str(refusal.get("code") or "OP_ERROR"),
                     duration_ms=duration_ms,
-                    message=str(semantic_error.get("message") or ""),
+                    message=str(refusal.get("message") or ""),
                     retry_scope=retry_scope,
                 )
-                return cli_ops.envelope(False, error=semantic_error)
+                return cli_ops.envelope(False, error=refusal)
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__
