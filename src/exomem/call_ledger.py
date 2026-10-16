@@ -67,7 +67,8 @@ from typing import Any
 
 #: Version 2 adds the content-free `access` and `item_count`. A version 1 row
 #: lacks both; every reader treats them as unknown there, and `verify` re-hashes
-#: each row as stored, so v1 rows keep verifying.
+#: each row as stored, so v1 rows keep verifying. Optional `app_id` is additive
+#: within version 2; older rows stay byte-exact and verify without that field.
 SCHEMA_VERSION = 2
 
 #: The earliest moment this process could have recorded a row: before it, the
@@ -419,6 +420,7 @@ def build_row(
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
     principal_kind: str | None = None,
+    app_id: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -432,6 +434,7 @@ def build_row(
     released_items: int | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
+    from .cloud_cell import canonical_app_id
     from .privacy_log import log_client_label, log_client_version, log_session_ref
 
     # Caller-chosen header and handshake text: bounded under content-private
@@ -451,6 +454,9 @@ def build_row(
         "session_id": _clip(session_id) if session_id else None,
         "client_name": _clip(client_name) if client_name else None,
         "client_version": _clip(client_version) if client_version else None,
+        # A content-free gateway grant UUID survives content-private logging.
+        # It identifies an actor for the owner and grants no authority.
+        "app_id": canonical_app_id(app_id),
         "transport": _clip(transport) if transport else None,
         "caller_principal_hash": _clip(caller_principal_hash)
         if caller_principal_hash
@@ -715,6 +721,7 @@ def record_call(
     arguments: dict[str, Any] | None = None,
     caller_principal_hash: str | None = None,
     principal_kind: str | None = None,
+    app_id: str | None = None,
     client_name: str | None = None,
     client_version: str | None = None,
     transport: str | None = None,
@@ -755,6 +762,7 @@ def record_call(
                 arguments=arguments,
                 caller_principal_hash=caller_principal_hash,
                 principal_kind=principal_kind,
+                app_id=app_id,
                 client_name=client_name,
                 client_version=client_version,
                 transport=transport,

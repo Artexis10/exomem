@@ -807,9 +807,10 @@ def served_create(vault_root, arguments):
         raise connection.CollectionStoreError(
             "COLLECTION_STORE_UNAVAILABLE", "only the service serving this vault creates a summary collection")
     session = server.session
-    if not session.fence_client.collection_store_fence().enrolled:
-        # Served, so this vault's store was enrolled: a coordinator that no longer knows it was replaced.
-        raise admission.adoption_required()
+    fence = session.fence_client.collection_store_fence()
+    if not fence.enrolled:
+        # Served, so this vault's store was enrolled: its coordinator was replaced, or retired the fence.
+        raise admission.unenrolled(fence)
     with server.lent() as lend:
         result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
@@ -991,10 +992,12 @@ class StoreServer:
             if fence_client is None:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
-            if not fence_client.collection_store_fence().enrolled:
+            fence = fence_client.collection_store_fence()
+            if not fence.enrolled:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the
                 # fence cut is the owner's offline step, which the writer credential cannot make.
-                raise admission.adoption_required()
+                # A retired fence means this host's marker predates the vault's export to files.
+                raise admission.unenrolled(fence)
             # A create left pending before a restart: its requests are busy, not missing.
             self.pending_create = _durable_create(self.root)
             try:

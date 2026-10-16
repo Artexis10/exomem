@@ -1,8 +1,8 @@
 """Recent assistant activity and the note count, for the owner's settings view.
 
 Served as `bootstrap(section="activity")`. Everything comes from content-free
-sources: the call ledger (client family, command, access, counts, times) and
-the count of saved pages. Unknown is a visible state: an event's `items` and
+sources: the call ledger (actor ID, client family, command, access, counts,
+times) and the count of saved pages. Unknown is a visible state: an event's `items` and
 `note_count` are null when not known, never zero, and `since` is the moment
 from which the event list accounts for every call. It never covers a row the
 reader could not read or the list could not show.
@@ -102,7 +102,7 @@ def _events(
 
     registry = {command.name: command for command in commands.PRODUCT_COMMANDS}
     listing = _Listing()
-    read: list[tuple[dt.datetime, tuple[str | None, str] | None, int | None]] = []
+    read: list[tuple[dt.datetime, tuple[str | None, str | None, str] | None, int | None]] = []
     boundary: dt.datetime | None = None
     newer: dict[str, Any] | None = None
     for line in lines:
@@ -136,7 +136,7 @@ def _events(
 
 
 def _interval(
-    read: list[tuple[dt.datetime, tuple[str | None, str] | None, int | None]],
+    read: list[tuple[dt.datetime, tuple[str | None, str | None, str] | None, int | None]],
     boundary: dt.datetime | None,
 ) -> tuple[dt.datetime, list[dict[str, Any]]]:
     """`since` and the events over the rows strictly later than the boundary.
@@ -174,14 +174,18 @@ def _intact(row: dict[str, Any], newer: dict[str, Any] | None) -> bool:
 
 def _event_key(
     row: dict[str, Any], registry: dict[str, Any], client_family: Any
-) -> tuple[tuple[str | None, str] | None, int | None]:
-    """The (client family, action) a successful memory call lists under, and its count."""
+) -> tuple[tuple[str | None, str | None, str] | None, int | None]:
+    """The (app ID, client family, action) of a successful memory call, and its count."""
+    from .cloud_cell import canonical_app_id
+
     tool = row.get("tool")
     action = _action(registry.get(tool) if isinstance(tool, str) else None, row.get("access"))
     if row.get("outcome") != "ok" or action is None:
         return None, None
     items = row["item_count"] if type(row["item_count"]) is int else None
-    return (client_family(row.get("client_name")), action), items
+    return (
+        canonical_app_id(row.get("app_id")), client_family(row.get("client_name")), action
+    ), items
 
 
 def _action(command: Any, access: object) -> str | None:
@@ -200,13 +204,15 @@ class _Listing:
 
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
-        self._newest_by_key: dict[tuple[str | None, str], dict[str, Any]] = {}
+        self._newest_by_key: dict[tuple[str | None, str | None, str], dict[str, Any]] = {}
 
     def closed(self, at: dt.datetime) -> bool:
         """Full, and a row this old can join no listed event."""
         return len(self.events) == EVENT_LIMIT and at < self.events[-1]["_newest"] - MERGE_WINDOW
 
-    def add(self, at: dt.datetime, key: tuple[str | None, str], items: int | None) -> bool:
+    def add(
+        self, at: dt.datetime, key: tuple[str | None, str | None, str], items: int | None
+    ) -> bool:
         """Join the newest event of the key or list a new one; False when the full
         list has no room for it."""
         event = self._newest_by_key.get(key)
@@ -218,7 +224,10 @@ class _Listing:
             return True
         if len(self.events) == EVENT_LIMIT:
             return False
-        event = {"client": key[0], "action": key[1], "items": items, "at": _iso(at), "_newest": at}
+        event = {
+            "app_id": key[0], "client": key[1], "action": key[2],
+            "items": items, "at": _iso(at), "_newest": at,
+        }
         self.events.append(event)
         self._newest_by_key[key] = event
         return True

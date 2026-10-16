@@ -54,6 +54,8 @@ def _head(commit_seq: int, head: str | None) -> None:
 
 
 def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[str, str]:
+    from .native_operands import FileRole, register_native_operands
+
     # An error from the caller's own check (custody, fencing, a transient read) is re-raised
     # as itself: only the copy's own validation may call the copy invalid.
     stopped: list[BaseException] = []
@@ -67,6 +69,8 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None]) -> dict[s
 
     try:
         check()
+        # Standalone copies bind persisted index operands to their own metadata file.
+        register_native_operands(conn, databases={FileRole.STORE: "main"})
         if conn.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
             raise ValueError("standalone journaling unavailable")
         check()

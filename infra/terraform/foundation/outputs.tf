@@ -96,6 +96,7 @@ output "k3s_agent_nodes" {
       ipv4              = node.ipv4
       private_ip        = node.private_ip
       dedicated_cell_id = node.dedicated_cell_id
+      shared_profile    = node.shared_profile
     }
   }
 }

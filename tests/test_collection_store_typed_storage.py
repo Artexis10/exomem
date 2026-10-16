@@ -56,7 +56,7 @@ def create(store):
 
 def migrate(store, *, limit=500):
     for _ in range(64):
-        state = store.migrate_typed_encoding(CID, limit=limit)
+        state = store.migrate_typed_encoding(CID, limit=limit, encoding=typed().TYPED_V1)
         if state != "building":
             return state
     raise AssertionError("typed migration did not finish")
@@ -202,7 +202,7 @@ def test_forward_migration_keeps_json_history_and_spines_typed_versions(store):
     txn = store.connection.execute("SELECT max(txn_id) FROM txns").fetchone()[0]
     payload = store.connection.execute("SELECT payload_hash FROM items WHERE row_id=?", (row_id,)).fetchone()[0]
     assert third["after_item_hash"] == tokens.item_version(CID, key, 3, payload)
-    assert history(store, row_id) == [*(row[1:] for row in before["version_identity"]),
+    assert history(store, row_id) == [*(row[1:6] for row in before["version_identity"]),
                                       (3, "typed-v1", payload, txn, 1)]
     assert store.connection.execute("SELECT row_version,ordinal,source_ref FROM item_sources WHERE row_id=? "
                                     "ORDER BY row_version", (row_id,)).fetchall() == [
@@ -249,8 +249,8 @@ def test_spine_refuses_orphan_sources_identities_and_payloads(store):
     before = history_and_typed()
     attempts = [
         ("INSERT INTO item_sources VALUES(?,?,?,?)", (row_id, 9, 0, EVIDENCE), "FOREIGN KEY"),
-        ("INSERT INTO version_identity VALUES(?,?,?,?,?,?)", (row_id, 9, "typed-v1", "0" * 64, txn, 1), "payload"),
-        ("INSERT INTO version_identity VALUES(?,?,?,?,?,?)", (row_id, 9, "json-v1", "0" * 64, txn, 1), "payload"),
+        ("INSERT INTO version_identity VALUES(?,?,?,?,?,?,?)", (row_id, 9, "typed-v1", "0" * 64, txn, 1, layout.generation), "payload"),
+        ("INSERT INTO version_identity VALUES(?,?,?,?,?,?,?)", (row_id, 9, "json-v1", "0" * 64, txn, 1, None), "payload"),
         ("INSERT INTO item_versions VALUES(?,?,?,?,?,?)", (row_id, 9, "{}", "", "0" * 64, txn), "typed"),
     ]
     columns = ",".join(["row_id", "row_version", "body", *layout.value_columns, "r"])
@@ -445,7 +445,7 @@ def test_interrupted_migration_resumes_and_catches_up_concurrent_writes(store, m
     first = store.append_record(CID, item={"title": "One", "amount": 1}, why="observe")
     bulk(store, {"title": "Two", "amount": 2}, {"title": "Three", "amount": 3})
     conn = store.connection
-    assert store.migrate_typed_encoding(CID, limit=1) == "building"
+    assert store.migrate_typed_encoding(CID, limit=1, encoding=typed().TYPED_V1) == "building"
     assert conn.execute("SELECT encoding FROM collections").fetchone() == ("json-v1",)
     store.update_record(CID, item_key=first["item_key"], changes={"amount": 1.5}, why="correct",
                         expected_container_hash=guard(store), expected_item_version=first["after_item_hash"])
@@ -459,7 +459,7 @@ def test_interrupted_migration_resumes_and_catches_up_concurrent_writes(store, m
 
     monkeypatch.setattr(module, "encode_row", crash)
     with pytest.raises(OSError, match="simulated crash"):
-        store.migrate_typed_encoding(CID, limit=1)
+        store.migrate_typed_encoding(CID, limit=1, encoding=typed().TYPED_V1)
     assert conn.execute("SELECT last_row_id,state FROM typed_encoding_mappings").fetchone() == (*progress, "building")
     assert conn.execute("SELECT encoding FROM collections").fetchone() == ("json-v1",)
     monkeypatch.undo()
@@ -488,7 +488,7 @@ def test_existing_json_store_gains_the_spine_without_rewriting_history(tmp_path,
         assert [row[:-1] for row in conn.execute("SELECT * FROM items")] == old_items
         assert conn.execute("SELECT encoding FROM items").fetchall() == [("json-v1",)]
         assert conn.execute("SELECT * FROM version_identity").fetchall() == [
-            (row_id, 1, "json-v1", "a" * 64, 1, 1)]
+            (row_id, 1, "json-v1", "a" * 64, 1, 1, None)]
         assert conn.execute("SELECT \"table\",\"from\" FROM pragma_foreign_key_list('item_sources')").fetchall() == [
             ("version_identity", "row_id"), ("version_identity", "row_version")]
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"), upgraded.transaction() as tx:

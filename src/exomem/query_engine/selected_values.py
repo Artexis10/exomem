@@ -99,9 +99,9 @@ def read_selected_values(source, fields, *, max_bytes, check):
         events.close()
 
 
-def read_selected_tree(source, selection, *, max_bytes, check):
+def read_selected_tree(source, selection, *, max_bytes, check, events=None):
     """Hydrate only admitted object properties and array members from a JSON stream."""
-    events = iter(_events(source, check))
+    events = iter(_events(source, check) if events is None else events)
     retained = 0
 
     def charge(value):
@@ -151,10 +151,69 @@ def read_selected_tree(source, selection, *, max_bytes, check):
 
     try:
         result = read(selection)
+        if next(events, None) is not None:
+            raise ValueError("stored JSON has trailing values")
         if len(json.dumps(result, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()) > max_bytes:
             raise QueryError("QUERY_RESULT_TOO_LARGE")
         check()
         return result
+    except (ijson.JSONError, ValueError, TypeError, StopIteration, RecursionError) as error:
+        raise QueryError("QUERY_UNAVAILABLE") from error
+    finally:
+        events.close()
+
+
+def read_scalar_path(source, path, *, max_bytes, check, events=None):
+    """Read one compiler-declared path; missing or mismatched containers mean absent.
+
+    This is query extraction, not field admission. It reuses the JSON event parser
+    without constructing siblings or array members outside the declared path.
+    """
+    from .scalars import MISSING
+
+    events = iter(_events(source, check) if events is None else events)
+
+    def skip(first):
+        depth = int(first[0] in ("start_map", "start_array"))
+        while depth:
+            check()
+            event, _ = next(events)
+            depth += (event in ("start_map", "start_array")) - (event in ("end_map", "end_array"))
+
+    def read(parts, first=None):
+        check()
+        event, value = next(events) if first is None else first
+        if not parts:
+            if event in ("start_map", "start_array", "map_key", "end_map", "end_array"):
+                raise ValueError("declared scalar path resolves to a container")
+            value = float(value) if isinstance(value, Decimal) else value
+            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode()) > max_bytes:
+                raise QueryError("QUERY_RESULT_TOO_LARGE")
+            return value
+        result = MISSING
+        if event == "start_map":
+            while (child := next(events))[0] != "end_map":
+                if child[0] != "map_key":
+                    raise ValueError("invalid stored object")
+                if type(parts[0]) is str and child[1] == parts[0]:
+                    result = read(parts[1:])
+                else:
+                    skip(next(events))
+        elif event == "start_array":
+            ordinal = 0
+            while (child := next(events))[0] != "end_array":
+                if type(parts[0]) is int and ordinal == parts[0]:
+                    result = read(parts[1:], child)
+                else:
+                    skip(child)
+                ordinal += 1
+        return result
+
+    try:
+        value = read(tuple(path))
+        if next(events, None) is not None:
+            raise ValueError("stored JSON has trailing values")
+        return value
     except (ijson.JSONError, ValueError, TypeError, StopIteration, RecursionError) as error:
         raise QueryError("QUERY_UNAVAILABLE") from error
     finally:

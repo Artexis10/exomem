@@ -10,11 +10,12 @@ from dataclasses import asdict, fields, is_dataclass, replace
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from ..collection_store import query_freshness
+from ..collection_store import native_identity, query_freshness
+from ..collection_store.native_projections import NativeProjectionPlan
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
-from .typed_rows import AdmittedQuery, execute_rows
+from .typed_rows import AdmittedQuery, execute_rows, indexed_relation, logical_item_key
 
 _MAX_TOKEN_BYTES = 4096
 _TOKEN_KEYS = frozenset({"v", "query", "principal", "schema", "authorization", "visible", "lineage", "as_of", "boundary"})
@@ -112,7 +113,7 @@ def _visible(admitted, dependencies):
                         max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
                     )
                     selected = [(path, path in values, values.get(path)) for path in sorted(dependencies) if path != "item_key"]
-                    digest.update(_json([key, selected]).encode() + b"\n")
+                    digest.update(_json([logical_item_key(admitted, key), selected]).encode() + b"\n")
                 except (ValueError, TypeError, RecursionError) as error:
                     raise QueryError("QUERY_COST_LIMIT") from error
                 session.check()
@@ -166,9 +167,15 @@ def _resume(admitted, payload):
     session, conn = admitted.session, admitted.session.connection
     columns = ",".join(column for column, _ in admitted.compiled.order_terms)
     membership = admitted.membership_sql.replace("i.row_id", "p.row_id")
+    key = payload["boundary"]
+    if isinstance(admitted.projection, NativeProjectionPlan):
+        try:
+            key = native_identity.encode(key, admitted.projection.layout.identity)
+        except (ValueError, UnicodeError) as error:
+            raise QueryError("QUERY_CURSOR_INVALID") from error
     boundary = conn.execute(
-        f"SELECT {columns} FROM {admitted.table} p WHERE p.item_key=? AND {membership}",
-        (payload["boundary"],),
+        f"SELECT {columns} FROM {indexed_relation(admitted, hinted=False)} WHERE p.item_key=? AND {membership}",
+        (key,),
     ).fetchone()
     if boundary is None:
         raise QueryError("QUERY_CURSOR_STALE")
@@ -207,7 +214,8 @@ def execute_page(session, query, *, as_of=None):
         admitted = _resume(admitted, payload)
     page = execute_rows(admitted)
     boundary_position = next(n for n, (column, _) in enumerate(admitted.compiled.order_terms) if column == "p.item_key")
-    token = codec.mint(binding, as_of=admitted.compiled.as_of, boundary=page.last_order_key[boundary_position]) if page.has_more else None
+    token = codec.mint(binding, as_of=admitted.compiled.as_of,
+                       boundary=logical_item_key(admitted, page.last_order_key[boundary_position])) if page.has_more else None
     result = {"rows": page.rows, "returned": len(page.rows), "has_more": page.has_more,
               "next_cursor": token, "total": page.total, "as_of": admitted.compiled.as_of,
               "source": asdict(query.source), "query_version": query.version,

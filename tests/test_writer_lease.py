@@ -1003,6 +1003,54 @@ def test_store_client_round_trips_heads_and_keeps_operator_release_headless(
         assert client.status().collection_store_head == head
 
 
+def test_store_client_retires_a_fence_and_re_enrols_at_the_next_generation(
+    monkeypatch, tmp_path
+) -> None:
+    """A retired fence reads as unenrolled at its generation, and re-enrolment builds on it.
+
+    A client that reads every unenrolled fence as generation 0 refuses a retired one as
+    an outage, and can never re-enrol the vault.
+    """
+    from io import BytesIO
+
+    from starlette.testclient import TestClient
+
+    from exomem.lease_coordinator import create_app
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    app = create_app(
+        database=tmp_path / "coordinator.sqlite", bearer_token="lease", operator_token="operator"
+    )
+    with TestClient(app) as transport:
+
+        def urlopen(request, timeout):
+            response = transport.request(
+                request.method,
+                request.full_url,
+                content=request.data,
+                headers=dict(request.header_items()),
+            )
+            assert response.status_code == 200, response.text
+            return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        operator = LeaseCoordinatorClient(
+            LeaseConfig(
+                url="https://lease.example", vault_id="main", replica_id="desktop", token="operator"
+            )
+        )
+        first = "a9d3d366-2509-46ca-bc29-3f318ef9d78d"
+        operator.transition_collection_store_fence(expected_generation=0, store_id=first)
+        retired = operator.retire_collection_store_fence(expected_generation=1, store_id=first)
+        assert (retired.enrolled, retired.store_id, retired.generation) == (False, None, 1)
+        assert operator.collection_store_fence() == retired
+        second = "6044a9ed-b2d4-4c50-b65f-af08c7504dbb"
+        enrolled = operator.transition_collection_store_fence(
+            expected_generation=1, store_id=second
+        )
+        assert (enrolled.enrolled, enrolled.store_id, enrolled.generation) == (True, second, 2)
+
+
 @pytest.mark.parametrize(
     "changed",
     [
@@ -1077,7 +1125,7 @@ def test_lease_record_rejects_inconsistent_store_metadata(payload) -> None:
         {
             "capability": "collections-store-v1",
             "enrolled": False,
-            "store_id": None,
+            "store_id": "a9d3d366-2509-46ca-bc29-3f318ef9d78d",
             "generation": 1,
         },
         {"capability": "collections-store-v1", "enrolled": True, "store_id": None, "generation": 1},

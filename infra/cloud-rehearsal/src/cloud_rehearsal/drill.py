@@ -41,6 +41,7 @@ import asyncpg
 import boto3
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
+from cellctl.control_test_contract import control_test_sql
 from cellctl.k8s_client import OUT_OF_SERVICE_TAINT, VOLUME_LOST_ANNOTATION
 from cellctl.manifests import (
     BACKUP_JOB_NAME,
@@ -1120,8 +1121,9 @@ async def control_database(stack: infra.Stack) -> None:
     owner = await asyncpg.connect(stack.postgres.dsn("substrate_owner", from_host=True))
     try:
         await owner.execute(TENANTS_STANDIN_SQL)
-        await owner.execute((FIXTURES / "exomem_cloud_schema.sql").read_text(encoding="utf-8"))
-        await owner.execute((FIXTURES / "exomem_cloud_grants.sql").read_text(encoding="utf-8"))
+        schema_sql, grants_sql = control_test_sql(FIXTURES)
+        await owner.execute(schema_sql)
+        await owner.execute(grants_sql)
     finally:
         await owner.close()
 

@@ -30,3 +30,11 @@
 
 - [ ] 5.1 Complete independent exact-content review and integrated CI; release the cell image before the gateway sets the header.
 - [ ] 5.2 Synchronize the deltas and archive through OpenSpec after delivery evidence; validate strictly.
+
+## 6. Stable Home actor metadata
+
+- [x] 6.1 Define the gateway actor header and read canonical grant UUIDs on Cloud requests only, independently of handshake names.
+- [x] 6.2 Carry optional actor metadata through the existing tracer into schema 2 rows; preserve content-private logging and older chain verification.
+- [x] 6.3 Group owner activity by validated actor ID, family and action; retain counts, coverage boundaries and null metadata for older rows.
+- [x] 6.4 Prove the authenticated HTTP caller-to-ledger-to-activity path, separate same-family grants, malformed and local IDs, unavailable headers and older rows.
+- [ ] 6.5 Complete the gateway and Home integration, independent exact-content review and ordinary release under the existing delivery batch.

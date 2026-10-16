@@ -2839,7 +2839,7 @@ class _Applied:
     superseded: int
 
 
-def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: list[str]) -> _Applied:
+def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: list[str], *, scope=None) -> _Applied:
     """Apply one batch to a derived collection's rows: the one path a live import and a rebuild share.
 
     The entries are each batch row in source order with its item key and payload hash, from
@@ -2847,7 +2847,7 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     """
     kept, superseded, prepared = _collapse(batch.rows, manifest, source_ref, logged=True)
     items, refused = _derived_items(batch, kept, prepared, manifest, source_ref, shas)
-    outcomes = derived_rows.apply(conn, goal, items)
+    outcomes = derived_rows.apply(conn, goal, items, scope=scope)
     entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
     rejections = [(row.ordinal, row.start, code, at) for row, code, at in batch.rejections] + [
         (kept[outcome["index"]][0].ordinal, kept[outcome["index"]][0].start, outcome["code"], "item")
@@ -2921,7 +2921,7 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     shas = job.binding["source"]["members"]["sha256"]
 
     def work(conn):
-        applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas)
+        applied = _derived_apply(conn, goal, batch, manifest, proof.ref, shas, scope=store.write_scope)
         tally, counts = dict(record["tally"]), dict(record["counts"])
         for _, key, payload in applied.entries:
             _extend(tally, key, payload)
