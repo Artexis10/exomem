@@ -11,6 +11,11 @@ records a per-vault disable in the store that can only narrow it.
 ``collections-migrate-v1`` is the same kind of fence for moving existing file Records and
 Planning collections into the store (OpenSpec move-structured-collections-to-sqlite
 P1b.3). It stays off until the GA gate (P3.6) adds it to ``RELEASED``.
+
+``collection-views-v1`` fences edit-back of store collection views (the same change, §6):
+the serving store thread turning an owner's edit of a view into a governed update or a
+held correction, and publishing pending views without a summary release. It stays off
+until the P2.8 gate adds it to ``RELEASED``, and the per-vault rollback narrows it too.
 """
 
 from __future__ import annotations
@@ -24,9 +29,10 @@ RECORDS_SUMMARY_V1 = "records-summary-v1"
 UNAVAILABLE = "RECORDS_SUMMARY_UNAVAILABLE"
 COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
 MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
+COLLECTION_VIEWS_V1 = "collection-views-v1"
 
 #: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1; P3.6 adds
-#: COLLECTIONS_MIGRATE_V1.
+#: COLLECTIONS_MIGRATE_V1; P2.8 adds COLLECTION_VIEWS_V1.
 RELEASED: frozenset[str] = frozenset()
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
@@ -39,7 +45,11 @@ def records_summary_disabled(root) -> bool:
         return False
     # store_meta keeps this key in every schema version, so a store awaiting its writer's migration answers too.
     with closing(connection.open_head_reader(path)) as reader:
-        return reader.execute("SELECT 1 FROM store_meta WHERE key=?", (DISABLED_KEY,)).fetchone() is not None
+        return _disabled(reader)
+
+
+def _disabled(conn) -> bool:
+    return conn.execute("SELECT 1 FROM store_meta WHERE key=?", (DISABLED_KEY,)).fetchone() is not None
 
 
 def require_not_disabled(root) -> None:
@@ -50,6 +60,26 @@ def require_not_disabled(root) -> None:
 def records_summary_enabled(root=None) -> bool:
     """Whether this release serves records-summary-v1; the one place that answers it."""
     return RECORDS_SUMMARY_V1 in RELEASED and (root is None or not records_summary_disabled(root))
+
+
+def collection_views_enabled(root=None, *, conn=None) -> bool:
+    """Whether this release runs edit-back of store collection views; the one place that answers it.
+
+    It prevents an unreleased edit-back from committing an owner's edit, or holding it, on a
+    production store. Firing wrongly costs nothing new: views keep publishing as before, and
+    an edit waits on disk until the release turns edit-back on. ``conn`` reads the rollback
+    inside a transaction the caller already holds.
+    """
+    if COLLECTION_VIEWS_V1 not in RELEASED:
+        return False
+    if conn is not None:
+        return not _disabled(conn)
+    return root is None or not records_summary_disabled(root)
+
+
+def summary_route_open(vault_root, manifest) -> bool:
+    """Whether this release serves a request on ``manifest``'s collection: always, unless it is summary."""
+    return manifest.view_mode != "summary" or records_summary_enabled(vault_root)
 
 
 def require_records_summary(root=None) -> None:
@@ -83,8 +113,8 @@ def require_records_summary_route(vault_root, writer, action, values) -> None:
     if selector is None or selected_writer(vault_root, selector) is None:
         return
     with writer.read_collection(selector) as manifest:
-        summary = manifest.view_mode == "summary"
-    if summary:
+        open_ = summary_route_open(vault_root, manifest)
+    if not open_:
         require_records_summary(vault_root)
 
 

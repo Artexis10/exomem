@@ -22,6 +22,9 @@ from .structured_collections import CollectionError, parse_plan_ref
 _LIFECYCLES = frozenset({"active", "archived"})
 _EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
+#: The fields the narrow `triage` transition may change; plan_memory's triage action fixes them.
+# nosemgrep: ep-word-set -- The plan_memory triage action accepts exactly these fields.
+TRIAGE_FIELDS = frozenset({"kind", "status", "priority", "commitment", "horizon", "area", "parent"})
 _OPTIONAL = frozenset(
     {
         "health",
@@ -1496,8 +1499,7 @@ def triage(
     why: str,
 ) -> dict[str, Any]:
     """Apply the deliberately narrow Planning transition workflow."""
-    allowed = {"kind", "status", "priority", "commitment", "horizon", "area", "parent"}
-    if not transition or set(transition) - allowed:
+    if not transition or set(transition) - TRIAGE_FIELDS:
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")
     manifest = record_governance.resolve_collection_for_mutation(vault_root, collection)
     require_planning_profile(manifest)

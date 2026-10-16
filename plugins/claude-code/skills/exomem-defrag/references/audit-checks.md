@@ -51,3 +51,20 @@ or correction. Review and capture workflows give examples and authority rules.
 Explicit results expose `meta.coverage` as complete, capped, or unknown per
 family, including empty results. Compact due-state omissions do not prove
 complete coverage; reconciliation heals missing or stale derived support.
+
+## Held collection view corrections
+
+`collection_view_corrections` lists each owner edit of a store collection view
+that the substrate held instead of applying: a save from a stale editor buffer
+(`VIEW_CONFLICT`), an edit the collection's rules refuse (`VIEW_INVALID`), a
+deleted view (`VIEW_DELETED`), or a view stamped by another store
+(`VIEW_FOREIGN`). Each finding names the read-only view under the collection's
+`Held/` directory, with `meta.held_id` and `meta.code`. The category is part of
+the default attention surface, and it lists only corrections you may read.
+Read the held view and its diagnostics first. A `VIEW_CONFLICT` or
+`VIEW_FOREIGN` correction holds bytes that the view no longer shows. Resume a
+Records `VIEW_CONFLICT` through `record_memory(action="update", held=...)`, or
+discard either with a reason; a later edit of the view never resolves them. A
+`VIEW_INVALID` edit kept in place or a `VIEW_DELETED` view is resolved when the
+owner saves a valid edit of the view, or when you discard it. Discarding an
+invalid view that is still in place renders the view from the store again.

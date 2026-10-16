@@ -938,6 +938,7 @@ class StoreServer:
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
+        self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
@@ -1243,38 +1244,58 @@ class StoreServer:
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _views_tick(self):
-        """Publish pending views, such as summary pages, a window at a time; returns the seconds until the next tick.
+        """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
 
-        A committed change leaves summary pages pending; they publish here, after its
-        acknowledgement, through the store's reconcile path, as the in-process owner. A
-        window holds at most ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages
-        at their bounds. A view installed by one pass is confirmed current by the next, so
-        two passes follow each maintenance wake; views still pending then, which cannot
-        publish yet, wait for the next wake or the retry interval.
-        Import status polling preserves these passes and retry deadlines.
+        It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
+        unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
+        (``edit_back``) reads every item and manifest view at its first tick and every 60 s
+        after, outside the write transaction, and turns each settled edit into a governed
+        update or a held correction. Then a committed change's pending views, such as
+        summary pages, publish a window at a time through the store's reconcile path, as
+        the in-process owner. A window holds at most
+        ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
+        view installed by one pass is confirmed current by the next, so two passes follow
+        each maintenance wake; views still pending then, which cannot publish yet, wait for
+        the next wake or the retry interval. Import status polling preserves these passes
+        and retry deadlines.
         """
         from ..governance import principal
-        from . import capability
+        from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or not capability.records_summary_enabled(self.root):
+        if self.runtime is None:
             return IMPORT_IDLE_SECONDS
+        views = capability.collection_views_enabled(self.root)
+        if not views and not capability.records_summary_enabled(self.root):
+            return IMPORT_IDLE_SECONDS
+        if views and self._edit_back is None:
+            self._edit_back = edit_back.EditBack()
+        # Without edit-back, the publication pass alone sets the next tick, as before it existed.
+        wait = self._edit_back.wait(time.monotonic()) if views else float("inf")
+        if views and wait <= 0:
+            try:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:
+                                               _mutate(self.root, method, *args, **kwargs))
+            except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
+                logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                wait = IMPORT_RETRY_SECONDS
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0
-                    return IMPORT_IDLE_SECONDS
+                    return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
                                  after=self._views_after, pending_only=True)
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None
-            return IMPORT_RETRY_SECONDS
+            return min(wait, IMPORT_RETRY_SECONDS)
         self._views_after = result["next_path"]
         if self._views_after is None:
             self._views_passes += 1
-        return 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS
+        return min(wait, 0.0 if self._views_after is not None or self._views_passes < 2 else IMPORT_RETRY_SECONDS)
 
     def _close(self):
         with self._condition:

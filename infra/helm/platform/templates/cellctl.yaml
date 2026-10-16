@@ -243,6 +243,10 @@ spec:
               value: {{ .Values.artifactBroker.endpoint | quote }}
             - name: CELLCTL_ARTIFACT_BROKER_CELL_IDS
               value: {{ .Values.artifactBroker.cellIds | toJson | quote }}
+            {{- if .Values.artifactBroker.allCells }}
+            - name: CELLCTL_ARTIFACT_BROKER_ALL_CELLS
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if .Values.cells.jobEgressExcept }}
             - name: CELLCTL_JOB_EGRESS_EXCEPT
@@ -683,8 +687,8 @@ spec:
           !has(variables.np.podSelector.matchExpressions) &&
           ((!has(variables.np.egress) || size(variables.np.egress) == 0)
           {{- if .Values.artifactBroker.enabled }}
-            || (variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
-              size(variables.np.egress) == 1 &&
+            || ({{ if not .Values.artifactBroker.allCells }}variables.namespaceName.substring(9) in {{ .Values.artifactBroker.cellIds | toJson }} &&
+              {{ end }}size(variables.np.egress) == 1 &&
               size(variables.np.egress[0].to) == 1 &&
               !has(variables.np.egress[0].to[0].ipBlock) &&
               variables.np.egress[0].to[0].namespaceSelector.matchLabels ==

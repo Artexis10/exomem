@@ -40,6 +40,7 @@ from . import (
     chain,
     connection,
     derived_rows,
+    edit_back,
     governance,
     index_migrations,
     rollups,
@@ -117,6 +118,8 @@ class CollectionWriter:
         self._operation = None
         self._facade_profile = None
         self._publication = None
+        # The settled view edit the current leaf call applies (edit_back), else None.
+        self._view_edit = None
 
     def _require_operation_context(self) -> None:
         self.handle.require_owner_thread()
@@ -167,8 +170,14 @@ class CollectionWriter:
                     )
                 batch = self._publication = views.PublicationBatch(self)
                 self._row_counts = {}
+                if self._view_edit is not None:
+                    # The edited bytes become canonical here, so displacing them loses nothing.
+                    batch.accept(self._view_edit["path"], self._view_edit["digest"])
                 try:
                     yield
+                    if self._view_edit is not None and batch.business_started:
+                        # A later valid edit of a view resolves the holds of its earlier bytes there.
+                        self._resolve_in_place(self._view_edit["path"], self._view_edit["base"])
                 except _RecoveryOnly:
                     recovery_only = True
                 batch.stage_all()
@@ -744,10 +753,12 @@ class CollectionWriter:
             after_manifest = before_manifest
         transition = records._transition_id()
         committed_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        view_edit = self._view_edit is not None and not control
+        recorded = edit_back.OPERATION if view_edit else operation
         event = {
             "transition_id": transition,
             "collection_id": manifest.collection_id,
-            "operation": operation,
+            "operation": recorded,
             "generation_before": generation,
             "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
@@ -766,7 +777,7 @@ class CollectionWriter:
             "txn_id": txn_id,
             "transition_id": transition,
             "collection_id": manifest.collection_id,
-            "operation": operation,
+            "operation": recorded,
             "profile_operation": f"plan_{'add' if operation == 'append' else operation}"
             if manifest.semantic_profile == "planning" and not control
             else None,
@@ -774,7 +785,7 @@ class CollectionWriter:
             "generation_after": generation + (not control),
             "manifest_version_before": before_manifest,
             "manifest_version_after": after_manifest,
-            "actor": effective_principal().audience_id,
+            "actor": edit_back.ACTOR if view_edit else effective_principal().audience_id,
             "why": why,
             "request_id": request_id,
             "request_hash": request_hash,
@@ -843,95 +854,69 @@ class CollectionWriter:
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
         return views.render_view(self.connection, self._publication.identity, projection, manifest)
 
-    def _classify_view_input(self, projection, raw):
-        try:
-            frontmatter, _, _ = vault.parse_frontmatter(raw.decode(), strict=True)
-            view_stamp = frontmatter.get("exomem_view")
-        except (UnicodeError, ValueError):
-            view_stamp = None
-        if not isinstance(view_stamp, dict):
-            return "VIEW_INVALID", None, None
-        if (set(view_stamp) != {"s", "i", "v", "h"} or
-                any(memory_refs.normalize_id(view_stamp.get(name)) is None for name in ("s", "i")) or
-                type(view_stamp.get("v")) is not int or view_stamp["v"] < 1 or
-                not isinstance(view_stamp.get("h"), str) or len(view_stamp["h"]) != 12 or
-                any(char not in "0123456789abcdef" for char in view_stamp["h"])):
-            return "VIEW_INVALID", None, None
-        lineage = json.loads(self.connection.execute(
-            "SELECT value FROM store_meta WHERE key='lineage'"
-        ).fetchone()[0])
-        if (view_stamp.get("s") != self._publication.identity["store_id"] or
-                view_stamp.get("i") not in {entry["instance_id"] for entry in lineage}):
-            return "VIEW_FOREIGN", view_stamp, None
-        if projection["kind"] == "item":
-            current = self.connection.execute(
-                "SELECT row_version,payload_hash FROM items WHERE row_id=?", (projection["row_id"],)
-            ).fetchone()
-        elif projection["kind"] == "manifest":
-            current = self.connection.execute(
-                "SELECT c.manifest_version,m.manifest_hash FROM collections c JOIN collection_manifests m "
-                "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
-                (projection["collection_id"],),
-            ).fetchone()
-        elif projection["kind"] == "summary":
-            # Generated read-only output: hold any edit with its bytes, never parse it into rows.
-            generation, derived = self.connection.execute(
-                "SELECT generation,derived FROM collections WHERE collection_id=?", (projection["collection_id"],)
-            ).fetchone()
-            return derived_rows.COLLECTION_DERIVED if derived else "SUMMARY_VIEW_READ_ONLY", view_stamp, generation
-        else:
-            return "VIEW_INVALID", view_stamp, projection["pending_row_version"]
-        version, payload = current
-        base = view_stamp.get("v")
-        if isinstance(base, int) and not isinstance(base, bool) and base < version:
-            return "VIEW_CONFLICT", view_stamp, version
-        if base != version or view_stamp.get("h") != payload[:12]:
-            return "VIEW_INVALID", view_stamp, version
-        try:
-            _, manifest, declared = self._collection(projection["collection_id"])
-            if projection["kind"] == "item":
-                key, schema_version = self.connection.execute(
-                    "SELECT item_key,schema_version FROM items WHERE row_id=?", (projection["row_id"],)
-                ).fetchone()
-                profile = record_formats.profile_for(manifest.semantic_profile)
-                system = {"type": profile.item_type, "collection_id": manifest.collection_id,
-                          profile.item_id_property: key, "schema_version": schema_version}
-                if any(frontmatter.get(name) != value for name, value in system.items()):
-                    return "VIEW_INVALID", view_stamp, version
-                values = {name: value for name, value in frontmatter.items()
-                          if name not in {*system, "exomem_view"}}
-                self._validate(manifest, declared, key, values, operation="update", validate_graph=False)
-            else:
-                proposed = collections.parse_manifest_bytes(self.root, projection["path"], raw)
-                if proposed.derived != manifest.derived or (proposed.view_mode != manifest.view_mode and
-                                                            summary.populated(self.connection, manifest.collection_id)):
-                    return summary.MODE_CHANGE_UNSUPPORTED, view_stamp, version
-        except collections.CollectionError:
-            return "VIEW_INVALID", view_stamp, version
-        # Current-base edit-back is a later P2 slice; retain its bytes and ownership.
-        return None, view_stamp, version
-
     def _register_view_input(self, projection, raw, token, slot, *, source=None):
-        code, view_stamp, current = self._classify_view_input(projection, raw)
-        if code == "VIEW_FOREIGN":
-            self._publication.foreign_discovered = True
-        if code is None:
-            self._publication.pending = True
+        """Classify bytes found at a view path (``slot`` "offline") or displaced by an install.
+
+        True: the bytes are canonical or preserved in a hold, so an install may displace
+        them. False: they wait for edit-back or for their governance context, in place.
+        Without the edit-back release, a valid or formatting-only edit waits in place, as
+        before edit-back existed.
+        """
+        batch = self._publication
+        path = projection["path"]
+        digest = hashlib.sha256(raw).hexdigest()
+        displaced = slot != "offline"
+        observed = None if batch.observed is None else batch.observed.get(path)
+        if (not displaced and batch.observed is not None and projection["kind"] in edit_back.EDITABLE_KINDS
+                and (observed is None or observed.digest != digest)):
+            # Edit-back settled other bytes; these wait for their own settled observation.
+            batch.pending = True
             return False
-        reference = hashlib.sha256(f"{projection['path']}\0{token}\0{slot}\0".encode() + raw).hexdigest()[:24]
+        found = edit_back.classify(self, projection, raw, refusal=observed.refusal if observed else (),
+                                   edit_back=batch.edit_back)
+        code = found.code
+        if code == edit_back.SAME and batch.edit_back:
+            batch.accept(path, digest)
+            if not displaced:
+                self._resolve_in_place(path, found.current)
+            return True
+        if code is None or code == edit_back.SAME:
+            if not displaced or not batch.edit_back:
+                # A valid edit at the current base is edit-back's to apply once it settles.
+                batch.pending = True
+                return False
+            code = edit_back.CONFLICT  # A1: an unseen edit met this publication
+        if code == edit_back.FOREIGN:
+            batch.foreign_discovered = True
+        in_place = not displaced and batch.edit_back and edit_back.kept_in_place(code, projection["kind"])
+        reference = (edit_back.held_id(path, base=found.base) if in_place
+                     else edit_back.held_id(path, raw=raw))
         existing = self.connection.execute(
             "SELECT held_bytes FROM held_candidates WHERE held_id=?", (reference,)
         ).fetchone()
-        if existing is not None:
-            return existing[0] == raw
-        _, manifest, _ = self._collection(projection["collection_id"])
-        path = f"{records._held_directory(manifest)}/{reference}.md"
-        diagnostics = [{
-            "code": code, "path": projection["path"], "token": token, "slot": slot,
-            "sha256": hashlib.sha256(raw).hexdigest(), "stamp": view_stamp,
-            "base_row_version": view_stamp.get("v") if view_stamp else None,
-            "current_row_version": current,
-        }]
+        preserved = existing is not None and existing[0] == raw
+        if not preserved and not in_place:
+            # Bytes that a hold at the view path already preserves stay held once.
+            preserved = self.connection.execute(
+                "SELECT 1 FROM held_candidates WHERE collection_id=? AND kind='view-correction' AND held_bytes=? "
+                "AND json_extract(diagnostics_json,'$[0].path')=? LIMIT 1",
+                (projection["collection_id"], raw, path),
+            ).fetchone() is not None
+        if not preserved:
+            diagnostics = {
+                "code": code, "path": path, "token": token, "slot": slot, "sha256": digest,
+                "stamp": found.stamp, "base_row_version": found.base, "current_row_version": found.current,
+                **({"issues": list(found.issues)} if found.issues else {}),
+            }
+            if not self._hold_view_correction(projection, code, raw, reference, diagnostics, found.base, source):
+                return False
+        batch.accept(path, digest)
+        if in_place:
+            batch.kept.add(path)
+        return True
+
+    def _hold_view_correction(self, projection, code, raw, reference, diagnostics, base, source):
+        """Hold one view correction, governed by the displaced render context, never the human's bytes."""
         contexts = (source or {}).get("source_contexts", [])
         pairs = {tuple(pair) for name in ("previous_published", "previous_pending")
                  if (pair := (source or {}).get(name)) is not None}
@@ -951,29 +936,60 @@ class CollectionWriter:
             self._publication.pending = True
             return False
         metadata = metadata.pop()
+        _, manifest, _ = self._collection(projection["collection_id"])
+        path = f"{records._held_directory(manifest)}/{reference}.md"
         now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._publication.capture_previous(path)
+        target = None
+        if projection["kind"] == "item":
+            target = self.connection.execute("SELECT item_key FROM items WHERE row_id=?",
+                                             (projection["row_id"],)).fetchone()
+        candidate = {"action": "view-edit", "item_key": target[0] if target else None}
+        diagnostics = _json([diagnostics])
         self._execute(
             "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
             "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
-            "VALUES (?,?,'view-correction',?,?,?,?,?,?,?,?,?)",
-            (reference, projection["collection_id"], code, _json({"action": "view-edit"}), raw,
-             _json(diagnostics), path, view_stamp.get("v") if view_stamp and type(view_stamp.get("v")) is int else None, now,
-             metadata, hashlib.sha256(raw).hexdigest()),
+            "VALUES (?,?,'view-correction',?,?,?,?,?,?,?,?,?) ON CONFLICT(held_id) DO UPDATE SET "
+            "code=excluded.code,candidate_json=excluded.candidate_json,held_bytes=excluded.held_bytes,"
+            "diagnostics_json=excluded.diagnostics_json,base_row_version=excluded.base_row_version,"
+            "updated_at=excluded.updated_at,governance_json=excluded.governance_json,"
+            "governance_hash=excluded.governance_hash",
+            (reference, projection["collection_id"], code, _json(candidate), raw, diagnostics, path,
+             base if type(base) is int else None, now, metadata, hashlib.sha256(raw).hexdigest()),
         )
         text = views.held_view({
             "collection_id": projection["collection_id"], "held_id": reference,
             "updated_at": now, "kind": "view-correction", "held_bytes": raw,
-            "diagnostics_json": _json(diagnostics),
-            "governance_json": metadata,
+            "diagnostics_json": diagnostics, "governance_json": metadata,
         }, self._publication.identity)
         self._pending(path, projection["collection_id"], "held", 1, text, manifest=manifest)
         self.handle.release_cache.touch(projection["collection_id"],
                                        f"exomem://collection-held/{projection['collection_id']}/{reference}")
-        if code == "VIEW_FOREIGN":
+        if code == edit_back.FOREIGN:
             self._execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,'1')", (schema.META_VIEW_DIVERGED,))
         self._precommit(manifest)
         return True
+
+    def _hold_deleted(self, projection, source):
+        """Hold a deleted item or manifest view, which no delete action can stand for (design §6)."""
+        current = edit_back.current_version(self.connection, projection)
+        reference = edit_back.held_id(projection["path"], base=current)
+        if self.connection.execute("SELECT 1 FROM held_candidates WHERE held_id=?", (reference,)).fetchone():
+            return True
+        return self._hold_view_correction(projection, edit_back.DELETED, b"", reference, {
+            "code": edit_back.DELETED, "path": projection["path"], "base_row_version": current,
+            "current_row_version": current,
+        }, current, source)
+
+    def _resolve_in_place(self, path, base):
+        """Release the holds of earlier bytes at a view path once that path is valid again."""
+        cursor = self.connection.execute(
+            "SELECT * FROM held_candidates WHERE kind='view-correction' AND held_id IN (?,?)",
+            (edit_back.held_id(path, base=base), edit_back.held_id(path, base=None)),
+        )
+        names = [column[0] for column in cursor.description]
+        for held in cursor.fetchall():
+            self._release(dict(zip(names, held, strict=True)))
 
     def _recover_view_inputs(self, batch, previous):
         descriptor = json.loads(previous["install_json"])
@@ -981,7 +997,7 @@ class CollectionWriter:
         preserved = []
         for displaced in [descriptor, *descriptor.get("preserved", [])]:
             expected = {pair[1] for name in ("previous_published", "previous_pending")
-                        if (pair := displaced.get(name)) is not None}
+                        if (pair := displaced.get(name)) is not None} | set(displaced.get("accepted", ()))
             found = False
             for slot in range(2):
                 leaf = views.ASIDE_PREFIX + displaced["token"] + f"-{slot}"
@@ -1016,11 +1032,15 @@ class CollectionWriter:
             raise result.error
         return preserved
 
-    def reconcile_views(self, *, limit=64, after=None, pending_only=False):
+    def reconcile_views(self, *, limit=64, after=None, pending_only=False, paths=None):
         """Recover one path window; inspect never writes or invokes this path.
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
-        ``pending_only`` takes only views awaiting publication, as the serving store thread does.
+        ``pending_only`` takes only views awaiting publication, as the serving store thread does;
+        under the edit-back release it leaves an edit at an item or manifest view path to
+        edit-back, which waits for the edit to settle.
+        ``paths`` maps each view edit-back settled to its observation; only those are visited,
+        and only while their bytes are still the observed ones.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
             raise ValueError("reconcile limit must be between 1 and 1024")
@@ -1030,12 +1050,18 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             batch = self._publication
             batch.bind(result)
+            batch.observed = paths if paths is not None else {} if pending_only and batch.edit_back else None
             result["recovered_stages"] = batch.recovered_stages
-            cursor = self.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') AND path>? "
-                "AND (? OR state='pending') ORDER BY path LIMIT ?",
-                (after or "", not pending_only, limit + 1),
-            )
+            if paths is not None:
+                cursor = self.connection.execute(
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') "
+                    f"AND path IN ({','.join('?' for _ in paths)}) ORDER BY path LIMIT ?", (*paths, limit + 1))
+            else:
+                cursor = self.connection.execute(
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') AND path>? "
+                    "AND (? OR state='pending') ORDER BY path LIMIT ?",
+                    (after or "", not pending_only, limit + 1),
+                )
             rows = [dict(zip((c[0] for c in cursor.description), row, strict=True)) for row in cursor.fetchall()]
             if len(rows) > limit:
                 rows = rows[:limit]
@@ -1066,6 +1092,9 @@ class CollectionWriter:
                     elif opened.error.code != "MISSING":
                         raise opened.error
                     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
+                    observed = None if paths is None else paths[projection["path"]]
+                    if observed is not None and digest != observed.digest:
+                        continue  # changed again since it settled; the next pass looks again
                     if digest is not None and digest == projection["pending_sha256"]:
                         if not preserved:
                             self._execute(
@@ -1074,15 +1103,21 @@ class CollectionWriter:
                                 "state='current' WHERE path=?", (projection["path"],)
                             )
                         continue
-                    if digest is not None and digest == projection["published_sha256"] and projection["state"] == "current":
+                    if digest is not None and digest == projection["published_sha256"] and projection["state"] != "pending":
+                        if projection["state"] == "held":
+                            # The owner restored the published view, which resolves its in-place hold.
+                            self._resolve_in_place(projection["path"], edit_back.current_version(self.connection, projection))
+                            self._execute("UPDATE projection_state SET state='current' WHERE path=?", (projection["path"],))
                         continue
-                    if raw is not None and digest not in {projection["published_sha256"], projection["pending_sha256"]}:
+                    source = {
+                        "previous_published": views._pair(projection["published_row_version"], projection["published_sha256"]),
+                        "previous_pending": views._pair(projection["pending_row_version"], projection["pending_sha256"]),
+                        "source_contexts": projection["source_contexts"],
+                    }
+                    own = {projection["published_sha256"], projection["pending_sha256"],
+                           *batch.accepted.get(projection["path"], ())}
+                    if raw is not None and digest not in own:
                         token = json.loads(projection["install_json"])["token"] if projection["install_json"] else uuid.uuid4().hex
-                        source = {
-                            "previous_published": views._pair(projection["published_row_version"], projection["published_sha256"]),
-                            "previous_pending": views._pair(projection["pending_row_version"], projection["pending_sha256"]),
-                            "source_contexts": projection["source_contexts"],
-                        }
                         if not self._register_view_input(projection, raw, token, "offline", source=source):
                             batch.pending = True
                             descriptor = json.loads(projection["install_json"]) if projection["install_json"] else {
@@ -1092,6 +1127,18 @@ class CollectionWriter:
                             descriptor["deferred_target_sha256"] = digest
                             self._execute("UPDATE projection_state SET state='pending',install_json=? WHERE path=?",
                                           (_json(descriptor), projection["path"]))
+                            continue
+                    if projection["path"] in batch.kept:
+                        # O2: the owner's held bytes stay in place until the hold is resolved.
+                        self._execute("UPDATE projection_state SET state='held',stat_identity=? WHERE path=?",
+                                      (observed.stat if observed else None, projection["path"]))
+                        continue
+                    if (raw is None and batch.edit_back and projection["kind"] in edit_back.EDITABLE_KINDS
+                            and not preserved and projection["published_sha256"] is not None
+                            and (batch.observed is None or projection["path"] in batch.observed)):
+                        # A deleted view is held, then re-rendered: no delete exists (design §6).
+                        if not self._hold_deleted(projection, source):
+                            batch.pending = True
                             continue
                     if projection["kind"] == "held":
                         retired = _row(self.connection.execute("SELECT * FROM held_candidates WHERE held_id=? AND view_path=?",
@@ -1111,6 +1158,53 @@ class CollectionWriter:
                     batch.pending = True
                 self._precommit(manifest)
         return result
+
+    def apply_view_edit(self, observation, found):
+        """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.
+
+        It is recorded as a ``view_edit`` transition by ``owner:view-edit``, with a request
+        identity derived from the view path, its base version and its bytes, so a replay of
+        the same bytes commits nothing new. A leaf refusal raises, and edit-back holds it.
+        """
+        projection, change = observation.projection, found.change
+        identity = edit_back.request_id(observation.path, found.base, observation.digest)
+        self._view_edit = {"path": observation.path, "digest": observation.digest, "base": found.base}
+        try:
+            if projection["kind"] == "manifest":
+                return self.revise_collection(
+                    projection["collection_id"], manifest_text=change["manifest_text"],
+                    expected_manifest_hash=change["expected_manifest_hash"],
+                    expected_container_hash=change["expected_container_hash"],
+                    why=edit_back.why(observation.path), request_id=identity,
+                )
+            return self.update_record(
+                projection["collection_id"], item_key=change["item_key"], changes=change["changes"],
+                delete_fields=change["delete_fields"], body=change["body"], operation=change["operation"],
+                expected_container_hash=change["expected_container_hash"],
+                expected_item_version=change["expected_item_version"],
+                why=edit_back.why(observation.path), hold=False, request_id=identity,
+            )
+        finally:
+            self._view_edit = None
+
+    def record_view_observations(self, observations):
+        """Record the stat identity of views found holding their own bytes; no transition.
+
+        The next pass then skips each such view with one stat. A view held in place whose
+        owner restored its published bytes resolves that hold.
+        """
+        with self._mutation(reconcile=True):
+            for observation in observations:
+                row = self.connection.execute(
+                    "SELECT published_sha256,state FROM projection_state WHERE path=?", (observation.path,)
+                ).fetchone()
+                if row is None or row[0] != observation.digest or row[1] == "pending":
+                    continue
+                if row[1] == "held":
+                    self._resolve_in_place(observation.path,
+                                           edit_back.current_version(self.connection, observation.projection))
+                self._execute("UPDATE projection_state SET stat_identity=?,state='current' WHERE path=?",
+                              (observation.stat, observation.path))
 
     def record_control_transition(self, operation, transitions, *, why):
         """Record a content-free control transition: one chained txn per affected collection.
@@ -1479,20 +1573,44 @@ class CollectionWriter:
                 types.named_validator(name).validate(manifest, plans, write=write)
         return values
 
-    def _held(self, cid: str, held: str | None):
-        reference = records._validate_held_reference(held)
+    def _held(self, cid: str, held: str | None, *, corrections=False):
+        """A held write refusal, or with ``corrections`` also a held view correction (discard).
+
+        With ``corrections``, a view correction an earlier release held under its older id
+        shape resolves too, so it can still be discarded.
+        """
+        if corrections and edit_back.legacy_held_id(held):
+            reference, refusals = held, False
+        else:
+            reference, refusals = records._validate_held_reference(held), True
         if reference is None:
             return None
         row = _row(
             self.connection.execute(
-                "SELECT * FROM held_candidates WHERE held_id = ? AND collection_id = ? AND kind = 'write-refusal'",
-                (reference, cid),
+                "SELECT * FROM held_candidates WHERE held_id = ? AND collection_id = ? "
+                "AND ((kind = 'write-refusal' AND ?) OR (kind = 'view-correction' AND ?))",
+                (reference, cid, refusals, corrections),
             )
         )
         if row is None:
             raise records._held_not_found()
         row["candidate"] = records._decode_held_value(json.loads(row["candidate_json"]))
         return row
+
+    def _rerender_discarded(self, held, manifest):
+        """O2: discarding a correction held in place re-renders its view over the discarded bytes."""
+        diagnostics = json.loads(held["diagnostics_json"] or "[]")
+        path = diagnostics[0].get("path") if diagnostics and isinstance(diagnostics[0], dict) else None
+        previous = self._publication.previous(path) if isinstance(path, str) else None
+        if previous is None or previous["state"] != "held":
+            return
+        self._publication.accept(path, hashlib.sha256(held["held_bytes"]).hexdigest())
+        previous = self._publication.capture_previous(path)
+        if self._publication.recovered_inputs[path] is None:
+            return  # the publication pass re-renders it once its inputs are recovered
+        version, text = self._render_view(previous, manifest)
+        self._pending(path, previous["collection_id"], previous["kind"], version, text, previous["row_id"],
+                      manifest=manifest)
 
     def _hold(self, manifest, error, candidate, why, hold, resumed=None, key=None):
         if (
@@ -1715,7 +1833,8 @@ class CollectionWriter:
         # The built-in v1 audit wire contract fixes Planning's replan label.
         return {"txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
                 "effect": "resume" if resumed else "insert" if before is None else "update",
-                "effect_label": "replan" if manifest.semantic_profile == "planning" else "correction" if before else None,
+                "effect_label": ("edit" if self._view_edit is not None and before else
+                                 "replan" if manifest.semantic_profile == "planning" else "correction" if before else None),
                 "version_before": None if before is None else before["row_version"], "version_after": version,
                 "hash_before": None if before is None else before["payload_hash"], "hash_after": payload}
 
@@ -2237,9 +2356,12 @@ class CollectionWriter:
             before = self._item(manifest.collection_id, key)
             if before is None:
                 raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-            resumed = self._held(manifest.collection_id, held)
+            resumed = self._held(manifest.collection_id, held, corrections=True)
             if resumed:
                 candidate = resumed["candidate"]
+                if resumed["kind"] == "view-correction":
+                    # A held stale-buffer save resumes as its bytes over the current row.
+                    candidate = edit_back.resumed_update(self, resumed, manifest, before)
                 if candidate["action"] != "update" or candidate["item_key"] != key:
                     raise records._held_not_found()
                 if changes is not None and not isinstance(changes, Mapping):
@@ -2268,18 +2390,9 @@ class CollectionWriter:
             final = dict(old_values)
             if declared.kind == "intended":
                 if operation == "triage":
-                    allowed = {
-                        "kind",
-                        "status",
-                        "priority",
-                        "commitment",
-                        "horizon",
-                        "area",
-                        "parent",
-                    }
                     if (
                         not changes
-                        or set(changes) - allowed
+                        or set(changes) - planning.TRIAGE_FIELDS
                         or any(
                             v is None and k not in {"area", "parent"} for k, v in changes.items()
                         )
@@ -2309,6 +2422,8 @@ class CollectionWriter:
                     manifest, declared, key, final, before=old_values, operation=operation
                 )
             except collections.CollectionError as error:
+                if resumed and resumed["kind"] == "view-correction":
+                    raise  # the correction keeps the owner's exact bytes; a refusal never rewrites them
                 result = self._hold(
                     manifest,
                     error,
@@ -2550,11 +2665,13 @@ class CollectionWriter:
         records._validate_why(why)
         with self._mutation():
             _, manifest, _ = self._collection(collection)
-            candidate = self._held(manifest.collection_id, held)
+            candidate = self._held(manifest.collection_id, held, corrections=True)
             if candidate is None:
                 raise records._held_not_found()
             self._precommit(manifest)
             self._release(candidate)
+            if candidate["kind"] == "view-correction":
+                self._rerender_discarded(candidate, manifest)
             receipt = {
                 "_record_receipt": "exomem.records-mutation",
                 "receipt_version": 1,

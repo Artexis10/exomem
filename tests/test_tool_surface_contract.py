@@ -10,7 +10,7 @@ from types import MappingProxyType
 
 import pytest
 from conftest import initialize_vault_state_offline
-from fastmcp.exceptions import ToolError, ValidationError
+from fastmcp.exceptions import ValidationError
 from starlette.testclient import TestClient
 
 from exomem import commands, semantic_authoring, semantic_index
@@ -651,21 +651,23 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
     assert final_state.document.units[0].unit_ref == unit.unit_ref
 
 
-def test_observe_unrelated_errors_keep_the_native_mcp_error_contract(
+def test_observe_unrelated_refusals_reach_the_client_as_a_coded_envelope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
 
-    with pytest.raises(ToolError, match="UNIT_REFERENCE_REQUIRED"):
-        _call_tool(
-            mcp,
-            "observe_memory",
-            {
-                "path": "Knowledge Base/Notes/Insights/unrelated.md",
-                "operation": "remove",
-            },
-        )
+    result = _call_tool(
+        mcp,
+        "observe_memory",
+        {
+            "path": "Knowledge Base/Notes/Insights/unrelated.md",
+            "operation": "remove",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "UNIT_REFERENCE_REQUIRED"
 
 
 def test_the_server_tells_every_client_to_activate_context_first(

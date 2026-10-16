@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, record_formats, reserved_paths, vault
-from . import authority, connection, governance, summary, typed_storage
+from . import authority, capability, connection, governance, summary, typed_storage
 
 STAGE_PREFIX = ".exomem-collection-stage-"
 ASIDE_PREFIX = ".exomem-collection-aside-"
@@ -65,6 +65,20 @@ class PublicationBatch:
         self.foreign_discovered = False
         self.business_started = False
         self.deferred_create = None
+        # path -> digests of bytes the store adopted or preserved, so displacing them loses nothing.
+        self.accepted = {}
+        # Paths whose held human bytes stay in place until the owner resolves the hold.
+        self.kept = set()
+        # path -> the settled edit-back observation this batch acts on, or None for every path.
+        self.observed = None
+        # Whether the release runs edit-back; without it, view inputs are classified as before it.
+        self.edit_back = capability.collection_views_enabled(conn=writer.connection)
+
+    def accept(self, path, digest):
+        self.accepted.setdefault(path, set()).add(digest)
+
+    def accepted_digests(self, path, descriptor=None):
+        return self.accepted.get(path, set()) | set((descriptor or {}).get("accepted", ()))
 
     def eligible(self, projection):
         if (projection["collection_id"] != self.deferred_create
@@ -201,7 +215,10 @@ class PublicationBatch:
                 with opened.require() as file:
                     raw = self._fs().read(file).require()
                 digest = _digest(raw)
-                if digest not in {previous["published_sha256"], previous["pending_sha256"]}:
+                if digest in self.accepted_digests(path, descriptor):
+                    # An earlier transaction adopted or preserved these bytes; this install may displace them.
+                    self.accept(path, digest)
+                elif digest not in {previous["published_sha256"], previous["pending_sha256"]}:
                     source = {"previous_published": _pair(previous["published_row_version"], previous["published_sha256"]),
                               "previous_pending": _pair(previous["pending_row_version"], previous["pending_sha256"]),
                               "source_contexts": contexts}
@@ -317,6 +334,8 @@ class PublicationBatch:
                 "source_contexts": previous.get("source_contexts", []) if previous else [],
             }
             publication = self.publications[path] = _Publication(path, descriptor)
+        if self.accepted.get(path):
+            publication.descriptor["accepted"] = sorted(self.accepted[path])
         publication.descriptor["render_context"] = self._render_context(projection, manifest)
         publication.projection = projection
         publication.context = (projection["collection_id"], manifest.manifest_version.hash)
@@ -432,7 +451,7 @@ class PublicationBatch:
             pair[1]
             for name in ("previous_published", "previous_pending")
             if (pair := publication.descriptor.get(name)) is not None
-        }
+        } | set(publication.descriptor.get("accepted", ()))
         for slot in range(2):
             leaf = ASIDE_PREFIX + publication.descriptor["token"] + f"-{slot}"
             result = fs.file(publication.parent, leaf, access="mutate")

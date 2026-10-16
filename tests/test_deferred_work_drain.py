@@ -424,6 +424,70 @@ def test_unbounded_manual_drain_reconciles_semantic_work_created_by_full_refresh
     assert deferred_index.status(vault)["count"] == 0
 
 
+@pytest.mark.parametrize("published", [True, False], ids=["embedding-current", "embedding-stale"])
+def test_service_full_drain_retires_receipts_whose_embedding_is_published_or_queued(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """A Cloud cell's own drain must clear a full receipt in one pass.
+
+    It reported an already-published page as a deferred embedding with no
+    semantic receipt to cover it, so every pass kept the full receipt, and
+    status kept naming `exomem index` as the next action.
+    """
+    from exomem import semantic_drain
+
+    # Outside a Cloud cell: the two switches that select the service profile,
+    # embeddings on, and the answer a running semantic owner gives about the
+    # page's publication. The store, the drain and the fan-out are real.
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(semantic_drain, "publication_ready", lambda *_args, **_kwargs: published)
+    rels = ["Knowledge Base/pond-a.md", "Knowledge Base/pond-b.md"]
+    for rel in rels:
+        (vault / rel).write_text("# Pond\n\nThe pond froze overnight.\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+
+    index_sync.drain_deferred_work(vault)
+
+    assert deferred_index.snapshot_full(vault) == []
+    # A stale embedding keeps its work as a semantic receipt; a current one owes none.
+    queued = [receipt.rel_path for receipt in deferred_index.snapshot(vault)]
+    assert queued == ([] if published else rels)
+
+
+def test_legacy_full_drain_retires_receipts_once_the_embedding_is_written(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy profile embeds inline during the drain, then clears the receipt.
+
+    The real fan-out judges the report here, so a component that misreports a
+    replay would keep the receipt on every pass, as the service profile did.
+    """
+    from exomem import embeddings
+
+    # Embeddings on, with the inline embedder answering as it does for a current
+    # page; the profile, store, drain and fan-out are real.
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    embedded: list[Path] = []
+
+    def embed(_root: Path, paths: list[Path], **_kwargs):
+        embedded.extend(paths)
+        return embeddings.EmbeddingSyncStatus("completed", "embedding_upsert_completed", len(paths))
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", embed)
+    rels = ["Knowledge Base/pond-a.md", "Knowledge Base/pond-b.md"]
+    for rel in rels:
+        (vault / rel).write_text("# Pond\n\nThe pond froze overnight.\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+
+    index_sync.drain_deferred_work(vault)
+
+    assert sorted(path.relative_to(vault).as_posix() for path in embedded) == rels
+    assert deferred_index.snapshot_full(vault) == []
+    assert deferred_index.snapshot(vault) == []
+
+
 def test_full_drain_isolates_a_failed_receipt_from_later_work(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

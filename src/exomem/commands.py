@@ -4318,6 +4318,28 @@ def op_get(
         }
     else:
         out = result.as_dict(include_raw=False)
+    restricted = egress_module.caller_restricted(vault_root)
+    if restricted:
+        # A caller from whom anything can be withheld gets the "withheld
+        # entirely" answer before the optional work below: history and links
+        # grow with the vault, so a withheld page that ran them would refuse
+        # measurably later than a missing one. This is the release gate's own
+        # decision on the same page and snapshot, so the refusal and its
+        # receipt are the gate's; a notice (L1-L4) still reaches the caller
+        # through the gate below.
+        with call_spans_module.span("read.reference"):
+            snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
+        with call_spans_module.span("read.release"):
+            withheld = egress_module.page_withheld_entirely(
+                vault_root,
+                out,
+                snapshot_content=result.content,
+                stable_ref=snapshot_ref,
+            )
+        if withheld:
+            raise ValueError(
+                f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
+            )
     if max_body_chars is not None and max_body_chars < 0:
         raise ValueError("get: max_body_chars must be non-negative")
     query_log.log_get_call(
@@ -4340,8 +4362,9 @@ def op_get(
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
-    with call_spans_module.span("read.reference"):
-        snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
+    if not restricted:
+        with call_spans_module.span("read.reference"):
+            snapshot_ref = _snapshot_memory_ref(vault_root, result.path, result.frontmatter)
     with call_spans_module.span("read.release"):
         released = egress_module.annotate_page(
             vault_root,
@@ -5793,7 +5816,8 @@ def op_move_file(
 
     Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
-            CURATED_PROTECTED; PROMOTION_REASON_REQUIRED.
+            CURATED_PROTECTED; PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH
+            (either end is a store collection's view path).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
@@ -5873,7 +5897,9 @@ def op_delete(
             warnings}.
     Errors: UNCONFIRMED; INVALID_PATH; NOT_FOUND; ALREADY_TRASHED;
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
-            INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
+            INBOUND_LINKS; TRASH_FAILED; COLLECTION_VIEW_PATH (a store
+            collection's view, or a folder holding one); (dir) NOT_A_DIR;
+            NOT_EMPTY.
     """
     # A folder is deleted by the owner only: a folder can hold pages the
     # writer may not see, by a policy or by RAW on any vault, and every answer
@@ -6029,7 +6055,8 @@ def op_recover_from_trash(
     Returns: {trash_path, restored_path, kind, warnings}.
     Errors: INVALID_PATH; NOT_FOUND; NOT_IN_TRASH; NO_RESTORE_PATH;
             RESTORE_INTO_TRASH; APPEND_ONLY; CURATED_PROTECTED;
-            DEST_EXISTS; RECOVER_FAILED.
+            DEST_EXISTS; RECOVER_FAILED; COLLECTION_VIEW_PATH (the restore
+            path is a store collection's view path).
     """
     try:
         result = recover_from_trash_module.recover_from_trash(
@@ -12630,9 +12657,19 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "search": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "fetch": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "fetch": {
+        "surface": "primary",
+        "actions": ("ask",),
+        "first_run_safe": True,
+        "restricted_refusal_floor": True,
+    },
     "find": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
-    "get": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "get": {
+        "surface": "primary",
+        "actions": ("ask",),
+        "first_run_safe": True,
+        "restricted_refusal_floor": True,
+    },
     "add": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
     "note": {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
     "preserve": {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
@@ -12759,6 +12796,7 @@ def _build_commands() -> tuple[Command, ...]:
                 product_actions=tuple(meta.get("actions", ())),
                 first_run_safe=bool(meta.get("first_run_safe", False)),
                 path_roles=reserved_paths_module.path_roles_for_command(name),
+                restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
             )
         )
     return tuple(cmds)
@@ -12834,7 +12872,12 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("fetch", "get"),
-        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {
+            "surface": "primary",
+            "actions": ("ask",),
+            "first_run_safe": True,
+            "restricted_refusal_floor": True,
+        },
     ),
     (
         "browse_memory",
@@ -13286,6 +13329,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 routes=tuple(routes),
                 response_detail=response_detail,
                 path_roles=reserved_paths_module.path_roles_for_command(name),
+                restricted_refusal_floor=bool(meta.get("restricted_refusal_floor", False)),
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
             )
         )
