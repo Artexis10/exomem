@@ -52,3 +52,14 @@ restart the service reflexively — restarts CAUSE pattern (1) for live sessions
   dual-state leftover the doctor `state.placement` section will FAIL on
   (`exomem maintain --adopt-state <which>` resolves it; never delete either
   copy by hand).
+
+## Cloud cells
+
+- **Never run an Exomem writer inside a live Cloud cell.** A `kubectl exec`
+  of a command or script that writes the vault (capture, index, a script that
+  calls the store) makes an out-of-process writer. The server reads the
+  change as an outside edit, repairs its lexical catalogue, and answers
+  `/health/ready` with 503 until the repair proves the catalogue. A cell has
+  one replica, so it has no endpoint meanwhile and its clients get 503. Write
+  through the cell's MCP connector or REST API instead, and keep any exec
+  read-only.
