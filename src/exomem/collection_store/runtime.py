@@ -1211,12 +1211,13 @@ class StoreServer:
     def _views_tick(self):
         """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
 
-        It runs whenever this service serves the store, unless the vault's rollback disabled
-        it. Edit-back (``edit_back``) reads every item and manifest view at its first tick
-        and every 60 s after, outside the write transaction, and turns each settled edit
-        into a governed update or a held correction. Then a committed change's pending
-        views, such as summary pages, publish a window at a time through the store's
-        reconcile path, as the in-process owner. A window holds at most
+        It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
+        unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
+        (``edit_back``) reads every item and manifest view at its first tick and every 60 s
+        after, outside the write transaction, and turns each settled edit into a governed
+        update or a held correction. Then a committed change's pending views, such as
+        summary pages, publish a window at a time through the store's reconcile path, as
+        the in-process owner. A window holds at most
         ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
         view installed by one pass is confirmed current by the next, so two passes follow
         each maintenance wake; views still pending then, which cannot publish yet, wait for
@@ -1227,12 +1228,16 @@ class StoreServer:
         from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None or capability.records_summary_disabled(self.root):
+        if self.runtime is None:
             return IMPORT_IDLE_SECONDS
-        if self._edit_back is None:
+        views = capability.collection_views_enabled(self.root)
+        if not views and not capability.records_summary_enabled(self.root):
+            return IMPORT_IDLE_SECONDS
+        if views and self._edit_back is None:
             self._edit_back = edit_back.EditBack()
-        wait = self._edit_back.wait(time.monotonic())
-        if wait <= 0:
+        # Without edit-back, the publication pass alone sets the next tick, as before it existed.
+        wait = self._edit_back.wait(time.monotonic()) if views else float("inf")
+        if views and wait <= 0:
             try:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                     wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:

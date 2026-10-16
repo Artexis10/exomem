@@ -859,32 +859,35 @@ class CollectionWriter:
 
         True: the bytes are canonical or preserved in a hold, so an install may displace
         them. False: they wait for edit-back or for their governance context, in place.
+        Without the edit-back release, a valid or formatting-only edit waits in place, as
+        before edit-back existed.
         """
         batch = self._publication
         path = projection["path"]
         digest = hashlib.sha256(raw).hexdigest()
         displaced = slot != "offline"
         observed = None if batch.observed is None else batch.observed.get(path)
-        if not displaced and batch.observed is not None and (observed is None or observed.digest != digest):
+        if (not displaced and batch.observed is not None and projection["kind"] in edit_back.EDITABLE_KINDS
+                and (observed is None or observed.digest != digest)):
             # Edit-back settled other bytes; these wait for their own settled observation.
             batch.pending = True
             return False
         found = edit_back.classify(self, projection, raw, refusal=observed.refusal if observed else ())
         code = found.code
-        if code == edit_back.SAME:
+        if code == edit_back.SAME and batch.edit_back:
             batch.accept(path, digest)
             if not displaced:
                 self._resolve_in_place(path, found.current)
             return True
-        if code is None:
-            if not displaced:
+        if code is None or code == edit_back.SAME:
+            if not displaced or not batch.edit_back:
                 # A valid edit at the current base is edit-back's to apply once it settles.
                 batch.pending = True
                 return False
             code = edit_back.CONFLICT  # A1: an unseen edit met this publication
         if code == edit_back.FOREIGN:
             batch.foreign_discovered = True
-        in_place = not displaced and edit_back.kept_in_place(code, projection["kind"])
+        in_place = not displaced and batch.edit_back and edit_back.kept_in_place(code, projection["kind"])
         reference = (edit_back.held_id(path, base=found.base) if in_place
                      else edit_back.held_id(path, raw=raw))
         existing = self.connection.execute(
@@ -940,7 +943,7 @@ class CollectionWriter:
         if projection["kind"] == "item":
             target = self.connection.execute("SELECT item_key FROM items WHERE row_id=?",
                                              (projection["row_id"],)).fetchone()
-        candidate = {"action": "view-edit", **({"item_key": target[0]} if target else {})}
+        candidate = {"action": "view-edit", "item_key": target[0] if target else None}
         diagnostics = _json([diagnostics])
         self._execute(
             "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
@@ -1033,7 +1036,8 @@ class CollectionWriter:
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
         ``pending_only`` takes only views awaiting publication, as the serving store thread does;
-        it leaves an edit at a view path to edit-back, which waits for the edit to settle.
+        under the edit-back release it leaves an edit at an item or manifest view path to
+        edit-back, which waits for the edit to settle.
         ``paths`` maps each view edit-back settled to its observation; only those are visited,
         and only while their bytes are still the observed ones.
         """
@@ -1045,7 +1049,7 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             batch = self._publication
             batch.bind(result)
-            batch.observed = paths if paths is not None else {} if pending_only else None
+            batch.observed = paths if paths is not None else {} if pending_only and batch.edit_back else None
             result["recovered_stages"] = batch.recovered_stages
             if paths is not None:
                 cursor = self.connection.execute(
@@ -1128,8 +1132,8 @@ class CollectionWriter:
                         self._execute("UPDATE projection_state SET state='held',stat_identity=? WHERE path=?",
                                       (observed.stat if observed else None, projection["path"]))
                         continue
-                    if (raw is None and projection["kind"] in ("item", "manifest") and not preserved
-                            and projection["published_sha256"] is not None
+                    if (raw is None and batch.edit_back and projection["kind"] in edit_back.EDITABLE_KINDS
+                            and not preserved and projection["published_sha256"] is not None
                             and (batch.observed is None or projection["path"] in batch.observed)):
                         # A deleted view is held, then re-rendered: no delete exists (design §6).
                         if not self._hold_deleted(projection, source):
@@ -1569,15 +1573,22 @@ class CollectionWriter:
         return values
 
     def _held(self, cid: str, held: str | None, *, corrections=False):
-        """A held write refusal, or with ``corrections`` also a held view correction (discard)."""
-        reference = records._validate_held_reference(held)
+        """A held write refusal, or with ``corrections`` also a held view correction (discard).
+
+        With ``corrections``, a view correction an earlier release held under its older id
+        shape resolves too, so it can still be discarded.
+        """
+        if corrections and edit_back.legacy_held_id(held):
+            reference, refusals = held, False
+        else:
+            reference, refusals = records._validate_held_reference(held), True
         if reference is None:
             return None
         row = _row(
             self.connection.execute(
                 "SELECT * FROM held_candidates WHERE held_id = ? AND collection_id = ? "
-                "AND (kind = 'write-refusal' OR ?)",
-                (reference, cid, corrections),
+                "AND ((kind = 'write-refusal' AND ?) OR (kind = 'view-correction' AND ?))",
+                (reference, cid, refusals, corrections),
             )
         )
         if row is None:

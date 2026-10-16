@@ -9,15 +9,23 @@ import json
 
 import pytest
 from test_collection_store_migration import env as env
+from test_collection_store_service import service as service
 from test_collection_store_writer import CID, KEY, create, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 
 from exomem import get_page
 from exomem import structured_collections as collections
-from exomem.collection_store import edit_back
+from exomem.collection_store import capability, edit_back
 
 SETTLED = edit_back.SETTLE_SECONDS
 HELD = edit_back.INVALID_SECONDS
+VIEWS = capability.COLLECTION_VIEWS_V1
+
+
+@pytest.fixture(autouse=True)
+def views_released(monkeypatch):
+    """Each case runs under a release that enables edit-back, unless it sets its own release."""
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {VIEWS})
 
 
 def passes(store, *times):
@@ -225,6 +233,7 @@ def served(env, capsys, monkeypatch):
                               why="file fixture", scaffold=True)
     stop_writer()
     assert migrate(root, "apply") == 0
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {VIEWS})  # env set its own release
     capsys.readouterr()
     vault = Served(root)
     vault.start()
@@ -395,15 +404,23 @@ def test_an_edit_inside_the_managed_presentation_block_is_not_adopted(store):
     assert store.connection.execute("SELECT body FROM items").fetchone() == ("Authored line\n",)
 
 
-def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store):
+def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store, monkeypatch):
     """Defect: the store's own render is taken for an edit, or every pass reads every view again."""
-    receipt, path = appended(store, count=1)
+    from exomem import held_fs
+
+    _, path = appended(store, count=1)
     store.reconcile_views()
     rendered, before = path.read_bytes(), txns(store)
-    passes(store, 0.0, SETTLED, 60.0, 60.0 + SETTLED)
+    with held_fs.acquire(store.root).require() as fs:
+        platform = type(fs)
+    reads = []
+    read = platform.read
+    monkeypatch.setattr(platform, "read", lambda fs, file: reads.append(file) or read(fs, file))
+    runner = passes(store, 0.0)
+    assert len(reads) == 2  # the first pass reads the manifest and item views
+    runner.run(store, now=60.0)
+    assert len(reads) == 2  # the next full pass only stats them
     assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
-    assert store.connection.execute("SELECT state,stat_identity IS NOT NULL FROM projection_state WHERE path=?",
-                                    (receipt["affected_paths"][0],)).fetchone() == ("current", 1)
 
 
 def test_views_render_no_file_mode_audit_marker_or_head(store):
@@ -419,3 +436,124 @@ def test_views_render_no_file_mode_audit_marker_or_head(store):
     assert b"exomem-record-audit" not in (store.root / receipt["affected_paths"][0]).read_bytes()
     manifest = get_page.get_page(store.root, path=manifest_path()).frontmatter
     assert "record_audit" not in manifest and manifest["exomem_view"]["v"] == 1
+
+
+def vault_bytes(root):
+    """Every vault file but the store replica, which publishes after earlier commits on its own schedule."""
+    from exomem.collection_store import replica
+
+    skipped = replica.replica_path(root)
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*"))
+            if path.is_file() and path != skipped}
+
+
+@pytest.fixture
+def quick_service(monkeypatch, request):
+    """The summary-collection service, started with edit-back windows of tenths of a second."""
+    monkeypatch.setattr(edit_back, "SETTLE_SECONDS", 0.2)
+    monkeypatch.setattr(edit_back, "INVALID_SECONDS", 0.4)
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 0.3)
+    return request.getfixturevalue("service")
+
+
+@pytest.mark.parametrize("released", [frozenset(), frozenset({VIEWS})], ids=["production", "summary-fenced"])
+def test_an_unreleased_route_takes_no_view_edit(quick_service, monkeypatch, released):
+    """Defect: edit-back commits or holds an owner's edit of a summary collection's view while the
+    release keeps edit-back off, or while it keeps every route on that collection refused."""
+    import time
+
+    from exomem.collection_store import runtime
+
+    root, view = quick_service.root, quick_service.root / manifest_path()
+    until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state!='current'") == [(0,)])
+    monkeypatch.setattr(capability, "RELEASED", released)
+    view.write_bytes(view.read_bytes().replace(b"title: Work", b"title: Renamed"))
+    before, txns_before = vault_bytes(root), store_rows(root, "SELECT COUNT(*) FROM txns")
+    for _ in range(6):  # each served request wakes the store thread's views tick
+        runtime._server(root).call(lambda: None)
+        time.sleep(0.5)
+    assert store_rows(root, "SELECT COUNT(*) FROM txns") == txns_before
+    assert store_rows(root, "SELECT COUNT(*) FROM held_candidates") == [(0,)]
+    assert vault_bytes(root) == before
+    # The same edit is applied once the release serves both edit-back and the collection.
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1, VIEWS}))
+    runtime._server(root).call(lambda: None)
+    until(lambda: store_rows(root, "SELECT COUNT(*) FROM txns WHERE operation='view_edit'") == [(1,)])
+    [(text,)] = store_rows(root, "SELECT manifest_text FROM collection_manifests ORDER BY manifest_version DESC LIMIT 1")
+    assert "title: Renamed" in text
+
+
+def test_edit_back_waits_for_its_release_on_a_migrated_collection(served, monkeypatch):
+    """Defect: edit-back applies an owner's item edit under a release that serves migrated
+    collections but keeps edit-back off."""
+    import time
+
+    from exomem.collection_store import runtime
+
+    root = served.root
+    _, path = published_view(root, "Waiting", count=1)
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {VIEWS})
+    path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 5"))
+    for _ in range(6):  # past the settle window; each served request wakes the views tick
+        runtime._server(root).call(lambda: None)
+        time.sleep(0.5)
+    assert counted(root, "Waiting") == 1
+    assert store_rows(root, "SELECT COUNT(*) FROM held_candidates") == [(0,)]
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {VIEWS})
+    until(lambda: counted(root, "Waiting") == 5)
+
+
+def test_an_edited_summary_page_is_held_by_the_served_publication_pass(store):
+    """Defect: the served publication pass leaves an edited summary page to edit-back, which reads
+    only item and manifest views, so the page is never held or rendered again."""
+    from test_collection_store_summary import bulk, pages
+    from test_collection_store_summary import create as create_summary
+
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal()):
+        create_summary(store)
+        bulk(store, [{"title": "One", "count": 1}])
+        store.reconcile_views()
+        store.reconcile_views()
+        page = store.root / pages(store)[0]
+        edited = page.read_bytes() + b"\n- title: Two\n  count: 2\n"
+        page.write_bytes(edited)
+        bulk(store, [{"title": "Three", "count": 3}])
+        for _ in range(6):
+            store.reconcile_views(pending_only=True)
+    assert [(code, raw) for _, code, raw in holds(store)] == [("SUMMARY_VIEW_READ_ONLY", edited)]
+    assert page.read_bytes() != edited
+
+
+def test_reordering_a_manifest_views_properties_commits_nothing(store):
+    """Defect: a formatting-only manifest edit commits a revise, which also refuses an in-flight
+    revise that carried the earlier manifest hash."""
+    from exomem import vault
+
+    create(store)
+    store.reconcile_views()
+    path = store.root / manifest_path()
+    rendered = path.read_bytes()
+    frontmatter, body, _ = vault.parse_frontmatter(rendered.decode(), strict=True)
+    reordered = {name: frontmatter[name] for name in reversed(list(frontmatter))}
+    edited = ("---\n" + vault.serialize_frontmatter(reordered) + "\n---\n" + body).encode()
+    assert edited != rendered
+    path.write_bytes(edited)
+    before = txns(store)
+    passes(store, 0.0, SETTLED)
+    assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
+
+
+def test_a_view_correction_held_under_an_earlier_id_shape_can_be_discarded(store):
+    """Defect: a correction an earlier release held under a 24-hex id is listed for attention but
+    every discard answers HELD_NOT_FOUND."""
+    _, path = appended(store, count=1)
+    path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: broken"))
+    store.reconcile_views()
+    [(held, _, _)] = holds(store)
+    legacy = hashlib.sha256(held.encode()).hexdigest()[:24]
+    store.connection.execute("UPDATE held_candidates SET held_id=? WHERE held_id=?", (legacy, held))
+    store.connection.commit()
+    store.discard_held(CID, held=legacy, why="an older hold")
+    assert holds(store) == []

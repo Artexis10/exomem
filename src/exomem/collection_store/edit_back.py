@@ -11,8 +11,10 @@ governed update through the ordinary writer leaf (``update_record``, a Planning
 transition by ``owner:view-edit``. Everything else is a held view correction, keyed so
 that a repeat of the same observation adds nothing.
 
-Only the serving store thread runs a pass, as the writer-lease holder. A vault without
-the mode marker never reaches this module.
+Only the serving store thread runs a pass, as the writer-lease holder, and only while the
+release enables ``collection-views-v1`` (``capability.collection_views_enabled``). A
+collection behind a closed route fence is skipped. A vault without the mode marker never
+reaches this module.
 """
 
 from __future__ import annotations
@@ -58,12 +60,23 @@ DELETED = "VIEW_DELETED"
 #: bytes are not the current render. False re-renders at once, displacing the bytes into the hold.
 KEEP_INVALID_IN_PLACE = True
 
+#: The view kinds edit-back reads; the others are generated read-only output.
+# nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+EDITABLE_KINDS = ("item", "manifest")
+
 _HEX12 = re.compile(r"[0-9a-f]{12}")
+#: The id shape of a view correction an earlier release held, before ids were UUID-shaped.
+_LEGACY_HELD_ID = re.compile(r"[0-9a-f]{24}")
+
+
+def legacy_held_id(reference) -> bool:
+    """Whether ``reference`` is a view-correction id an earlier release gave (it checks shape only)."""
+    return isinstance(reference, str) and _LEGACY_HELD_ID.fullmatch(reference) is not None
 
 
 def kept_in_place(code: str, kind: str) -> bool:
     """Whether a hold of ``code`` leaves the owner's bytes at an item or manifest view path."""
-    return KEEP_INVALID_IN_PLACE and code == INVALID and kind in ("item", "manifest")
+    return KEEP_INVALID_IN_PLACE and code == INVALID and kind in EDITABLE_KINDS
 
 
 def held_id(path: str, *, base: int | None = None, raw: bytes | None = None) -> str:
@@ -144,7 +157,7 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = ()) -> Classifi
     if stamp is None:
         # Only the exact imported bytes may be unstamped, and those are the published digest.
         return Classification(INVALID, None, None, current_version(conn, projection)
-                              if projection["kind"] in ("item", "manifest") else None)
+                              if projection["kind"] in EDITABLE_KINDS else None)
     identity = views.store_identity(conn)
     lineage = json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
     if stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}:
@@ -157,7 +170,7 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = ()) -> Classifi
                                            (projection["collection_id"],)).fetchone()
         code = derived_rows.COLLECTION_DERIVED if derived else "SUMMARY_VIEW_READ_ONLY"
         return Classification(code, stamp, stamp["v"], generation)
-    if projection["kind"] not in ("item", "manifest"):
+    if projection["kind"] not in EDITABLE_KINDS:
         return Classification(INVALID, stamp, stamp["v"], projection["pending_row_version"])
     if projection["kind"] == "item":
         current, payload = conn.execute("SELECT row_version,payload_hash FROM items WHERE row_id=?",
@@ -240,7 +253,8 @@ def _manifest_change(writer, projection, frontmatter, body, found):
         (row["collection_id"], row["manifest_version"])).fetchone()[0]
     edited = {name: value for name, value in frontmatter.items() if name != "exomem_view"}
     text = "---\n" + vault.serialize_frontmatter(edited) + "\n---\n" + ("\n" + body if body else "")
-    if views.manifest_view(text, found.stamp) == views.manifest_view(stored, found.stamp):
+    # Parsed, not as text: reordering the manifest's properties is formatting, not a revise.
+    if _parsed_view(text, found.stamp) == _parsed_view(stored, found.stamp):
         return Classification(SAME, found.stamp, found.base, found.current)
     proposed = collections.parse_manifest_bytes(writer.root, projection["path"], text.encode())
     if proposed.collection_id != manifest.collection_id:
@@ -254,6 +268,11 @@ def _manifest_change(writer, projection, frontmatter, body, found):
         "manifest_text": text, "expected_manifest_hash": manifest.manifest_version.hash,
         "expected_container_hash": writer._container(row),
     })
+
+
+def _parsed_view(manifest_text: str, stamp) -> tuple:
+    frontmatter, body, _ = vault.parse_frontmatter(views.manifest_view(manifest_text, stamp), strict=True)
+    return frontmatter, body.strip()
 
 
 def resumed_update(writer, held, manifest, before) -> dict:
@@ -297,6 +316,19 @@ class Observation:
             self.projection["published_sha256"], self.projection["pending_sha256"]}
 
 
+def _served(writer, cid) -> bool:
+    """Whether this release serves the collection's views: eligible, and behind no closed route fence."""
+    from . import authority, capability
+
+    if not authority.projection_eligible(writer, {"collection_id": cid}):
+        return False
+    try:
+        _, manifest, _ = writer._collection(cid)
+    except (collections.CollectionError, connection.CollectionStoreError):
+        return False
+    return capability.summary_route_open(writer.root, manifest)
+
+
 def _stat(version) -> str:
     return f"{version.identity.device}:{version.identity.inode}:{version.size}:{version.mtime_ns}"
 
@@ -305,10 +337,9 @@ def observe(writer, paths=None) -> list[Observation]:
     """Read the item and manifest views a pass checks, outside the write transaction.
 
     A view whose stat identity matches the one recorded with its current bytes costs one
-    stat. ``paths`` limits the pass to the views still settling.
+    stat. ``paths`` limits the pass to the views still settling. A collection behind a
+    closed route fence is not read at all.
     """
-    from . import authority
-
     with writer.read_snapshot():
         if paths is None:
             cursor = writer.connection.execute(
@@ -319,8 +350,7 @@ def observe(writer, paths=None) -> list[Observation]:
                 "(SELECT value FROM json_each(?)) ORDER BY path", (json.dumps(sorted(paths)),))
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
-        admitted = {cid: authority.projection_eligible(writer, {"collection_id": cid})
-                    for cid in {row["collection_id"] for row in rows}}
+        admitted = {cid: _served(writer, cid) for cid in {row["collection_id"] for row in rows}}
     found = []
     with ExitStack() as stack:
         fs = stack.enter_context(held_fs.acquire(writer.root).require())
@@ -471,13 +501,16 @@ def attention_findings(vault_root) -> tuple[list, str | None]:
 
 def _findings(writer):
     from ..audit import AuditFinding
+    from . import capability
 
     findings = []
     with writer.read_snapshot():
         operation = writer._operation
         for (cid,) in writer.connection.execute("SELECT collection_id FROM collections ORDER BY collection_id").fetchall():
             try:
-                writer._collection(cid)
+                _, manifest, _ = writer._collection(cid)
+                if not capability.summary_route_open(writer.root, manifest):
+                    continue  # a collection this release does not serve has no actionable correction
                 released = operation.inspection_selection(cid).released
             except (collections.CollectionError, connection.CollectionStoreError):
                 continue  # a collection the caller cannot see is absent, not an error

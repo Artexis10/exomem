@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, record_formats, reserved_paths, vault
-from . import authority, connection, governance, summary, typed_storage
+from . import authority, capability, connection, governance, summary, typed_storage
 
 STAGE_PREFIX = ".exomem-collection-stage-"
 ASIDE_PREFIX = ".exomem-collection-aside-"
@@ -71,6 +71,8 @@ class PublicationBatch:
         self.kept = set()
         # path -> the settled edit-back observation this batch acts on, or None for every path.
         self.observed = None
+        # Whether the release runs edit-back; without it, view inputs are classified as before it.
+        self.edit_back = capability.collection_views_enabled(conn=writer.connection)
 
     def accept(self, path, digest):
         self.accepted.setdefault(path, set()).add(digest)
