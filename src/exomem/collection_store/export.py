@@ -618,6 +618,7 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     deferred = []
     with manager.consistency_guard(root, operation="collection_store_export"):
         intent = _local_intent(root)
+        resumed = intent is not None
         if intent is None:
             if authority.read_marker(root) is None:
                 return preview(root) | {"step": "apply"}
@@ -630,10 +631,15 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
         if fence.enrolled:
             admission._require_fence(fence, marker)
             # Its capability holds the lease while the fence stands.
-            session.runtime()
+            runtime = session.runtime()
             with manager.writer_authority_guard(vault_root=root):
                 token = manager._fencing_token
                 with session.writer(token) as writer:
+                    if resumed:
+                        # Until the replica carries the intent, another host may adopt it and write,
+                        # so a resume first proves the coordinator's head is this store's. This
+                        # run's own _begin admitted the store under this token, which proved it.
+                        admission._verify_acquisition(writer, runtime, fence, marker)
                     # The replica carries the intent before any file changes, so no host adopts it.
                     published = admission._publish_current_epoch(session, writer, token)
                 if published.status != "published":

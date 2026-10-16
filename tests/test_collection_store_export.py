@@ -250,7 +250,8 @@ def _export_and_crash(environment, database, cut, plan_id):
             os._exit(73)
         return run
 
-    {"before-files": lambda: setattr(export, "_write_collection", die),
+    {"after-begin": lambda: setattr(export, "_begin", after(export._begin)),
+     "before-files": lambda: setattr(export, "_write_collection", die),
      "between-files-and-checkpoint": lambda: setattr(records, "export_checkpoint", die),
      "after-fence-retire": lambda: setattr(export, "_detach", die),
      "after-marker-retire": lambda: setattr(export, "_retire_marker", after(export._retire_marker)),
@@ -273,7 +274,7 @@ def crash_export(tmp_path, cut, plan_id):
     wait_out_the_lease()
 
 
-@pytest.mark.parametrize("cut", ["before-files", "between-files-and-checkpoint", "after-fence-retire",
+@pytest.mark.parametrize("cut", ["after-begin", "before-files", "between-files-and-checkpoint", "after-fence-retire",
                                  "after-marker-retire", "before-store-tombstone"])
 def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env, capsys, tmp_path, cut):  # noqa: F811
     """An export killed between two steps that cannot finish, finishes differently, or, cut after
@@ -300,6 +301,39 @@ def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env
     checkpoints = [line for line in (root / "Knowledge Base/log.md").read_text().splitlines()
                    if "rebaseline" in line and "collections-store-history" in line]
     assert len(checkpoints) == 3  # one per written collection, never repeated by the resume
+
+
+def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it_writes(
+        env, capsys, tmp_path):  # noqa: F811
+    """A resume that publishes, renews and exports a store behind the coordinator's head: a host
+    that adopted the replica before it carried the intent committed a row the files then lack,
+    and that row survives only in a store that retire-local later tombstones."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "after-begin", plan_id)  # the intent is in the live store, not the replica
+    other = tmp_path / "other"
+    shutil.copytree(root, other)
+    with pytest.MonkeyPatch.context() as there:
+        for name, value in {"EXOMEM_STATE_ROOT": str(tmp_path / "other-state"), "EXOMEM_VAULT_PATH": str(other),
+                            "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-other"),
+                            "EXOMEM_WRITER_LEASE_REPLICA_ID": "other"}.items():
+            there.setenv(name, value)
+        service = start_service(other)  # it adopts the replica, which carries no intent
+        try:
+            call(other, "record_memory", action="append", collection=WORK, item={"title": "Other host row"},
+                 why="a store-mode write on another host")
+        finally:
+            service.stop()
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    recorded = client.status().collection_store_head
+    before = vault_bytes(root)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
+
+    assert "COLLECTION_STORE_SYNC_PENDING" in capsys.readouterr().err
+    assert client.status().collection_store_head == recorded
+    assert vault_bytes(root) == before
 
 
 def test_a_rerun_after_a_hand_retired_fence_refuses_before_it_retires_the_marker(env, capsys, tmp_path):  # noqa: F811
