@@ -288,6 +288,27 @@ def _require_collection_store_recovery(session, token) -> None:
         session.require(token)
 
 
+@contextmanager
+def _collection_store_manifest(vault_root: Path, authority_check: Callable[[], bool], action: str):
+    """Yield the complete state manifest under the migration lock, checking the caller's authority first."""
+
+    if not callable(authority_check):
+        raise StateMigrationOfflineRequired("collection-store authority is absent")
+    state_dir = state_paths.vault_state_dir(vault_root)
+    with _migration_lock(state_dir):
+        if authority_check() is not True:
+            raise StateMigrationOfflineRequired("collection-store authority is absent")
+        manifest = _load_manifest(state_dir, vault_root=vault_root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired(f"collection-store {action} requires complete state")
+        try:
+            yield state_dir, manifest
+        finally:
+            # Publication can succeed before a final durability check raises.
+            with _RESOLUTION_LOCK:
+                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
+
+
 def record_collection_store_compatibility(
     vault_root: Path, *, authority_check: Callable[[], bool],
 ) -> None:
@@ -298,15 +319,7 @@ def record_collection_store_compatibility(
     old-process exclusion; this seam establishes none of those boundaries.
     """
 
-    if not callable(authority_check):
-        raise StateMigrationOfflineRequired("collection-store authority is absent")
-    state_dir = state_paths.vault_state_dir(vault_root)
-    with _migration_lock(state_dir):
-        if authority_check() is not True:
-            raise StateMigrationOfflineRequired("collection-store authority is absent")
-        manifest = _load_manifest(state_dir, vault_root=vault_root)
-        if manifest is None or manifest["state"] != "complete":
-            raise StateMigrationOfflineRequired("collection-store enrollment requires complete state")
+    with _collection_store_manifest(vault_root, authority_check, "enrollment") as (state_dir, manifest):
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
         if (
             physical != set(_descriptor_ids())
@@ -316,14 +329,9 @@ def record_collection_store_compatibility(
             raise StateMigrationOfflineRequired("collection-store enrollment requires ready families")
         if authority_check() is not True:
             raise StateMigrationOfflineRequired("collection-store authority was lost")
-        try:
-            if _COLLECTION_STORE_COMPATIBILITY_IDS - optional:
-                manifest["descriptors"] = sorted(set(manifest["descriptors"]) | _COLLECTION_STORE_COMPATIBILITY_IDS)
-                _write_manifest(state_dir, manifest)
-        finally:
-            # Publication can succeed before a final durability check raises.
-            with _RESOLUTION_LOCK:
-                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
+        if _COLLECTION_STORE_COMPATIBILITY_IDS - optional:
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) | _COLLECTION_STORE_COMPATIBILITY_IDS)
+            _write_manifest(state_dir, manifest)
 
 
 def retire_collection_store_compatibility(
@@ -337,23 +345,10 @@ def retire_collection_store_compatibility(
     store custody and export intent; this seam removes only the two store IDs.
     """
 
-    if not callable(authority_check):
-        raise StateMigrationOfflineRequired("collection-store authority is absent")
-    state_dir = state_paths.vault_state_dir(vault_root)
-    with _migration_lock(state_dir):
-        if authority_check() is not True:
-            raise StateMigrationOfflineRequired("collection-store authority is absent")
-        manifest = _load_manifest(state_dir, vault_root=vault_root)
-        if manifest is None or manifest["state"] != "complete":
-            raise StateMigrationOfflineRequired("collection-store retirement requires complete state")
-        try:
-            if _COLLECTION_STORE_COMPATIBILITY_IDS & set(manifest["descriptors"]):
-                manifest["descriptors"] = sorted(set(manifest["descriptors"]) - _COLLECTION_STORE_COMPATIBILITY_IDS)
-                _write_manifest(state_dir, manifest)
-        finally:
-            # Publication can succeed before a final durability check raises.
-            with _RESOLUTION_LOCK:
-                _RESOLUTION_CACHE.pop(_cache_key(vault_root, state_dir), None)
+    with _collection_store_manifest(vault_root, authority_check, "retirement") as (state_dir, manifest):
+        if _COLLECTION_STORE_COMPATIBILITY_IDS & set(manifest["descriptors"]):
+            manifest["descriptors"] = sorted(set(manifest["descriptors"]) - _COLLECTION_STORE_COMPATIBILITY_IDS)
+            _write_manifest(state_dir, manifest)
 
 
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:

@@ -52,6 +52,7 @@ _TRANSITION_DOMAIN = b"exomem.collection-store-export-transition:v1\0"
 #: The checkpoint's one gap code names the store transitions it summarizes.
 _HISTORY_CODE = "collections-store-history:{store_id}:{first}-{last}"
 #: The projection kinds the export renders back, of the schema's closed kinds; the others have no file form.
+# nosemgrep: ep-word-set -- the schema's closed projection kinds that have a file form, not a vocabulary.
 _RENDERED = ("manifest", "item", "log", "held")
 
 STALE = "COLLECTION_STORE_EXPORT_STALE"

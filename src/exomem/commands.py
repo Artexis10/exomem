@@ -10382,10 +10382,9 @@ def op_maintain_memory(
         from .collection_store import preflight as store_preflight
 
         return store_preflight.preflight(vault_root)
-    if mode == "collections-store-adopt-local":
-        from .collection_store import admission as store_admission
-
-        if (
+    def store_preview_arguments_invalid() -> bool:
+        # The preview-first store modes take no audit arguments; an apply needs true, plan_id and why.
+        return (
             categories is not None
             or dry_run is not None
             or rebuild_embeddings
@@ -10395,7 +10394,12 @@ def op_maintain_memory(
             or source_snapshot is not None
             or (apply is None and (plan_id is not None or why is not None))
             or (apply is not None and (apply is not True or plan_id is None or why is None))
-        ):
+        )
+
+    if mode == "collections-store-adopt-local":
+        from .collection_store import admission as store_admission
+
+        if store_preview_arguments_invalid():
             raise ValueError(
                 "INVALID_ARGUMENTS: collections-store-adopt-local previews without arguments; "
                 "apply needs true, plan_id and why"
@@ -10410,17 +10414,7 @@ def op_maintain_memory(
     if mode == "collections-store-export":
         from .collection_store import admission as store_admission
 
-        if (
-            categories is not None
-            or dry_run is not None
-            or rebuild_embeddings
-            or detail != "actionable"
-            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
-            or collection is not None
-            or source_snapshot is not None
-            or (apply is None and (plan_id is not None or why is not None))
-            or (apply is not None and (apply is not True or plan_id is None or why is None))
-        ):
+        if store_preview_arguments_invalid():
             raise ValueError(
                 "INVALID_ARGUMENTS: collections-store-export previews without arguments; "
                 "apply needs true, plan_id and why, and runs only offline"
