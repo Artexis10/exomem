@@ -33,6 +33,8 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import text_scripts
+
 log = logging.getLogger(__name__)
 
 DEFAULT_LANGS_ENV = "EXOMEM_OCR_DEFAULT_LANGS"
@@ -287,7 +289,10 @@ def read_image(cmd: str, image: Path) -> str:
     """OCR one image file: detect its script, then read with that script's models.
 
     A script with vertical models gets a horizontal and a vertical pass, and the
-    pass Tesseract is more confident in wins.
+    pass Tesseract is more confident in wins. Tesseract spaces Japanese text
+    word by word, and in places character by character, so the winning text
+    loses each space between two characters of Chinese or Japanese text
+    (`text_scripts.close_spaceless_gaps`).
     """
     models = installed_models(cmd)
     if models is None:
@@ -298,4 +303,4 @@ def read_image(cmd: str, image: Path) -> str:
         plans = passes_for(models, _detect_script(cmd, image))
     with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
         results = [_read(cmd, image, lang, psm, Path(tmp)) for lang, psm in plans]
-    return max(results, key=lambda result: result[0])[1]
+    return text_scripts.close_spaceless_gaps(max(results, key=lambda result: result[0])[1])

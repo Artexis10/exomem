@@ -20,39 +20,55 @@ import re
 import unicodedata
 from functools import lru_cache
 
-#: Blocks whose scripts are written without spaces between words: Han, kana,
-#: Hangul, Thai, Lao, Khmer and Myanmar. Planes 2 and 3 hold only CJK
-#: ideographs, so they are declared whole and future extensions land inside.
-SCRIPTIO_CONTINUA_BLOCKS: tuple[tuple[int, int, str], ...] = (
-    (0x0E00, 0x0E7F, "Thai"),
-    (0x0E80, 0x0EFF, "Lao"),
-    (0x1000, 0x109F, "Myanmar"),
-    (0x1100, 0x11FF, "Hangul Jamo"),
-    (0x1780, 0x17FF, "Khmer"),
-    (0x19E0, 0x19FF, "Khmer Symbols"),
+#: Blocks of Han, kana and CJK punctuation. Chinese and Japanese put no space
+#: between words or phrases, so a space between two of these characters is
+#: never part of the text. Planes 2 and 3 hold only CJK ideographs, so they
+#: are declared whole and future extensions land inside.
+SPACELESS_BLOCKS: tuple[tuple[int, int, str], ...] = (
     (0x2E80, 0x2EFF, "CJK Radicals Supplement"),
     (0x2F00, 0x2FDF, "Kangxi Radicals"),
     (0x3000, 0x303F, "CJK Symbols and Punctuation"),
     (0x3040, 0x309F, "Hiragana"),
     (0x30A0, 0x30FF, "Katakana"),
-    (0x3130, 0x318F, "Hangul Compatibility Jamo"),
     (0x31F0, 0x31FF, "Katakana Phonetic Extensions"),
     (0x3400, 0x4DBF, "CJK Unified Ideographs Extension A"),
     (0x4E00, 0x9FFF, "CJK Unified Ideographs"),
-    (0xA960, 0xA97F, "Hangul Jamo Extended-A"),
-    (0xA9E0, 0xA9FF, "Myanmar Extended-B"),
-    (0xAA60, 0xAA7F, "Myanmar Extended-A"),
-    (0xAC00, 0xD7AF, "Hangul Syllables"),
-    (0xD7B0, 0xD7FF, "Hangul Jamo Extended-B"),
     (0xF900, 0xFAFF, "CJK Compatibility Ideographs"),
     (0xFF65, 0xFF9F, "Halfwidth Katakana"),
-    (0xFFA0, 0xFFDC, "Halfwidth Hangul"),
     (0x1AFF0, 0x1AFFF, "Kana Extended-B"),
     (0x1B000, 0x1B0FF, "Kana Supplement"),
     (0x1B100, 0x1B12F, "Kana Extended-A"),
     (0x1B130, 0x1B16F, "Small Kana Extension"),
     (0x20000, 0x3FFFF, "Supplementary and Tertiary Ideographic Planes"),
 )
+
+#: Blocks of the other scripts written without spaces between words: Hangul,
+#: Thai, Lao, Khmer and Myanmar. Their text still holds spaces (Korean puts
+#: one between words, the others between phrases), so a space there is text.
+SPACED_CONTINUA_BLOCKS: tuple[tuple[int, int, str], ...] = (
+    (0x0E00, 0x0E7F, "Thai"),
+    (0x0E80, 0x0EFF, "Lao"),
+    (0x1000, 0x109F, "Myanmar"),
+    (0x1100, 0x11FF, "Hangul Jamo"),
+    (0x1780, 0x17FF, "Khmer"),
+    (0x19E0, 0x19FF, "Khmer Symbols"),
+    (0x3130, 0x318F, "Hangul Compatibility Jamo"),
+    (0xA960, 0xA97F, "Hangul Jamo Extended-A"),
+    (0xA9E0, 0xA9FF, "Myanmar Extended-B"),
+    (0xAA60, 0xAA7F, "Myanmar Extended-A"),
+    (0xAC00, 0xD7AF, "Hangul Syllables"),
+    (0xD7B0, 0xD7FF, "Hangul Jamo Extended-B"),
+    (0xFFA0, 0xFFDC, "Halfwidth Hangul"),
+)
+
+#: Every block the tokenizer reads as unspaced runs, in code point order.
+SCRIPTIO_CONTINUA_BLOCKS: tuple[tuple[int, int, str], ...] = tuple(
+    sorted(SPACELESS_BLOCKS + SPACED_CONTINUA_BLOCKS)
+)
+
+#: The Halfwidth and Fullwidth Forms block. Its punctuation (`，`, `！`, `（`)
+#: belongs to Chinese and Japanese text; its letters and digits are Latin.
+FULLWIDTH_FORMS_BLOCK = (0xFF00, 0xFFEF)
 
 #: Letter blocks of the scripts the tokenizer treats specially: Latin words get
 #: an accent-folded index variant; Cyrillic, Greek and Armenian words get their
@@ -103,6 +119,56 @@ def _within(code_point: int, starts: tuple[int, ...], ends: tuple[int, ...]) -> 
 def is_scriptio_continua(character: str) -> bool:
     """True when `character` belongs to a declared unspaced script's block."""
     return _within(ord(character), _CONTINUA_STARTS, _CONTINUA_ENDS)
+
+
+_SPACELESS_STARTS = tuple(start for start, _end, _name in SPACELESS_BLOCKS)
+_SPACELESS_ENDS = tuple(end for _start, end, _name in SPACELESS_BLOCKS)
+
+
+def is_spaceless(character: str) -> bool:
+    """True for Han, kana, CJK punctuation and fullwidth punctuation.
+
+    The ideographic space sits in a CJK block but is a space, so it is not one.
+    """
+    code_point = ord(character)
+    if FULLWIDTH_FORMS_BLOCK[0] <= code_point <= FULLWIDTH_FORMS_BLOCK[1] and (
+        unicodedata.category(character).startswith("P")
+    ):
+        return True
+    return _within(code_point, _SPACELESS_STARTS, _SPACELESS_ENDS) and not character.isspace()
+
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _horizontal(space: str) -> bool:
+    # Unicode's space separators (Zs) and the tab; line and paragraph breaks are not Zs.
+    return space == "\t" or unicodedata.category(space) == "Zs"
+
+
+def close_spaceless_gaps(text: str) -> str:
+    """`text` without the horizontal spaces between two `is_spaceless` characters.
+
+    OCR can space Chinese and Japanese text word by word, or character by
+    character (`東 京 駅 の 近く`), which breaks the unspaced run the tokenizer
+    reads as one. A space beside a Latin word, a digit or a Hangul word, and
+    every line break, is text and stays.
+    """
+
+    def gap(match: re.Match[str]) -> str:
+        start, end = match.span()
+        run = match.group()
+        if (
+            start > 0
+            and end < len(text)
+            and is_spaceless(text[start - 1])
+            and is_spaceless(text[end])
+            and all(map(_horizontal, run))
+        ):
+            return ""
+        return run
+
+    return _WHITESPACE_RUN_RE.sub(gap, text)
 
 
 #: The Hiragana block. Japanese writes particles, inflections and okurigana
