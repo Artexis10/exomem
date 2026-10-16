@@ -18,6 +18,8 @@ on:
       - "infra/cellctl/uv.lock"
       - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
+      - "scripts/check-media-samples.py"
+      - "tests/fixtures/media-samples/**"
       - ".github/workflows/cloud-images.yml"
   push:
     branches: [main]
@@ -32,6 +34,8 @@ on:
       - "infra/cellctl/uv.lock"
       - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
+      - "scripts/check-media-samples.py"
+      - "tests/fixtures/media-samples/**"
       - ".github/workflows/cloud-images.yml"
   workflow_dispatch:
 
