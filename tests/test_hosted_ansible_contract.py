@@ -72,7 +72,7 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert 'k3s_version: "v1.35.6+k3s1"' in defaults
     assert "2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432" in defaults
     assert "get_url:" in tasks
-    assert 'checksum: "sha256:{{ k3s_sha256_amd64 }}"' in tasks
+    assert "checksum: \"sha256:{{ k3s_binaries[ansible_facts['architecture']].sha256 }}\"" in tasks
     assert "cluster-init: true" in config
     assert "secrets-encryption: true" in config
     # harden-exomem-cloud-operator-access D4/2.6: the admin kubeconfig is

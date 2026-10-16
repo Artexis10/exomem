@@ -493,3 +493,110 @@ def test_buildkit_target_verification_accepts_all_matching_platforms(monkeypatch
         }
     monkeypatch.setattr(recovery, "run", lambda *args: json.dumps(inspection))
     recovery.verify_build_target("ghcr.io/example/runtime@sha256:" + "b" * 64, name)
+
+
+@pytest.mark.parametrize(
+    "invalid", [None, "missing-platform", "duplicate-platform", "bad-descriptor"]
+)
+def test_native_index_join_writes_only_the_validated_digest(tmp_path, monkeypatch, invalid):
+    """A partial native build must never become a tagged or attested release image."""
+    import hashlib
+    import json
+
+    repository = "registry.example/runtime"
+    children = ["sha256:" + "a" * 64, "sha256:" + "b" * 64]
+    for architecture, digest in zip(("amd64", "arm64"), children, strict=True):
+        (tmp_path / f"cloud-{architecture}.digest").write_text(digest)
+    manifests = [
+        {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": digest,
+            "size": 123,
+            "platform": {"os": "linux", "architecture": architecture},
+        }
+        for architecture, digest in zip(("amd64", "arm64"), children, strict=True)
+    ]
+    if invalid == "missing-platform":
+        manifests.pop()
+    elif invalid == "duplicate-platform":
+        manifests.append(manifests[0])
+    elif invalid == "bad-descriptor":
+        manifests[0]["digest"] = "invalid"
+    # Keep indentation: a reserialization changes the content address.
+    raw = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": manifests,
+        },
+        indent=2,
+    ).encode()
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    pushed = []
+
+    def check_output(args):
+        if "--dry-run" in args:
+            assert args[-2:] == [repository + "@" + child for child in children]
+        else:
+            assert "inspect" in args and args[-1] == repository + "@" + digest
+        # Buildx appends one display newline to both JSON outputs.
+        return raw + b"\n"
+
+    monkeypatch.setattr(recovery.subprocess, "check_output", check_output)
+    monkeypatch.setattr(recovery, "run", lambda *args: pushed.append(args) or "")
+    verified = []
+    monkeypatch.setattr(recovery, "verify_build_target", lambda *args: verified.append(args))
+    if invalid:
+        with pytest.raises(ValueError, match="platform|digest"):
+            recovery.join_image(repository, "cloud", tmp_path)
+        assert not pushed
+        assert not verified
+    else:
+        assert recovery.join_image(repository, "cloud", tmp_path) == digest
+        assert pushed == [
+            (
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--tag",
+                repository + "@" + digest,
+                *[repository + "@" + child for child in children],
+            )
+        ]
+        assert verified == [(repository + "@" + digest, "cloud")]
+
+
+def test_native_index_join_rejects_missing_child_without_registry_writes(tmp_path, monkeypatch):
+    (tmp_path / "cloud-amd64.digest").write_text("sha256:" + "a" * 64)
+    monkeypatch.setattr(recovery, "run", lambda *args: pytest.fail("partial pair must not push"))
+    with pytest.raises(FileNotFoundError, match="cloud-arm64.digest"):
+        recovery.join_image("registry.example/runtime", "cloud", tmp_path)
+
+
+def test_missing_native_role_finishes_verified_roles_and_reports_incomplete(tmp_path, monkeypatch):
+    """One failed native role must not hide or suppress another role's publication."""
+    digest = "sha256:" + "b" * 64
+    receipt = tmp_path / "original.sigstore.json"
+    receipt.write_bytes(b"original receipt")
+    tags = {}
+    uploaded = []
+    monkeypatch.setattr(recovery, "recovered_image", lambda name, *args: (None, []) if name == "cloud" else (digest, [receipt]))
+    monkeypatch.setattr(recovery, "image_digest", lambda ref: tags.get(ref))
+    monkeypatch.setattr(recovery, "upload_missing", lambda *args: uploaded.append(args[0]))
+
+    def command(*args):
+        if args[0] == "git":
+            return "a" * 40
+        tags[args[args.index("--tag") + 1]] = digest
+        return ""
+
+    monkeypatch.setattr(recovery, "run", command)
+    images = {
+        "cloud": {"ref": "registry.example/runtime:1.2.3-cloud", "immutable_tags": ["registry.example/runtime:1.2.3-cloud"]},
+        "cellctl": {"ref": "registry.example/controller:1.2.3", "immutable_tags": ["registry.example/controller:1.2.3"]},
+    }
+    with pytest.raises(ValueError, match="release incomplete.*cloud"):
+        recovery.finish_images("v1.2.3", images, tmp_path)
+    assert tags == {"registry.example/controller:1.2.3": digest}
+    assert uploaded == ["v1.2.3"]
