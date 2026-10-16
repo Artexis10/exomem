@@ -1115,8 +1115,7 @@ class SemanticCorpusContext:
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
-        current = self.pages.get(state.path)
-        if current is not None and _topology_unchanged(current, state):
+        if _stable_topology_replacement(self, state):
             return _context_with_stable_topology_candidate(self, state)
         pages = dict(self.pages)
         pages[state.path] = state
@@ -2450,13 +2449,11 @@ def _reconcile_markdown_delta(
     # page's facts still hold, so re-derive that page alone, not the corpus.
     if len(changed_paths) == 1:
         rel_path = changed_paths[0]
-        current = context.pages.get(rel_path)
         state = states.get(rel_path)
         if (
-            current is not None
-            and state is not None
-            and _topology_unchanged(current, state)
+            state is not None
             and identities.get(rel_path) == previous_identities.get(rel_path)
+            and _stable_topology_replacement(context, state)
         ):
             return _context_with_stable_topology_candidate(context, state)
 
@@ -3547,8 +3544,22 @@ def _context_from_state_map(
     )
 
 
-def _topology_unchanged(current: SemanticPageState, state: SemanticPageState) -> bool:
-    """Whether replacing `current` with `state` leaves every other page's facts valid."""
+def _stable_topology_replacement(
+    context: SemanticCorpusContext, state: SemanticPageState
+) -> bool:
+    """Whether `state` can replace its page without re-deriving any other page's facts.
+
+    Relation fact identities count occurrences per authored identity across the
+    whole corpus, so a page that shares its `exomem_id` with another page is
+    never re-derived alone.
+    """
+    current = context.pages.get(state.path)
+    if current is None:
+        return False
+    if state.identity_kind == "exomem_id" and context.identity_census.paths_by_identity.get(
+        state.identity, ()
+    ) != (state.path,):
+        return False
     return (
         current.title,
         current.identity_kind,

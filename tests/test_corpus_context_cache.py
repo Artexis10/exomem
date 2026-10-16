@@ -22,6 +22,7 @@ import pytest
 from exomem import (
     activation_manifest,
     freshness,
+    memory_refs,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
@@ -309,9 +310,9 @@ def test_markdown_delete_reconciles_without_full_rebuild(
     ("title", "body", "rebuilds_corpus"),
     [
         # A new title can change how every other page's links resolve.
-        ("Incremental", "Changed with the same governed rules.\n", True),
+        ("Incremental", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", True),
         # An in-place edit re-derives only the edited page's own facts.
-        ("One", "- vault.hosts [[Knowledge Base/Notes/Insights/two]]\n", False),
+        ("One", "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n", False),
     ],
     ids=["retitled", "edited-in-place"],
 )
@@ -340,6 +341,35 @@ def test_incremental_reconcile_matches_full_rebuild(
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
     rebuilt = _shared_context(vault)
 
+    assert rebuilt.relation_facts
+    assert incremental.as_dict() == rebuilt.as_dict()
+
+
+def test_edit_to_a_page_sharing_its_id_keeps_relation_identities_distinct(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_id = "0b7c6f3e-8d2a-4c1e-9f5b-2a6d8e4c1b3f"
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    relations = "## Relations\n- supports [[Knowledge Base/Notes/Insights/two]]\n"
+    for name in ("a-copy.md", "one.md"):
+        (notes / name).write_text(
+            f"---\ntitle: {name}\ntype: insight\nstatus: active\nproject: atlas\n"
+            f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\n{relations}",
+            encoding="utf-8",
+        )
+    _shared_context(vault)
+    (notes / "one.md").write_text(
+        f"---\ntitle: one.md\ntype: insight\nstatus: active\nproject: atlas\n"
+        f"{memory_refs.ID_FIELD}: {shared_id}\n---\n\nEdited.\n\n{relations}",
+        encoding="utf-8",
+    )
+    incremental = _shared_context(vault)
+
+    semantic_contract.reset_corpus_context_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+    rebuilt = _shared_context(vault)
+
+    assert len({fact.identity for fact in rebuilt.relation_facts}) == 2
     assert incremental.as_dict() == rebuilt.as_dict()
 
 
