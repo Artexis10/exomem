@@ -42,8 +42,9 @@ HARNESS_SESSION_TIMEOUT = 900
 HARNESS_MODULES_FILE = ROOT / "tests" / "harness_modules.txt"
 NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 
-#: The test jobs the release PR skips. Lint, build, specs, capabilities and
-#: release evidence still run on it; the full run at its base is its test proof.
+#: The test jobs the release PR skips. Lint, build, specs, capabilities, the
+#: wheel onboarding gate and release evidence still run on it; the full run at
+#: its base is its test proof.
 RELEASE_PR_SKIPPED_JOBS = {
     "core-tests",
     "harness-tests",

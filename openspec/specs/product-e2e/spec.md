@@ -55,7 +55,7 @@ Real OCR, PDF, ASR, CLIP, and video fixtures SHALL run scheduled or opt-in with 
 #### Scenario: Docs-only changes report omitted execution
 - **WHEN** every change relative to the pull request merge parent is inside the docs-only set
 - **THEN** CI reports that the installed journey did not run and makes no runtime acceptance claim
-- **AND** every test that reads a docs-only path still runs, and the remaining CI checks still run under their existing rules
+- **AND** every test marked `reads_repository_docs` still runs, the push run on main runs every test after the merge, and the remaining CI checks still run under their existing rules
 
 #### Scenario: Mixed changes retain installed proof
 - **WHEN** a pull request changes any path outside the docs-only set, including `README.md`, a deletion, or either side of a rename
