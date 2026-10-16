@@ -518,6 +518,52 @@ def test_local_runtime_activation_falls_back_without_liveness_probe(
         readiness.reset()
 
 
+def test_stdio_transport_activates_when_the_pipe_opens_not_on_the_fallback_timer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stdio client has no `/health` probe. Workers that start on the 5 s
+    # fallback timer land their CPU burst inside the client's first queries.
+    import io
+
+    from exomem import server
+    from exomem.governance import authorization_transport
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    activated = threading.Event()
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda root: activated.set() if root == vault else None,
+    )
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+    mcp = server.ExomemFastMCP("stdio-activation-probe", lifespan=activation.lifespan())
+    mcp._exomem_local_runtime_activation = activation
+
+    class _ClientClosesOnceWorkersStart(io.RawIOBase):
+        # The client sends nothing and closes stdin when the workers start,
+        # or after 5 s, far inside the 60 s fallback timer.
+        def readable(self) -> bool:
+            return True
+
+        def readinto(self, _buffer) -> int:
+            activated.wait(5.0)
+            return 0
+
+    stdin = io.BufferedReader(_ClientClosesOnceWorkersStart())
+    monkeypatch.setattr(authorization_transport.sys, "stdin", SimpleNamespace(buffer=stdin))
+    monkeypatch.setattr(authorization_transport.sys, "stdout", SimpleNamespace(buffer=io.BytesIO()))
+
+    try:
+        asyncio.run(mcp.run_stdio_async(show_banner=False))
+        assert activated.is_set()
+    finally:
+        readiness.reset()
+
+
 def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
