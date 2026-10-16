@@ -22,6 +22,7 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from .governance.scrubber import NOTICE, scrub_text
 
@@ -299,7 +300,8 @@ def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: s
     if not isinstance(archive_info, dict) or not isinstance(recorded_url, str):
         raise RuntimeError("staged candidate did not record its wheel source")
     source_url, _, fragment = recorded_url.partition("#")
-    if source_url != snapshot.as_uri():
+    # uv records a local version's '+' raw where as_uri() writes %2B; compare the decoded paths.
+    if unquote(source_url) != unquote(snapshot.as_uri()):
         raise RuntimeError("staged candidate did not record its wheel source")
     recorded_digests: list[str] = []
     deprecated_hash = archive_info.get("hash")
