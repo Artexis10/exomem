@@ -353,15 +353,13 @@ def test_unresolved_video_is_missing_before_decoder_loads(video_vault, monkeypat
             commands_module.op_get_video_frames(video_vault, VIDEO)
 
 
-def test_mcp_tool_error_carries_code(video_vault, monkeypatch) -> None:
+def test_mcp_path_refusal_answers_with_its_code(video_vault, monkeypatch) -> None:
     mcp = _build_server(monkeypatch)
-    with pytest.raises(Exception) as exc:
-        asyncio.run(
-            mcp.call_tool(
-                "read_media", {"path": "../escape.mp4"}, run_middleware=True
-            )
-        )
-    assert "INVALID_PATH" in str(exc.value)
+    result = asyncio.run(
+        mcp.call_tool("read_media", {"path": "../escape.mp4"}, run_middleware=True)
+    )
+    assert result.structured_content["success"] is False
+    assert result.structured_content["error"]["code"] == "INVALID_PATH"
 
 
 def test_mcp_only_surface() -> None:
