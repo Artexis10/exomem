@@ -944,15 +944,15 @@ if "--psm" in args and args[args.index("--psm") + 1] == "0":
     sys.exit(1)  # OSD is not expected when the inventory is unreadable
 base = pathlib.Path(args[1])
 tab, newline = chr(9), chr(10)
-base.with_suffix(".txt").write_text({text!a} + newline, encoding="utf-8")
+base.with_suffix(".txt").write_text("harbour lantern was repaired" + newline)
 rows = (("level", "conf", "text"), ("5", "91", "harbour"), ("5", "90", "lantern"))
 base.with_suffix(".tsv").write_text(newline.join(tab.join(row) for row in rows) + newline)
 '''
 
 
-def _fake_tesseract(tmp_path: Path, listing: str, text: str = "harbour lantern was repaired") -> str:
+def _fake_tesseract(tmp_path: Path, listing: str) -> str:
     script = tmp_path / "tesseract"
-    script.write_text(f"#!{sys.executable}\n" + _FAKE_TESSERACT.format(listing=listing, text=text))
+    script.write_text(f"#!{sys.executable}\n" + _FAKE_TESSERACT.format(listing=listing))
     script.chmod(0o755)
     return str(script)
 
@@ -968,74 +968,6 @@ def test_tesseract_4_without_a_tessdata_path_still_reads_the_image(tmp_path) -> 
     image.write_bytes(b"png")
 
     assert ocr_models.read_image(tesseract, image) == "harbour lantern was repaired"
-
-
-# Tesseract 5's text for the two Japanese fixtures, recorded from the Cloud image's own
-# script-first OCR: it spaces Japanese word by word, and in places character by character.
-_TESSERACT_JAPANESE = {
-    "ocr-jpn.png": (
-        "昨日 の 午後 、 東 京 駅 の 近く の 古本 屋 で\n"
-        "古い 地図 を 見 つけ まし た 。 その 地図 に は\n"
-        "明治 時 代 の 町 並み が 細か く 描 か れ て いま す 。"
-    ),
-    "ocr-jpn-vert.png": (
-        "京都 の 庭園 で 静か な 朝 を 過ごし まし た 。\n"
-        "池 の 水 面 に は 紅葉 が 映っ て いま し た 。\n"
-        "鳥 の 声 だ けが 遠く か ら 聞 こえ て きま す 。"
-    ),
-}
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
-@pytest.mark.parametrize(
-    "name,query",
-    [
-        ("ocr-jpn-vert.png", "静かな朝を過ごしました"),
-        ("ocr-jpn.png", "東京駅"),
-        ("ocr-jpn.png", "見つけました"),
-    ],
-    ids=["vertical-phrase", "place-name", "verb"],
-)
-def test_japanese_ocr_text_matches_its_unspaced_keyword_query(
-    tmp_path, monkeypatch, name: str, query: str
-) -> None:
-    # Each space Tesseract puts inside a Japanese phrase cuts the run the tokenizer reads
-    # as one, so a keyword query for the phrase missed the image that holds it.
-    pytest.importorskip("PIL")
-    from exomem import find_results
-    from exomem.find_types import ParsedPage
-
-    tesseract = _fake_tesseract(
-        tmp_path, "List of available languages (1):\njpn", text=_TESSERACT_JAPANESE[name]
-    )
-    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: tesseract)
-
-    text = extract.extract_text(_SAMPLES / name).text
-    page = ParsedPage(tmp_path / "scan.md", "scan.md", {}, text, "", 0.0)
-
-    assert find_results.stem_tokens_present(page, query)
-    assert len(text.splitlines()) == 3  # the lines Tesseract read stay lines
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
-@pytest.mark.parametrize(
-    "read,stored",
-    [
-        # Korean puts a space between words, so every space is text.
-        ("어제 서울역 근처에서 오래된 지도를 찾았습니다", "어제 서울역 근처에서 오래된 지도를 찾았습니다"),
-        # The spaces beside a Latin word and a number are text; only Japanese closes up.
-        ("Exomem は 2026 年 に 公開 さ れ まし た 。", "Exomem は 2026 年に公開されました。"),
-    ],
-    ids=["korean", "latin-and-digits"],
-)
-def test_ocr_keeps_the_spaces_that_are_text(tmp_path, read: str, stored: str) -> None:
-    from exomem import ocr_models
-
-    tesseract = _fake_tesseract(tmp_path, "List of available languages (1):\neng", text=read)
-    image = tmp_path / "page.png"
-    image.write_bytes(b"png")
-
-    assert ocr_models.read_image(tesseract, image) == stored
 
 
 def _traineddata(path: Path, script: str) -> None:
