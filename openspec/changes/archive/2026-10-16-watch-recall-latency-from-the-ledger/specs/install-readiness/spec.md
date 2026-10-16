@@ -13,9 +13,11 @@ from its output, because caller identities stay internal to the watch.
 
 The check SHALL warn when a population breaches its bar. It SHALL also warn,
 with a note, when the latency contract is unavailable or any source has failed
-reads, malformed rows, rows of unknown timing or observation failures, because
-incomplete coverage cannot establish a pass. Otherwise it SHALL pass, with a note
-when there are no samples or a population has too few. The check MUST NOT read
+reads, malformed rows, rows whose timestamp cannot be placed in the window or
+observation failures, because incomplete coverage cannot establish a pass.
+Otherwise it SHALL pass, with a note when there are no samples or a population
+has too few. A row with no usable timing marks its population `unavailable` in
+the details without changing the status. The check MUST NOT read
 note content, query text or paths. The disk readers MUST NOT apply the startup
 grace period, since the cold window after a promotion is itself worth seeing in
 a diagnosis.
