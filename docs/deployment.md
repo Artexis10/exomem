@@ -901,9 +901,10 @@ The check refuses nothing in these cases:
 
 - Without a live store, as in a copy of the vault on a fresh state root, the
   supervisor has no schema to compare.
-- After an export to files, the host keeps its store until
-  `exomem collections export --retire-local`, but no collection routes to it. An
-  earlier release is then the way back.
+- After an export to files, no collection routes to the store. The exporting
+  host sets its store aside, and every other host keeps its store until
+  `exomem collections export --retire-local`. An earlier release is then the way
+  back.
 - If the supervisor cannot read the store's schema, the target meets the store
   as any release would. A refusal would also block the release that repairs it.
 

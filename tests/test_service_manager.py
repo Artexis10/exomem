@@ -465,22 +465,32 @@ def _release_of(python):
     ).stdout.strip()
 
 
-@pytest.mark.parametrize("candidate", ["earlier-release", "older-store-schema"])
+@pytest.mark.parametrize("candidate", ["earlier-release", "older-store-schema", "first-enrolment"])
 def test_a_candidate_older_than_the_live_store_schema_is_refused_before_worker_stop(tmp_path, monkeypatch, candidate):
     """Defect: the supervisor hands a store at schema 11 to a release that reads only schema 10. Its reader
     refuses the store, so on a fenced vault its writer gets no lease and every write on the host refuses."""
+    import sqlite3
+    from contextlib import closing
+
     interpreter = os.environ.get("EXOMEM_TEST_OLDER_READER_PYTHON")
     if candidate == "earlier-release" and not interpreter:
         pytest.skip("requires an installed earlier reader")
-    from exomem.collection_store import connection, schema
+    from exomem.collection_store import authority, connection, schema
 
     module = _manager()
     vault = tmp_path / "vault"
-    _mixed_marker(vault)
+    if candidate == "first-enrolment":
+        vault.mkdir()
+    else:
+        _mixed_marker(vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     # The live store, as this release migrated it: at the current schema.
     connection.open_writer(connection.store_path(vault), lease_check=lambda: True).close()
+    if candidate == "first-enrolment":
+        # A first enrolment cut the fence and stopped before it installed the marker.
+        with closing(sqlite3.connect(connection.store_path(vault))) as conn, conn:
+            conn.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)", (authority.PENDING_CREATE, "{}"))
     python = interpreter if candidate == "earlier-release" else _store_reader(tmp_path, schema.SCHEMA_VERSION - 1)
 
     async def scenario():

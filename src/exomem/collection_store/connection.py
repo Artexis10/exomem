@@ -494,8 +494,8 @@ def schema_pending(path: Path) -> bool:
     return found < schema.SCHEMA_VERSION
 
 
-def recorded_schema(path: Path) -> int | None:
-    """The schema that a store records, also one newer than this release opens, or None if unreadable.
+def recorded_meta(path: Path, key: str) -> str | None:
+    """One ``store_meta`` value that a store records, or None if it is absent or unreadable.
 
     It reads one row with the standard library, so a launcher can ask without the store libraries.
     It neither validates nor migrates the store.
@@ -503,9 +503,18 @@ def recorded_schema(path: Path) -> int | None:
     try:
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
                                      timeout=BUSY_TIMEOUT_MS / 1000)) as conn:
-            row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchone()
-        return None if row is None else int(row[0])
-    except (sqlite3.Error, OSError, TypeError, ValueError):
+            row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else row[0]
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def recorded_schema(path: Path) -> int | None:
+    """The schema that a store records, also one newer than this release opens, or None if unreadable."""
+    value = recorded_meta(path, schema.META_SCHEMA_VERSION)
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
         return None
 
 
