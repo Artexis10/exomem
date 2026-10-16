@@ -37,7 +37,7 @@ audit_effects = Table("audit_effects", metadata,
 version_identity = Table("version_identity", metadata,
     Column("row_id", Integer, primary_key=True), Column("row_version", Integer, primary_key=True),
     Column("encoding", Text), Column("payload_hash", Text), Column("txn_id", Integer),
-    Column("schema_version", Integer))
+    Column("schema_version", Integer), Column("payload_generation", Integer))
 projection_state = Table("projection_state", metadata,
     Column("path", Text, primary_key=True), Column("collection_id", Text), Column("row_id", Integer),
     Column("kind", Text), Column("pending_row_version", Integer), Column("pending_sha256", Text),
