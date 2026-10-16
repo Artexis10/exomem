@@ -833,11 +833,25 @@ Releases 0.114.0 through 0.118.x read the store only up to schema 10, so they
 cannot open a migrated store. 0.119.0 and later read schema 11, so they stay
 valid rollback targets.
 
-From the release after 0.120.0, the managed launcher refuses an upgrade target
-that cannot read the live store. It compares the newest store schema that the
-target reads with the schema of the live store, and it refuses before the
-serving worker stops. The serving worker keeps serving. Without a live store, as in a copy of the vault on a fresh
-state root, the launcher has no schema to compare and refuses nothing.
+The managed supervisor refuses an upgrade target that cannot read the live
+store when the vault's marker routes collections to the store. It compares the
+newest store schema that the target reads with the schema of the live store, and
+it refuses before the serving worker stops. The serving worker keeps serving.
+
+The supervisor runs this check, so the supervisor's release decides it, not the
+worker's. A supervisor started on 0.120.0 or earlier does not have the check.
+After a seamless upgrade replaces its worker, it still accepts 0.114.0 through
+0.118.x as a target until the service unit restarts.
+
+The check refuses nothing in these cases:
+
+- Without a live store, as in a copy of the vault on a fresh state root, the
+  supervisor has no schema to compare.
+- After an export to files, the host keeps its store until
+  `exomem collections export --retire-local`, but no collection routes to it. An
+  earlier release is then the way back.
+- If the supervisor cannot read the store's schema, the target meets the store
+  as any release would. A refusal would also block the release that repairs it.
 
 Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
 cannot open the store. On a vault with a collection store fence, its writer gets

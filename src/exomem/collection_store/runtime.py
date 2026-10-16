@@ -772,6 +772,7 @@ def _durable_create(root):
             return None
         with closing(connection.open_head_reader(connection.store_path(root))) as reader:
             intent = authority.pending_create(reader)
+    # The head reader denies other columns as sqlite3.Error, so a read past store_meta would look like no intent here.
     except (connection.CollectionStoreError, sqlite3.Error, OSError):
         return None
     return None if intent is None else [{"collection_id": entry["collection_id"], "manifest_path": entry["manifest_path"]}

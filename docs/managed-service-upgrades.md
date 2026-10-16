@@ -406,12 +406,20 @@ as `skipped` with the reason `declared_none`, because the store schema is not a
 state migration. The new worker migrates the store itself once it acquires the
 writer lease. Until then, the old worker keeps the lease and serves.
 
-A release from before the schema change cannot open the migrated store. From
-the release after 0.120.0, the supervisor compares the newest store schema that
-an upgrade target reads with the schema of the live store. It refuses a target that cannot read the live
-store before the serving worker stops, so that worker keeps serving. Releases
-0.114.0 through 0.118.x read only up to schema 10, so the supervisor refuses them
-on a store at schema 11. 0.119.0 and later read schema 11 and stay valid targets.
+A release from before the schema change cannot open the migrated store. When
+the vault's marker routes collections to the store, the supervisor compares the
+newest store schema that an upgrade target reads with the schema of the live
+store. It refuses a target that cannot read the live store before the serving
+worker stops, so that worker keeps serving. Releases 0.114.0 through 0.118.x read
+only up to schema 10, so the supervisor refuses them on a store at schema 11.
+0.119.0 and later read schema 11 and stay valid targets.
+
+The supervisor runs this check, so the supervisor's release decides it. A
+supervisor started on 0.120.0 or earlier does not have the check. After a
+seamless upgrade replaces its worker, it still accepts 0.114.0 through 0.118.x
+until the service unit restarts. After an export to files, no collection routes
+to the store, so the check refuses nothing and an earlier release is the way
+back.
 
 Started by hand on a migrated store, a release from 0.114.0 through 0.118.x
 cannot open it. On a vault with a collection store fence, every write on that

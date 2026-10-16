@@ -49,15 +49,16 @@ collection-store contract before deleting external state or its compatibility
 fence; that remedy SHALL not substitute for validated collection export.
 
 Supported launchers SHALL refuse a candidate whose newest readable store schema
-is below the live store's schema, before the serving worker stops. Without a
+is below the live store's schema, before the serving worker stops, when the
+vault's marker routes collections to the store. Without that marker, without a
 live store, or with one whose schema the launcher cannot read, this check SHALL
 refuse nothing. Each live store schema from 12 on SHALL also have one optional
 compatibility ID, `collections-store-schema-<N>`; schema 11 has none, because
 releases since 0.114.0 treat an unknown ID alike, so an ID would also refuse the
 releases that read schema 11. A release SHALL support the IDs up to its own
 store schema. A writer SHALL record the current schema's IDs before it migrates
-a store or installs a migrated copy, and every store admission SHALL record
-them. A migration that rolls back SHALL record the earlier schema's IDs again.
+a store or installs a migrated copy. A migration that rolls back SHALL record
+the earlier schema's IDs again.
 
 Supported Exomem launchers SHALL derive required store compatibility from the
 existing vault-side authority marker before fresh external-state bootstrap,
@@ -138,6 +139,7 @@ No plugin bit, declaration, or boolean override SHALL grant custody.
 - **WHEN** a writer has migrated a vault's live store to a schema that an earlier release cannot read
 - **THEN** a supported launcher refuses that release as a candidate before the serving worker stops
 - **AND** it still accepts a release that reads the live store's schema
+- **AND** it accepts the earlier release once an export to files has retired the vault's marker
 - **AND** from schema 12 on, the state manifest records the schema's ID before the migration commits, and a migration that rolls back records the earlier schema's IDs again
 
 #### Scenario: Unknown replication custody does not disable file knowledge

@@ -882,23 +882,20 @@ def remove_stale_socket(path: Path) -> None:
 def _require_store_schema(vault: Path, ceiling: int | None) -> None:
     """Refuse a candidate whose newest store schema is older than the vault's live store.
 
-    Such a release's reader refuses the store, so on a vault with a collection store fence
-    its writer gets no lease and every write on the host refuses. A store whose schema this
-    launcher cannot read refuses nothing here: the candidate meets it as any release would,
-    and refusing would also block the release that repairs it.
+    Such a release's reader refuses the store, so its writer gets no lease and every write
+    on the host refuses. Only a vault whose marker routes collections to the store needs
+    it: after an export to files the host keeps its store until ``--retire-local``, and an
+    earlier release is then the documented way back. A store whose schema cannot be read
+    refuses nothing here: the candidate meets it as any release would, and refusing would
+    also block the release that repairs it. The read loads no store libraries.
     """
-    import sqlite3
+    from .collection_store import authority, connection
 
-    from .collection_store import connection
-
-    path = connection.store_path(vault)
-    if not path.exists():
+    if authority.read_marker(vault) is None:
         return
-    try:
-        live = connection.store_schema(path)
-    except (connection.CollectionStoreError, connection.CollectionStoreUnavailable, sqlite3.Error, OSError):
-        return
-    if ceiling is None or ceiling < live:
+    live = connection.recorded_schema(connection.store_path(vault))
+    if live is not None and (ceiling is None or ceiling < live):
+        log.warning("candidate reads collection store schemas up to %s; the live store is at %s", ceiling, live)
         raise ValueError(f"candidate cannot read the collection store's schema {live}")
 
 

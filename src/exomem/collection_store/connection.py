@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -494,16 +494,19 @@ def schema_pending(path: Path) -> bool:
     return found < schema.SCHEMA_VERSION
 
 
-def store_schema(path: Path) -> int:
-    """The schema that a store records, also one newer than this release can open."""
+def recorded_schema(path: Path) -> int | None:
+    """The schema that a store records, also one newer than this release opens, or None if unreadable.
+
+    It reads one row with the standard library, so a launcher can ask without the store libraries.
+    It neither validates nor migrates the store.
+    """
     try:
-        conn, found = _open_read_only(path, BUSY_TIMEOUT_MS)
-    except CollectionStoreError as error:
-        if isinstance(error.__cause__, schema.SchemaVersionError):
-            return error.__cause__.found
-        raise
-    conn.close()
-    return found
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                                     timeout=BUSY_TIMEOUT_MS / 1000)) as conn:
+            row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchone()
+        return None if row is None else int(row[0])
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return None
 
 
 def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:

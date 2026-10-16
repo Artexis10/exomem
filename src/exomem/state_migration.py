@@ -299,11 +299,9 @@ def record_collection_store_compatibility(
     The trusted caller must prove its mutation authority by returning True on
     each check. It owns store custody, fencing, durable recovery intent and
     old-process exclusion; this seam establishes none of those boundaries.
-    Every admission calls it, so a store that an earlier release of this schema
-    migrated gains its schema IDs at its next admission.
     """
 
-    _record_optional(vault_root, authority_check, add=_COLLECTION_STORE_IDS | set(store_schema.compatibility_ids()))
+    _record_optional(vault_root, authority_check, add=_COLLECTION_STORE_IDS)
 
 
 def record_collection_store_schema(
