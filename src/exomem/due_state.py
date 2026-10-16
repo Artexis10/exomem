@@ -263,6 +263,39 @@ def load(vault_root: Path) -> dict[str, Any] | None:
     return payload
 
 
+#: The last parsed projection per vault, beside the file token it was read under.
+_SHARED: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
+_SHARED_LOCK = threading.Lock()
+_SHARED_CAP = 8
+
+
+def _load_shared(vault_root: Path) -> dict[str, Any] | None:
+    """`load` for the read paths: parsed once per projection file, then shared.
+
+    The projection reaches about 20 MB on a large vault, and decoding it cost
+    0.3 s on every activation. `save` only ever replaces the file, so its token
+    names its bytes. The token is taken before the read, so a file replaced in
+    between is parsed again on the next call, never served stale. Callers read
+    the result and never change it; a writer calls `load` for its own copy.
+    """
+    token = _file_token(state_path(vault_root))
+    if token is None:
+        return None
+    key = str(vault_root)
+    with _SHARED_LOCK:
+        hit = _SHARED.get(key)
+    if hit is not None and hit[0] == token:
+        return hit[1]
+    payload = load(vault_root)
+    if payload is not None:
+        with _SHARED_LOCK:
+            _SHARED.pop(key, None)
+            if len(_SHARED) >= _SHARED_CAP:
+                _SHARED.pop(next(iter(_SHARED)), None)
+            _SHARED[key] = (token, payload)
+    return payload
+
+
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
@@ -2723,7 +2756,7 @@ def served_entries(
                     for row in hit["rows"]
                     if not row.get("path") or _page_exists(vault_root, row["path"])
                 ]
-    payload = load(vault_root)
+    payload = _load_shared(vault_root)
     if payload is None or _owes_nothing(payload):
         # Unreadable: the build recomputes or recovers, and nothing is filed.
         # Owes nothing: the empty list under any filter, and -- as in the
@@ -2768,6 +2801,8 @@ def reset_serve_cache() -> None:
         _SERVE_CACHE.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
+    with _SHARED_LOCK:
+        _SHARED.clear()
     _LEDGER_WRITE_FAILED.clear()
 
 
@@ -2836,7 +2871,7 @@ def _served_entries_uncached(
 
     horizon: dt.datetime | None = None
     if payload is None:
-        payload = load(vault_root)
+        payload = _load_shared(vault_root)
     if payload is None and not recover:
         # Activation omits unavailable advice rather than starting a vault scan.
         return [], None, {}, None
@@ -3116,7 +3151,7 @@ def _fingerprints_for(vault_root: Path) -> dict[str, tuple[str, str, str]]:
             hit = _FINGERPRINTS.get(key)
         if hit is not None and hit[0] == token:
             return hit[1]
-    projection = load(vault_root) or _UNPERSISTED.get(key)
+    projection = _load_shared(vault_root) or _UNPERSISTED.get(key)
     if projection is None:
         return {}
     fingerprints = _fingerprints_by_ref(projection)

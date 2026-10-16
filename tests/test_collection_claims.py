@@ -1549,7 +1549,27 @@ def test_carrier_reuses_projection_and_routing_within_each_audience_read(
     calls.update(load=0, routing=0)
     withheld = due_state.served_entries(tmp_path, now=now)
     assert not any(row["category"] == "unreflected_observations" for row in withheld)
-    assert calls == {"load": 1, "routing": 1}
+    # The projection file is unchanged, so the rebuild reuses its parse.
+    assert calls == {"load": 0, "routing": 1}
+
+
+def test_a_serve_leaves_the_shared_projection_as_the_file_says(tmp_path: Path) -> None:
+    # Every read shares one parse per projection file. A serve that changed it
+    # would change every later answer until the file is next rewritten.
+    _write_candidate_pages(tmp_path)
+    _write_candidate_pages(tmp_path, domain="garden-lease")
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    _write_observation(tmp_path)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    due_state.reconcile(tmp_path, now=now)
+    served = due_state.served_entries(tmp_path, now=now)
+    assert len({row["path"] for row in served}) > 1
+    due_state.served_entries(tmp_path, now=now, paths=frozenset({served[0]["path"]}), recover=False)
+    later = now + dt.timedelta(days=1)
+    from_shared = due_state.served_entries(tmp_path, now=later)
+
+    due_state.reset_serve_cache()
+    assert from_shared == due_state.served_entries(tmp_path, now=later)
 
 
 def test_collection_coverage_reports_unreflected_and_inventory_count(tmp_path: Path) -> None:
