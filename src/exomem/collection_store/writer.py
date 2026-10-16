@@ -1720,7 +1720,7 @@ class CollectionWriter:
                 "hash_before": None if before is None else before["payload_hash"], "hash_after": payload}
 
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
-                    *, ordinal=0, queue_log=True):
+                    *, ordinal=0, queue_log=True, scope=None):
         if before is None and manifest.view_mode == "items":
             self._require_items_capacity(manifest.collection_id)
         if _renders_rows(manifest):
@@ -1745,7 +1745,7 @@ class CollectionWriter:
                 index_migrations.AccountedWriter(self.connection, self._execute),
                 layout,
                 row_id=row_id, row_version=version, values=values, body=body, payload_hash=payload,
-                txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key,
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version, item_key=key, scope=scope,
             )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
@@ -1767,7 +1767,7 @@ class CollectionWriter:
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
 
-    def _write_new_items(self, manifest, plans, txn):
+    def _write_new_items(self, manifest, plans, txn, *, scope=None):
         """Apply admitted new summary rows together inside the existing mutation transaction."""
         manifest_metadata, encoding, layout = self._item_write_context(manifest)
         parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
@@ -1787,7 +1787,7 @@ class CollectionWriter:
             typed_storage.write_new_versions(index_migrations.AccountedWriter(self.connection, self._execute), layout,
                 [(row_ids[key], key, values, body, row["payload_hash"])
                  for (key, values, body, _, _, _), row in zip(plans, parameters, strict=True)],
-                txn_id=txn["txn_id"], schema_version=manifest.schema.version)
+                txn_id=txn["txn_id"], schema_version=manifest.schema.version, scope=scope)
         index_migrations.maintain_new_items(index_migrations.AccountedWriter(self.connection, self._execute),
             manifest.collection_id, [(row_ids[key], key, 1, values) for key, values, _, _, _, _ in plans])
         # Immediate source FKs require every payload identity to exist before sources attach.
@@ -1972,12 +1972,13 @@ class CollectionWriter:
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans])
+            scope = self.handle.write_scope
             if manifest.view_mode == summary.SUMMARY and all(before is None for _, _, _, _, before, _ in plans):
-                self._write_new_items(manifest, plans, txn)
+                self._write_new_items(manifest, plans, txn, scope=scope)
             else:
                 for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
                     self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
-                                     ordinal=ordinal, queue_log=False)
+                                     ordinal=ordinal, queue_log=False, scope=scope)
             if is_log:
                 self._pending_log(manifest, txn)
             elif manifest.view_mode == summary.SUMMARY:

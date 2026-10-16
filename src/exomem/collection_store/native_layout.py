@@ -82,9 +82,8 @@ class NativeLayout(Layout):
                                "codecs": [codec.value for codec in self.codecs],
                                "identity": self.identity, "escape": ESCAPE, "metadata": METADATA, "extent": EXTENT})
 
-    @property
-    def encoding(self) -> str:
-        return TYPED_V2
+    #: A class constant, not a property: scans read it once per row.
+    encoding = TYPED_V2
 
 
 def build(collection_id: str, generation: int, fields: Mapping[str, FieldSpec], *, identity: str) -> NativeLayout:

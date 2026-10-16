@@ -11,11 +11,12 @@ from io import BytesIO
 from ..query_engine.scalars import ScalarValueError
 from . import native_enum, native_numbers, native_temporal
 from .native_layout import MASK_BITS, Codec, NativeLayout
-from .native_metadata import FieldMetadata, snapshot_fields
+from .native_metadata import FieldMetadata, WriteScope, snapshot_fields
 from .typed_storage import _ABSENT, TypedStorageError, canonical_json
 
 # Closed escape wire: reserved prefix plus canonical JSON, disjoint from scalar frames.
 ESCAPE_PREFIX = b"\xff\x01"
+_json_string = json.encoder.encode_basestring
 
 
 def encoded_equal(left: tuple, right: tuple) -> bool:
@@ -94,6 +95,13 @@ def _json_value(payload: bytes, *, max_bytes: int):
         raise TypedStorageError("invalid native JSON value") from error
 
 
+def _text(cell: str, max_bytes: int) -> str:
+    # An ASCII string's UTF-8 length is its length, so most cells skip encoding.
+    if (len(cell) if cell.isascii() else len(cell.encode("utf-8"))) > max_bytes:
+        raise TypedStorageError("native text exceeds the decoding budget")
+    return cell
+
+
 def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_bytes: int):
     if type(max_bytes) is not int or max_bytes < 0:
         raise TypedStorageError("native decoding requires a byte budget")
@@ -106,9 +114,7 @@ def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_byte
     try:
         match codec:
             case Codec.TEXT if type(cell) is str:
-                if len(cell.encode("utf-8")) > max_bytes:
-                    raise TypedStorageError("native text exceeds the decoding budget")
-                return cell
+                return _text(cell, max_bytes)
             case Codec.NUMBER:
                 return native_numbers.decode(cell, digit_budget=max_bytes)
             case Codec.BOOLEAN if type(cell) is int and cell in (0, 1):
@@ -125,7 +131,8 @@ def decode_cell(codec: Codec, cell: object, metadata: FieldMetadata, *, max_byte
     raise TypedStorageError("native cell does not match its frozen codec")
 
 
-def encode_row(connection, layout: NativeLayout, values: Mapping) -> tuple:
+def encode_row(connection, layout: NativeLayout, values: Mapping, *, scope: WriteScope | None = None) -> tuple:
+    """Encode one row; a writer transaction encoding many rows passes its own scope to share metadata reads."""
     # Measure validated source values before compaction; frames cannot authorize their own expansion.
     extent = len(canonical_json(values).encode("utf-8"))
     masks = [0] * len(layout.mask_columns)
@@ -136,7 +143,8 @@ def encode_row(connection, layout: NativeLayout, values: Mapping) -> tuple:
             masks[ordinal // MASK_BITS] |= 1 << (ordinal % MASK_BITS)
             cells.append(None)
         else:
-            metadata = FieldMetadata(connection, layout.collection_id, layout.generation, ordinal)
+            metadata = (FieldMetadata(connection, layout.collection_id, layout.generation, ordinal) if scope is None
+                        else scope.field(connection, layout.collection_id, layout.generation, ordinal))
             cells.append(encode_cell(codec, value, metadata))
     known = set(layout.fields)
     residual = {name: value for name, value in values.items() if name not in known}
@@ -243,54 +251,86 @@ def prepare_dense_selection(connection, layout: NativeLayout, selection, *, max_
                  for ordinal, _ in selected)]
     metadata = snapshot_fields(connection, layout.collection_id, layout.generation,
                                (ordinal for ordinal, _ in selected), database=layout.database)
-    widths = tuple(1 << min(MASK_BITS, len(layout.fields) - ordinal * MASK_BITS) for ordinal in masks)
-    slots = tuple((name, layout.codecs[ordinal], metadata[ordinal], selection[name],
-                   masks.index(ordinal // MASK_BITS), 1 << (ordinal % MASK_BITS),
-                   len(canonical_json(name).encode("utf-8")) + 1, name in semantic_fields)
-                  for ordinal, name in selected)
+    # Row positions: four identity and extent columns, the selected masks, then one cell per selected field.
+    cells_at = 4 + len(masks)
+    mask_bounds = tuple((4 + index, 1 << min(MASK_BITS, len(layout.fields) - ordinal * MASK_BITS))
+                        for index, ordinal in enumerate(masks))
+    slots = []
+    for index, (ordinal, name) in enumerate(selected):
+        codec, semantic = layout.codecs[ordinal], name in semantic_fields
+        inline, accept = (native_temporal.instant_days(metadata[ordinal]) if semantic and codec is Codec.DATETIME
+                          else (None, None))
+        # A name's charge includes its colon and one separating comma; the decoder starts one byte up for the first.
+        slots.append((name, 4 + masks.index(ordinal // MASK_BITS), 1 << (ordinal % MASK_BITS),
+                      len(canonical_json(name).encode("utf-8")) + 2, cells_at + index,
+                      codec is Codec.NUMBER, codec is Codec.TEXT, inline,
+                      (codec, metadata[ordinal], selection[name], semantic, accept)))
+    plain, prefix, view_type = native_numbers.plain, ESCAPE_PREFIX, native_temporal.TemporalView
+    single_mask = mask_bounds[0][1] if len(mask_bounds) == 1 else 0
 
     def decode(row):
-        if row[1] != row[2] or type(row[3]) is not int or row[3] < 2:
+        extent = row[3]
+        if row[1] != row[2] or type(extent) is not int or extent < 2:
             raise TypedStorageError("native current row is missing, stale or has no measured extent")
-        mask_values = row[4:4 + len(masks)]
-        if any(type(mask) is not int or not 0 <= mask < width for mask, width in zip(mask_values, widths, strict=True)):
-            raise TypedStorageError("invalid native missing mask")
-        if row[3] > max_bytes:
+        if single_mask:
+            mask = row[4]
+            if type(mask) is not int or not 0 <= mask < single_mask:
+                raise TypedStorageError("invalid native missing mask")
+        else:
+            for at, width in mask_bounds:
+                mask = row[at]
+                if type(mask) is not int or not 0 <= mask < width:
+                    raise TypedStorageError("invalid native missing mask")
+        if extent > max_bytes:
             return None
-        result, remaining = {}, row[3] - 2
-        for index, (name, codec, field_metadata, tree, mask_at, missing_bit, name_bytes, semantic) in enumerate(slots):
-            cell = row[4 + len(masks) + index]
-            if mask_values[mask_at] & missing_bit:
+        result, remaining = {}, extent - 1
+        for name, mask_at, missing_bit, name_bytes, at, number, text, inline, shared in slots:
+            cell = row[at]
+            if row[mask_at] & missing_bit:
                 if cell is not None:
                     raise TypedStorageError("missing native field has a payload")
                 continue
-            escaped = type(cell) is bytes and cell.startswith(ESCAPE_PREFIX)
-            if cell is None:
-                value = None
-            elif semantic and not escaped:
-                value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
-                                                field_metadata, max_bytes=row[3], day_only=True)
-            elif not escaped:
-                # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
-                value = decode_cell(codec, cell, field_metadata, max_bytes=row[3])
+            # Each shortcut runs the owner's own rule for its common cell; everything else goes to the shared decoders.
+            if inline is not None and type(cell) is not str and (value := inline(cell, extent)) is not None:
+                pass  # an instant whose format this scan accepted; an escape has no frame's version byte
+            elif number and plain(cell):
+                value = cell  # native_numbers.decode returns a plain cell itself
+            elif text and type(cell) is str and cell.isascii():
+                value = _text(cell, extent)  # ASCII cannot fail to encode, so decode_cell's UnicodeError wrap never applies
             else:
-                if len(cell) - len(ESCAPE_PREFIX) > row[3]:
-                    raise TypedStorageError("native JSON exceeds its measured values extent")
-                value = selected_cell(codec, cell, field_metadata, tree, max_bytes=max_bytes, check=check)
-            if isinstance(value, native_temporal.TemporalView):
+                codec, field_metadata, tree, semantic, accept = shared
+                escaped = type(cell) is bytes and cell.startswith(prefix)
+                if cell is None:
+                    value = None
+                elif accept is not None and not escaped:
+                    value = accept(cell, extent)
+                elif semantic and not escaped:
+                    value = native_temporal.inspect(cell, "date" if codec is Codec.DATE else "datetime",
+                                                    field_metadata, max_bytes=extent, day_only=True)
+                elif not escaped:
+                    # Eligibility already proves whole scalar admission; keep the shared codec as decoder authority.
+                    value = decode_cell(codec, cell, field_metadata, max_bytes=extent)
+                else:
+                    if len(cell) - len(prefix) > extent:
+                        raise TypedStorageError("native JSON exceeds its measured values extent")
+                    value = selected_cell(codec, cell, field_metadata, tree, max_bytes=max_bytes, check=check)
+            # Canonical JSON bytes of the value; a TemporalView counts its full spelling.
+            kind = type(value)
+            if kind is int:
+                size = len(str(value))
+            elif kind is view_type:
                 size = value.text_bytes + 2
+            elif kind is str:
+                # The canonical serializer uses this same non-ASCII JSON string encoder; ASCII JSON is a byte a character.
+                encoded = _json_string(value)
+                size = len(encoded) if encoded.isascii() else len(encoded.encode("utf-8"))
             elif value is None:
                 size = 4
-            elif type(value) is bool:
+            elif kind is bool:
                 size = 4 if value else 5
-            elif type(value) is int:
-                size = len(str(value))
-            elif type(value) is str:
-                # The canonical serializer uses this same non-ASCII JSON string encoder.
-                size = len(json.encoder.encode_basestring(value).encode("utf-8"))
             else:
                 size = len(canonical_json(value).encode("utf-8"))
-            remaining -= name_bytes + size + bool(result)
+            remaining -= name_bytes + size
             if remaining < 0:
                 raise TypedStorageError("native values exceed the decoding budget")
             result[name] = value

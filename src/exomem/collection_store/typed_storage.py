@@ -127,9 +127,8 @@ class Layout:
     def encoded(self) -> str:
         return canonical_json({"version": 1, "fields": list(self.fields)})
 
-    @property
-    def encoding(self) -> str:
-        return TYPED_V1
+    #: A class constant, not a property: scans read it once per row.
+    encoding = TYPED_V1
 
 
 @functools.lru_cache(maxsize=64)
@@ -191,14 +190,17 @@ def decode_value(tag: int, value: Any, key: Any) -> Any:
     raise TypedStorageError("stored typed value does not match its discriminator")
 
 
-def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None) -> tuple[Any, ...]:
-    """Column parameters in ``value_columns`` order, then the residual object."""
+def encode_row(layout: Layout, values: Mapping[str, Any], *, connection=None, scope=None) -> tuple[Any, ...]:
+    """Column parameters in ``value_columns`` order, then the residual object.
+
+    ``scope`` is the caller's ``native_metadata.WriteScope`` for the open transaction, if it encodes many rows.
+    """
     if layout.encoding == TYPED_V2:
         from . import native_rows
 
         if connection is None:
             raise TypedStorageError("native row encoding requires its metadata connection")
-        return native_rows.encode_row(connection, layout, values)
+        return native_rows.encode_row(connection, layout, values, scope=scope)
     columns = []
     for name in layout.fields:
         columns.extend(encode_value(values.get(name, _ABSENT)))
@@ -586,9 +588,9 @@ def _version_parameters(layout, row_id, row_version, encoded, body, payload_hash
 
 
 def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values: Mapping[str, Any],
-                  body: str, payload_hash: str, txn_id: int, schema_version: int, item_key=None) -> None:
+                  body: str, payload_hash: str, txn_id: int, schema_version: int, item_key=None, scope=None) -> None:
     """Write typed current/version payloads and their identity in the caller's transaction."""
-    encoded = encode_row(layout, values, connection=conn)
+    encoded = encode_row(layout, values, connection=conn, scope=scope)
     _upsert_current(conn, layout, row_id, row_version, encoded, item_key=item_key)
     _, _, _, insert_version = _declarations(layout)
     history, identity = _version_parameters(layout, row_id, row_version, encoded, body, payload_hash, txn_id, schema_version)
@@ -596,11 +598,11 @@ def write_version(conn, layout: Layout, *, row_id: int, row_version: int, values
     conn.execute(tables.INSERT_IDENTITY, identity)
 
 
-def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_version: int) -> None:
+def write_new_versions(conn, layout: Layout, rows, *, txn_id: int, schema_version: int, scope=None) -> None:
     """Encode new rows once, then install current payloads, history and identities."""
     current, history, identities = [], [], []
     for row_id, key, values, body, payload_hash in rows:
-        encoded = encode_row(layout, values, connection=conn)
+        encoded = encode_row(layout, values, connection=conn, scope=scope)
         current.append(_current_parameters(conn, layout, row_id, 1, encoded, item_key=key))
         version, identity = _version_parameters(layout, row_id, 1, encoded, body, payload_hash, txn_id, schema_version)
         history.append(version)

@@ -57,7 +57,13 @@ def seed(store, items, *, cid=CID):
     per-test budget; the reduction under test reads only canonical rows. An
     items collection's rows get the view paths their files would have.
     """
-    from exomem.collection_store import governance, native_identity, tables, tokens, typed_storage
+    from exomem.collection_store import (
+        governance,
+        native_identity,
+        tables,
+        tokens,
+        typed_storage,
+    )
 
     conn = store.connection
     text, metadata, path, mode = conn.execute(
@@ -83,13 +89,14 @@ def seed(store, items, *, cid=CID):
              for key, values, payload_hash in keyed))
         ids = dict(tx.execute("SELECT item_key,row_id FROM items WHERE collection_id=?", (cid,)))
         _, _, upsert, insert_version = typed_storage._declarations(layout)
-        value_columns = (*layout.value_columns, "r")
+        # One metadata scope serves every row of this transaction; the layout's columns are fixed for it too.
+        scope, columns = store.handle.write_scope, (*layout.value_columns, "r")
         # Core batches seed canonical fixtures without per-row dispatch or unbounded parameters.
         batch_size = 128
         for start in range(0, len(keyed), batch_size):
             current_rows, versions, identities = [], [], []
             for key, values, payload_hash in keyed[start:start + batch_size]:
-                encoded = dict(zip(value_columns, typed_storage.encode_row(layout, values, connection=tx), strict=True))
+                encoded = dict(zip(columns, typed_storage.encode_row(layout, values, connection=tx, scope=scope), strict=True))
                 current = {"row_id": ids[key], "row_version": 1, **encoded}
                 current_rows.append({**current, **({"item_key": native_identity.encode(key, layout.identity)}
                                     if layout.encoding == typed_storage.TYPED_V2 else {})})
@@ -104,6 +111,35 @@ def seed(store, items, *, cid=CID):
 
 def create(store, rollups=None):
     store.create_collection(manifest_path(), manifest(rollups=rollups), why="create", scaffold=False)
+
+
+def test_a_write_scope_refuses_reuse_after_its_transaction_and_with_another_file(store, tmp_path):
+    """A scope kept past ROLLBACK would store a frame that names a rolled-back format ID, and one used with
+    another file's rows would store their instants against this file's epoch."""
+    import sqlite3
+
+    from exomem.collection_store import typed_storage
+
+    create(store)
+    layout = typed_storage.require_layout(store.connection, CID)
+    assert layout.encoding == typed_storage.TYPED_V2
+    values = {"id": "a", "start": "2024-01-02T00:30:00+02:00"}
+    with pytest.raises(LookupError):
+        with store.handle.transaction() as tx:
+            kept = store.handle.write_scope
+            typed_storage.encode_row(layout, values, connection=tx, scope=kept)
+            raise LookupError("roll the transaction back")
+    other = sqlite3.connect(tmp_path / "other.sqlite", isolation_level=None)
+    try:
+        other.execute("BEGIN")
+        other.execute("CREATE TABLE marker(x)")
+        with store.handle.transaction() as tx:
+            with pytest.raises(RuntimeError, match="outlived"):
+                typed_storage.encode_row(layout, values, connection=tx, scope=kept)
+            with pytest.raises(RuntimeError, match="another connection"):
+                typed_storage.encode_row(layout, values, connection=other, scope=store.handle.write_scope)
+    finally:
+        other.close()
 
 
 @pytest.fixture(autouse=True)

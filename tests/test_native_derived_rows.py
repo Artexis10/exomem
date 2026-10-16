@@ -146,3 +146,4 @@ def test_native_derived_replay_keeps_numeric_subtypes_and_signed_zero_after_reop
         assert backup.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         restored = typed_storage.current_values(backup, target.reads("main"), row_id)
         assert typed_storage.canonical_json(restored) == typed_storage.canonical_json(reversed_zeros)
+
