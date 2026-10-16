@@ -817,6 +817,11 @@ retire on a vault that still routes collections to the store makes those
 collections unavailable on every host, and this release has no command that
 undoes it.
 
+This release ships no export command that turns store collections back into
+files. Retire the fence only on a vault that has no store marker: check that the
+file `Knowledge Base/_Collections/mode.json` is absent from every host's copy of
+the vault.
+
 1. Stop the Exomem service on every host that serves the vault.
 2. Read the fence with the writer credential:
    `curl -s -H "Authorization: Bearer $EXOMEM_WRITER_LEASE_TOKEN" http://127.0.0.1:8770/v1/vaults/main/collection-store-fence`
@@ -847,6 +852,11 @@ After the retire, the hosts behave as follows:
   read a retired fence. It fails closed with `WRITER_COORDINATOR_UNAVAILABLE` and
   does not serve the store. The cost is that the store collections stay
   unavailable on that host until its vault copy no longer routes to the store.
+
+Do not roll the coordinator back to a release from before the retire once a
+fence is retired. An older coordinator ignores the retired generations, so it
+enrols the vault at generation 1 again, and a stale store marker could then bind
+that enrolment.
 
 The coordinator keeps every retired generation. The fence read reports
 `enrolled: false` with the newest retired generation, or 0 for a vault that was
