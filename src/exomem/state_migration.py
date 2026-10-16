@@ -46,9 +46,8 @@ CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
 #: What a store-routed vault records, and what its reverse export retires.
 _COLLECTION_STORE_COMPATIBILITY_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
-_OPTIONAL_COMPATIBILITY_IDS = frozenset({
-    "collections-store-v1", "raw-protection-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-    CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
+_OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
+    "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID,
 })
 
 

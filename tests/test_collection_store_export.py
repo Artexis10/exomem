@@ -40,7 +40,7 @@ from test_collection_store_s1_gate import coordinator
 from test_collection_store_service import DAILY, Service, call
 
 from exomem import __main__ as cli
-from exomem import records, state_migration, state_paths, writer_lease
+from exomem import record_formats, records, state_migration, state_paths, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import authority, connection, export
 from exomem.collection_store.connection import CollectionStoreError
@@ -215,7 +215,7 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
     at = printed(capsys)["exported_at"]
     for name, value in host.items():
         monkeypatch.setenv(name, value)
-    assert run_export(other, "--retire-local") == 1  # the exported vault has not reached this host yet
+    assert run_export(other, "--retire-local", operator=False) == 1  # the exported vault has not reached here yet
     assert "still routes" in capsys.readouterr().err and connection.store_path(other).exists()
     shutil.rmtree(other)
     shutil.copytree(root, other)  # the exported vault reaches the other host
@@ -227,7 +227,7 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
         service.stop()
     assert connection.store_path(other).exists()  # served from files, never opened
 
-    assert run_export(other, "--retire-local") == 0
+    assert run_export(other, "--retire-local", operator=False) == 0  # the writer credential suffices
     assert printed(capsys)["status"] == "retired"
     assert not connection.store_path(other).exists()
     assert (state_paths.vault_state_dir(other) / f"collections.sqlite.exported-{at}").is_file()
@@ -261,22 +261,27 @@ def _export_and_crash(environment, database, cut, plan_id):
     os._exit(0)
 
 
-@pytest.mark.parametrize("cut", ["before-files", "between-files-and-checkpoint", "after-fence-retire",
-                                 "after-marker-retire", "before-store-tombstone"])
-def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env, capsys, tmp_path, cut):  # noqa: F811
-    """An export killed between two steps that cannot finish, finishes differently, or, cut after
-    its fence retire, leaves the retired fence beside a marker that still routes collections."""
+def crash_export(tmp_path, cut, plan_id):
+    """Run one export apply that dies at ``cut``, then wait out the dead owner's lease."""
     import multiprocessing
 
-    root = env
-    _, served = migrated_and_written(root, capsys)
-    plan_id = preview_id(root, capsys)
     child = multiprocessing.get_context("spawn").Process(target=_export_and_crash, args=(
         {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, plan_id))
     child.start()
     child.join(120)
     assert child.exitcode == 73
     wait_out_the_lease()
+
+
+@pytest.mark.parametrize("cut", ["before-files", "between-files-and-checkpoint", "after-fence-retire",
+                                 "after-marker-retire", "before-store-tombstone"])
+def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env, capsys, tmp_path, cut):  # noqa: F811
+    """An export killed between two steps that cannot finish, finishes differently, or, cut after
+    its fence retire, leaves the retired fence beside a marker that still routes collections."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, cut, plan_id)
     if cut == "after-fence-retire":
         assert not fence().enrolled and authority.read_marker(root) is not None
     assert run_export(root, "--dry-run", operator=False) == 0
@@ -295,6 +300,87 @@ def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env
     checkpoints = [line for line in (root / "Knowledge Base/log.md").read_text().splitlines()
                    if "rebaseline" in line and "collections-store-history" in line]
     assert len(checkpoints) == 3  # one per written collection, never repeated by the resume
+
+
+def test_a_rerun_after_a_hand_retired_fence_refuses_before_it_retires_the_marker(env, capsys, tmp_path):  # noqa: F811
+    """A rerun that takes a retired fence as proof that the export wrote and verified its files,
+    then retires the marker and tombstones the store while the vault still holds the store's
+    views, so the rows written in store mode survive only in the tombstone."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    crash_export(tmp_path, "before-files", plan_id)  # the intent is recorded, no file is written
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, "operator")
+        writer_lease.configured_schema_fence_operator_client().retire_collection_store_fence(
+            expected_generation=1, store_id=store_id)
+    views = vault_bytes(root)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
+
+    assert export.UNVERIFIED in capsys.readouterr().err
+    assert authority.parse_marker(root, authority.read_marker(root))["store_id"] == store_id
+    assert connection.store_path(root).exists()
+    assert vault_bytes(root) == views
+
+
+def test_a_host_that_lost_its_store_after_the_fence_retire_finishes_with_renames_and_retire_local(
+        env, capsys, tmp_path):  # noqa: F811
+    """The documented recovery for an exporting host whose live store is lost after the fence
+    retire: retire-local that keeps the store's descriptors because no store is left, so a
+    release from before the store still refuses this state."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    crash_export(tmp_path, "after-fence-retire", preview_id(root, capsys))
+    for path in state_paths.vault_state_dir(root).glob("collections*.sqlite*"):
+        path.unlink()
+    at = "20261016T120000Z"
+    (root / COLLECTIONS / "mode.json").rename(root / COLLECTIONS / f"mode.json.exported-{at}")
+    (root / COLLECTIONS / "collections.sqlite").rename(root / COLLECTIONS / f"collections.sqlite.exported-{at}")
+
+    assert run_export(root, "--retire-local", operator=False) == 0
+
+    assert printed(capsys)["status"] == "retired"
+    assert not {"collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID} & set(
+        state_migration.recorded_descriptor_ids(root))
+    assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+
+
+def test_the_retire_probe_needs_the_operator_credential_and_moves_no_fence(env, capsys, monkeypatch):  # noqa: F811
+    """A probe that passes on a credential the coordinator rejects, so an export writes every
+    file and then cannot retire the fence, or a probe that changes the fence it checks."""
+    root = env
+    legacy_vault(root)
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    enrolled = fence()
+    monkeypatch.setenv(OPERATOR, "operator")
+    writer_lease.configured_schema_fence_operator_client().probe_collection_store_fence_retire()
+    monkeypatch.setenv(OPERATOR, "not-the-operator")
+
+    with pytest.raises(OpError) as refused:
+        writer_lease.configured_schema_fence_operator_client().probe_collection_store_fence_retire()
+
+    assert refused.value.code == "SCHEMA_FENCE_OPERATOR_UNAVAILABLE"
+    assert fence() == enrolled and enrolled.enrolled
+
+
+def test_a_log_over_the_file_mode_bound_keeps_the_vault_in_the_store(env, capsys, monkeypatch):  # noqa: F811
+    """An export that writes a log file mode then refuses to read, or that names the log's
+    bound as a value with no file form, so the owner cannot tell what to shrink."""
+    root = env
+    migrated_and_written(root, capsys)
+    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    before = vault_bytes(root)
+    monkeypatch.setattr(record_formats, "_MAX_LOG_BYTES", 64)
+
+    assert run_export(root, "--dry-run", operator=False) == 1
+
+    previewed = printed(capsys)
+    assert previewed["verdict"] == "blocked" and "plan_id" not in previewed
+    assert {row["collection_id"]: row["blocker"]["code"] for row in previewed["collections"]
+            if row["status"] == "blocked"} == {X3_ID: export.OVER_BOUND}
+    nothing_changed(root, before, store_id)
 
 
 def nothing_changed(root, before, store_id):

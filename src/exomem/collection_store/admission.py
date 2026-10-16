@@ -738,7 +738,8 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False):
 
     root = Path(vault_root).resolve()
     if retire_local:
-        return _offline_owner(root, "export", export.retire_local)
+        # Reading the fence needs only the writer credential, and the step changes this host alone.
+        return _offline_owner(root, "export", export.retire_local, operator=False)
     if plan_id is None:
         return export.preview(root)
     from .runtime import served
@@ -844,16 +845,18 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work):
-    """Run ``work(session, manager, operator_client)`` as the owner's offline store step.
+def _offline_owner(root, operation, work, *, operator=True):
+    """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
-    lease, which it hands back with the flushed head.
+    lease, which it hands back with the flushed head. ``operator=False`` is for a step
+    that only reads the fence: its client carries the writer credential, not the operator's.
     """
-    fence_client = writer_lease.configured_schema_fence_operator_client()
+    config = writer_lease.LeaseConfig.from_env()
+    fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
+                    else writer_lease.LeaseCoordinatorClient(config) if config.enabled else None)
     if fence_client is None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", f"{operation} needs the configured writer lease")
-    config = writer_lease.LeaseConfig.from_env()
     _require_no_service(config, operation)
     # Its own holder, so the coordinator arbitrates against an idle-released service that
     # re-acquires mid-step rather than handing both processes one token.

@@ -816,10 +816,13 @@ operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
 7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
-9. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local` with the operator credential.
-10. Install the older release on every host, then start the Exomem services.
+9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED` or `COLLECTION_STORE_EXPORT_UNVERIFIED`, follow "When an export cannot finish" below.
+10. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local`.
+11. Install the older release on every host, then start the Exomem services.
 
-The services then read every collection from its files.
+The services then read every collection from its files. The `--retire-local`
+step needs only the writer-lease credential, because it changes the host that
+runs it and reads the coordinator's fence without moving it.
 
 The preview blocks the whole vault while any one collection cannot leave the
 store, and names the collection and the reason:
@@ -845,9 +848,9 @@ the export retires the coordinator's store fence through the operator-only
 to `mode.json.exported-<utc>`, renames the replica and the live store to
 `collections.sqlite.exported-<utc>`, and removes the store's state compatibility
 descriptors. No host adopts the renamed files; they stay as evidence of the
-export. An apply that stops after the fence retire only finishes these renames
-when it runs again, so no host is left with a retired fence beside a marker that
-still routes collections.
+export. An apply that stops after the fence retire verifies the files again
+while the marker still routes collections, then finishes these renames. A
+retired fence alone never lets a rerun retire the marker.
 
 The retire and the lease revocation are one coordinator transaction. The lease
 holder at that moment loses its fencing token, so a store writer that opened
@@ -879,6 +882,50 @@ exported vault, takes the next generation with a new store identity. Run that
 enrolment with a release that has the retire, because an older release cannot
 read a retired fence. An enrolment request based on an older generation gets
 HTTP 409.
+
+A vault that was migrated again after an export has fence generation 2 or later
+in its marker. Only the coordinator that holds that fence can serve it. A
+replaced coordinator, or one restored from a backup older than that migration,
+does not hold the fence. The hosts then refuse the store with
+`COLLECTION_STORE_MARKER_CONFLICT`, because only a marker at generation 1 may
+make the first fence cut on a new coordinator. Keep the coordinator database in
+the backups, and restore a copy taken after the latest migration.
+
+#### When an export cannot finish
+
+An apply that stops leaves its intent in the live store. The store then keeps
+every row and refuses writes, and the services refuse its collections until the
+export finishes. This release has no step that abandons an export.
+
+- `COLLECTION_STORE_EXPORT_VIEW_EDITED` names each view that changed after the
+  export began. Put back the bytes of each named file, for example from the
+  vault's sync history, then run the apply again with the same `plan_id`. A
+  rerun accepts a view that holds the bytes the store published or the bytes
+  this export wrote.
+- `COLLECTION_STORE_EXPORT_UNVERIFIED` means that file mode does not read a
+  collection as the store served it. A rerun repeats the same check, so it
+  cannot finish. Keep the services stopped. Keep `mode.json`, the live store,
+  the vault replica and the coordinator's fence as they are: the store still
+  holds every row. File a bug report with the refusal text.
+
+Never retire the fence by hand. The export retires it only after it verifies
+every file. A fence retired before that leaves the vault refused with
+`COLLECTION_STORE_EXPORT_UNVERIFIED`, and no rerun can finish it.
+
+#### When the exporting host loses its live store after the fence retire
+
+The export verified every file before it retired the fence, so only renames
+remain. Do these steps only when the export itself retired the fence:
+
+1. Keep the services stopped on every host.
+2. Pick one time for both renames, in the form `YYYYMMDDTHHMMSSZ` (UTC).
+3. Rename `<knowledge base folder>/_Collections/mode.json` to `mode.json.exported-<time>`.
+4. Rename `<knowledge base folder>/_Collections/collections.sqlite` to `collections.sqlite.exported-<time>`.
+5. Run `exomem collections export --vault <vault> --retire-local`.
+
+The command reports `retired` and removes the store's state compatibility
+descriptors. Start the services, which then read every collection from its
+files.
 
 ### Durable-session cutover and rollback
 

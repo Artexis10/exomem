@@ -25,7 +25,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .. import record_formats, records, state_migration, vault, writer_lease
 from .. import structured_collections as collections
@@ -60,6 +60,8 @@ UNVERIFIED = "COLLECTION_STORE_EXPORT_UNVERIFIED"
 #: Why a collection cannot leave the store, as the preview names it: closed reasons of this module.
 STORE_NATIVE, OVER_BOUND = "COLLECTION_STORE_EXPORT_STORE_NATIVE", "COLLECTION_STORE_EXPORT_OVER_BOUND"
 UNREPRESENTABLE, VIEW_EDITED = "COLLECTION_STORE_EXPORT_UNREPRESENTABLE", "COLLECTION_STORE_EXPORT_VIEW_EDITED"
+#: The refusal the log adapter raises at its byte bound while the plan parses a rendered log.
+_LOG_BOUND = "RECORD_SOURCE_TOO_LARGE"
 
 
 def _sha(data: bytes) -> str:
@@ -88,15 +90,19 @@ def _unexportable(manifest, imported, rendered):
     """
     if imported is None:
         return _blocker(STORE_NATIVE, "the store created this collection, so file mode never held it")
-    if rendered is None:
+    # A log's bound is the adapter's own: _render_log parses the rendered log through it.
+    if rendered is None or manifest.storage.strategy == "markdown-log":
         return None
+    # The items adapter checks its bounds inside its guarded directory walk and has no check
+    # over planned files to reuse, so this counts what it counts: every file and directory
+    # below the source, each file's bytes and their sum.
+    source = PurePosixPath(manifest.storage.source)
     sources = [data for _, data in rendered["sources"]]
-    if manifest.storage.strategy == "markdown-log":
-        bounds = ((len(sources[0]), record_formats._MAX_LOG_BYTES, "log bytes"),)
-    else:
-        bounds = ((len(sources), record_formats._MAX_ITEM_FILES, "item files"),
-                  (max(map(len, sources), default=0), record_formats._MAX_ITEM_BYTES, "bytes in one item"),
-                  (sum(map(len, sources)), record_formats._MAX_COLLECTION_BYTES, "collection bytes"))
+    directories = {parent for path, _ in rendered["sources"] for parent in PurePosixPath(path).parents
+                   if source in parent.parents}
+    bounds = ((len(sources) + len(directories), record_formats._MAX_ITEM_FILES, "item files and directories"),
+              (max(map(len, sources), default=0), record_formats._MAX_ITEM_BYTES, "bytes in one item"),
+              (sum(map(len, sources)), record_formats._MAX_COLLECTION_BYTES, "collection bytes"))
     for found, limit, name in bounds:
         if found > limit:
             return _blocker(OVER_BOUND, f"{found} {name} exceed the file-mode bound of {limit}")
@@ -244,7 +250,8 @@ def _plan_collection(root, conn, entry, store_id, plan_id):
                 blocker = _blocker(VIEW_EDITED, "these views changed since the store published them: "
                                    + ", ".join(edited) + "; restore their bytes before exporting")
     except (collections.CollectionError, legacy_import.LegacyProofError, ValueError) as error:
-        blocker = _blocker(UNREPRESENTABLE, f"{getattr(error, 'code', type(error).__name__)}: {error}")
+        code = getattr(error, "code", type(error).__name__)
+        blocker = _blocker(OVER_BOUND if code == _LOG_BOUND else UNREPRESENTABLE, f"{code}: {error}")
     if blocker is not None:
         return {**row, "status": "blocked", "blocker": blocker}, None
     if rendered is None:
@@ -359,24 +366,21 @@ def _stale():
     return CollectionStoreError(STALE, "the store, the marker or a view changed since the preview; preview again")
 
 
-def _require_retire_route(fence_client, marker):
+def _require_retire_route(fence_client):
     """Refuse before any change unless the coordinator serves the fence retire the export ends with.
 
-    A retire naming a store the coordinator does not fence changes nothing and answers
-    409; a coordinator without the route answers 404. Without this check, an export would
-    write every file and then stop with its collections unavailable until the coordinator
-    is upgraded. A false refusal costs the owner one coordinator upgrade.
+    Without this check, an export would write every file and then stop with its
+    collections unavailable until the coordinator is upgraded or the credential fixed.
+    A false refusal costs the owner one coordinator check before any file changes.
     """
     try:
-        fence_client.retire_collection_store_fence(
-            expected_generation=marker["collection_store_fence"]["generation"], store_id=str(uuid.uuid4()))
+        fence_client.probe_collection_store_fence_retire()
     except OpError as error:
         if error.code != "WRITER_COORDINATOR_CONTRACT_ABSENT":
-            return
+            raise
         raise CollectionStoreError(
             preflight.UPGRADE_REQUIRED, "the writer-lease coordinator cannot retire a collection store fence; "
             f"upgrade it to Exomem {preflight._running_release()}, the release running here") from error
-    raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the coordinator retired a fence it does not hold")
 
 
 def _begin(session, manager, fence_client, *, plan_id, why):
@@ -396,7 +400,7 @@ def _begin(session, manager, fence_client, *, plan_id, why):
         if sealed["plan_id"] != plan_id:
             raise _stale()
         marker = authority.parse_marker(session.root, raw)
-        _require_retire_route(fence_client, marker)
+        _require_retire_route(fence_client)
         intent = {"version": 2, "kind": authority.EXPORT, "request_id": "export:" + uuid.uuid4().hex,
                   "plan_id": plan_id, "expected_marker": raw.decode("utf-8"), "why": why,
                   "exported_at": dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ"),
@@ -499,8 +503,12 @@ def _require_reads_as_served(root, conn, intent, work):
     verified = []
     for entry in intent["collections"]:
         cid = entry["collection_id"]
-        manifest = collections.load_manifest(root, Path(root) / entry["manifest_path"])
-        snapshot = record_formats.load_adapter(root, manifest).read()
+        try:
+            manifest = collections.load_manifest(root, Path(root) / entry["manifest_path"])
+            snapshot = record_formats.load_adapter(root, manifest).read()
+        except collections.CollectionError as error:
+            raise CollectionStoreError(UNVERIFIED, f"file mode cannot read {entry['manifest_path']}: {error}") \
+                from error
         stored = {key: (typed_storage.item_values(conn, row_id), body, payload) for row_id, key, body, payload
                   in conn.execute("SELECT row_id,item_key,body,payload_hash FROM items WHERE collection_id=?", (cid,))}
         found = {record.identity.key: record for record in snapshot.records}
@@ -599,8 +607,9 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
 
     Order: files and checkpoints, their verification, the fence retire, then the
     marker, the replica, the descriptors and the store. The fence is retired only after
-    every collection is verified, and a rerun after it never verifies again: a rerun then
-    only finishes the marker, so no retired fence stays beside a routing marker.
+    every collection is verified. A rerun after the retire verifies again while the
+    marker still routes, then finishes the renames; once the marker is renamed, a rerun
+    only finishes the rest.
     """
     root = session.root
     session.verify_custody()
@@ -645,6 +654,14 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
             _detach(session, manager)
         elif fence.generation != generation:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the coordinator fences another generation")
+        elif authority.read_marker(root) == intent["expected_marker"].encode("utf-8"):
+            # A retired fence does not prove this export wrote the files: a hand retire leaves
+            # none. The live store goes last, so while the marker routes it still verifies them.
+            with closing(connection.open_reader(session.path)) as reader:
+                sealed, work = plan(root, reader, plan_id=intent["plan_id"])
+                if sealed["verdict"] != "exportable":
+                    raise _refused(sealed)
+                verified = _require_reads_as_served(root, reader, intent, work)
         else:
             verified = None
         with manager.writer_authority_guard(vault_root=root):
@@ -661,15 +678,16 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     return _report("apply", "exported", status="exported", plan_id=intent["plan_id"], store_id=store_id,
                    exported_at=intent["exported_at"], retired_fence_generation=generation,
                    marker=f"{authority.marker_path(root).parent.relative_to(root).as_posix()}/{tombstone}",
-                   **({"collections": verified} if verified is not None else {"resumed": "after the fence retire"}))
+                   **({"collections": verified} if verified is not None else {"resumed": "after the marker retire"}))
 
 
 def retire_local(session, manager, fence_client) -> dict:
-    """On another host, once the exported vault reached it: tombstone its stale store and retire its descriptors.
+    """Once a host's vault copy routes nothing to a store: tombstone its stale store and retire its descriptors.
 
     It refuses while the vault still routes collections here, and touches a local store
     only when an exported marker in the vault names that store and the coordinator no
-    longer fences it, so a store the export did not retire stays put.
+    longer fences it, so a store the export did not retire stays put. A host without a
+    store only retires the descriptors.
     """
     root = session.root
     session.verify_custody()
@@ -684,7 +702,12 @@ def retire_local(session, manager, fence_client) -> dict:
             exported[authority.parse_marker(root, path.read_bytes())["store_id"]] = path.name[len(
                 MARKER_LEAF + EXPORTED):]
         if not session.path.exists():
-            return _report("retire-local", "nothing_to_retire", status="retired")
+            # No store is left to tombstone, but the descriptors still keep an older release out.
+            with manager.writer_authority_guard(vault_root=root):
+                token = manager._fencing_token
+                state_migration.retire_collection_store_compatibility(
+                    root, authority_check=lambda: session.require(token))
+            return _report("retire-local", "retired", status="retired", store="absent")
         with closing(connection.open_reader(session.path)) as reader:
             store_id = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
             intent = authority.pending_create(reader)

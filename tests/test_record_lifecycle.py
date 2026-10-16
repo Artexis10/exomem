@@ -106,39 +106,21 @@ def test_a_checkpoint_over_a_collection_without_history_reads_acknowledged_gap(t
     discontinuity, so a reverse export of a collection with no legacy history reads `ok`."""
     fixture = copy_x3_fixture(tmp_path)
     _activity_log(tmp_path)
-    manifest_file = fixture / "_collection.md"
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
     transition = "0123456789abcdef01234567"
-    manifest_file.write_text(
-        record_formats.render_manifest_audit_head(
-            manifest_file.read_text(encoding="utf-8"),
-            transition,
-            semantic_profile="records",
-            reader_version=2,
-        ),
-        encoding="utf-8",
-    )
-    manifest = collections.load_manifest(tmp_path, manifest_file)
-    checkpoint = records._lifecycle_audit_body(
+
+    records.export_checkpoint(
+        tmp_path,
+        manifest.path,
+        manifest_text=(tmp_path / manifest.path).read_text(encoding="utf-8"),
         transition_id=transition,
         parent_id="baseline",
-        operation="rebaseline",
-        manifest=manifest,
-        before_manifest_hash="1" * 64,
-        after_manifest_hash=manifest.manifest_version.hash,
-        before_container_hash="2" * 64,
-        after_container_hash=record_formats.load_adapter(tmp_path, manifest).read().source_versions[-1].hash,
+        gap_code="collections-store-history:invented:1-2",
         payload_hash="3" * 64,
         why="summarize invented store history",
-        continuity=False,
-        acknowledged_gap_codes=("collections-store-history:invented:1-2",),
-        gap_fingerprint="4" * 64,
-        checkpoint_snapshot_hash="5" * 64,
     )
-    log = tmp_path / "Knowledge Base/log.md"
-    log.write_text(log.read_text(encoding="utf-8") + checkpoint + "\n", encoding="utf-8")
 
     report = records.inspect_audit_gap(tmp_path, manifest.path)
-
     assert report["status"] == "acknowledged_gap"
     assert (report["discontinuity"]["prior_head"], report["discontinuity"]["checkpoint_transition"]) == (
         "baseline",
