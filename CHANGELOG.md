@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.121.0](https://github.com/Artexis10/exomem/compare/v0.120.0...v0.121.0) (2026-10-16)
+
+
+### Features
+
+* **cloud:** add a fleet default for Cloud media engines ([#1798](https://github.com/Artexis10/exomem/issues/1798)) ([e9e6b34](https://github.com/Artexis10/exomem/commit/e9e6b34217fdde2c0cfe972e5d5843f823271868))
+* **cloud:** give every cell the artifact broker by one fleet switch ([#1801](https://github.com/Artexis10/exomem/issues/1801)) ([a751c6f](https://github.com/Artexis10/exomem/commit/a751c6fbf255ec0cd3aed7f0c07938769d2ecdb0))
+* **cloud:** rotate the K3s client CA after a lost disk ([#1799](https://github.com/Artexis10/exomem/issues/1799)) ([8eea37b](https://github.com/Artexis10/exomem/commit/8eea37b6efa4d102d7bf2e04d479d532e6ad8661))
+* **collections:** apply edits of store collection views behind their own release ([#1809](https://github.com/Artexis10/exomem/issues/1809)) ([0af7447](https://github.com/Artexis10/exomem/commit/0af7447e7b2016b49330b97abd8c8662d3a63ab5))
+* **collections:** export a migrated vault back to file collections ([#1782](https://github.com/Artexis10/exomem/issues/1782)) ([dc6d15a](https://github.com/Artexis10/exomem/commit/dc6d15ab58bfb5b8853a7cf5c7fa674e6d043627))
+* **collections:** recover a stale migration and an unfinished export ([#1803](https://github.com/Artexis10/exomem/issues/1803)) ([8778331](https://github.com/Artexis10/exomem/commit/8778331d32c323f4f55a87dbadfaca99d5cb256a))
+* **collections:** refuse store collection views in the file tools ([#1796](https://github.com/Artexis10/exomem/issues/1796)) ([eeb53ee](https://github.com/Artexis10/exomem/commit/eeb53ee0e94e457bbae30d76ca2f4b8c5d2c4e4d))
+
+
+### Bug Fixes
+
+* **collections:** refuse a rollback target that cannot read the store, and finish earlier releases' intents ([#1808](https://github.com/Artexis10/exomem/issues/1808)) ([a1faeaa](https://github.com/Artexis10/exomem/commit/a1faeaa83546b2b8a41778f4c5581f0fd613b272))
+* **governance:** complete restricted direct-read refusals at a fixed floor ([#1797](https://github.com/Artexis10/exomem/issues/1797)) ([b13bea2](https://github.com/Artexis10/exomem/commit/b13bea2e129e8be5905fe365c21de59e7b4ddcc6))
+* **graph:** drain only bytes its resolver has seen ([#1795](https://github.com/Artexis10/exomem/issues/1795)) ([74764f4](https://github.com/Artexis10/exomem/commit/74764f43b014acf70f8978651eb6dd0558842c49))
+* **lease:** let a process without a store runtime pass the store fence ([#1805](https://github.com/Artexis10/exomem/issues/1805)) ([d16f082](https://github.com/Artexis10/exomem/commit/d16f082602cd67cef6bf2136f8a319eed1527043))
+* **mcp:** answer coded refusals with the error envelope and back off media without writer authority ([#1802](https://github.com/Artexis10/exomem/issues/1802)) ([c443769](https://github.com/Artexis10/exomem/commit/c443769ac5b9719950e3e627a27c933981586bbe))
+* **media:** find Japanese OCR text by keyword and retire Cloud full-index receipts ([#1807](https://github.com/Artexis10/exomem/issues/1807)) ([1f43d73](https://github.com/Artexis10/exomem/commit/1f43d73cd6f5308ebe58fa49571fba205dae8384))
+* **watcher:** stop reading Exomem's own writes as outside edits ([#1804](https://github.com/Artexis10/exomem/issues/1804)) ([a854dfa](https://github.com/Artexis10/exomem/commit/a854dfa9e652babc1c600431457aa57c0e95fdbc))
+* **writes:** hash both images as written so CRLF pages retry and chain ([#1792](https://github.com/Artexis10/exomem/issues/1792)) ([41ce313](https://github.com/Artexis10/exomem/commit/41ce313deacb2b7ff2b371f1c2bdaf799d5398f4))
+
+
+### Performance
+
+* **writes:** run writes, boundary holders and reads ahead of bulk passes ([#1806](https://github.com/Artexis10/exomem/issues/1806)) ([007e217](https://github.com/Artexis10/exomem/commit/007e21760e0ee3793ece583087c65cfa4012a4c4))
+
 ## [0.120.0](https://github.com/Artexis10/exomem/compare/v0.119.0...v0.120.0) (2026-10-16)
 
 
