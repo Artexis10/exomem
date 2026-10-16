@@ -60,9 +60,9 @@ def validate_new_entry(
     """Bind a new history leaf to the exact logical images used by its producer."""
     try:
         entry = json.loads(raw)
-        # The semantic writer retains logical Markdown; its primary guard binds raw bytes.
+        # The semantic writer evaluates the logical (LF) before image; its primary guard binds raw bytes.
         before_source = before_source.replace("\r\n", "\n").replace("\r", "\n")
-        after_source = after_source.replace("\r\n", "\n").replace("\r", "\n")
+        # It writes and hashes the after image as given, so a carried-through CRLF stays in its hash.
         parent_ref = semantic_index.build_parent_index_state(
             root, primary_path, source=before_source
         ).document.parent_ref
