@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import uuid
 from contextlib import closing
 from dataclasses import replace
 
@@ -42,7 +43,7 @@ from test_collection_store_service import DAILY, Service, call
 from exomem import __main__ as cli
 from exomem import record_formats, records, state_migration, state_paths, writer_lease
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, connection, export
+from exomem.collection_store import authority, chain, connection, export
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
 
@@ -235,11 +236,12 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
         state_migration.recorded_descriptor_ids(other))
 
 
-def _export_and_crash(environment, database, cut, plan_id):
+def _export_and_crash(environment, database, cut, plan_id, flags):
     """`collections export --plan-id` in a fresh interpreter that dies at ``cut``, as a killed process would."""
     os.environ.clear()
     os.environ.update(environment)
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
+    from exomem.collection_store import admission
 
     def die(*args, **kwargs):
         os._exit(73)
@@ -250,24 +252,35 @@ def _export_and_crash(environment, database, cut, plan_id):
             os._exit(73)
         return run
 
+    def at_work(original):
+        def run(root, manifest_path, **kwargs):
+            if manifest_path == WORK:
+                os._exit(73)
+            return original(root, manifest_path, **kwargs)
+        return run
+
     {"after-begin": lambda: setattr(export, "_begin", after(export._begin)),
      "before-files": lambda: setattr(export, "_write_collection", die),
      "between-files-and-checkpoint": lambda: setattr(records, "export_checkpoint", die),
+     # The other written collections, which come first, have their files and their checkpoints.
+     "between-work-files-and-checkpoint": lambda: setattr(records, "export_checkpoint",
+                                                          at_work(records.export_checkpoint)),
      "after-fence-retire": lambda: setattr(export, "_detach", die),
      "after-marker-retire": lambda: setattr(export, "_retire_marker", after(export._retire_marker)),
-     "before-store-tombstone": lambda: setattr(export, "_tombstone_store", die)}[cut]()
+     "before-store-tombstone": lambda: setattr(export, "_tombstone_store", die),
+     "after-abandon-transaction": lambda: setattr(admission, "_publish_current_epoch", die)}[cut]()
     with coordinator(database), library_scope():
         cli._collections_main(["export", "--vault", environment["EXOMEM_VAULT_PATH"], "--plan-id", plan_id,
-                               "--why", "roll back to files"])
+                               "--why", "roll back to files", *flags])
     os._exit(0)
 
 
-def crash_export(tmp_path, cut, plan_id):
-    """Run one export apply that dies at ``cut``, then wait out the dead owner's lease."""
+def crash_export(tmp_path, cut, plan_id, *flags):
+    """Run one export apply (or ``flags``' step) that dies at ``cut``, then wait out the dead owner's lease."""
     import multiprocessing
 
     child = multiprocessing.get_context("spawn").Process(target=_export_and_crash, args=(
-        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, plan_id))
+        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, plan_id, flags))
     child.start()
     child.join(120)
     assert child.exitcode == 73
@@ -303,15 +316,8 @@ def test_an_export_cut_at_any_step_resumes_from_its_intent_to_the_same_files(env
     assert len(checkpoints) == 3  # one per written collection, never repeated by the resume
 
 
-def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it_writes(
-        env, capsys, tmp_path):  # noqa: F811
-    """A resume that publishes, renews and exports a store behind the coordinator's head: a host
-    that adopted the replica before it carried the intent committed a row the files then lack,
-    and that row survives only in a store that retire-local later tombstones."""
-    root = env
-    migrated_and_written(root, capsys)
-    plan_id = preview_id(root, capsys)
-    crash_export(tmp_path, "after-begin", plan_id)  # the intent is in the live store, not the replica
+def another_host_writes(root, tmp_path):
+    """A second host with its own copy of the vault adopts the replica and writes a row through its store."""
     other = tmp_path / "other"
     shutil.copytree(root, other)
     with pytest.MonkeyPatch.context() as there:
@@ -325,6 +331,18 @@ def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it
                  why="a store-mode write on another host")
         finally:
             service.stop()
+
+
+def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it_writes(
+        env, capsys, tmp_path):  # noqa: F811
+    """A resume that publishes, renews and exports a store behind the coordinator's head: a host
+    that adopted the replica before it carried the intent committed a row the files then lack,
+    and that row survives only in a store that retire-local later tombstones."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "after-begin", plan_id)  # the intent is in the live store, not the replica
+    another_host_writes(root, tmp_path)
     client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
     recorded = client.status().collection_store_head
     before = vault_bytes(root)
@@ -336,27 +354,164 @@ def test_a_resume_after_another_host_wrote_through_the_replica_refuses_before_it
     assert vault_bytes(root) == before
 
 
-def test_a_rerun_after_a_hand_retired_fence_refuses_before_it_retires_the_marker(env, capsys, tmp_path):  # noqa: F811
-    """A rerun that takes a retired fence as proof that the export wrote and verified its files,
-    then retires the marker and tombstones the store while the vault still holds the store's
-    views, so the rows written in store mode survive only in the tombstone."""
-    root = env
-    migrated_and_written(root, capsys)
-    plan_id = preview_id(root, capsys)
-    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
-    crash_export(tmp_path, "before-files", plan_id)  # the intent is recorded, no file is written
+def retire_by_hand(store_id):
+    """The operator retires the store fence outside the export, as `POST .../collection-store-fence/retire` does."""
     with pytest.MonkeyPatch.context() as shell:
         shell.setenv(OPERATOR, "operator")
         writer_lease.configured_schema_fence_operator_client().retire_collection_store_fence(
             expected_generation=1, store_id=store_id)
-    views = vault_bytes(root)
+
+
+def test_an_apply_whose_lease_lapsed_after_its_intent_refuses_behind_another_hosts_head(
+        env, capsys, monkeypatch):  # noqa: F811
+    """An apply paused past its lease after recording its intent, while another host took the lease,
+    adopted the replica and wrote: going on publishes, renews and exports over that host's head, so its
+    row survives only in a store that retire-local later tombstones."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        store_id = reader.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+        sequence, _ = chain.verify_store_chain(reader)
+    elsewhere = writer_lease.LeaseCoordinatorClient(
+        replace(writer_lease.LeaseConfig.from_env(), replica_id="another-host"))
+    begin = export._begin
+
+    def pause_while_another_host_writes(*args, **kwargs):
+        begun = begin(*args, **kwargs)
+        wait_out_the_lease()
+        held = elsewhere.acquire(collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY)
+        # What that host's renewal reports once it committed one row past this store's head.
+        elsewhere.renew(held.fencing_token, collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY,
+                        collection_store_head=writer_lease.CollectionStoreHead(
+                            store_id, str(uuid.uuid4()), sequence + 1, "a" * 64))
+        elsewhere.release(held.fencing_token)
+        return begun
+
+    monkeypatch.setattr(export, "_begin", pause_while_another_host_writes)
+    before = vault_bytes(root)
 
     assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
 
-    assert export.UNVERIFIED in capsys.readouterr().err
+    assert "COLLECTION_STORE_SYNC_PENDING" in capsys.readouterr().err
+    assert vault_bytes(root) == before
+
+
+def test_a_rerun_after_a_hand_retired_fence_goes_forward_from_the_frozen_store(env, capsys, tmp_path):  # noqa: F811
+    """A rerun after a fence retired by hand before the export wrote its files that stays refused with no
+    way out, or that retires the marker without writing and verifying the files, so the rows written in
+    store mode survive only in the tombstone."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    crash_export(tmp_path, "before-files", plan_id)  # the intent is recorded, no file is written
+    retire_by_hand(store_id)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 0
+
+    resumed = printed(capsys)
+    assert {row["collection_id"]: row["status"] for row in resumed["collections"]} == {
+        CID: "written", X3_ID: "written", LEDGER_ID: "unwritten", OTHER: "written"}
+    assert authority.read_marker(root) is None and not connection.store_path(root).exists()
+    assert (fence().enrolled, fence().generation) == (False, 1)
+    assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+    assert call(root, "record_memory", action="inspect", collection=WORK)["audit"]["status"] == "acknowledged_gap"
+
+
+def test_a_hand_retired_fence_over_another_hosts_head_refuses_before_it_writes(env, capsys, tmp_path):  # noqa: F811
+    """A rerun that goes forward from a fence retired by hand although another host adopted the replica
+    and wrote first: the files would lack that host's row, which then survives only in a store that
+    retire-local later tombstones."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    crash_export(tmp_path, "after-begin", plan_id)  # the intent is in the live store, not the replica
+    another_host_writes(root, tmp_path)
+    retire_by_hand(store_id)
+    before = vault_bytes(root)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
+
+    assert "COLLECTION_STORE_SYNC_PENDING" in capsys.readouterr().err
+    assert vault_bytes(root) == before
     assert authority.parse_marker(root, authority.read_marker(root))["store_id"] == store_id
-    assert connection.store_path(root).exists()
-    assert vault_bytes(root) == views
+
+
+def test_an_edit_after_the_exports_own_fence_retire_does_not_stop_its_renames(env, capsys, tmp_path):  # noqa: F811
+    """A rerun after the export's own fence retire that reads the files again, so a person's file-mode
+    edit made after the store let go refuses it as unverified and leaves the vault routed to a store
+    whose fence is gone."""
+    root = env
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "after-fence-retire", plan_id)
+    view = root / WORK.replace("_collection.md", "Items/Original.md")
+    edited = view.read_bytes() + b"\nA note added in file mode\n"
+    view.write_bytes(edited)
+
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 0
+
+    assert printed(capsys)["resumed"] == "after the fence retire"
+    assert authority.read_marker(root) is None and not connection.store_path(root).exists()
+    assert view.read_bytes() == edited
+
+
+def test_an_export_that_cannot_finish_is_abandoned_keeping_every_row_and_the_edit(env, capsys, tmp_path):  # noqa: F811
+    """An export stuck behind a view a person edited whose only way out loses a store row, adopts or
+    overwrites the edit, or orphans the checkpoints it already published, so that every later export
+    reads a transition fork and ends unverified."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "between-work-files-and-checkpoint", plan_id)
+    view = root / WORK.replace("_collection.md", "Items/Original.md")
+    original = view.read_bytes()
+    edited = original + b"\nA note added by hand\n"
+    view.write_bytes(edited)
+    assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
+    assert export.VIEW_EDITED in capsys.readouterr().err
+    before = vault_bytes(root, outside=COLLECTIONS)
+
+    assert run_export(root, "--abandon", "--plan-id", plan_id, "--why", "the edit needs a decision first") == 0
+
+    abandoned = printed(capsys)
+    assert (abandoned["status"], abandoned["checkpoints"]) == ("abandoned", sorted([OTHER, X3_ID]))
+    assert vault_bytes(root, outside=COLLECTIONS) == before
+    service = start_service(root)
+    try:
+        assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+    finally:
+        service.stop()
+    assert view.read_bytes() == edited  # kept where the person wrote it, and adopted nowhere
+    view.write_bytes(original)  # the owner decides against the note
+
+    assert run_export(root, "--plan-id", preview_id(root, capsys), "--why", "roll back to files") == 0
+
+    assert {row["collection_id"]: row["audit"] for row in printed(capsys)["collections"]} == {
+        CID: "acknowledged_gap", X3_ID: "acknowledged_gap", LEDGER_ID: "ok", OTHER: "acknowledged_gap"}
+    assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+
+
+def test_an_abandon_cut_after_its_transaction_leaves_a_store_the_service_serves(env, capsys, tmp_path):  # noqa: F811
+    """An abandon killed between its store transaction and its publication that leaves the store
+    unadmittable, or still owned by the export it gave up."""
+    root = env
+    _, served = migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    crash_export(tmp_path, "between-files-and-checkpoint", plan_id)
+    crash_export(tmp_path, "after-abandon-transaction", plan_id, "--abandon")
+
+    service = start_service(root)
+    try:
+        assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+        written = call(root, "record_memory", action="append", collection=WORK, item={"title": "After abandon"},
+                       why="a store write once the export was abandoned")
+        assert written["outcome"] == "committed"
+    finally:
+        service.stop()
+    assert run_export(root, "--dry-run", operator=False) == 0 and printed(capsys)["verdict"] == "exportable"
 
 
 def test_a_host_that_lost_its_store_after_the_fence_retire_finishes_with_renames_and_retire_local(

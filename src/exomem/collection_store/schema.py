@@ -64,6 +64,8 @@ META_VIEW_DIVERGED = "diverged"
 META_ADOPTED_FOREIGN_REPLICA = "adopted_foreign_replica"
 # Digests of foreign evidence already reconciled into held corrections.
 META_RECONCILED_FOREIGN = "reconciled_foreign"
+# Per collection, the checkpoint an abandoned export left in the files: the next export's legacy parent.
+META_EXPORT_PARENTS = "export_legacy_parents"
 META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"

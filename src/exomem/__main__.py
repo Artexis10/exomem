@@ -2265,6 +2265,11 @@ def _collections_main(argv: list[str]) -> int:
         help="on another host, once the exported vault reached it: retire this host's stale store",
     )
     export.add_argument("--why", help="reason recorded with each collection's checkpoint (required with --plan-id)")
+    export.add_argument(
+        "--abandon", action="store_true",
+        help="with --plan-id: give up that unfinished export, which keeps every row in the store and the vault "
+        "routed to it; no vault file changes",
+    )
     for command in (backup, adopt, create, rollback, migrate, export):
         command.add_argument(
             "--vault",
@@ -2308,9 +2313,12 @@ def _collections_main(argv: list[str]) -> int:
             if args.plan_id is not None and not args.why:
                 print("collections export: --plan-id needs --why", file=sys.stderr)
                 return 2
+            if args.abandon and args.plan_id is None:
+                print("collections export: --abandon needs --plan-id", file=sys.stderr)
+                return 2
             with library_scope():
                 result = admission.export_route(Path(args.vault), plan_id=args.plan_id, why=args.why,
-                                                retire_local=args.retire_local)
+                                                retire_local=args.retire_local, abandon=args.abandon)
             print(json.dumps(result, sort_keys=True))
             if result.get("verdict") == "blocked":
                 return 1

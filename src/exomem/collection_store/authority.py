@@ -309,10 +309,44 @@ def _intent_collection(entry):
     return entry
 
 
+def _store_head(value):
+    """Validate a store head an intent records: its commit sequence and chain hash, None only at genesis."""
+    if (not isinstance(value, dict) or set(value) != {"commit_seq", "head_hash"}
+            or type(value["commit_seq"]) is not int or value["commit_seq"] < 0
+            or (value["head_hash"] is None) != (value["commit_seq"] == 0)
+            or not (value["head_hash"] is None or isinstance(value["head_hash"], str) and value["head_hash"])):
+        _invalid()
+
+
+def _migrate_fields(intent):
+    """Validate the fields a migration adds when it replaces an unadmitted store of its own (P1b.3c).
+
+    ``supersedes`` names the store and generation a first enrolment's fence binds, which
+    fresh staging replaces; ``base_head`` is the live store's head that a migration over an
+    enrolled store imports onto, so a recovery can prove the store it restores.
+    """
+    if "supersedes" in intent:
+        found = intent["supersedes"]
+        if (intent["expected_marker"] is not None or not isinstance(found, dict)
+                or set(found) != {"store_id", "generation"} or not isinstance(found["store_id"], str)
+                or not found["store_id"] or type(found["generation"]) is not int or found["generation"] < 1):
+            _invalid()
+    if "base_head" in intent:
+        if intent["expected_marker"] is None:
+            _invalid()
+        _store_head(intent["base_head"])
+
+
 def _export_intent(intent):
-    """Validate an export's intent: it retires ``expected_marker`` with its store and fence, so it has no target."""
-    if (set(intent) != {"version", "kind", "request_id", "plan_id", "expected_marker", "exported_at", "why",
-                        "collections"}
+    """Validate an export's intent: it retires ``expected_marker`` with its store and fence, so it has no target.
+
+    ``verified``, once present, records that file mode read every collection as the store
+    served it, so a rerun after the fence retire finishes without reading the files again.
+    """
+    # nosemgrep: ep-word-set -- the closed field names of the intent record this module writes.
+    if (set(intent) - {"verified"} != {"version", "kind", "request_id", "plan_id", "expected_marker", "exported_at",
+                                       "why", "collections"}
+            or intent.get("verified", True) is not True
             or not all(isinstance(intent[name], str) and intent[name]
                        for name in ("request_id", "plan_id", "expected_marker", "exported_at", "why"))
             or not isinstance(intent["collections"], list) or not intent["collections"]):
@@ -360,6 +394,7 @@ def pending_create(conn):
         entries = [_intent_collection(entry) for entry in intent["collections"]]
         if len({entry["collection_id"] for entry in entries}) != len(entries):
             _invalid()
+        _migrate_fields(intent)
         return intent
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "invalid pending create intent") from error

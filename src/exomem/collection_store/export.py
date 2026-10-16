@@ -39,6 +39,7 @@ from . import (
     legacy_import,
     owner,
     preflight,
+    schema,
     takeover,
     typed_storage,
 )
@@ -206,11 +207,14 @@ def _view_edits(root, conn, manifest, cid, targets):
     return sorted(edited)
 
 
-def _plan_collection(root, conn, entry, store_id, plan_id):
+def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=True):
     """One routed collection's export row, and its work when the store wrote it.
 
     ``plan_id`` is the export's identity once its intent exists: the checkpointed manifest
-    then counts as a target too, so a resumed run plans the same work.
+    then counts as a target too, so a resumed run plans the same work. ``parents`` holds
+    the checkpoint an abandoned export left per collection, which the next checkpoint
+    continues. ``views=False`` plans the work without checking the views against it,
+    for an abandon that records which views hold it.
     """
     cid = entry["collection_id"]
     manifest_path, layout, frame_json, head = conn.execute(
@@ -242,7 +246,7 @@ def _plan_collection(root, conn, entry, store_id, plan_id):
             targets = {manifest_path: rendered["manifest"], **dict(rendered["sources"]), **dict(rendered["held"]),
                        **dict.fromkeys(resolved)}
         blocker = _unexportable(manifest, imported, rendered)
-        if blocker is None:
+        if blocker is None and views:
             allowed = dict(targets)
             if plan_id is not None and rendered is not None:
                 allowed[manifest_path] = _checkpointed(text, manifest, _transition(plan_id, cid)).encode("utf-8")
@@ -263,14 +267,21 @@ def _plan_collection(root, conn, entry, store_id, plan_id):
                                  "AND manifest_version=1", (cid,)).fetchone()[0]
     work = {"manifest_path": manifest_path, "manifest_text": text, "targets": targets, "resolved": resolved,
             "basis": basis,
-            # The checkpoint continues the legacy chain from the head the store imported.
-            "parent_id": collections.parse_manifest_bytes(
+            # The checkpoint continues the legacy chain from the head the store imported, or from
+            # the checkpoint an abandoned export left: another parent would fork that chain.
+            "parent_id": parents.get(cid) or collections.parse_manifest_bytes(
                 Path(root), manifest_path, imported_text.encode("utf-8")).audit_head or "baseline",
             "gap_code": _HISTORY_CODE.format(store_id=store_id, first=first, last=last), "collection_head": head}
     return {**row, "status": "written", "files": sum(1 for _, before, after in basis if before != after)}, work
 
 
-def plan(root, conn, *, plan_id=None):
+def _parents(conn):
+    """Each collection's checkpoint that an abandoned export left in the files, by collection id."""
+    row = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_EXPORT_PARENTS,)).fetchone()
+    return {} if row is None else json.loads(row[0])
+
+
+def plan(root, conn, *, plan_id=None, views=True):
     """The sealed export plan of the store ``conn`` reads, and the work of each written collection."""
     head = chain.verify_store_chain(conn)
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -278,9 +289,9 @@ def plan(root, conn, *, plan_id=None):
     marker = authority.parse_marker(root, raw)
     if marker["store_id"] != store_id:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the marker routes to another store")
-    rows, work = [], {}
+    rows, work, parents = [], {}, _parents(conn)
     for entry in sorted(marker["collections"], key=lambda item: item["manifest_path"]):
-        row, planned = _plan_collection(root, conn, entry, store_id, plan_id)
+        row, planned = _plan_collection(root, conn, entry, store_id, plan_id, parents, views=views)
         rows.append(row)
         if planned is not None:
             work[entry["collection_id"]] = planned
@@ -385,7 +396,7 @@ def _require_retire_route(fence_client):
 
 
 def _begin(session, manager, fence_client, *, plan_id, why):
-    """Record the export intent on an admitted store whose plan is still the previewed one."""
+    """Record the export intent on an admitted store whose plan is still the previewed one; the intent and token."""
     records._validate_why(why)
     opened = admission.open_store(session, manager, fence_client=fence_client)
     if opened["status"] != "admitted":
@@ -415,7 +426,7 @@ def _begin(session, manager, fence_client, *, plan_id, why):
                 raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "another intent owns this store")
             conn.execute("INSERT INTO store_meta(key,value) VALUES (?,?)", (
                 authority.PENDING_CREATE, json.dumps(intent, sort_keys=True, separators=(",", ":"))))
-    return intent
+    return intent, token
 
 
 def _renew(session, token):
@@ -603,14 +614,67 @@ def _tombstone_store(session, at):
             _rename(fs, directory, name, name + EXPORTED + at)
 
 
+def _write_and_verify(session, token, intent, store_id, deferred):
+    """Write every collection's files and checkpoint from the frozen store, then prove file mode reads them back."""
+    with closing(connection.open_reader(session.path)) as reader:
+        head = chain.verify_store_chain(reader)
+        sealed, work = plan(session.root, reader, plan_id=intent["plan_id"])
+        if sealed["verdict"] != "exportable":
+            raise _refused(sealed)
+        for cid, planned in work.items():
+            _renew(session, token)
+            _write_collection(session, token, intent, cid, planned, store_id, head, deferred)
+        _renew(session, token)
+        return _require_reads_as_served(session.root, reader, intent, work)
+
+
+def _record_verified(session, runtime, token, intent):
+    """Record in the intent that file mode reads every collection as the store served it, before any retire.
+
+    A rerun after the fence retire then finishes the renames without reading the files
+    again, which an edit made after the retire would fail.
+    """
+    if not runtime.retire_idle_handle():
+        raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+    with session.writer(token) as writer, writer.handle.transaction() as conn:
+        session.require(token)
+        if authority.pending_create(conn) != intent:
+            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "the export intent changed")
+        intent["verified"] = True
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", (
+            json.dumps(intent, sort_keys=True, separators=(",", ":")), authority.PENDING_CREATE))
+
+
+def _require_retired_head(fence_client, path, store_id, generation):
+    """Refuse to go forward from a retired fence unless the coordinator retired this store at its own head.
+
+    Before the retire, another host may have adopted the replica and written rows that this
+    store lacks; the files would then lose them. A false refusal keeps the vault as it is,
+    still routed and with its fence retired, until that host's store reaches this host.
+    """
+    retired = fence_client.retired_collection_store_fence()
+    if (retired.store_id, retired.generation) != (store_id, generation):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the coordinator retired another store fence")
+    head = retired.collection_store_head
+    with closing(connection.open_reader(path)) as reader:
+        (instance,) = reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_INSTANCE_ID,)).fetchone()
+        if head is not None and not admission.holds_head(reader, head, store_id, instance):
+            raise CollectionStoreError(takeover.SYNC_PENDING, (
+                "the head the coordinator recorded when it retired this store's fence is not in this store, so "
+                "another host wrote rows that the files would lose; keep the services stopped and keep both stores, "
+                "the marker and the fence as they are"))
+
+
 def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     """Export inside the owner's offline session, or resume the export this store's intent records.
 
-    Order: files and checkpoints, their verification, the fence retire, then the
+    Order: files and checkpoints, their verification, then the fence retire, the
     marker, the replica, the descriptors and the store. The fence is retired only after
-    every collection is verified. A rerun after the retire verifies again while the
-    marker still routes, then finishes the renames; once the marker is renamed, a rerun
-    only finishes the rest.
+    every collection is verified, which the intent records first. A rerun after a retire
+    goes on from the frozen store while the marker still routes, once the coordinator
+    retired this store at its own head: after this export's retire it finishes the
+    renames, and after a retire made by hand it first writes and verifies the files. Once
+    the marker is renamed, a rerun only finishes the rest.
     """
     root = session.root
     session.verify_custody()
@@ -618,17 +682,18 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     admission._bind_fence_client(session, fence_client)
     deferred = []
     with manager.consistency_guard(root, operation="collection_store_export"):
-        intent = _local_intent(root)
-        resumed = intent is not None
+        intent, begun = _local_intent(root), None
         if intent is None:
             if authority.read_marker(root) is None:
                 return preview(root) | {"step": "apply"}
-            intent = _begin(session, manager, fence_client, plan_id=plan_id, why=why)
+            intent, begun = _begin(session, manager, fence_client, plan_id=plan_id, why=why)
         elif intent["plan_id"] != plan_id:
             raise _stale()
         marker = authority.parse_marker(root, intent["expected_marker"])
         store_id, generation = marker["store_id"], marker["collection_store_fence"]["generation"]
+        routed = authority.read_marker(root) == intent["expected_marker"].encode("utf-8")
         fence = fence_client.collection_store_fence()
+        verified = None
         if fence.enrolled:
             admission._require_fence(fence, marker)
             # Its capability holds the lease while the fence stands.
@@ -636,41 +701,36 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
             with manager.writer_authority_guard(vault_root=root):
                 token = manager._fencing_token
                 with session.writer(token) as writer:
-                    if resumed:
-                        # Until the replica carries the intent, another host may adopt it and write,
-                        # so a resume first proves the coordinator's head is this store's. This
-                        # run's own _begin admitted the store under this token, which proved it.
+                    if token != begun:
+                        # The intent adds no commit, so the replica publication below copies nothing
+                        # new and the replica lacks it: another host may adopt the replica and write
+                        # once this run's lease lapses. A resume, or a run whose token changed since
+                        # _begin, first proves the coordinator's head is this store's; under _begin's
+                        # own token, _begin's admission of the store proved it.
                         admission._verify_acquisition(writer, runtime, fence, marker)
-                    # The replica carries the intent before any file changes, so no host adopts it.
                     published = admission._publish_current_epoch(session, writer, token)
                 if published.status != "published":
                     raise CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING",
                                                f"replica publication: {published.reason or published.status}")
-                with closing(connection.open_reader(session.path)) as reader:
-                    head = chain.verify_store_chain(reader)
-                    sealed, work = plan(root, reader, plan_id=intent["plan_id"])
-                    if sealed["verdict"] != "exportable":
-                        raise _refused(sealed)
-                    for cid, planned in work.items():
-                        _renew(session, token)
-                        _write_collection(session, token, intent, cid, planned, store_id, head, deferred)
-                    _renew(session, token)
-                    verified = _require_reads_as_served(root, reader, intent, work)
+                verified = _write_and_verify(session, token, intent, store_id, deferred)
+                _record_verified(session, runtime, token, intent)
                 _renew(session, token)
                 fence_client.retire_collection_store_fence(expected_generation=generation, store_id=store_id)
             _detach(session, manager)
         elif fence.generation != generation:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the coordinator fences another generation")
-        elif authority.read_marker(root) == intent["expected_marker"].encode("utf-8"):
-            # A retired fence does not prove this export wrote the files: a hand retire leaves
-            # none. The live store goes last, so while the marker routes it still verifies them.
-            with closing(connection.open_reader(session.path)) as reader:
-                sealed, work = plan(root, reader, plan_id=intent["plan_id"])
-                if sealed["verdict"] != "exportable":
-                    raise _refused(sealed)
-                verified = _require_reads_as_served(root, reader, intent, work)
-        else:
-            verified = None
+        elif routed:
+            # No enrolled fence admits a runtime and the marker cannot enrol again, so the store
+            # is frozen: going forward from it loses nothing once its retired head is its own.
+            _require_retired_head(fence_client, session.path, store_id, generation)
+            if not intent.get("verified"):
+                # A retire made by hand does not prove that this export wrote the files.
+                runtime = session.runtime()
+                with manager.writer_authority_guard(vault_root=root):
+                    token = manager._fencing_token
+                    verified = _write_and_verify(session, token, intent, store_id, deferred)
+                    _record_verified(session, runtime, token, intent)
+                _detach(session, manager)
         with manager.writer_authority_guard(vault_root=root):
             token = manager._fencing_token
             tombstone = _retire_marker(session, token, intent)
@@ -685,7 +745,89 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     return _report("apply", "exported", status="exported", plan_id=intent["plan_id"], store_id=store_id,
                    exported_at=intent["exported_at"], retired_fence_generation=generation,
                    marker=f"{authority.marker_path(root).parent.relative_to(root).as_posix()}/{tombstone}",
-                   **({"collections": verified} if verified is not None else {"resumed": "after the marker retire"}))
+                   **({"collections": verified} if verified is not None else {
+                       "resumed": "after the fence retire" if routed else "after the marker retire"}))
+
+
+def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
+    """Give up the unfinished export ``plan_id`` names while its fence stands, keeping every row (P1b.4a).
+
+    For an export that refuses as unverified, or over a view a person edited, on a rerun.
+    In one store transaction it records each file that holds the export's bytes as that
+    view's published bytes, forgets each resolved held file the export removed, records
+    each checkpoint the export published as the parent of the next export's, and deletes
+    the intent; then it publishes the replica and records the head. It rewrites no vault
+    file and adopts no edit: the service's view-edit capture holds what a person changed.
+    """
+    records._validate_why(why)
+    root = session.root
+    session.verify_custody()
+    admission._ProducerSession.bind(session, manager)
+    admission._bind_fence_client(session, fence_client)
+    with manager.consistency_guard(root, operation="collection_store_export_abandon"):
+        intent = _local_intent(root)
+        if intent is None:
+            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "no unfinished export owns this store")
+        if intent["plan_id"] != plan_id:
+            raise _stale()
+        expected = intent["expected_marker"].encode("utf-8")
+        marker = authority.parse_marker(root, expected)
+        if authority.read_marker(root) != expected:
+            # Past the marker retire only renames remain, and no host routes to the store any more.
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the export already retired the marker; "
+                                       "run `exomem collections export --plan-id ID --why REASON` to finish it")
+        fence = fence_client.collection_store_fence()
+        if not fence.enrolled:
+            # Serving the store again would need its fence enrolled again, which no step does
+            # yet. A false refusal costs nothing: the apply goes forward from a retired fence.
+            raise CollectionStoreError("COLLECTION_STORE_RETIRED", (
+                "the coordinator retired this store's fence, so the export can only go forward: run "
+                "`exomem collections export --plan-id ID --why REASON` with the service stopped"))
+        admission._require_fence(fence, marker)
+        runtime = session.runtime()
+        with manager.writer_authority_guard(vault_root=root):
+            token = manager._fencing_token
+            if not runtime.retire_idle_handle():
+                raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+            with session.writer(token) as writer:
+                # Another host that adopted the replica since the export began holds rows this store lacks.
+                admission._verify_acquisition(writer, runtime, fence, marker)
+                with closing(connection.open_reader(session.path)) as reader:
+                    _, work = plan(root, reader, plan_id=plan_id, views=False)
+                    parents = _parents(reader)
+                views, removed = [], []
+                for cid, planned in work.items():
+                    transition = _transition(plan_id, cid)
+                    checkpointed = _checkpointed(planned["manifest_text"], collections.parse_manifest_bytes(
+                        root, planned["manifest_path"], planned["manifest_text"].encode("utf-8")),
+                        transition).encode("utf-8")
+                    for path, target in planned["targets"].items():
+                        data = _read(root, path)
+                        if target is None and data is None:
+                            removed.append((path,))
+                        elif data is not None and (data == target or path == planned["manifest_path"]
+                                                   and data == checkpointed):
+                            views.append((_sha(data), path))
+                    if _read(root, planned["manifest_path"]) == checkpointed:
+                        # The manifest names this checkpoint as its audit head, so the legacy chain ends there.
+                        parents[cid] = transition
+                with writer.handle.transaction() as conn:
+                    session.require(token)
+                    if authority.pending_create(conn) != intent:
+                        raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "the export intent changed")
+                    conn.executemany("UPDATE projection_state SET published_sha256=? WHERE path=?", views)
+                    conn.executemany("DELETE FROM projection_state WHERE path=? AND kind='held'", removed)
+                    conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (
+                        schema.META_EXPORT_PARENTS, json.dumps(parents, sort_keys=True, separators=(",", ":"))))
+                    conn.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
+                published = admission._publish_current_epoch(session, writer, token)
+            if published.status != "published":
+                raise CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING",
+                                           f"replica publication: {published.reason or published.status}")
+            manager._renew_collection_store(token)
+    return _report("abandon", "abandoned", status="abandoned", plan_id=plan_id, store_id=marker["store_id"],
+                   views_recorded=len(views), held_removed=len(removed), checkpoints=sorted(
+                       cid for cid in work if parents.get(cid) == _transition(plan_id, cid)))
 
 
 def retire_local(session, manager, fence_client) -> dict:
