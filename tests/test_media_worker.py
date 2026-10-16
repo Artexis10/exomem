@@ -2933,8 +2933,9 @@ def test_supervisor_backs_off_while_children_find_no_writer_authority(
         for _ in range(8):  # 80 simulated seconds, one step at a time
             now[0] += 10
             settle()
-        # Fixed 5 s pacing would have spawned about sixteen children here.
-        assert len(launches) <= 5
+        # The delay doubles from 5 s. A fixed 5 s delay relaunches at every
+        # 10 s step instead: nine children here.
+        assert launches == [1000.0, 1010.0, 1020.0, 1040.0, 1080.0]
     finally:
         worker._stop_event.set()
         worker._wake.set()
