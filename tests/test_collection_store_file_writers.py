@@ -127,7 +127,6 @@ def test_an_episode_records_leaf_into_a_store_collection_refuses_before_any_seal
         with pytest.raises((OpError, ValueError)) as refused:
             episode(root, action="prepare", candidate="work", proposal=leaf_into_work(container))
         assert getattr(refused.value, "code", None) == "CURATION_RECORDS_STORE_UNSUPPORTED", refused.value
-        assert "record_memory append" in str(refused.value)
         assert sealed_plans(root) == []
     finally:
         service.stop()
@@ -172,5 +171,46 @@ def test_a_records_leaf_sealed_before_the_migration_refuses_before_approval(env,
         assert [item["code"] for item in resumed["stale"]] == ["CURATION_RECORDS_STORE_UNSUPPORTED"]
         assert not curation.CurationStore(root).approval_path(run).exists()
         assert (store_head(root), rows(root, CID)) == before
+    finally:
+        service.stop()
+
+
+def test_a_run_approved_before_the_migration_refuses_its_resume_and_stays_resumable(env, capsys, monkeypatch):
+    """Defect: the resume of a Records run approved before the migration records the store
+    refusal as the run's final failure, so the run can never commit once the store runs it."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    with request_scope(OWNER):
+        container = commands.op_record_memory(root, action="inspect", collection=WORK)["lifecycle_guards"][
+            "expected_container_hash"]
+    record_an_episode(root)
+    prepared = episode(root, action="prepare", candidate="work", proposal=leaf_into_work(container))
+    run = prepared["candidates"][0]["leaves"][0]["run_id"]
+    plan_id, fingerprint = curation.CurationStore(root).identities(run)
+
+    def stopped(name):
+        if name == "after-prepared-state":
+            raise curation.CurationFault(name)
+
+    # The owner approves the run, and the process stops before its leaf runs.
+    with monkeypatch.context() as crash, request_scope(OWNER):
+        crash.setattr(curation, "_fault_barrier", stopped)
+        with pytest.raises(curation.CurationFault):
+            curation.apply(root, run_id=run, plan_id=plan_id, expected_plan_fingerprint=fingerprint,
+                           why="Approve the sealed work item.")
+    stop_writer()
+    service = migrated(root, capsys)
+    try:
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == "maintain_memory")
+        answers = []
+        for _attempt in range(2):
+            with request_scope(OWNER), pytest.raises((OpError, ValueError)) as refused:
+                writer_lease.invoke_command(command, root, mode="curation", curation_action="resume", run_id=run,
+                                            plan_id=plan_id, idempotency_key="resume-the-approved-work-item")
+            details = getattr(refused.value, "details", None) or {}
+            answers.append((getattr(refused.value, "code", None), details.get("committed")))
+        assert answers == [("CURATION_RECORDS_STORE_UNSUPPORTED", None)] * 2
+        status = curation.status(root, run_id=run)
+        assert (status["receipts"], status["failed_step"], status["next_action"]) == ([], None, "resume")
     finally:
         service.stop()

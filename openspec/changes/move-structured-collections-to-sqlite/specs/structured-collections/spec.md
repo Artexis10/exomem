@@ -573,9 +573,11 @@ Append and targeted update for `markdown-log` and `markdown-items` collections S
 - **WHEN** mutations target different vault roots
 - **THEN** collection serialization does not introduce a global cross-vault lock
 
-#### Scenario: A curation Records step on a store collection refuses before approval
-- **WHEN** a curation or episode Records step (`append-record` or `update-record`) is prepared, applied or resumed for a collection that the vault's marker routes to the collection store, including a step sealed before the migration
-- **THEN** it refuses with `CURATION_RECORDS_STORE_UNSUPPORTED` before any approval and writes nothing: no plan is sealed, and the store and the collection's views are unchanged
+#### Scenario: A curation Records step on a store collection refuses and writes nothing
+- **WHEN** a curation or episode Records step (`append-record` or `update-record`) is prepared, applied or resumed for a collection that the vault's marker routes to the collection store, including a step sealed or approved before the migration
+- **THEN** it refuses with `CURATION_RECORDS_STORE_UNSUPPORTED` and writes nothing: a preparation seals no plan, an apply records no approval, and the store and the collection's views are unchanged
+- **AND** a resume of a run approved before the migration records no receipt, so the run does not fail and stays resumable
+- **AND** the refusal names the Records action that makes the change now, `record_memory append` for an append step or `record_memory update` for an update step
 - **AND** a caller from whom the collection is withheld gets the refusal that a missing collection gives
 
 ### Requirement: Idempotent append and conflict-safe update

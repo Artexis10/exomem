@@ -64,7 +64,7 @@ RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "updat
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
 #: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
 # nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
-_COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
+COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
 # The compatibility flag `allow_records` admits only episode-owned private leaves.
 _EPISODE_STEP_KINDS = RECORDS_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 MAX_STEPS: Final[int] = 64
@@ -261,12 +261,14 @@ def _error(code: str, reason: str) -> CurationError:
     return CurationError(code, reason)
 
 
-def _records_store_unsupported() -> CurationError:
-    """A Records leaf writes files; a collection the store owns refuses it before any seal or approval."""
+def _records_store_unsupported(kind: str) -> CurationError:
+    """A Records leaf writes files; a collection the store owns refuses it and names the Records
+    action that makes the same change now."""
+    action = "append" if kind == RECORDS_STEP_KIND else "update"
     return _error(
         "CURATION_RECORDS_STORE_UNSUPPORTED",
-        "a Records leaf cannot write a collection-store collection yet: record the item with "
-        "record_memory append, then set the candidate's disposition to deferred",
+        "a Records leaf cannot write a collection-store collection yet: make the change with "
+        f"record_memory {action}, then set the candidate's disposition to deferred",
     )
 
 
@@ -1344,7 +1346,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             except collections.CollectionError as error:
                 # Raised only to a caller who may know the collection; others hear it is absent.
                 if error.code == "COLLECTION_STORE_UNAVAILABLE":
-                    raise _records_store_unsupported() from error
+                    raise _records_store_unsupported(kind) from error
                 raise
             manifest = record_governance.require_records_profile(resolved)
             if kind == RECORDS_STEP_KIND:
@@ -1729,24 +1731,24 @@ def _records_store_blockers(
             prepared.get("collection_id"), str
         ):
             continue
+        manifest_path = prepared.get("manifest_path")
         try:
             require_file_collection(
-                vault_root, prepared["collection_id"], authorize_path=keep or (lambda _path: True)
+                vault_root,
+                prepared["collection_id"],
+                authorize_path=keep or (lambda _path: True),
+                notice_path=manifest_path if isinstance(manifest_path, str) else None,
             )
         except collections.CollectionError as error:
             if error.code == "COLLECTION_NOT_FOUND":
                 continue
             refusal = (
-                _records_store_unsupported()
+                _records_store_unsupported(str(item["kind"]))
                 if error.code == "COLLECTION_STORE_UNAVAILABLE"
                 else _error(error.code, error.reason)
             )
             blockers.append(
-                {
-                    "code": refusal.code,
-                    "path": str(prepared.get("manifest_path") or ""),
-                    "reason": refusal.reason,
-                }
+                {"code": refusal.code, "path": str(manifest_path or ""), "reason": refusal.reason}
             )
             owned.add(index)
     return blockers, owned
@@ -2429,6 +2431,15 @@ def _next_step(
     return None
 
 
+def _uncommitted_plan(plan: Mapping[str, Any], committed: set[str]) -> dict[str, Any]:
+    return {
+        **plan,
+        "binding_manifest": [
+            item for item in plan["binding_manifest"] if item["step_id"] not in committed
+        ],
+    }
+
+
 def _blockers_for_uncommitted(
     vault_root: Path, plan: Mapping[str, Any], committed: set[str]
 ) -> list[dict[str, Any]]:
@@ -2437,13 +2448,9 @@ def _blockers_for_uncommitted(
             _validate_entity_candidate_plan(vault_root, plan)
         except CurationError as error:
             return [{"code": error.code, "reason": error.reason}]
-    filtered = {
-        **plan,
-        "binding_manifest": [
-            item for item in plan["binding_manifest"] if item["step_id"] not in committed
-        ],
-    }
-    return _binding_blockers(vault_root, filtered, registry_identities(vault_root))
+    return _binding_blockers(
+        vault_root, _uncommitted_plan(plan, committed), registry_identities(vault_root)
+    )
 
 
 def _record_blocked_state(
@@ -2753,7 +2760,15 @@ def _execute_next(
                 compensation=compensation,
             )
 
-    blockers = _blockers_for_uncommitted(vault_root, plan, _committed_step_ids(reconstructed))
+    committed = _committed_step_ids(reconstructed)
+    store_blockers, _store_owned = _records_store_blockers(
+        vault_root, _uncommitted_plan(plan, committed), None
+    )
+    if store_blockers:
+        # The store owns the collection now. Refusing without a receipt keeps the run's phase,
+        # so a run approved before the migration stays resumable once the store runs it.
+        raise _error(store_blockers[0]["code"], store_blockers[0]["reason"])
+    blockers = _blockers_for_uncommitted(vault_root, plan, committed)
     if blockers:
         blocker = blockers[0]
         _record_failed_attempt(
@@ -3545,7 +3560,7 @@ class CurationStore:
             path,
             dict(receipt),
             create_only=True,
-            commit_point=receipt.get("outcome") in _COMMITTED_OUTCOMES,
+            commit_point=receipt.get("outcome") in COMMITTED_OUTCOMES,
         )
         return path
 
@@ -3611,7 +3626,7 @@ class CurationStore:
             )
             if not common_valid:
                 return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
-            if outcome in _COMMITTED_OUTCOMES:
+            if outcome in COMMITTED_OUTCOMES:
                 if approval is None or set(receipt) != {
                     "version",
                     "attempt",
@@ -3915,7 +3930,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
     receipts = {
         str(receipt.get("step_id")): receipt
         for receipt in state.get("receipts", [])
-        if receipt.get("outcome") in {"committed", "recovered-committed"}
+        if receipt.get("outcome") in COMMITTED_OUTCOMES
     }
     steps: list[dict[str, Any]] = []
     for ordinal in reversed(range(len(forward_plan["steps"]))):

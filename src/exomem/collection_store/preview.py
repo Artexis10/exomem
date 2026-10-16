@@ -117,13 +117,14 @@ def store_notice(vault_root, authorize_path):
     return lambda path: owner or (path is not None and authorize_path(path))
 
 
-def require_file_collection(vault_root, selector, *, authorize_path):
+def require_file_collection(vault_root, selector, *, authorize_path, notice_path=None):
     """Refuse a file-mode mutation of a collection that the vault's marker routes to the store.
 
     Every file-mode writer resolves its collection through the mutation resolver, which
     calls this first, so a write never lands in a routed collection's generated views.
     Reads keep resolving those views off the store thread on purpose, so this check
-    belongs to mutation resolution alone.
+    belongs to mutation resolution alone. ``notice_path`` is the manifest path a caller
+    holds for a selector by identity; an unreadable marker decides the notice on it.
     """
     from . import authority
 
@@ -141,7 +142,8 @@ def require_file_collection(vault_root, selector, *, authorize_path):
         marker = None if raw is None else authority.parse_marker(root, raw)
     except CollectionStoreError as error:
         # Which collections the store owns is unknown, so none can be written as a file.
-        _refuse(root, _selector_path(root, selector), authorize_path, error.code, MARKER_UNREADABLE)
+        path = notice_path if notice_path is not None else _selector_path(root, selector)
+        _refuse(root, path, authorize_path, error.code, MARKER_UNREADABLE)
     if marker is None:
         return
     entry = authority.selected_entry(root, marker, selector)
