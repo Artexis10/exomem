@@ -161,6 +161,16 @@ def in_flight() -> int:
         return _in_flight
 
 
+def foreground_elsewhere() -> bool:
+    """Whether another thread's foreground work would hold a bulk pass at its next yield.
+
+    For a bulk unit that holds a boundary, so never yields, but can end between its
+    parts: ending there brings its next yield, outside the boundary, forward.
+    """
+    mine = 1 if getattr(_local, "depth", 0) else 0  # a thread counts once in `_in_flight`
+    return _in_flight > mine and not _awaiting_bulk
+
+
 class BulkCancelled(BaseException):
     """Owned bulk work stopped; ordinary proof failures must not swallow it."""
 
@@ -181,7 +191,7 @@ def wait_for_retry(seconds: float) -> None:
         raise BulkCancelled()
 
 
-class _PassBudget:
+class PassBudget:
     """How long one `bulk()` pass has run, waited, and may still run unyielded."""
 
     __slots__ = ("started", "waited", "work_until")
@@ -210,7 +220,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     (`MAX_WAIT_SHARE`).
     """
     check_cancelled()
-    budget: _PassBudget | None = getattr(_local, "budget", None)
+    budget: PassBudget | None = getattr(_local, "budget", None)
     if _bulk_may_run():  # unlocked reads: the common case costs two loads
         if budget is not None:
             budget.work_until = 0.0
@@ -271,13 +281,17 @@ def cancellable(stop: threading.Event | None) -> Iterator[None]:
 
 
 @contextmanager
-def bulk(*, stop: threading.Event | None = None) -> Iterator[None]:
-    """Mark this thread's work as an off-boundary bulk pass for `yielding_in_bulk`."""
+def bulk(*, stop: threading.Event | None = None, budget: PassBudget | None = None) -> Iterator[None]:
+    """Mark this thread's work as an off-boundary bulk pass for `yielding_in_bulk`.
+
+    ``budget`` continues one pass across several scopes, for a pass whose units run
+    between other work on the same thread; otherwise each outermost scope is a pass.
+    """
     with cancellable(stop):
         outermost = not getattr(_local, "bulk", 0)
         _local.bulk = getattr(_local, "bulk", 0) + 1
         if outermost:
-            _local.budget = _PassBudget()
+            _local.budget = budget if budget is not None else PassBudget()
         try:
             yield
         finally:

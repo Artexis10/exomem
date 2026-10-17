@@ -21,6 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
+from .. import foreground_priority
 from . import connection, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -934,6 +935,7 @@ class StoreServer:
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
+        self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
@@ -959,6 +961,9 @@ class StoreServer:
             if not self._closed:
                 self._requests.append(request)
                 self._condition.notify_all()
+        # Between two rebuild steps this thread waits as a bulk pass while other requests run;
+        # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -1213,12 +1218,15 @@ class StoreServer:
         each derived collection (``derived_rows``). After that, a plain read of the derived file
         finds the rebuilds still running, so an idle store takes no checkout. A rebuild waiting
         on a missing source retries after ``DERIVED_RETRY_SECONDS``; one that finishes lets the
-        import jobs it held continue at once.
+        import jobs it held continue at once. A rebuild is background work: a step ends after
+        its batch when another request waits or runs, and the next step waits for it.
         """
         from ..governance import principal
         from . import capability, derived_rows
         from .preview import preview_store
 
+        # The running rebuild's pass continues only from a step that advanced; any other return ends it.
+        rebuild, self._derived_pass = self._derived_pass, None
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
@@ -1228,17 +1236,36 @@ class StoreServer:
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
+            if rebuild is not None:
+                # A rebuild is one bulk pass across its steps: before the next one it waits while
+                # another request runs (``foreground_priority``), holding no boundary and no store
+                # checkout, so a handoff or a publication never waits on it. A store request ends
+                # the wait (``call``), and the step then ends after one batch (``_derived_aside``).
+                with foreground_priority.bulk(budget=rebuild):
+                    foreground_priority.yield_to_foreground()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                outcome = derived_rows.step(self.root, writer)
+                outcome = derived_rows.step(self.root, writer, aside=self._derived_aside)
                 self._derived_handle = writer.handle
         except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
             logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
+        if outcome == "advanced":
+            self._derived_pass = rebuild or foreground_priority.PassBudget()
         if outcome == "done":
             self._ticks["import"] = 0.0
         # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
         return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
+
+    def _derived_aside(self):
+        """Whether a rebuild step ends after its batch, which only releases the boundary sooner.
+
+        A store request is queued, a writer waits for the boundary, or another request runs. The
+        waiter count is checked on its own: a request that awaits bulk work releases every pass,
+        so ``foreground_elsewhere`` is then false, however many writers wait.
+        """
+        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+                or foreground_priority.foreground_elsewhere())
 
     def _views_tick(self):
         """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
