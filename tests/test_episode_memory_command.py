@@ -216,6 +216,17 @@ def test_a_changed_record_supersedes_a_crlf_revision(vault: Path) -> None:
     assert "status" not in _frontmatter(vault / second["source"]["path"])
 
 
+def test_a_changed_record_supersedes_through_an_unresolved_vault_root(vault: Path) -> None:
+    alias = vault / ".." / vault.name
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+        second = _record(alias, summary="The delivery date is now confirmed.")
+
+    assert second["revision"] == 2
+    assert _frontmatter(vault / first["source"]["path"])["status"] == "superseded"
+    assert "status" not in _frontmatter(vault / second["source"]["path"])
+
+
 def test_one_key_used_by_two_audiences_keeps_separate_ledgers(vault: Path) -> None:
     with request_scope(_audience("client-a")):
         first = _record(vault)

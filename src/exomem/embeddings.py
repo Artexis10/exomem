@@ -2499,6 +2499,7 @@ def prepare_generation_vectors(
     from . import find as find_module
     from .vault import PathGuardError, content_hash, read_guarded_text
 
+    vault_root = Path(vault_root).resolve()
     target = Path(vault_root).joinpath(*str(rel_path).split("/"))
     try:
         if target.is_symlink() or not target.is_file():

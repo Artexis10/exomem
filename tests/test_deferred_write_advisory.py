@@ -626,6 +626,23 @@ def test_vector_handoff_refuses_a_newline_edit_during_encoding(
     assert path.read_bytes() == changed
 
 
+def test_vector_handoff_rechecks_the_canonical_root_for_a_configured_alias(
+    vault: Path, encoder: _DeterministicEncoder
+) -> None:
+    target = _seed_page(vault, "root-alias", "One current generation through a root alias.")
+    alias = vault.parent / "vault-alias"
+    try:
+        alias.symlink_to(vault, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    expected = _fingerprint(vault, target)
+
+    generation = embeddings.prepare_generation_vectors(alias, target, expected_fingerprint=expected)
+
+    assert generation is not None
+    assert generation.fingerprint == expected
+
+
 def test_embedding_and_advisory_encode_generation_once(
     vault: Path, encoder: _DeterministicEncoder
 ) -> None:

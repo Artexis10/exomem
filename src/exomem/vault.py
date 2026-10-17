@@ -4005,15 +4005,21 @@ def read_bounded_guarded_bytes(
 
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
-    """Read UTF-8 text once and bind a guard to those exact source bytes."""
-    root = Path(vault_root)
-    absolute = Path(path)
+    """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
+    configured_root = Path(vault_root).absolute()
+    root = configured_root.resolve()
+    absolute = Path(path).absolute()
+    # Resolve only the configured root; inner aliases remain visible to guards.
     try:
-        relative = absolute.relative_to(root).as_posix()
-    except ValueError as error:
-        raise PathGuardError(
-            "PATH_GUARD_INVALID", "guarded read target is outside the vault"
-        ) from error
+        relative = absolute.relative_to(configured_root)
+    except ValueError:
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError as error:
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "guarded read target is outside the vault"
+            ) from error
+    absolute = root / relative
     try:
         limit = absolute.lstat().st_size
     except FileNotFoundError:
@@ -4022,7 +4028,7 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    raw, guard = read_bounded_guarded_bytes(root, relative, limit=limit)
+    raw, guard = read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
     return raw.decode("utf-8"), guard
 
 
