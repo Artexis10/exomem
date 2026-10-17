@@ -222,10 +222,15 @@ def span(name: str, fields: dict[str, Any] | None = None):
     nothing and the span is shaped exactly as it always was.
     """
     started = time.perf_counter()
+    cpu_started = time.thread_time_ns() if MCP_CALL_TOKEN.get() is not None else None
     try:
         yield fields
     finally:
-        record_span(name, (time.perf_counter() - started) * 1000.0, fields)
+        measured = (
+            {"thread_cpu_us": (time.thread_time_ns() - cpu_started) // 1000, **(fields or {})}
+            if cpu_started is not None else fields
+        )
+        record_span(name, (time.perf_counter() - started) * 1000.0, measured)
 
 
 def timed(name: str):

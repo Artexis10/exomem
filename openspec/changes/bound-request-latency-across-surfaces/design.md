@@ -1,5 +1,17 @@
 # Design
 
+The programme uses one public MCP canary in the existing recall runner. Private positive cases declare the read arguments, expected state and required references/material. The runner keeps one authenticated client session and times each complete call through parsed response validation. It reuses `latency_watch` and the packaged programme bar, with independent availability and coverage results. It stops a failed positive series after recording the attempt. JSON, exit status and a structured warning connect to the maintained operator runner; there is no new scheduler or repair owner. Production probes stay read-only, while natural write observations and disposable write acceptance retain their own provenance. A deployment change invalidates previous acceptance.
+
+## Ordinary write follow-through
+
+Write advice reuses the page delta's projection and serves only affected paths. Its optional `scope` is `affected_paths`; omission preserves historical global meaning. Global and affected-path blocks retain separate emission history. Delivered rows already carry their category and fingerprint, so first-surfaced recording uses those identities without scanning the projection.
+
+Flush receipt proof and pending publication newest-first before the outermost matching vault hold releases. Re-prove earlier session receipts whose paths overlap newer commits. Keep component waits and terminal persistence outside the hold. Record handoff failure as derived work pending, without changing the committed outcome. Direct leaves without a matching hold retain the guarded post-terminal path.
+
+Prime the broad writer resolver from the proven structural corpus after semantic warmup, with existing freshness checks. Ordinary recall retains its separate projection. Blocked edits never warm shared writer state. The existing cache and receipt machinery supply these capabilities; no new scheduler or readiness gate is needed.
+
+Manifest revisions refresh the touched claims projection before its served view is reused. Egress retains its independent release checks. Existing spans carry content-free CPU measurements where wall time alone cannot distinguish work from waiting.
+
 ## Context
 
 See `proposal.md` for the problem and `specs/request-latency-contract/spec.md` for the new behavior.

@@ -176,6 +176,8 @@ def _require_disposable_environment(vault_root: Path, state_dir: Path) -> None:
             raise SystemExit("write acceptance refuses non-temporary ambient state")
     if not os.environ.get("EXOMEM_STATE_ROOT"):
         os.environ["EXOMEM_STATE_ROOT"] = str(state_dir / "product")
+    if not os.environ.get("EXOMEM_WRITER_LEASE_STATE_DIR"):
+        os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_dir)
     if not os.environ.get("EXOMEM_CONFIG_PATH"):
         os.environ["EXOMEM_CONFIG_PATH"] = str(state_dir / "no-config.json")
 

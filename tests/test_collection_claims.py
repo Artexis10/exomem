@@ -12,6 +12,7 @@ from exomem import (
     mutation_terminal,
     record_formats,
     record_governance,
+    records,
     semantic_writes,
 )
 from exomem import (
@@ -71,6 +72,30 @@ def _write_manifest(tmp_path: Path, *, claims: str = "", lifecycle: str = "activ
     path.write_text(_manifest(claims=claims, lifecycle=lifecycle), encoding="utf-8")
     (path.parent / "Entries").mkdir()
     return path
+
+
+def test_manifest_revision_refreshes_routing_before_projection_ttl(tmp_path: Path) -> None:
+    path = _write_manifest(tmp_path, claims="claims:\n  terms: [account state]\n")
+    (tmp_path / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    due_state.reconcile(tmp_path)
+    assert due_state.routing_targets(tmp_path)[0].title == "Account status ledger"
+    manifest = collections.load_manifest(tmp_path, path)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+
+    result = records.revise_collection(
+        tmp_path,
+        manifest.path,
+        manifest_text=path.read_text(encoding="utf-8").replace(
+            "title: Account status ledger", "title: Revised status ledger"
+        ),
+        why="clarify the collection title",
+        **records.lifecycle_guards(manifest, snapshot),
+    )
+
+    assert result["outcome"] == "committed"
+    targets = due_state.routing_targets(tmp_path)
+    assert len(targets) == 1
+    assert targets[0].title == "Revised status ledger"
 
 
 def test_declared_claims_round_trip_through_manifest_inspection_and_describe(

@@ -6,6 +6,37 @@ Define comparable latency evidence across public requests, inner operations and 
 
 ## ADDED Requirements
 
+### Requirement: One shared canary measures live public calls and recall availability
+
+The existing recall runner SHALL provide a read-only MCP canary mode for configured positive recall and activation cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and use the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
+
+The canary SHALL report availability separately from latency. A timeout, unavailable response, malformed terminal, missing expected reference or missing expected material SHALL fail a positive case. A fast refusal SHALL NOT pass availability. The runner SHALL emit content-free JSON, a failing exit status and a structured warning for failed evidence. The maintained operator runner SHALL consume that result for alerts and release checks; the canary SHALL NOT change admission, initiate repairs or add another scheduler. Unmeasured operations and missing alert installation SHALL remain visible as incomplete work.
+
+#### Scenario: A fast refusal fails availability
+- **WHEN** a positive recall case returns a typed warming refusal below the latency ceiling
+- **THEN** the canary retains its elapsed time and refusal outcome
+- **AND** availability and the release check fail
+
+#### Scenario: Ready custody does not substitute for a real recall
+- **WHEN** an external custody census reports ready but the live MCP response cannot return the case's required material
+- **THEN** the canary reports the failed public case
+- **AND** it does not repair or relabel the response as healthy
+
+#### Scenario: An interrupted series cannot establish acceptance
+- **WHEN** a case fails before the declared sample count completes
+- **THEN** the report retains attempted cases and marks the remaining coverage incomplete
+- **AND** it does not infer a passing percentile from the successful subset
+
+### Requirement: Ordinary warm public writes meet the subsecond target
+
+Ordinary warm note, record, and planning mutations SHALL have public-request p95 below 1,000 ms without increasing the CPU cap. Each declared operation and transport SHALL include all eligible known terminal outcomes and at least 30 samples. Cold startup, contended requests, and explicit heavy work SHALL remain separate populations. Existing immediate-visibility and durable-custody requirements SHALL remain in force.
+
+#### Scenario: An installed warm write series reaches its target
+
+- **WHEN** comparable installed arms execute ordinary warm mutations on identical reference inputs
+- **THEN** each declared operation and transport has p95 below 1,000 ms with its outcomes and coverage reported
+- **AND** result identity, authorization, custody, and convergence checks pass
+
 ### Requirement: Each latency bar has one machine-readable identity
 
 The system SHALL define every latency bar in one versioned machine-readable source. Each bar SHALL identify its surface, operation, profile, boundary, population, outcome-inclusion rule, reference, percentile, comparison, threshold, window, minimum sample count, source coverage and owning requirement. Reports SHALL identify the contract revision. Existing numerical bars SHALL retain their owning requirements without independent copies in consumers.

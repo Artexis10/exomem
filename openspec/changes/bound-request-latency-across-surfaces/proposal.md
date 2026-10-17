@@ -25,8 +25,11 @@ Existing latency checks measure different boundaries, populations and percentile
 ### Modified Capabilities
 
 - `agent-bootstrap-contract`: Keep compact and session latency advisories within existing budgets while full and diagnostics profiles retain spans and coverage.
+- `attention-queue`: Scope write advice to affected pages while preserving global bootstrap and review counts.
 
 Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
+
+Ordinary warm public writes additionally target p95 below 1,000 ms, with cold and contended populations reported separately. Existing acknowledgement custody requirements remain in force.
 
 ## Impact
 

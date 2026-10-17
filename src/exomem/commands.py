@@ -1820,9 +1820,9 @@ def op_bootstrap(
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
                 "due_state": (
-                    "Counts arrive on committed writes, recall and bootstrap: total, category counts and up to five dated refs. Absent when none are due."
+                    "Write counts cover affected pages (scope: affected_paths); recall and bootstrap counts are global. Each has category counts and up to five dated refs."
                     if profile == "compact"
-                    else "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due"
+                    else "Write advice counts affected pages and declares scope: affected_paths. Recall and bootstrap retain global counts. Each block has a total, category counts and up to five dated references. Missing advice does not mean nothing is due."
                 ),
                 "due_state_handling": (
                     "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "

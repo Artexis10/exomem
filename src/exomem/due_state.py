@@ -206,7 +206,7 @@ _LOCK = threading.Lock()
 #: design: it is per-conversation presentation state, not a durable fact about the
 #: vault, and persisting it would make a server restart change what an agent is
 #: told. The vault is in the key because one process can serve several.
-_EMISSION: dict[tuple[str, str, str], str] = {}
+_EMISSION: dict[tuple[str, str, str, str], str] = {}
 _EMISSION_CAP = 512
 
 #: Projections for vaults whose state file could not be written (a read-only KB
@@ -1073,6 +1073,26 @@ def _claim_projection_row(manifest: Any, snapshot: Any | None) -> dict[str, Any]
     }
 
 
+def apply_manifest_write_delta(
+    vault_root: Path, manifest: Any, *, snapshot: Any = None,
+) -> None:
+    """Refresh one committed manifest's claims without discovering other collections."""
+    if manifest.semantic_profile != "records":
+        return
+    with _LOCK:
+        current = load(vault_root)
+        if current is None:
+            return
+        claims = dict(current.get("claims") or {})
+        row = _claim_projection_row(manifest, snapshot)
+        retained = claims.get(str(manifest.path))
+        if snapshot is None and isinstance(retained, Mapping):
+            row["items"] = retained.get("items", [])
+            row["complete"] = retained.get("complete") is True
+        claims[str(manifest.path)] = row
+        save(vault_root, {**current, "claims": claims})
+
+
 @canonical_read
 def _recompute_claims(
     vault_root: Path, *, authorize_path: Any = None
@@ -1486,6 +1506,7 @@ def apply_write_delta(
 
     vault_root = Path(vault_root)
     rel = str(rel_path).replace("\\", "/").lstrip("/")
+    _track_batch_path(vault_root, rel)
     page = find_module._CACHE.get(vault_root / rel, vault_root)
     pages = [page] if page is not None else []
 
@@ -2388,23 +2409,22 @@ def block_for_structured_write(
         return None
     profile = str(getattr(manifest, "semantic_profile", "") or "")
     delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
-    if (
-        delta(
-            vault_root,
-            manifest,
-            path=path,
-            key=key,
-            values=values,
-            previous=previous,
-            today=today,
-        )
-        is None
-    ):
+    payload = delta(
+        vault_root,
+        manifest,
+        path=path,
+        key=key,
+        values=values,
+        previous=previous,
+        today=today,
+    )
+    if payload is None:
         return None
+    _track_batch_path(vault_root, path)
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, frozenset({path}), today=today, payload=payload)
 
 
 # --------------------------------------------------------------------------
@@ -2505,6 +2525,16 @@ _BATCH_LOCK = threading.Lock()
 #: batch runs on another thread would read as part of it; this depth is bound
 #: to the context the scope was entered in.
 _IN_BATCH: ContextVar[int] = ContextVar("exomem_due_state_in_batch", default=0)
+# Retained until the post-batch carrier consumes it; each outer scope starts a fresh set.
+_BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "exomem_due_state_batch_paths", default=None,
+)
+
+
+def _track_batch_path(vault_root: Path, path: str) -> None:
+    tracked = _BATCH_PATHS.get()
+    if tracked is not None:
+        tracked.setdefault(str(vault_root), set()).add(path)
 
 
 @contextmanager
@@ -2523,6 +2553,8 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     the design asks for.
     """
     key = str(vault_root or "")
+    if not _IN_BATCH.get():
+        _BATCH_PATHS.set({})
     with _BATCH_LOCK:
         _BATCH[key] = _BATCH.get(key, 0) + 1
     depth = _IN_BATCH.set(_IN_BATCH.get() + 1)
@@ -2657,6 +2689,7 @@ def served_entries(
     purpose: str | None = None,
     paths: frozenset[str] | None = None,
     recover: bool = True,
+    payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Every open item this audience may see, most-overdue first -- memoised.
 
@@ -2698,7 +2731,7 @@ def served_entries(
         # A partial audience view never populates or reuses the full served cache.
         return _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal,
-            purpose=purpose, paths=paths, recover=recover,
+            purpose=purpose, paths=paths, recover=recover, payload=payload,
         )[0]
     writer = bound_writer(vault_root)
     if writer is not None:
@@ -3139,10 +3172,8 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     already past egress, the triage filter and the disposition filter, because
     that is where `served_entries` put it.
 
-    The fingerprints come from the projection the block was built from: the wire
-    block deliberately carries refs and dates only, and widening it to carry a
-    fingerprint would put an internal identity on a public surface for the sake
-    of a ledger write.
+    The delivered rows carry their own category and fingerprint. Reading a newer
+    projection here would stamp an identity the caller never received.
     """
     if not vault_root or not block:
         return
@@ -3150,16 +3181,13 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
     if not rows:
         return
     try:
-        fingerprints = _fingerprints_for(vault_root)
-        if not fingerprints:
-            return
         entries = []
         for row in rows:
             ref = str(row.get("ref") or "")
-            identity = fingerprints.get(ref)
-            if ref and identity:
-                # The row's category is its family on the ledger.
-                entries.append((_ref_id(ref), identity[0], identity[1]))
+            fingerprint = row.get("fingerprint")
+            category = row.get("category")
+            if ref and isinstance(fingerprint, str) and fingerprint and isinstance(category, str) and category:
+                entries.append((_ref_id(ref), fingerprint, category))
         if not entries:
             return
         review_state_module.record_surfaced(vault_root, entries, surface="carrier")
@@ -3379,12 +3407,32 @@ def block_for_write(
     Those decisions are real and are collected; they just belong to this advisory
     rather than to the mutation.
     """
-    if apply_write_delta(vault_root, rel_path, today=today) is None:
+    payload = apply_write_delta(vault_root, rel_path, today=today)
+    if payload is None:
         return None
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, frozenset({rel_path}), today=today, payload=payload)
+
+
+def _affected_block(
+    vault_root: Path,
+    paths: frozenset[str],
+    *,
+    today: dt.date | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Count only affected page buckets, with the ordinary disclosure and triage rules."""
+    from .mutation_terminal import DUE_STATE_AFFECTED_PATHS
+
+    if not paths:
+        return None
+    paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
+    result = block(served_entries(
+        vault_root, today=today, paths=paths, recover=False, payload=payload,
+    ))
+    return {**result, "scope": DUE_STATE_AFFECTED_PATHS} if result else None
 
 
 def block_for_batch(
@@ -3404,8 +3452,10 @@ def block_for_batch(
     """
     from .governance import egress as egress_module
 
+    tracked = _BATCH_PATHS.get()
+    paths = frozenset(tracked.pop(str(vault_root), ()) if tracked is not None else ())
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
-        return served(vault_root, today=today)
+        return _affected_block(vault_root, paths, today=today)
 
 
 # --------------------------------------------------------------------------
@@ -3446,7 +3496,10 @@ def emission_key(vault_root: Path | None = None) -> tuple[str, str, str]:
 
 def _digest(payload: dict[str, Any]) -> str:
     return json.dumps(
-        {"total": payload.get("total"), "categories": payload.get("categories")},
+        {
+            "total": payload.get("total"), "categories": payload.get("categories"),
+            **({"top": payload.get("top")} if payload.get("scope") else {}),
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -3467,7 +3520,8 @@ def would_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None
         # decides once, after the scope exits.
         return False
     with _LOCK:
-        return _EMISSION.get(emission_key(vault_root)) != _digest(payload)
+        key = (*emission_key(vault_root), str(payload.get("scope") or ""))
+        return _EMISSION.get(key) != _digest(payload)
 
 
 def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> None:
@@ -3484,7 +3538,7 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
         return
     if batch_active(vault_root):
         return
-    key = emission_key(vault_root)
+    key = (*emission_key(vault_root), str(payload.get("scope") or ""))
     digest = _digest(payload)
     with _LOCK:
         if _EMISSION.get(key) == digest:
@@ -3530,3 +3584,4 @@ def reset_emission_state() -> None:
         _UNPERSISTED.clear()
     with _BATCH_LOCK:
         _BATCH.clear()
+    _BATCH_PATHS.set(None)

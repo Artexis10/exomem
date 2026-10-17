@@ -1,5 +1,15 @@
 # Tasks
 
+## 5. Ordinary write follow-through
+
+- [ ] 5.1 Serve page-scoped write advice with independent emission history and delivered fingerprints; verify global carriers, disclosure, and batch behavior.
+- [ ] 5.2 Publish receipt proof under the existing outermost vault hold; verify overlapping multi-hold supersession, direct fallback, degradation, and replay.
+- [ ] 5.3 Prime the writer resolver from the proven structural corpus; verify freshness, recall separation, and blocked-edit behavior.
+- [ ] 5.4 Refresh manifest claims after revisions and add CPU attribution to existing spans; verify changed claims and unchanged release checks.
+- [ ] 5.5 Reuse installed acceptance tools for matched warm writes, all outcomes, and honest coverage; independently verify latency, CPU, custody, and convergence.
+- [ ] 5.6 Extend the existing recall runner with one shared read-only MCP canary; verify failures, real reference checks, public timing and honest incomplete coverage.
+- [ ] 5.7 Connect the same canary to the maintained operator alert runner and release check; verify the installed real-vault deployment across active read and write streams.
+
 ## 1. Prove the source and public boundaries
 
 - [ ] 1.1 Reconcile final integrated source with current contracts; verify incoming connector-boundary checks and existing acknowledgement custody before product edits.

@@ -1,17 +1,4 @@
-"""Due-state carriage on the five operation leaves.
-
-The page-write and structured-collection carriers already exist. These pin the
-OPERATION leaves — vault adoption, Adoption Studio applies, maintenance repair,
-artifact preservation, media processing — as carriers of the same bounded
-advisory block, under the same contract: served from the committed terminal
-projection, one block per invocation, change-only, and silent when the
-invocation committed nothing.
-
-The whole file is written against the response the CALLER receives, driven
-through `writer_lease.invoke_command` (the one dispatcher MCP, REST, hosted and
-CLI share), because the mutation terminal that admits the block only runs there
-— calling a leaf directly skips the only code that can put one in.
-"""
+"""Bulk writes surface due advice only for pages their deltas changed."""
 
 from __future__ import annotations
 
@@ -231,25 +218,23 @@ def _count_commits(monkeypatch, run) -> _CommitCount:
 # ==========================================================================
 
 
-def test_adopt_vault_carries_one_block(vault: Path) -> None:
+def test_source_adoption_omits_unrelated_due_advice(vault: Path) -> None:
     _seed(vault)
 
     response = _adopt(vault)
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response, response
 
 
-def test_adoption_studio_apply_carries_one_block(vault: Path) -> None:
+def test_studio_source_apply_omits_unrelated_due_advice(vault: Path) -> None:
     _seed(vault)
 
     response = _studio_apply(vault)
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response, response
 
 
-def test_adoption_studio_apply_proposal_carries_one_terminal_block(tmp_path: Path) -> None:
+def test_studio_proposal_omits_due_advice_on_untouched_pages(tmp_path: Path) -> None:
     from test_adoption_proposals import (
         _applied_run,
         _imported_paths,
@@ -280,13 +265,11 @@ def test_adoption_studio_apply_proposal_carries_one_terminal_block(tmp_path: Pat
         why="Approved after reviewing the compiled synthesis.",
     )
 
-    assert list(response).count("due_state") == 1
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response
     assert "_vault" not in response
-    assert "_vault" not in response["due_state"]
     ledger = _ledger(vault)
     assert ledger["writes"] - before["writes"] == 1
-    assert ledger["emissions"] - before["emissions"] == 1
+    assert ledger["emissions"] == before["emissions"]
 
 
 def test_maintain_fix_carries_one_block(vault: Path) -> None:
@@ -296,55 +279,54 @@ def test_maintain_fix_carries_one_block(vault: Path) -> None:
     response = _maintain(vault, mode="fix", dry_run=False)
 
     assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert response["due_state"]["scope"] == "affected_paths"
+    assert response["due_state"]["total"] == 1
+    assert due_state_module.served(vault)["total"] == 2
 
 
-def test_maintain_reconcile_carries_one_block(vault: Path) -> None:
+def test_reconcile_updates_global_projection_without_local_advice(vault: Path) -> None:
     _seed(vault)
 
     response = _maintain(vault, mode="reconcile")
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response, response
 
 
-def test_maintain_backfill_ids_carries_one_block(vault: Path) -> None:
+def test_identity_backfill_counts_due_items_on_changed_pages(vault: Path) -> None:
     _seed(vault)
 
     response = _maintain(vault, mode="backfill-ids", dry_run=False)
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert response["due_state"]["scope"] == "affected_paths"
+    assert response["due_state"]["total"] == 1
 
 
-def test_preserve_artifacts_carries_one_block(vault: Path, monkeypatch) -> None:
+def test_artifact_preservation_omits_unrelated_due_advice(vault: Path, monkeypatch) -> None:
     _seed(vault)
     before = _ledger(vault)
 
     response = _preserve(vault, monkeypatch)
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response, response
     ledger = _ledger(vault)
     assert ledger["writes"] == before["writes"]
-    assert ledger["emissions"] == before["emissions"] + 1
+    assert ledger["emissions"] == before["emissions"]
 
 
-def test_process_media_carries_one_block(vault: Path) -> None:
+def test_media_processing_omits_unrelated_due_advice(vault: Path) -> None:
     _seed(vault)
     relative = _drop_media(vault)
     before = _ledger(vault)
 
     response = _process_media(vault, relative)
 
-    assert "due_state" in response, response
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response, response
     ledger = _ledger(vault)
     assert ledger["writes"] == before["writes"]
-    assert ledger["emissions"] == before["emissions"] + 1
+    assert ledger["emissions"] == before["emissions"]
 
 
-def test_structured_files_apply_carries_one_block(tmp_path: Path) -> None:
+def test_structured_file_apply_omits_unrelated_due_advice(tmp_path: Path) -> None:
     from test_structured_file_migration import _seed as seed_collection
 
     manifest_path, _first, _second = seed_collection(tmp_path)
@@ -366,32 +348,12 @@ def test_structured_files_apply_carries_one_block(tmp_path: Path) -> None:
         why="apply the reviewed readable representation",
     )
 
-    assert "due_state" in response, response
+    assert "due_state" not in response, response
     ledger = _ledger(tmp_path)
     assert ledger["writes"] == before["writes"]
-    assert ledger["emissions"] == before["emissions"] + 1
+    assert ledger["emissions"] == before["emissions"]
 
 
-def test_the_block_leaves_the_operation_outcome_keys_untouched(
-    vault: Path, monkeypatch
-) -> None:
-    """The advisory is additive: same invocation, same outcome keys, plus one."""
-    _seed(vault)
-    carrying = _adopt(vault, directory="legacy-carrying")
-    assert "due_state" in carrying, carrying
-
-    monkeypatch.setattr(due_state_module, "served", lambda *_a, **_k: None)
-    due_state_module.reset_emission_state()
-    control = _adopt(vault, directory="legacy-control")
-
-    assert "due_state" not in control, control
-    # `capture_sweep` is a SECOND independent advisory on this seam, governed by
-    # its own quiet interval rather than by `served`, so it is excluded from both
-    # sides rather than from one. The invariant under test is unchanged.
-    volatile = {"due_state", "capture_sweep"}
-    assert set(carrying) - volatile == set(control) - volatile
-    for key in ("ok", "state", "status", "terminal", "mutated"):
-        assert carrying[key] == control[key]
 
 
 # ==========================================================================
@@ -399,7 +361,7 @@ def test_the_block_leaves_the_operation_outcome_keys_untouched(
 # ==========================================================================
 
 
-def test_a_twelve_write_adopt_records_one_emission_for_twelve_writes(
+def test_source_adoption_counts_writes_without_unrelated_emission(
     vault: Path,
 ) -> None:
     _seed(vault)
@@ -407,25 +369,12 @@ def test_a_twelve_write_adopt_records_one_emission_for_twelve_writes(
 
     response = _adopt(vault, count=12)
 
-    assert "due_state" in response, response
+    assert "due_state" not in response, response
     after = _ledger(vault)
     assert after["writes"] - before["writes"] == 12
-    assert after["emissions"] - before["emissions"] == 1
+    assert after["emissions"] == before["emissions"]
 
 
-def test_a_committing_invocation_with_unchanged_totals_carries_nothing(
-    vault: Path, monkeypatch
-) -> None:
-    """Change-only, on a carrying leaf: the second batch owes the same, so it stays quiet."""
-    _seed(vault)
-    first = _preserve(vault, monkeypatch)
-    assert "due_state" in first, first
-    after_first = _ledger(vault)["emissions"]
-
-    second = _preserve(vault, monkeypatch)
-
-    assert "due_state" not in second, second
-    assert _ledger(vault)["emissions"] == after_first
 
 
 # ==========================================================================
@@ -550,24 +499,24 @@ def test_an_unreadable_review_state_yields_no_block_and_completes(
     vault: Path, monkeypatch
 ) -> None:
     _seed(vault)
-    relative = _drop_media(vault, "isolated.m4a")
+    _repairable_overdue(vault, "isolated-repair")
 
     def unreadable(*_args, **_kwargs):
         raise OSError("review state is unreadable")
 
     monkeypatch.setattr(due_state_module, "served_entries", unreadable)
 
-    response = _process_media(vault, relative)
+    response = _maintain(vault, mode="fix", dry_run=False)
 
     assert "due_state" not in response, response
     assert response["ok"] is True
     assert response["state"] == "committed"
 
 
-def test_a_partially_failed_invocation_that_committed_still_carries(
+def test_partial_source_adoption_omits_unrelated_due_advice(
     vault: Path,
 ) -> None:
-    """One batch, some items excluded: the committed half still reports."""
+    """A partial Source import does not surface warnings about unrelated compiled pages."""
     _seed(vault)
     selected = _overdue_legacy(vault, "legacy-partial", 4)
     selected.append("legacy-partial/does-not-exist.md")
@@ -579,7 +528,7 @@ def test_a_partially_failed_invocation_that_committed_still_carries(
         selected_paths=selected,
     )
 
-    assert "due_state" in response, response
+    assert "due_state" not in response, response
 
 
 # ==========================================================================
@@ -587,18 +536,8 @@ def test_a_partially_failed_invocation_that_committed_still_carries(
 # ==========================================================================
 
 
-def test_the_adopt_block_reports_the_projection_after_the_batch(vault: Path) -> None:
-    """Twelve writes, and the block is the vault's post-batch truth — measured.
-
-    MEASURED, and load-bearing for the f23 driver's docstring: twelve
-    `copy-as-sources` writes add ZERO due items, because they land as Source
-    pages and the projected categories are authored on compiled pages. The
-    ledger's write count moves by twelve and the due total does not move at all.
-    So this batch delivers its one block as the FIRST QUALIFYING RESPONSE of the
-    session, not because the counts changed — anyone reading a delivered block
-    here as evidence that the bulk pages moved the counts would be reading it
-    wrong.
-    """
+def test_source_adoption_keeps_global_due_counts(vault: Path) -> None:
+    """Source adoption updates write counts without surfacing unrelated due pages."""
     _seed(vault)
     before_total = due_state_module.served(vault)["total"]
     before_writes = _ledger(vault)["writes"]
@@ -607,7 +546,7 @@ def test_the_adopt_block_reports_the_projection_after_the_batch(vault: Path) -> 
 
     assert _ledger(vault)["writes"] - before_writes == 12
     assert due_state_module.served(vault)["total"] == before_total
-    assert response["due_state"] == due_state_module.served(vault)
+    assert "due_state" not in response
 
 
 def test_the_fix_block_counts_the_pages_the_pass_just_rewrote(vault: Path) -> None:
@@ -618,10 +557,12 @@ def test_the_fix_block_counts_the_pages_the_pass_just_rewrote(vault: Path) -> No
 
     response = _maintain(vault, mode="fix", dry_run=False)
 
-    assert response["due_state"]["total"] == before + 1
+    assert response["due_state"]["scope"] == "affected_paths"
+    assert response["due_state"]["total"] == 1
+    assert due_state_module.served(vault)["total"] == before + 1
 
 
-def test_the_reconcile_block_counts_a_page_written_out_of_band(vault: Path) -> None:
+def test_reconcile_refreshes_global_counts_after_an_outside_write(vault: Path) -> None:
     """Reconcile's own full recompute is the delta path for this mode (design D3)."""
     _seed(vault)
     before = due_state_module.served(vault)["total"]
@@ -629,4 +570,5 @@ def test_the_reconcile_block_counts_a_page_written_out_of_band(vault: Path) -> N
 
     response = _maintain(vault, mode="reconcile")
 
-    assert response["due_state"]["total"] == before + 1
+    assert "due_state" not in response
+    assert due_state_module.served(vault)["total"] == before + 1

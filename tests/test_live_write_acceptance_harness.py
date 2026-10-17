@@ -753,6 +753,20 @@ def test_disposable_measurement_refuses_conflicting_ambient_vault(
         )
 
 
+def test_disposable_measurement_keeps_implicit_writer_state_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    for name in ("EXOMEM_VAULT_PATH", "EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    state = tmp_path / "state"
+
+    module._require_disposable_environment(tmp_path / "vault", state)
+    manager = module.writer_lease.get_manager()
+
+    assert manager.idempotency.path.is_relative_to(state)
+
+
 @pytest.mark.parametrize("tool_error", (False, True))
 def test_connector_measures_the_requested_public_command_and_rejects_tool_errors(
     monkeypatch: pytest.MonkeyPatch, tool_error: bool,

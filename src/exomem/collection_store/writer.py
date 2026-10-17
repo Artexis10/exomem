@@ -1621,6 +1621,7 @@ class CollectionWriter:
             self._precommit(manifest)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()
+        records._refresh_manifest_due_state(self.root, manifest)
         return receipt
 
     def _validate(
@@ -2717,6 +2718,7 @@ class CollectionWriter:
             self._precommit(proposed)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()
+        records._refresh_manifest_due_state(self.root, proposed)
         return receipt
 
     def discard_held(self, collection, *, held, why):

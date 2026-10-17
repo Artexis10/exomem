@@ -1086,6 +1086,8 @@ _MAX_DUE_STATE_CATEGORIES = 8
 _MAX_DUE_STATE_TOP = 5
 _MAX_DUE_STATE_TOKEN_CHARS = 64
 _MAX_DUE_STATE_REF_CHARS = 256
+# The advisory protocol fixes this scope; omitted scope means historical global counts.
+DUE_STATE_AFFECTED_PATHS = "affected_paths"
 #: Every reference this substrate puts on the wire is an `exomem://` URI.
 _ADVISORY_REF_SCHEME = "exomem://"
 
@@ -1114,6 +1116,8 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
             continue
         value = container.get("due_state")
         if not isinstance(value, Mapping):
+            continue
+        if "scope" in value and value["scope"] != DUE_STATE_AFFECTED_PATHS:
             continue
         total = value.get("total")
         categories = value.get("categories")
@@ -1164,6 +1168,7 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                     "total": total,
                     "categories": {str(name): categories[name] for name in categories},
                     "top": rows,
+                    **({"scope": DUE_STATE_AFFECTED_PATHS} if "scope" in value else {}),
                 },
                 str(hint) if isinstance(hint, str) else "",
             )
