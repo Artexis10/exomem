@@ -655,6 +655,13 @@ The store still requires its capability fence, head checks, mutation lock, verif
 and supported reader admission. This setup does not enable store creation or
 migrate an existing collection.
 
+The collection store requires this coordination. On an install without a
+configured coordinator, including a stdio install, the migration preflight
+reports the vault `blocked`. Every store step refuses with
+`COLLECTION_STORE_COORDINATION_REQUIRED` and points to this section: migration,
+enrolment, a summary collection create, serving a store and adopt-local.
+File-mode Records and Planning collections are unaffected.
+
 The lease is replication-agnostic. It decides which replica may mutate; it does
 not copy vault files. This desktop/laptop example uses Syncthing, but self-hosters
 can use shared storage, Unison, rsync automation, Git-based replication, or another

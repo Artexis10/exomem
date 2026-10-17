@@ -790,6 +790,38 @@ def test_ready_gate_refuses_a_stale_complete_manifest_without_resuming_it(
     assert "--migrate-state --offline" in (check.remediation or "")
 
 
+def test_doctor_passes_a_complete_manifest_that_records_store_compatibility(
+    tmp_path: Path,
+) -> None:
+    """A collections store adds optional compatibility IDs beside the physical families.
+
+    Startup admits that manifest. Doctor compared the whole descriptor list with the
+    physical families, reported it as stale, and told the operator to stop every
+    writer and run an offline migration that the state does not need.
+    """
+    from exomem import doctor, state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    descriptor_ids = state_migration._descriptor_ids()
+    manifest = state_migration._new_manifest(
+        vault, tuple(sorted({*descriptor_ids, "collections-store-v1"}))
+    )
+    manifest["families"] = {
+        descriptor_id: {"status": "complete"} for descriptor_id in descriptor_ids
+    }
+    manifest["state"] = "complete"
+    state_migration._write_manifest(state_dir, manifest)
+    _reset_resolution_cache()
+
+    assert state_migration.migration_status(vault) == "complete"
+    check = doctor._check_state_placement(vault)
+    assert check.status == "pass"
+    assert check.details is not None
+    assert check.details["migration_status"] == "complete"
+
+
 @pytest.mark.parametrize("manifest_state", ("absent", "in-progress"))
 def test_doctor_refuses_state_that_ordinary_startup_cannot_admit(
     tmp_path: Path,

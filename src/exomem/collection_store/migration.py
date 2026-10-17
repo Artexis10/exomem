@@ -267,6 +267,8 @@ def prepare(vault_root) -> dict:
     capability.require_collections_migrate()
     root = Path(vault_root).resolve()
     coordinator = preflight.coordinator_capability()
+    if coordinator["status"] == "not_configured":
+        raise admission.coordination_required("the collections-store migration")
     if _require_stageable(root) is not None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                    "a migration cutover is unfinished; run the apply step to finish it")

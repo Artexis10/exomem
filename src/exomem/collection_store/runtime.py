@@ -1030,8 +1030,7 @@ class StoreServer:
             # The writer credential reads the coordinator's fence; moving it is the operator's.
             fence_client = self.manager.client
             if fence_client is None:
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
+                raise admission.coordination_required("serving the collection store")
             fence = fence_client.collection_store_fence()
             if not fence.enrolled:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the
