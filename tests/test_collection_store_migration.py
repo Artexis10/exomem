@@ -868,6 +868,41 @@ def test_every_migration_step_refuses_while_the_release_keeps_it_dark(env, capsy
     assert (fence().enrolled, fence().generation) == (False, 0)
 
 
+def test_an_install_without_lease_coordination_is_not_migratable_and_names_the_setup(tmp_path, monkeypatch, capsys):
+    """A stdio install with no lease coordinator that the preflight calls migratable, whose prepare
+    or apply then refuses with an unrelated lease code, or that stages or opens a store first (D7)."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    monkeypatch.delenv(OPERATOR, raising=False)
+    monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
+    monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
+    monkeypatch.setattr(capability, "RELEASED", MIGRATE)
+    root = legacy_vault(tmp_path / "vault")
+    with library_scope():
+        report = preflight.preflight(root)
+        assert (report["verdict"], report["blocker"]["code"]) == ("blocked", admission.COORDINATION_REQUIRED)
+        assert report["coordinator"] == {"status": "not_configured"}
+        for step in ("prepare", "apply"):
+            assert migrate(root, step) == 1
+            assert admission.COORDINATION_REQUIRED in capsys.readouterr().err
+    assert staging_directories(root) == [] and not connection.store_path(root).exists()
+
+
+def test_a_summary_create_without_lease_coordination_names_the_setup_before_enrolment(tmp_path, monkeypatch):
+    """A summary create on an install with no lease coordinator that sends the owner to the enrolment
+    command, which cannot run there either, instead of to the coordinator setup (D7)."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1}))
+    root = tmp_path / "vault"
+    init_vault(root)
+    with pytest.raises(CollectionStoreError) as refused:
+        call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+             why="summary")
+    assert refused.value.code == admission.COORDINATION_REQUIRED
+    assert not connection.store_path(root).exists()
+
+
 def test_a_coordinator_without_the_store_fence_names_the_release_to_upgrade_to(tmp_path, monkeypatch):
     """A preflight that takes an older coordinator's silence for collections-store-v1 support,
     or refuses without naming the release that serves it (ruled N3)."""
