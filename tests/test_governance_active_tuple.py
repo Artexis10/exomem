@@ -7025,9 +7025,11 @@ def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
     assert custody_after.control.activation_epoch == 2
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_scene_frame_batch_replaces_parent_clip_samples_in_same_v4_successor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    newline: str,
 ) -> None:
     class Image:
         size = (1920, 1080)
@@ -7048,10 +7050,10 @@ def test_scene_frame_batch_replaces_parent_clip_samples_in_same_v4_successor(
     video_source = (
         "---\ntitle: Demo video\ntype: source\nstatus: active\n"
         "media_type: video\n---\n\nVideo evidence.\n"
-    )
+    ).replace("\n", newline)
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"governed video")
-    (vault / video_path).write_text(video_source, encoding="utf-8")
+    (vault / video_path).write_bytes(video_source.encode("utf-8"))
     _write_workspace(vault, _documents(ceiling=2))
     old_samples = (
         projected_retrieval.ProjectionClipSample(1_000, (1.0, 0.0)),

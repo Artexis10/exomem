@@ -40,6 +40,7 @@ from .vault import (
     content_hash,
     kb_root,
     parse_frontmatter,
+    read_guarded_text,
 )
 
 log = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ def _revisions(vault_root: Path, key: str, audience: str) -> list[_Revision]:
     for order, name in matched:
         path = folder / name
         try:
-            text = path.read_text(encoding="utf-8")
+            text, _guard = read_guarded_text(vault_root, path)
             frontmatter, _body, _raw = parse_frontmatter(text)
         except (OSError, UnicodeDecodeError, ValueError):
             continue

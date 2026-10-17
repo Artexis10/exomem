@@ -26,12 +26,14 @@ from . import find as find_module
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .vault import (
+    PathGuardError,
     PlannedWrite,
     VaultLockError,
     VaultLockTimeout,
     batch_atomic_write,
     content_hash,
     parse_frontmatter,
+    read_guarded_text,
     vault_creation_lock,
 )
 
@@ -382,8 +384,8 @@ def is_grandfathered(
             normalized_id = census_candidate.normalized_id
     if current_hash is None or (not id_supplied and census_candidate is None):
         try:
-            raw = absolute.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw, _guard = read_guarded_text(vault_root, absolute)
+        except (OSError, UnicodeDecodeError, PathGuardError):
             return False
         if current_hash is None:
             current_hash = content_hash(raw)
@@ -573,8 +575,8 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
             if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
                 continue
             try:
-                raw = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as error:
+                raw, _guard = read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, PathGuardError) as error:
                 raise ActivationManifestError(
                     "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
                     f"could not read activation candidate {path}: {error}",

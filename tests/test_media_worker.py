@@ -1844,7 +1844,11 @@ def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
     result = _preserve_media_stub(vault, filename="windows-crlf.m4a")
     binary = vault / result.path
     sidecar = vault / result.sidecar_path
-    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    preserved = (
+        f"\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+        "## Preserved notes\n\nOriginal cassette label.\n"
+    ).encode("utf-8")
+    sidecar.write_bytes((sidecar.read_bytes() + preserved).replace(b"\n", b"\r\n"))
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
     monkeypatch.setattr(
@@ -1863,6 +1867,8 @@ def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
     content = sidecar.read_text(encoding="utf-8")
     assert "processing_state: completed" in content
     assert "[0:00] Windows transcript committed." in content
+    assert preserve.SIDECAR_PRESERVED_NOTES_SENTINEL in content
+    assert "Original cassette label." in content
 
 
 def test_pending_state_cas_preserves_concurrent_completed_transcript(
@@ -1871,7 +1877,7 @@ def test_pending_state_cas_preserves_concurrent_completed_transcript(
     result = _preserve_media_stub(vault, filename="pending-cas.m4a")
     sidecar = vault / result.sidecar_path
     sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
-    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+    expected_hash = content_hash(sidecar.read_bytes().decode("utf-8"))
     completed_bytes: bytes | None = None
     real_batch = preserve.batch_atomic_write
 
@@ -1904,7 +1910,7 @@ def test_pending_state_cas_updates_unchanged_crlf_sidecar(vault) -> None:
     result = _preserve_media_stub(vault, filename="pending-cas-crlf.m4a")
     sidecar = vault / result.sidecar_path
     sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
-    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+    expected_hash = content_hash(sidecar.read_bytes().decode("utf-8"))
 
     updated = preserve.update_sidecar_processing_pending(
         vault,

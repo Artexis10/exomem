@@ -204,6 +204,18 @@ def test_a_changed_record_yields_a_second_page_and_revision_two(vault: Path) -> 
     assert "status" not in _frontmatter(vault / second["source"]["path"])
 
 
+def test_a_changed_record_supersedes_a_crlf_revision(vault: Path) -> None:
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+        old = vault / first["source"]["path"]
+        old.write_bytes(old.read_bytes().replace(b"\n", b"\r\n"))
+        second = _record(vault, summary="The delivery date is now confirmed.")
+
+    assert second["revision"] == 2
+    assert _frontmatter(old)["status"] == "superseded"
+    assert "status" not in _frontmatter(vault / second["source"]["path"])
+
+
 def test_one_key_used_by_two_audiences_keeps_separate_ledgers(vault: Path) -> None:
     with request_scope(_audience("client-a")):
         first = _record(vault)

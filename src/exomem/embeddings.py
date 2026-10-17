@@ -2497,14 +2497,14 @@ def prepare_generation_vectors(
     never falls back to a different generation's vectors.
     """
     from . import find as find_module
-    from .vault import content_hash
+    from .vault import PathGuardError, content_hash, read_guarded_text
 
     target = Path(vault_root).joinpath(*str(rel_path).split("/"))
     try:
         if target.is_symlink() or not target.is_file():
             return None
-        text = target.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        text, guard = read_guarded_text(vault_root, target)
+    except (OSError, UnicodeDecodeError, PathGuardError):
         return None
     fingerprint = content_hash(text)
     if fingerprint != expected_fingerprint:
@@ -2541,9 +2541,8 @@ def prepare_generation_vectors(
             return None
     # The page can move under a slow encode; re-prove before handing it on.
     try:
-        if content_hash(target.read_text(encoding="utf-8")) != expected_fingerprint:
-            return None
-    except (OSError, UnicodeDecodeError):
+        guard.recheck(vault_root)
+    except (OSError, UnicodeDecodeError, PathGuardError):
         return None
     return GenerationVectors(
         rel_path=str(rel_path),

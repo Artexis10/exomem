@@ -164,7 +164,7 @@ def validate_parent_record(
     """Validate one derived record against current canonical Markdown bytes."""
     root = Path(vault_root)
     # This seam is ordinary semantic recall validation, not structured-record
-    # parsing.  Refuse raw Records before ``read_text`` can hydrate a stale
+    # parsing.  Refuse raw Records before a guarded read can hydrate a stale
     # vector/lexical parent into the semantic path.
     from . import recall_policy
 
@@ -176,10 +176,10 @@ def validate_parent_record(
     except (OSError, ValueError):
         return SemanticIndexFreshness(False, "invalid_parent_path", parent_path)
     try:
-        source = path.read_text(encoding="utf-8")
+        source, _guard = vault.read_guarded_text(root, path)
     except FileNotFoundError:
         return SemanticIndexFreshness(False, "missing_parent", parent_path)
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError, vault.PathGuardError):
         return SemanticIndexFreshness(False, "parent_unavailable", parent_path)
     current_source_hash = vault.content_hash(source)
     current_ref = memory_refs.ref_from_markdown(source)
@@ -223,13 +223,7 @@ def build_parent_index_state(
         rel_path = PurePosixPath(str(path).replace("\\", "/")).as_posix().lstrip("/")
         source_path = root / rel_path
     if source is None:
-        source = source_path.read_text(encoding="utf-8")
-    else:
-        # ``Path.read_text`` uses universal-newline translation, while callers
-        # that share an exact byte snapshot may pass decoded CRLF content.
-        # Normalize both routes before frontmatter/ref parsing so Windows deep
-        # packs retain the same stable memory identity as indexed retrieval.
-        source = source.replace("\r\n", "\n").replace("\r", "\n")
+        source, _guard = vault.read_guarded_text(root, source_path)
     frontmatter, body, _ = vault.parse_frontmatter(source)
     parent_ref = memory_refs.ref_from_markdown(source)
     language = semantic_language_registry.core_registry()
@@ -308,14 +302,7 @@ def current_parent_index_state(
     candidate = Path(path)
     if source is None:
         source_path = candidate if candidate.is_absolute() else root / candidate
-        source = source_path.read_text(encoding="utf-8")
-    else:
-        # `build_parent_index_state` stores the hash of the newline-normalized
-        # source, so a caller sharing an exact byte snapshot has to be folded the
-        # same way before the comparison below. Hashing CRLF bytes against an LF
-        # hash never matches, and the answer to that miss is a silent reparse of a
-        # page whose parse is already in hand.
-        source = source.replace("\r\n", "\n").replace("\r", "\n")
+        source, _guard = vault.read_guarded_text(root, source_path)
     active = parent_state_for_path(root, path)
     language = semantic_language_registry.core_registry()
     relations = relation_registry.core_registry()

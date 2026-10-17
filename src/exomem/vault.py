@@ -357,7 +357,8 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
-_FM_PATTERN = re.compile(r"^---\r?\n(.*?)\r?\n---(?:\r?\n)?(.*)", re.DOTALL)
+# Markdown fences delimit YAML; the optional UTF-8 BOM stays outside the YAML block.
+_FM_PATTERN = re.compile(r"^\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n)?(.*)", re.DOTALL)
 _LOCK_NAMESPACES = frozenset(
     {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
 )
@@ -440,7 +441,7 @@ def kb_root(vault: Path) -> Path:
 
 
 def content_hash(content: str) -> str:
-    """sha256 hex of a file's full raw text — the drift-guard token.
+    """SHA-256 of the exact UTF-8 text; readers must preserve stored newlines.
 
     Hashing the WHOLE content (frontmatter + body) means a concurrent
     `tags:`/`status:` change trips the guard too, not just body edits.
@@ -5017,11 +5018,11 @@ def _batch_atomic_write_locked(
             continue
         if write.expected_hash is not None:
             try:
-                current = write.path.read_text(encoding="utf-8")
+                current = write.path.read_bytes()
             except FileNotFoundError:
                 actual_hash = None
             else:
-                actual_hash = content_hash(current)
+                actual_hash = hashlib.sha256(current).hexdigest()
             expected_missing = write.expected_hash == MISSING_CONTENT_HASH
             if (
                 not (expected_missing and actual_hash is None)
@@ -5263,9 +5264,7 @@ def _batch_atomic_write_locked(
             if not (
                 write.create_only and write.expected_hash == MISSING_CONTENT_HASH
             ) and write.expected_hash is not None:
-                actual_hash = content_hash(
-                    snapshot.content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-                )
+                actual_hash = snapshot.content_hash
                 if (
                     write.expected_hash == MISSING_CONTENT_HASH
                     or actual_hash != write.expected_hash

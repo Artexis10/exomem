@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
-import re
 import sqlite3
 import threading
 import time
@@ -983,7 +982,7 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
 
 def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str, str]:
     """Add an identity without reserializing or reordering existing frontmatter."""
-    fm, body, fm_text = vault_module.parse_frontmatter(markdown)
+    fm, _body, fm_text = vault_module.parse_frontmatter(markdown)
     if fm_text is None:
         raise ReferenceError("MISSING_FRONTMATTER", "cannot add exomem_id without frontmatter")
     if ID_FIELD in fm:
@@ -994,13 +993,11 @@ def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str
     identity = normalize_id(exomem_id) if exomem_id else new_id()
     if identity is None:
         raise ReferenceError("INVALID_REFERENCE", f"invalid memory id: {exomem_id!r}")
-    new_fm = fm_text.rstrip() + f"\n{ID_FIELD}: {identity}"
-    blank_line = bool(
-        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", markdown, re.DOTALL)
-    )
-    rendered = vault_module.render_frontmatter_document(
-        new_fm, body, newline=vault_module.document_newline(markdown), blank_line=blank_line
-    )
+    match = vault_module._FM_PATTERN.match(markdown)
+    assert match is not None
+    insertion = match.end(1)
+    newline = "\r\n" if markdown.startswith("\r\n", insertion) else "\n"
+    rendered = markdown[:insertion] + f"{newline}{ID_FIELD}: {identity}" + markdown[insertion:]
     return rendered, identity
 
 
@@ -1018,8 +1015,8 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
             if rel is None:
                 continue
             try:
-                raw = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
+                raw, guard = vault_module.read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
                 skipped.append({"path": rel, "reason": str(exc)})
                 continue
             fm, _, fm_text = vault_module.parse_frontmatter(raw)
@@ -1033,7 +1030,12 @@ def backfill_ids(vault_root: Path, *, dry_run: bool = True) -> dict:
             updated, identity = add_id_to_markdown(raw)
             missing.append(rel)
             assigned[rel] = memory_ref(identity)
-            writes.append(vault_module.PlannedWrite(path=path, content=updated))
+            writes.append(
+                vault_module.PlannedWrite(
+                    path=path, content=updated, guard=guard,
+                    expected_hash=vault_module.content_hash(raw),
+                )
+            )
     duplicates = [item for item in identity_issues if item["kind"] == "duplicate"]
     if duplicates and not dry_run:
         duplicate_ids = sorted({item["value"] for item in duplicates})
