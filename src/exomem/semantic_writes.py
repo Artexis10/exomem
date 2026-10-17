@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -43,7 +43,6 @@ from . import (
 from . import (
     find as find_module,
 )
-from .governance import connector_boundary
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
 
@@ -924,6 +923,11 @@ class CreationPreflight:
     vocabulary_binding: Any | None = None
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
+    #: The relation-review verdict this preflight computed, offered to the
+    #: commit's own preliminary attempt; see `relation_review.prevalidated_attempt`.
+    relation_attempt: relation_review._PrevalidatedAttempt | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def draft_hash(self) -> str | None:
@@ -1974,18 +1978,18 @@ def _preflight_existing(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
-        armed = connector_boundary.read_requirement(root) is not None
+        corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
+            root, registry, language
+        )
     resolver_freshness_before = freshness.triple(root, "vault")
     with (
         _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
-            # Unarmed vaults use saved public definitions; redundant overrides bypass warm reuse.
-            # Armed vaults retain their explicit public corpus registry.
             root,
-            registry=registry if armed else None,
-            language_registry=language if armed else None,
+            registry=corpus_registry,
+            language_registry=corpus_language,
             status_basis=status_basis,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
@@ -4304,6 +4308,44 @@ def preflight_creation(
     vocabulary_binding: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationPreflight:
+    # A fixed phase label. Its fields split out the two corpus-sized parts as
+    # whole milliseconds: `structural_ms` and `relation_review_ms`.
+    with call_spans.span("preflight.creation", {}) as measured:
+        return _preflight_creation(
+            vault_root,
+            measured,
+            path=path,
+            source=source,
+            operation=operation,
+            writer=writer,
+            draft_id=draft_id,
+            draft_token=draft_token,
+            registrations=registrations,
+            relation_disposition=relation_disposition,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
+            vocabulary_binding=vocabulary_binding,
+            status_basis=status_basis,
+        )
+
+
+def _preflight_creation(
+    vault_root: Path,
+    measured: dict[str, int],
+    *,
+    path: str,
+    source: str,
+    operation: str,
+    writer: str,
+    draft_id: str | None,
+    draft_token: str,
+    registrations: tuple[DraftRegistration, ...],
+    relation_disposition: str | None,
+    predecessor_path: str | None,
+    predecessor_content_hash: str | None,
+    vocabulary_binding: Any | None,
+    status_basis: lifecycle_statuses.Basis | None,
+) -> CreationPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     origin_inputs = _prepare_origin_inputs(root, path, source)
@@ -4337,24 +4379,36 @@ def preflight_creation(
             details=closure_plan.inspection.public_details(),
         )
     entry_generation = _entry_commit_generation(root)
-    result, state, corpus_census, before_corpus, source = _evaluate_structural(
-        root, destination=path, source=source, operation=operation, status_basis=status_basis
-    )
+    started = time.perf_counter()
+    try:
+        result, state, corpus_census, before_corpus, source = _evaluate_structural(
+            root, destination=path, source=source, operation=operation, status_basis=status_basis
+        )
+    finally:
+        measured["structural_ms"] = round((time.perf_counter() - started) * 1000.0)
     origin_inputs = _prepare_origin_inputs(root, path, source)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
-        validation = relation_review.revalidate_prepared_creation_draft(
-            root,
-            path=path,
-            source=source,
-            draft_id=draft_id,
-            operation=operation,
-            draft_token=draft_token,
-            requested_disposition=relation_disposition,
-            predecessor_path=predecessor_path,
-            predecessor_content_hash=predecessor_content_hash,
-        )
+        started = time.perf_counter()
+        try:
+            attempt = relation_review.revalidate_prepared_creation_attempt(
+                root,
+                path=path,
+                source=source,
+                draft_id=draft_id,
+                operation=operation,
+                draft_token=draft_token,
+                requested_disposition=relation_disposition,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+            )
+        finally:
+            measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
+        validation = attempt.validation
+        # This stamp also guards the relation-review verdict: both evaluations
+        # read this page's definitions and the status basis after the entry
+        # generation, so a change between or after them leaves it stale.
         census_token = _capture_validity_stamp(
             root,
             entry_generation,
@@ -4383,6 +4437,7 @@ def preflight_creation(
                 vocabulary_binding.parent_guard,
             ) if vocabulary_binding is not None else (),
             origin_inputs,
+            relation_review.prevalidated_attempt(attempt, census_token),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4659,8 +4714,9 @@ def _commit_creation(
         assert preflight.draft_id is not None
         # Pre-boundary: parse/canonicalize + the preliminary structural and
         # relation-review validation. Any failure here raises before the
-        # mutation boundary below is ever acquired.
-        with call_spans.span("commit.relation_review_prepare"):
+        # mutation boundary below is ever acquired. The span's one field
+        # names whether the preflight's relation review was reused, a count.
+        with call_spans.span("commit.relation_review_prepare", {}) as measured:
             prepared = relation_review.prepare_commit_creation_draft(
                 root,
                 path=preflight.destination,
@@ -4675,7 +4731,9 @@ def _commit_creation(
                 draft_token=preflight.draft_token,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                prevalidated=preflight.relation_attempt,
             )
+            measured[prepared.preliminary_outcome] = 1
     with call_spans.span("commit.embedding_prewarm"):
         _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id
