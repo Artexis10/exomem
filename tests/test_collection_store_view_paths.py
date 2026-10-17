@@ -7,6 +7,7 @@ owner's answer shows that the surface does expose the view to a reader who may s
 
 import json
 import shutil
+from dataclasses import replace
 
 import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
@@ -14,8 +15,10 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
 
 from exomem import structured_collections as collections
+from exomem import reserved_paths
 from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
+from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
 
 WORK = "Knowledge Base/Records/Work"
@@ -322,3 +325,20 @@ def test_a_sync_conflict_copy_of_a_withheld_view_is_absent(vault):
     # The copy carries the row's own stamp and bytes, which is how a sync client makes one.
     (vault.root / copy).write_bytes((vault.root / SECRET).read_bytes())
     assert _as(vault, _external(), observe) == absent
+
+
+def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault, monkeypatch):
+    """An owner aggregate must refuse an edited view even when the volume changes folder casing."""
+    monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
+    page = vault.root / OPEN
+    page.write_text(page.read_text().replace("Open plan", "Edited outside the store"))
+    entries = reserved_paths.list_generic_tree(vault.root, ".")
+    recased = tuple(
+        replace(entry, relative_path=entry.relative_path.replace("Knowledge Base/", "knowledge base/", 1))
+        for entry in entries
+    )
+    monkeypatch.setattr(reserved_paths, "list_generic_tree", lambda *_args, **_kwargs: recased)
+
+    assert _as(vault, owner_principal(), lambda: egress.owner_only_aggregate(vault.root)) == {
+        "available": False, "reason": "audience_restricted",
+    }
