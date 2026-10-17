@@ -1401,3 +1401,17 @@ def test_a_changed_contract_value_changes_what_cellctl_is_given(tmp_path: Path) 
 
     assert env["CELLCTL_PENDING_OPERATION_WARN_SECONDS"] == "1800"
     assert env["CELLCTL_PVC_RESERVED_FREE_BYTES"] == str(3 * 1024**3)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_upgrade_readiness_deadline_the_chart_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The chart's default, the rendered env, the parser and the tests' dataclass default must agree.
+    from cellctl.decide import ReconcileConfig
+    from cellctl.main import build_reconcile_config
+
+    name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
+    monkeypatch.setenv(name, _cellctl_env(_helm_template())[name])
+    assert build_reconcile_config().upgrade_ready_deadline == ReconcileConfig().upgrade_ready_deadline
+
+    changed = _cellctl_env(_helm_template("--set", "cellctl.upgradeReadyDeadlineMinutes=45"))
+    assert changed[name] == "45"

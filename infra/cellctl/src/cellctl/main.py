@@ -18,7 +18,7 @@ from kubernetes import config as k8s_config
 from .alerts import AlertThresholds
 from .backup_window import parse_backup_window
 from .capacity import CapacityConfig, SharedWorkerPolicy
-from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
+from .decide import ReconcileConfig
 from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
@@ -70,10 +70,16 @@ def build_secrets_config() -> SecretsConfig:
 
 
 def build_reconcile_config() -> ReconcileConfig:
-    # D3/D6: the init/upgrade-readiness deadline stays a 10-minute default
-    # (not pinned exactly by the design), but is configurable per the
-    # coordinator's ruling rather than hardcoded.
-    kwargs: dict[str, object] = {}
+    # D6 step 4: the upgrade-readiness deadline is required configuration, rendered by the
+    # chart (cellctl.upgradeReadyDeadlineMinutes). A first start that rebuilds a large
+    # vault's catalogue can answer "warming" for many minutes, and a deadline missed
+    # restores the cell and pauses the rollout, so a guessed value would do harm. The
+    # chart owns the number and its bounds; cellctl refuses to start without it.
+    kwargs: dict[str, object] = {
+        "upgrade_ready_deadline": timedelta(minutes=_positive_integer_env("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"))
+    }
+    # D3: the init deadline stays a 10-minute default (not pinned exactly by the
+    # design), but is configurable per the coordinator's ruling rather than hardcoded.
     minutes_raw = os.environ.get("CELLCTL_INIT_DEADLINE_MINUTES")
     if minutes_raw is not None:
         kwargs["init_deadline"] = timedelta(minutes=int(minutes_raw))
@@ -93,8 +99,6 @@ def build_reconcile_config() -> ReconcileConfig:
             if minutes <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(minutes=minutes)
-    if not kwargs:
-        return DEFAULT_RECONCILE_CONFIG
     return ReconcileConfig(**kwargs)
 
 
@@ -127,7 +131,7 @@ def build_alert_delivery_secret() -> tuple[str, str, str] | None:
 def _positive_integer_env(name: str) -> int:
     raw = os.environ.get(name)
     if raw is None:
-        raise ValueError(f"{name} is required: the chart renders it from the observability contract")
+        raise ValueError(f"{name} is required: the chart renders it")
     # Digits only: Helm prints a large number from JSON as 1.073741824e+09, which must not pass as a guess.
     if not (raw.isascii() and raw.isdecimal()) or int(raw) <= 0:
         raise ValueError(f"{name} must be a positive whole number, not {raw!r}")

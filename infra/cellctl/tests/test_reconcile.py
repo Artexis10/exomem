@@ -2215,7 +2215,7 @@ async def test_the_readiness_timeout_pause_is_written_before_the_restore_switch_
         await _pass(connection, cluster, now)  # target applied
         cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id, pod_ready=False, ready_pod_image=None)
         cluster.dying = True
-        await _pass(connection, cluster, now + timedelta(minutes=11))
+        await _pass(connection, cluster, now + reconcile.DEFAULT_RECONCILE_CONFIG.upgrade_ready_deadline + timedelta(minutes=1))
         statefulset = cluster.applied[(namespace_name(cell_id), "StatefulSet", "cell")]
         assert statefulset["metadata"]["annotations"]["exomem.io/hold"] == "restore"
         rollout = await db.read_rollout(connection)
