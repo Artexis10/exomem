@@ -43,7 +43,6 @@ from . import (
 from . import (
     find as find_module,
 )
-from .governance import connector_boundary
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
 
@@ -1979,18 +1978,18 @@ def _preflight_existing(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
-        armed = connector_boundary.read_requirement(root) is not None
+        corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
+            root, registry, language
+        )
     resolver_freshness_before = freshness.triple(root, "vault")
     with (
         _write_metric("exomem_write_corpus_context_ms", str(operation)),
         mutation_timing_span(timings, "preflight.corpus_context"),
     ):
         before_corpus, before_corpus_census = semantic_contract.build_corpus_context_with_census(
-            # Unarmed vaults use saved public definitions; redundant overrides bypass warm reuse.
-            # Armed vaults retain their explicit public corpus registry.
             root,
-            registry=registry if armed else None,
-            language_registry=language if armed else None,
+            registry=corpus_registry,
+            language_registry=corpus_language,
             status_basis=status_basis,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
@@ -4407,20 +4406,17 @@ def _preflight_creation(
         finally:
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
         validation = attempt.validation
-        # One stamp guards both verdicts: the generation read before either
-        # one, and every status and vocabulary input that either one read.
+        # This stamp also guards the relation-review verdict: both evaluations
+        # read this page's definitions and the status basis after the entry
+        # generation, so a change between or after them leaves it stale.
         census_token = _capture_validity_stamp(
             root,
             entry_generation,
             corpus_census=corpus_census,
             status_dependencies=tuple(
-                sorted(
-                    set(before_corpus.status_dependencies)
-                    | set(attempt.after_corpus.status_dependencies)
-                    | {state.status_dependency}
-                )
+                sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
             ),
-            definitions=semantic_contract.page_definitions_witnesses(state, attempt.candidate),
+            definitions=semantic_contract.page_definitions_witnesses(state),
         )
         return CreationPreflight(
             "full",
@@ -4718,8 +4714,9 @@ def _commit_creation(
         assert preflight.draft_id is not None
         # Pre-boundary: parse/canonicalize + the preliminary structural and
         # relation-review validation. Any failure here raises before the
-        # mutation boundary below is ever acquired.
-        with call_spans.span("commit.relation_review_prepare"):
+        # mutation boundary below is ever acquired. The span's one field
+        # names whether the preflight's relation review was reused, a count.
+        with call_spans.span("commit.relation_review_prepare", {}) as measured:
             prepared = relation_review.prepare_commit_creation_draft(
                 root,
                 path=preflight.destination,
@@ -4736,6 +4733,7 @@ def _commit_creation(
                 predecessor_content_hash=predecessor_content_hash,
                 prevalidated=preflight.relation_attempt,
             )
+            measured[prepared.preliminary_outcome] = 1
     with call_spans.span("commit.embedding_prewarm"):
         _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id

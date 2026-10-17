@@ -1551,8 +1551,8 @@ _CORPUS_CONTEXT_CACHE_LOCK = threading.Lock()
 # unchanged page definitions and supplied registry identities, reuse the whole
 # context when the structural object is unchanged, and otherwise reuse each page
 # whose structural state object is unchanged, so a write re-enriches only the
-# pages it changed. The supplied slot is separate because a creation's preflight
-# reads the unsupplied view and its relation review the supplied one.
+# pages it changed. The supplied slot serves armed vaults, whose writers keep an
+# explicit public corpus registry (`corpus_registry_overrides`).
 _ENRICHED_CONTEXT_MEMO: dict[
     tuple[tuple[str, str], bool],
     tuple[
@@ -2961,6 +2961,28 @@ def build_corpus_context(
     return context
 
 
+def corpus_registry_overrides(
+    vault_root: Path,
+    registry: relation_registry.RelationRegistry,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[
+    relation_registry.RelationRegistry | None,
+    semantic_language_registry.SemanticLanguageRegistry | None,
+]:
+    """The registries a writer hands its corpus build: none in an unarmed vault.
+
+    Unarmed, every page selects the saved public definitions, which are the
+    registries a writer loads, so handing them over changes no meaning and only
+    splits the warm enrichment memo. An armed vault keeps its explicit public
+    corpus registry.
+    """
+    from .governance import connector_boundary
+
+    if connector_boundary.read_requirement(Path(vault_root)) is None:
+        return None, None
+    return registry, language_registry
+
+
 def warm_corpus_context(vault_root: Path) -> None:
     """Fill the shared structural corpus cache without classifying for any caller."""
     _build_corpus_context_with_census(Path(vault_root))
@@ -3056,7 +3078,9 @@ def build_corpus_context_with_census(
             unarmed = False
         # Unarmed, the public overlay is every page's meaning. Armed, each visible
         # page carries its own instance and every other page keeps core meaning.
-        corpus_registry = relation_registry.load_registry(root) if unarmed else context.registry
+        corpus_registry = (
+            selection.snapshot("relations").typed if unarmed else context.registry
+        )
     # Enrichment changes interpretation, not titles, paths or structural census inputs.
     if candidate is None:
         resolver = _WikilinkResolverView(

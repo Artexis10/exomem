@@ -480,10 +480,16 @@ class _Attempt:
         """One of ``"reused"``/``"revalidated"``, for telemetry only.
 
         Only meaningful for an ``_attempt`` call that was given a ``reuse``
-        candidate at all (i.e. the in-lock call inside
-        ``commit_creation_draft``); other call sites never set ``reused``.
+        candidate at all (the commit's preliminary and in-lock attempts);
+        other call sites never set ``reused``. See ``_reuse_outcome``.
         """
         return "reused" if self.reused else "revalidated"
+
+
+def _reuse_outcome(reuse: _PrevalidatedAttempt | None, attempt: _Attempt) -> str:
+    """What an attempt did with a reuse offer, for telemetry only: ``unavailable``
+    (none offered), ``reused`` or ``revalidated`` (stale or another draft)."""
+    return "unavailable" if reuse is None else attempt.prevalidated_outcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +526,7 @@ class _PreparedCreationDraft:
     preliminary: _Attempt
     reuse: _PrevalidatedAttempt | None
     preliminary_commit_result: semantic_contract.SemanticContractResult
+    preliminary_outcome: str
 
 
 class _DuplicateJsonKey(ValueError):
@@ -3148,8 +3155,14 @@ def _attempt(
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
         loaded_contracts = memory_schema.load_saved_contracts(root)
+        corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
+            root, registry, language
+        )
         before, before_census = semantic_contract.build_corpus_context_with_census(
-            root, registry=registry, language_registry=language, status_basis=status_basis
+            root,
+            registry=corpus_registry,
+            language_registry=corpus_language,
+            status_basis=status_basis,
         )
         candidate = semantic_contract.build_page_state(
             root,
@@ -3900,6 +3913,7 @@ def prepare_commit_creation_draft(
             preliminary,
             reuse,
             preliminary_commit_result,
+            _reuse_outcome(prevalidated, preliminary),
         )
     except RelationReviewError:
         raise
@@ -3968,7 +3982,7 @@ def commit_prepared_creation_draft(
                     predecessor_content_hash=predecessor_content_hash,
                     reuse=reuse,
                 )
-                outcome = "unavailable" if reuse is None else attempt.prevalidated_outcome
+                outcome = _reuse_outcome(reuse, attempt)
                 measured[outcome] = 1
             _record_prevalidated_commit_outcome(outcome)
             validation = attempt.validation

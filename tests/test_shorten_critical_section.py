@@ -275,6 +275,41 @@ def _delete_target_in_a_governed_commit(vault: Path, state_dir: Path) -> None:
     writer_lease._bump_commit_generation(state_dir, vault)
 
 
+@pytest.mark.usefixtures("corpus_cache_on")
+def test_remember_reuses_its_preflight_relation_review_while_the_stamp_is_current(
+    vault: Path,
+) -> None:
+    """Nothing changed between preflight and commit, so the commit takes the
+    preflight's relation verdict instead of judging the draft a second time,
+    and the span an operator reads says so."""
+    from exomem import call_spans
+
+    manager = _standalone_manager(vault.parent / "state")
+    handle = call_spans.MCP_CALL_TOKEN.set("reuse-observed")
+    try:
+        result = _invoke_remember(
+            vault,
+            manager,
+            content=(
+                "# Bounded fusion stage\n\n"
+                "## Observations\n\n"
+                "- [operating constraint] Keep the fusion stage bounded #reliability\n\n"
+                "## Relations\n\n"
+                f"- supports [[{_TARGET_REL}]]\n"
+            ),
+            title="Bounded fusion stage",
+            slug="bounded-fusion-stage",
+            suggestions=False,
+        )
+    finally:
+        call_spans.MCP_CALL_TOKEN.reset(handle)
+    spans = {span["name"]: span for span in call_spans.pop_call_spans("reuse-observed")}
+
+    assert (vault / result["path"]).is_file()
+    assert spans["commit.relation_review_prepare"].get("fields") == {"reused": 1}
+
+
+@pytest.mark.usefixtures("corpus_cache_on")
 @pytest.mark.parametrize(
     "intervening_change", [_unregister_hosts, _delete_target_in_a_governed_commit]
 )

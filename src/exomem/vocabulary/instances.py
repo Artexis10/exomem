@@ -77,6 +77,10 @@ class DefinitionsSelection:
             raise outcome.with_traceback(None)
         return outcome
 
+    def snapshot(self, subject: str, scope: str | None = None) -> Snapshot:
+        """The one snapshot of `subject` this selection reads for an instance."""
+        return self._select(subject, scope)[1]
+
     def page_definitions(self, path: str, frontmatter: dict) -> PageDefinitions:
         """Select once from canonical membership, then admit only the requested subjects."""
         scope = page_scope(self._root, path, frontmatter)
