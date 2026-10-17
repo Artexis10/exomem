@@ -28,13 +28,13 @@ jobs:
   # split moves no coverage. Tier selection is EXOMEM_TEST_TIER, applied by
   # tests/conftest.py; tests/test_ci_reliability_contract.py proves the two
   # tiers plus the latency file partition the previous lean suite exactly.
-  # The 180-second per-test limit leaves room for CPU sharing. A worker crash
-  # fails its shard immediately; replacement workers must not hide lost tests.
+  # The 180-second per-test limit leaves room for CPU sharing. Disable worker
+  # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
     env:
-      # This wall-clock microgate needs the runner to itself, before the worker pool.
-      EXOMEM_SERIAL_CORE_TEST: tests/test_governance_overhead.py::test_empty_policy_op_find_overhead_under_budget
+      # These timing checks need the runner to themselves, before the worker pool.
+      EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
     # anything release-please does not manage. Lint, build (packages, Cloud
@@ -118,7 +118,7 @@ jobs:
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
-          "$EXOMEM_SERIAL_CORE_TEST"
+          "$EXOMEM_SERIAL_CORE_MODULE"
           -o timeout=180
           --durations-path=.test_durations.json
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}-serial.xml
@@ -137,7 +137,7 @@ jobs:
           --dist loadfile
           --max-worker-restart=0
           -o timeout=180
-          --deselect="$EXOMEM_SERIAL_CORE_TEST"
+          --ignore="$EXOMEM_SERIAL_CORE_MODULE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
