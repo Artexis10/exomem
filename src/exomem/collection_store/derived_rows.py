@@ -375,12 +375,11 @@ class Store:
         # a writer past a lost lease or a managed handoff must not change rows that the new holder's
         # log counts are built on. The divergence fence guards the store's publication, which this
         # file never reaches. The boundary stays: the writer's authority check requires this thread
-        # to hold it, and a release quiesces writers by taking it. The commit generation does not
-        # move, since this file is a projection of the store's import log and no validity stamp
-        # covers it. Only maintenance writes this file (rebuilds, import batches and a new handle's
-        # reconcile), so it holds the boundary as background work.
-        with active_manager().mutation_guard(self.root, operation="derived_rows", holder_kind="background",
-                                             advance_generation=False):
+        # to hold it, and a release quiesces writers by taking it. This file is a projection of the
+        # store's import log, written only by maintenance (rebuilds, import batches and a new
+        # handle's reconcile), so it takes the projection guard: background work that leaves the
+        # vault commit generation, which no validity stamp of this file depends on, where it is.
+        with active_manager().projection_guard(self.root, operation="derived_rows"):
             self.handle.require_write_authority(allow_diverged=True)
             self.conn.execute("BEGIN IMMEDIATE")
             self._owns_transaction = True

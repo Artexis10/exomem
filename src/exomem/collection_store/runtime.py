@@ -1225,6 +1225,8 @@ class StoreServer:
         from . import capability, derived_rows
         from .preview import preview_store
 
+        # The running rebuild's pass continues only from a step that advanced; any other return ends it.
+        rebuild, self._derived_pass = self._derived_pass, None
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
@@ -1234,24 +1236,21 @@ class StoreServer:
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
-            if self._derived_pass is not None:
+            if rebuild is not None:
                 # A rebuild is one bulk pass across its steps: before the next one it waits while
                 # another request runs (``foreground_priority``), holding no boundary and no store
                 # checkout, so a handoff or a publication never waits on it. A store request ends
                 # the wait (``call``), and the step then ends after one batch (``_derived_aside``).
-                with foreground_priority.bulk(budget=self._derived_pass):
+                with foreground_priority.bulk(budget=rebuild):
                     foreground_priority.yield_to_foreground()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 outcome = derived_rows.step(self.root, writer, aside=self._derived_aside)
                 self._derived_handle = writer.handle
         except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
-            self._derived_pass = None
             logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
-        if outcome != "advanced":
-            self._derived_pass = None
-        elif self._derived_pass is None:
-            self._derived_pass = foreground_priority.PassBudget()
+        if outcome == "advanced":
+            self._derived_pass = rebuild or foreground_priority.PassBudget()
         if outcome == "done":
             self._ticks["import"] = 0.0
         # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
@@ -1259,8 +1258,14 @@ class StoreServer:
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _derived_aside(self):
-        """Whether a rebuild step ends after its batch: a store request is queued, or another request runs."""
-        return bool(self._requests) or foreground_priority.foreground_elsewhere()
+        """Whether a rebuild step ends after its batch, which only releases the boundary sooner.
+
+        A store request is queued, a writer waits for the boundary, or another request runs. The
+        waiter count is checked on its own: a request that awaits bulk work releases every pass,
+        so ``foreground_elsewhere`` is then false, however many writers wait.
+        """
+        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+                or foreground_priority.foreground_elsewhere())
 
     def _views_tick(self):
         """Apply settled view edits, then publish pending views; returns the seconds until the next tick.

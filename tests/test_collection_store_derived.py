@@ -274,23 +274,40 @@ def _rebuilt(root):
         return derived_rows.rebuild_status(reader, store_path, DERIVED)["state"] == "ready"
 
 
+@pytest.mark.parametrize("awaiting_bulk", [False, True], ids=["alone", "beside-a-request-awaiting-bulk-work"])
 def test_a_writer_that_waits_for_the_boundary_during_a_rebuild_gets_it_after_one_batch(
     service: Service,  # noqa: F811 - the imported fixture, by name
     monkeypatch,
+    awaiting_bulk,
 ):
     """Defect: a rebuild step kept the vault mutation boundary through every batch of its member while a
     writer waited, and the next step followed at once. On a service rebuilding a large derived collection,
-    background commits waited out the mutation timeout and failed MUTATION_BUSY for the whole rebuild."""
+    background commits waited out the mutation timeout and failed MUTATION_BUSY for the whole rebuild.
+    A request that awaits bulk work, such as a governed write joining a corpus build, lets every bulk pass
+    run, so a step that asked only about foreground work missed the writer queued on the boundary."""
     root = service.root
     restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def joining():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=joining)
     try:
         _until(lambda: batches, 30)
+        if awaiting_bulk:
+            thread.start()
+            assert entered.wait(5)
         with restarted.manager.mutation_guard(root, operation="media_commit", holder_kind="background"):
             pass  # MUTATION_BUSY raises here
+        release.set()
         _until(lambda: _rebuilt(root), 30)
         assert _rows_file(derived_rows.path(connection.store_path(root))) == before
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(connection.store_path(root)))
     finally:
+        release.set()
         restarted.stop()
 
 
