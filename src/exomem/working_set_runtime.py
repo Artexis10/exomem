@@ -1521,12 +1521,12 @@ def carry_named_groups(
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find, lexstore
 
-    query_context = request_admission(vault_root, visible, status_basis, query_context)
-
     # The resolver's own reading of the turn (`analyze_turn`): pair positions
     # are kept in its token coordinates, so both must read the same text.
     turn = working_set_index.subject_text(turn)
     try:
+        # Inside the try: a failed admission abstains like every other carry fault.
+        query_context = request_admission(vault_root, visible, status_basis, query_context)
         stems = pairable_stems(turn)
         skipped = frozenset(pairable_stems(skip_terms)) if skip_terms else frozenset()
         stems = tuple(stem for stem in stems if stem not in skipped) if skipped else stems
@@ -1907,11 +1907,11 @@ def title_named_pages(
     from . import lexstore
     from .governance import egress
 
-    query_context = request_admission(vault_root, visible, status_basis, query_context)
-
     # The resolver's reading of the turn, as the carry reads it.
     turn = working_set_index.subject_text(turn)
     try:
+        # Inside the try: a failed admission lists nothing like every other listing fault.
+        query_context = request_admission(vault_root, visible, status_basis, query_context)
         from . import bm25 as bm25_module
 
         sentences = _positioned_units(turn)
