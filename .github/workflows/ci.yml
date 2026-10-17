@@ -127,7 +127,7 @@ jobs:
           --dist loadfile
           --max-worker-restart=0
           -o timeout=180
-          -v
+          -vv
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
@@ -230,7 +230,7 @@ jobs:
           --dist loadfile
           --max-worker-restart=0
           -o timeout=180
-          -v
+          -vv
           --group=${{ matrix.shard }}
           --splitting-algorithm=duration_based_chunks
           --durations-path=.test_durations.json
