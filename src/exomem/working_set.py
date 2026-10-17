@@ -277,8 +277,9 @@ RETRIEVAL_CARRY_MAX_DOMAINS = 3
 #: which is the turn this feature exists to serve.
 RETRIEVAL_CARRY_MIN_PAGES = 100
 
-#: The ledger fields of each carry rung's span (`working_set.carry.phrase`,
-#: `working_set.carry.title`) and of each `working_set.lanes.<position>` span.
+#: The ledger fields of each carry rung's span (`recall.working_set.carry.phrase`,
+#: `recall.working_set.carry.title`) and of each `working_set.lanes.<position>`
+#: span. The rung spans are ledger-only: the activation timing table stays flat.
 CARRY_SPAN_FIELDS = (
     call_spans.ADMITTED_PAGES,
     call_spans.STEM_ROWS,
@@ -2359,7 +2360,7 @@ def _carry_by_retrieval(
     with (
         _span(timings, "working_set.carry"),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
-        _span(timings, "working_set.carry.phrase", measured),
+        call_spans.span("recall.working_set.carry.phrase", measured),
     ):
         from . import working_set_runtime
 
@@ -2447,7 +2448,7 @@ def _carry_groups_by_retrieval(
     with (
         _span(timings, "working_set.carry"),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
-        _span(timings, "working_set.carry.phrase", measured),
+        call_spans.span("recall.working_set.carry.phrase", measured),
     ):
         from . import working_set_runtime
 
@@ -2626,7 +2627,7 @@ def _title_named_anchors(
     with (
         _span(timings, "working_set.carry"),
         call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
-        _span(timings, "working_set.carry.title", measured),
+        call_spans.span("recall.working_set.carry.title", measured),
     ):
         from . import working_set_runtime
 

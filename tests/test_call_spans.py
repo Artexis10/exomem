@@ -364,8 +364,6 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "egress.cross_check",
         "egress.scrub",
         "spans.overflow",
-        # Recorded through `FindTimings`, which prefixes every stage with
-        # `recall.`; the source pin below finds the stage name itself.
         "recall.working_set.carry.phrase",
         "recall.working_set.carry.title",
         "runtime.gc",
@@ -401,8 +399,6 @@ def test_every_declared_span_name_is_recorded_somewhere_in_the_source() -> None:
         # `index.<component>` is recorded from one f-string seam with the
         # component name supplied by the caller, so pin the component instead.
         and f'"{name.removeprefix("index.")}"' not in body
-        # `recall.<stage>` likewise, from `FindTimings.span`.
-        and f'"{name.removeprefix("recall.")}"' not in body
     )
     assert not missing, f"documented span names nothing records: {missing}"
 
