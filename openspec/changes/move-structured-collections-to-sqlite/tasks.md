@@ -217,7 +217,7 @@ October 4 private runtime/create foundation: independent review approves current
   - P1b.3c, the owner step that supersedes an unadmitted migration store whose fence is already cut;
   - P1b.4a, the owner step that abandons an export that cannot finish.
 
-  Then `collections-store-v1` is declared in the release's upgrade manifest, and the preview flag is retired.
+  Then `collections-store-v1` is declared in the release's upgrade manifest, the preview flag is retired, and the pre-GA re-import disclosure (`capability.PRE_GA_REIMPORT`) is deleted from the import answers.
 
 ## P4. Declared collection types
 

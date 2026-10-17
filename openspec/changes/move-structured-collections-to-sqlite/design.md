@@ -1127,7 +1127,7 @@ The orchestrator's rulings on #1459 are folded into the sections cited. The crit
 - **N3 confirmed.** A multi-host vault cannot migrate until its coordinator explicitly advertises `collections-store-v1`. This is acceptable because the coordinator is Exomem's own code and ships in the same release. The preflight refusal names the exact release to upgrade the coordinator to: the version of the running release that declares `collections-store-v1`, read from that release's own upgrade manifest at runtime rather than hard-coded (§8 C20, §16 A5).
 - **N4 confirmed.** The replica is published at most once per 60 s under steady writes (configurable), and synchronously at every orderly boundary: lease release, shutdown, quiesce, upgrade handoff and export (§16 A9).
 - **Amendment 11** (pinned links and the compiler-lane rewrite move to a follow-up change) is noted by the owner.
-- **D7 ruled by the owner (2026-10-16): store mode requires writer-lease coordination.** A stdio install runs the single-host coordinator to use the store; without one every store step refuses with `COLLECTION_STORE_COORDINATION_REQUIRED` (A11). A Cloud cell renders no lease URL today, so it serves no store until P1b.7 gives cells their coordination.
+- **D7 ruled by the owner (2026-10-16): store mode requires writer-lease coordination.** A stdio install runs the single-host coordinator to use the store; without one every store step refuses with `COLLECTION_STORE_COORDINATION_REQUIRED` (A11). A Cloud cell renders no lease URL today, so it serves no store; no task yet gives cells writer-lease coordination.
 
 ### Earlier rulings
 

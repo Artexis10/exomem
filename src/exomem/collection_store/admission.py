@@ -869,7 +869,7 @@ def coordination_required(operation):
     Store mode requires lease coordination (ruled D7): the capability fence, the head
     exchange and takeover all live in the coordinator. This prevents an install from
     reaching a store that no fence protects, or a step that refuses for an unrelated
-    reason; a false refusal costs the owner the coordinator setup it names.
+    reason; a false refusal costs the owner a rerun with the service's lease environment.
     """
     # It names what this process observes: a CLI run from a shell without the service's
     # EnvironmentFile sees no lease URL even where the service has a coordinator.
