@@ -173,9 +173,11 @@ def _tip_is_live(
     try:
         if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
             # A Records item is current only while its Records receipt agrees.
-            curation._verify_records_receipt(  # noqa: SLF001
+            if curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
-            )
+            ):
+                # The store's item version is the postimage; the item's file is a generated view.
+                return True
         if after == "absent":
             return curation._guarded_absent(vault_root, path)  # noqa: SLF001
         return curation._read_target(vault_root, path)[1] == after  # noqa: SLF001

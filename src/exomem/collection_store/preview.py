@@ -267,6 +267,11 @@ def _mutate(vault_root, method, *args, **kwargs):
     """Own the leaf boundary when the dispatcher holds only its writer fence."""
     from ..writer_lease import active_manager
 
+    if kwargs.get("_prepare") is not None:
+        # A prepare writes no row and rolls back. The curation command that asks already holds the
+        # boundary, so a second one would only advance the commit generation a second time.
+        return method(*args, **kwargs)
+
     with active_manager().mutation_guard(vault_root, operation=method.__name__):
         return method(*args, **kwargs)
 
