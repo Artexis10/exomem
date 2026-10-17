@@ -1,6 +1,12 @@
 # Design
 
-The programme uses one public MCP canary in the existing recall runner. Private positive cases declare the read arguments, expected state and required references/material. The runner keeps one authenticated client session and times each complete call through parsed response validation. It reuses `latency_watch` and the packaged programme bar, with independent availability and coverage results. It stops a failed positive series after recording the attempt. JSON, exit status and a structured warning connect to the maintained operator runner; there is no new scheduler or repair owner. Production probes stay read-only, while natural write observations and disposable write acceptance retain their own provenance. A deployment change invalidates previous acceptance.
+The programme uses one packaged MCP observer. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
+
+The command selects availability or acceptance. Availability checks every configured case once and requires positive coverage for each represented tool. Its successful result can coexist with insufficient latency evidence. Acceptance retains the declared sample, warmth, contention and deployment requirements. Observer identity remains separate from deployment identity. A deployment change invalidates previous acceptance.
+
+A standard systemd user timer runs the availability check through an explicitly selected installed observer. The observer remains independent of the worker interpreter and upgrade path. One bounded oneshot unit prevents overlap; the application adds no scheduler or repair loop. Private configuration supplies existing credentials. Missing authorization leaves installation unconfigured; installation never issues a grant. The latest report is atomic and owner-only.
+
+A failed unit, structured warning and offline doctor status provide local visibility. They do not deliver a push notification. Doctor distinguishes missing configuration, disabled scheduling, failed execution, stale evidence and fresh results. An old successful report cannot conceal a later failed execution. Notification delivery remains open until an authorized channel exists and delivery is verified. Production probes stay read-only. Natural write observations and disposable write acceptance retain separate provenance.
 
 ## Ordinary write follow-through
 

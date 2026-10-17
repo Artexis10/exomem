@@ -8,9 +8,11 @@ Define comparable latency evidence across public requests, inner operations and 
 
 ### Requirement: One shared canary measures live public calls and recall availability
 
-The existing recall runner SHALL provide a read-only MCP canary mode for configured positive recall and activation cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and use the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
+One packaged observer SHALL provide a read-only MCP canary mode for configured positive recall and activation cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and use the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
 
-The canary SHALL report availability separately from latency. A timeout, unavailable response, malformed terminal, missing expected reference or missing expected material SHALL fail a positive case. A fast refusal SHALL NOT pass availability. The runner SHALL emit content-free JSON, a failing exit status and a structured warning for failed evidence. The maintained operator runner SHALL consume that result for alerts and release checks; the canary SHALL NOT change admission, initiate repairs or add another scheduler. Unmeasured operations and missing alert installation SHALL remain visible as incomplete work.
+The canary SHALL report availability separately from latency. A timeout, unavailable response, malformed terminal, missing expected reference or missing expected material SHALL fail a positive case. A fast refusal SHALL NOT pass availability. The runner SHALL emit content-free JSON, a failing exit status and a structured warning for failed evidence. A standard systemd user timer SHALL run availability checks through an independently selected installed observer. The existing script SHALL delegate its MCP mode to that observer. The canary SHALL NOT change admission, initiate repairs or add an application scheduler. Local failed-unit, journal and doctor status SHALL NOT claim delivered notifications. Unmeasured operations, missing authorization and unverified notification delivery SHALL remain visible as incomplete work.
+
+The selected check SHALL determine exit status. Availability SHALL require every configured case and positive tool coverage. Acceptance SHALL apply all latency and provenance requirements.
 
 #### Scenario: A fast refusal fails availability
 - **WHEN** a positive recall case returns a typed warming refusal below the latency ceiling
@@ -26,6 +28,35 @@ The canary SHALL report availability separately from latency. A timeout, unavail
 - **WHEN** a case fails before the declared sample count completes
 - **THEN** the report retains attempted cases and marks the remaining coverage incomplete
 - **AND** it does not infer a passing percentile from the successful subset
+
+#### Scenario: Healthy availability has insufficient latency evidence
+
+- **GIVEN** every configured positive case returns its expected state, reference and material
+- **WHEN** the observer checks availability with fewer samples than the latency contract requires
+- **THEN** the selected availability check passes
+- **AND** acceptance and latency evidence remain incomplete
+- **AND** the observer does not report an availability failure for missing latency samples
+
+#### Scenario: A later failed execution cannot inherit an old success
+
+- **GIVEN** a previous canary report records successful availability
+- **WHEN** the scheduled observer fails before it publishes a new report
+- **THEN** offline status exposes the failed execution and the age of the previous report
+- **AND** the previous result does not establish current healthy availability
+
+#### Scenario: Observer identity does not attest the deployment
+
+- **WHEN** an installed observer checks a separately versioned deployment
+- **THEN** its report identifies observer provenance separately from caller-verified deployment provenance
+- **AND** availability does not require matching package versions
+- **AND** acceptance retains its deployment-proof requirement
+
+#### Scenario: Missing authorization leaves monitoring unconfigured
+
+- **GIVEN** no existing authorized credential is available for the configured endpoint
+- **WHEN** the operator prepares the monitor
+- **THEN** installation reports missing configuration without enabling an unusable scheduled check
+- **AND** it does not issue a credential or change runtime admission
 
 ### Requirement: Ordinary warm public writes meet the subsecond target
 
