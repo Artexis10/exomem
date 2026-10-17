@@ -2485,7 +2485,7 @@ class EpistemicGraphIndex:
                 if publishing:
                     conn.close()
                     return None
-            graph_sync.limit_graph_metadata_read(conn)
+            graph_sync.limit_graph_row_read(conn)
             conn.execute("BEGIN")
             # This marker validation MUST remain the first read in the transaction.
             values = dict(
@@ -2898,7 +2898,7 @@ class EpistemicGraphIndex:
 
     @staticmethod
     def _availability_metadata(conn: sqlite3.Connection) -> dict[str, str]:
-        graph_sync.limit_graph_metadata_read(conn)
+        graph_sync.limit_graph_row_read(conn)
         return dict(
             conn.execute(
                 "SELECT key, value FROM graph_meta WHERE key IN "
