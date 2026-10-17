@@ -504,11 +504,12 @@ Expected result: the cell serves from a new claim on the local class, and its
 old volume is retained.
 
 For the owner's cell, check the restart against the existing gate, cellctl's
-10-minute readiness deadline (`upgrade_ready_deadline` in
-`infra/cellctl/src/cellctl/decide.py`). The next upgrade rolls back a cell
-that is not ready within it after its start. Compare it with the time from the
-restore's end to `ready`, which `kubectl -n "$NS" get events` shows. If the
-restart comes close to the deadline, raise it before the next upgrade.
+readiness deadline (`cellctl.upgradeReadyDeadlineMinutes` in
+`infra/helm/platform/values.yaml`, 30 minutes by default). The next upgrade
+rolls back a cell that is not ready within it after its start. Compare it with
+the time from the restore's end to `ready`, which `kubectl -n "$NS" get events`
+shows. If the restart comes close to the deadline, raise it (the chart accepts
+5 to 120) before the next upgrade.
 
 If the move fails:
 

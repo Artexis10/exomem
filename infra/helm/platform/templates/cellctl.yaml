@@ -229,6 +229,8 @@ spec:
             {{- end }}
             - name: CELLCTL_INIT_DEADLINE_MINUTES
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
+            - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
+              value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
             # D8: nightly backup window and stagger.
             - name: CELLCTL_BACKUP_WINDOW
               value: {{ .Values.cells.backupWindow | quote }}

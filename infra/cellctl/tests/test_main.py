@@ -189,3 +189,17 @@ def test_cellctl_refuses_to_start_without_a_valid_alert_threshold(monkeypatch, n
 
     with pytest.raises(ValueError, match=name):
         main.build_cluster_config()
+
+
+@pytest.mark.parametrize("bad", [None, "0"], ids=["missing", "not-positive"])
+def test_cellctl_refuses_to_start_without_a_valid_upgrade_readiness_deadline(monkeypatch, bad: str | None) -> None:
+    # The chart owns the number: a guessed one either rolls back a healthy slow
+    # start or keeps a broken image up too long.
+    name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
+    if bad is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, bad)
+
+    with pytest.raises(ValueError, match=name):
+        main.build_reconcile_config()
