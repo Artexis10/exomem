@@ -510,6 +510,9 @@ rolls back a cell that is not ready within it after its start. Compare it with
 the time from the restore's end to `ready`, which `kubectl -n "$NS" get events`
 shows. If the restart comes close to the deadline, raise it (the chart accepts
 5 to 120) before the next upgrade.
+No alert fires while a cell waits out this deadline: `cell-unavailable` skips a
+cell under a hold, so a broken image stays down until the restore with only the
+rollout pause to show it.
 
 If the move fails:
 
