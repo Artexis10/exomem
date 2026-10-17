@@ -591,6 +591,29 @@ def test_a_collection_partly_withheld_after_preparation_refuses_the_leaf_before_
         service.stop()
 
 
+def test_a_direct_curation_apply_to_a_partly_withheld_collection_refuses_before_approval(env, capsys, monkeypatch):
+    """A direct apply must preserve the unapproved run when its collection becomes partly withheld."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        run = commit_one_leaf_as_external(root)
+        plans = curation.CurationStore(root)
+        plan_id, fingerprint = plans.identities(run)
+        withhold_from_external(root, ORIGINAL_ITEM)
+        before = store_head(root)
+        assert refusal(lambda: maintain_as(
+            EXTERNAL_CALLER, root, curation_action="apply", run_id=run, plan_id=plan_id,
+            expected_plan_fingerprint=fingerprint, why="Approve the sealed item.",
+            idempotency_key="direct-apply-partly-withheld",
+        ))[0] == "CURATION_BINDING_STALE"
+        assert not plans.approval_path(run).exists()
+        assert plans.reconstruct(run)["receipts"] == []
+        assert store_head(root) == before
+    finally:
+        service.stop()
+
+
 def test_a_leaf_committed_to_a_collection_since_partly_withheld_is_not_read_back_as_verified(env, capsys, monkeypatch):
     """Defect: the store's check of a committed step raises when the caller can read the item but not the
     whole collection, so the final coverage pass ends in a raw error instead of reporting that it cannot

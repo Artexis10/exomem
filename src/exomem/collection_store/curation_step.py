@@ -77,7 +77,9 @@ def resolve_guards(vault_root, writer, binding, args):
     collection_id, item_key = prepared["collection_id"], prepared.get("item_key")
     update = "expected_item_version" in args
     try:
-        container, version = writer.current_guards(collection_id, item_key if update else None)
+        # A seal is usable only under the write policy, including before a direct apply creates approval.
+        with writer.read_snapshot(mutation=True):
+            container, version = writer.current_guards(collection_id, item_key if update else None)
     except collections.CollectionError as error:
         # nosemgrep: ep-word-membership -- the writer's two absence codes, fixed by the writer.
         if error.code in {"COLLECTION_NOT_FOUND", "RECORD_NOT_FOUND"}:
