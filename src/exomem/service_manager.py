@@ -941,7 +941,9 @@ _MIGRATOR_OUTPUT_MAX_BYTES = 65536
 #: step (the target declares it and the operator file is usable), so that a standby that
 #: cannot be finished never pays for a pre-import. It carries no credential.
 STANDBY_COLLECTIONS_ENV = "EXOMEM_STANDBY_COLLECTIONS_STEP"
-#: The collections outcome recorded when this supervisor's wait for the migrator ran out.
+#: What this supervisor records when its wait for the migrator ran out: the collections
+#: outcome while a state migration may have been cut, otherwise the code beside the
+#: outcome that the stopped migrator left.
 MIGRATOR_TIMED_OUT = "timed_out"
 
 
@@ -1073,6 +1075,8 @@ class WorkerRuntime:
         self.collections_migration: dict[str, Any] | None = None
         #: A collections migrator's output, kept open until its exit is proven.
         self._migrator_output: Any = None
+        #: Whether this handoff's target declares a state migration, from `migration_required`.
+        self._state_migration_declared = True
         self.standby_waiting: str | None = None
         #: What the replacement last reported waiting on after the old worker
         #: stopped. Recorded for the handoff; it gates nothing.
@@ -1412,6 +1416,14 @@ class WorkerRuntime:
                 # ends in a killed migrator that left a migration half done.
                 command += ["--migrate-collections", "--deadline-monotonic", f"{publish_by:.3f}"]
                 environment = {OPERATOR_TOKEN_ENV: token}
+        before = None
+        if collections and not self._state_migration_declared:
+            from .collection_store import handoff_state
+
+            try:
+                before = handoff_state.left(Path(vault))
+            except Exception:  # noqa: BLE001 - without it a timed-out migrator fails the upgrade, as before
+                log.warning("collection store state before the migrator could not be read", exc_info=True)
         # A private unlinked file, not a pipe: a pipe could fill before the child exits, and a
         # descendant holding it open would keep its end from ever arriving. It is read only
         # once the child is gone, here or by the stop that follows a timed-out wait, so the
@@ -1421,9 +1433,14 @@ class WorkerRuntime:
             await self._spawn(command, environment=environment, stdout=self._migrator_output)
             await asyncio.wait_for(self.child.wait(), deadline.remaining(timeout))
         except TimeoutError:
-            if collections:
-                self.collections_migration = {"state": "ran", "outcome": MIGRATOR_TIMED_OUT}
-            raise
+            if before is None:
+                # A state migration may be what the wait cut short, and nothing here can read
+                # how far it got, so the upgrade fails into recovery.
+                if collections:
+                    self.collections_migration = {"state": "ran", "outcome": MIGRATOR_TIMED_OUT}
+                raise
+            await self._settle_stopped_migrator(Path(vault), before)
+            return
         except BaseException:
             self._release_migrator_output()
             raise
@@ -1436,6 +1453,24 @@ class WorkerRuntime:
         # A completed migrator is not proof its children have stopped.
         await self.stop(timeout=deadline.remaining(timeout))
 
+    async def _settle_stopped_migrator(self, vault: Path, before: Any) -> None:
+        """Classify a collections migrator this wait stopped by what it left, as it classifies itself.
+
+        A cutover that published its store finishes once begun, and on a large store that
+        can outlast the finishing reserve. Failing the upgrade then would make every resume
+        repeat it. So a stopped migrator settles like any other: a pending store is served
+        until a rerun, the next handoff or the owner's apply finishes it; nothing published
+        completes in file mode; only a store set aside or unreadable fails the upgrade.
+        """
+        from .collection_store import handoff_state
+
+        # The failure path's stop bound; an exit it cannot prove still fails the upgrade.
+        await self.stop(timeout=5)
+        found = handoff_state.published(before, handoff_state.left(vault)) or handoff_state.ABANDONED
+        self.collections_migration = {"state": "ran", "outcome": found, "code": MIGRATOR_TIMED_OUT}
+        if found == handoff_state.UNSAFE:
+            raise RuntimeError("stopped migrator left the collection store unsafe to serve")
+
     async def rerun_pending_collections(self, target: dict[str, Any]) -> None:
         """Run the migrator once more when its collections step left a published store pending.
 
@@ -1443,8 +1478,9 @@ class WorkerRuntime:
         its unadmitted lease until the lease expires, so the rerun first waits out the
         service's lease TTL (`EXOMEM_WRITER_LEASE_TTL`). One rerun and no more: each attempt
         costs a lease TTL of downtime, and a fault that persists does not clear on a second
-        try. A store still pending after it is served read-only until the next handoff or
-        the owner's apply finishes it, so this never fails the upgrade by itself.
+        try. A store still pending after it is served, read-only behind a cut fence or in
+        file mode before the cut, until the next handoff or the owner's apply finishes it,
+        so this never fails the upgrade by itself.
         """
         note = self.collections_migration
         if not isinstance(note, dict) or note.get("state") != "ran":
@@ -1585,6 +1621,7 @@ class WorkerRuntime:
         declares no such migration gets exactly the record it got before.
         """
         migrate, reason = self._state_migration_required(target)
+        self._state_migration_declared = migrate
         self.collections_migration = None
         declared = self._collections_declared(target)
         if declared == "probe_failed":

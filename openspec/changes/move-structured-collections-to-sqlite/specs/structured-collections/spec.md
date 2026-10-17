@@ -286,8 +286,12 @@ A vault SHALL move from file-canonical collections to the store only through a d
 #### Scenario: A failure after publication that persists keeps the vault serving
 - **WHEN** a managed handoff's migrator and its one rerun both fail after the store was published
 - **THEN** the replacement starts, the handoff record names the step `pending`, and the vault serves reads
-- **AND** every writer inside the lease is refused until the step finishes
+- **AND** after the fence cut every writer inside the lease is refused until the step finishes, and before it writes commit to the still-canonical files
 - **AND** the next handoff imports a file changed outside the lease meanwhile before it admits the store
+
+#### Scenario: A migrator stopped by the supervisor settles by what it left
+- **WHEN** the supervisor's wait stops a migrator whose published store had not finished
+- **THEN** the replacement starts, and the handoff record names the step `pending` with the code `timed_out`
 
 #### Scenario: A swap that stopped half way fails the handoff
 - **WHEN** a managed handoff's migrator stops after it set the live store aside and before the new store is in place

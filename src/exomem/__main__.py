@@ -4159,8 +4159,8 @@ def _simple_maintain_main(argv: list[str]) -> int:
             if collections is not None:
                 print(f"Collections: {collections['outcome']}")
         # Only a store this host cannot serve fails the handoff. A published store that still
-        # carries its intent serves reads, behind a fence that refuses every write, until the
-        # next handoff or the owner's offline apply finishes it; the record names it pending.
+        # carries its intent is served, read-only behind a cut fence or in file mode before the
+        # cut, until the next handoff or the owner's offline apply finishes it; it is pending.
         return 1 if unsafe else 0
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]

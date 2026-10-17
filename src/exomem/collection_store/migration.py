@@ -25,7 +25,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from .. import held_fs, state_paths
+from .. import state_paths
 from . import (
     admission,
     authority,
@@ -40,6 +40,7 @@ from . import (
     snapshot,
     takeover,
 )
+from . import handoff_state
 from .connection import CollectionStoreError
 
 logger = logging.getLogger(__name__)
@@ -638,7 +639,7 @@ def _hold_lease(session, manager, root, *, fenced):
 
 
 #: How a managed handoff's migration ends without publishing (design §10, D2).
-ABANDONED = "abandoned"
+ABANDONED = handoff_state.ABANDONED
 #: Why it was abandoned when no carry-forward reason above says so: its deadline passed,
 #: or a step refused or failed before anything was published.
 DEADLINE, REFUSED = "deadline", "refused"
@@ -780,55 +781,10 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             **({"restored": restored} if restored is not None else {}), **result}
 
 
-#: What a managed handoff's collections step ended in, as the supervisor records it: closed
-#: outcomes of this module, beside ``ABANDONED``, ``RESTORED`` and the report verdicts.
-#: ``pending``: a published store still carries its intent; ``unfinished``: an apply that
-#: reported none of these, which published nothing either; ``unsafe``: this host's live
-#: store is missing beside the marker that routes it while a swap's superseded store
-#: remains, or the store or marker this step left cannot be read.
-MIGRATED, PENDING, UNFINISHED, UNSAFE = "migrated", "pending", "unfinished", "unsafe"
-#: `_left`'s reading of a store or marker that could not be read.
-_UNREADABLE = "unreadable"
-
-
-def _left(root):
-    """The durable state a migration leaves on this host: (marker, live store).
-
-    The marker is its bytes, None or ``_UNREADABLE``. The store is "absent", "aside" (absent
-    beside a marker while a superseded store remains: a swap stopped between its renames),
-    ``_UNREADABLE``, ``PENDING`` (it carries a migration intent) or "settled".
-    """
-    try:
-        marker = authority.read_marker(root)
-    except (CollectionStoreError, held_fs.HeldFsError, OSError):
-        marker = _UNREADABLE
-    path = connection.store_path(root)
-    if not path.exists():
-        aside = marker is not None and any(path.parent.glob(path.name + takeover.SUPERSEDED + "*"))
-        return marker, "aside" if aside else "absent"
-    try:
-        with closing(connection.open_head_reader(path)) as reader:
-            intent = authority.pending_create(reader)
-    except (CollectionStoreError, sqlite3.DatabaseError, ValueError):
-        return marker, _UNREADABLE
-    return marker, PENDING if intent is not None and intent["kind"] == authority.MIGRATE else "settled"
-
-
-def _published(before, after):
-    """What a route that raised left published, from durable state alone; None for nothing.
-
-    Only the cutover's admission writes the marker, so a marker that changed under the route
-    was this migration's, installed. A store set aside, or left unreadable when it was not
-    before, is never read as nothing published: serving it in file mode could fork it.
-    """
-    (marker_before, store_before), (marker, store) = before, after
-    if store == "aside" or (_UNREADABLE in (marker, store) and _UNREADABLE not in (marker_before, store_before)):
-        return UNSAFE
-    if store == PENDING:
-        return PENDING
-    if marker != marker_before and _UNREADABLE not in (marker_before, store_before):
-        return MIGRATED
-    return None
+#: What a managed handoff's collections step ended in: ``handoff_state``'s closed outcomes,
+#: beside ``ABANDONED``, ``RESTORED`` and the report verdicts.
+MIGRATED, PENDING, UNFINISHED, UNSAFE = (handoff_state.MIGRATED, handoff_state.PENDING,
+                                         handoff_state.UNFINISHED, handoff_state.UNSAFE)
 
 
 def settle_handoff(vault_root, *, deadline) -> dict:
@@ -840,26 +796,26 @@ def settle_handoff(vault_root, *, deadline) -> dict:
     published, so the release completes in file mode and the next handoff retries it. A
     refusal or a fault settles by what it left durable, never by where it raised: before
     publication it is abandoned; after admission the store is migrated; a published store
-    that still carries its intent is ``pending``: the replacement serves the vault's reads,
-    and the cut fence refuses its writes, until the next handoff or the owner's apply
-    finishes it, rechecking every file first.
+    that still carries its intent is ``pending``: the replacement serves the vault, read-only
+    behind a cut fence or in file mode before the cut, until the next handoff or the owner's
+    apply finishes it, rechecking every file first.
     ``unsafe`` is the one outcome that fails the handoff.
     """
     root = Path(vault_root).resolve()
-    before = _left(root)
+    before = handoff_state.left(root)
     try:
         result = admission.migrate_route(root, step="handoff", deadline=deadline)
     except Exception as error:  # noqa: BLE001 - classified by the durable state it left, below
         logger.warning("the managed collections migration raised", exc_info=True)
         code = getattr(error, "code", None) or type(error).__name__
-        published = _published(before, _left(root))
+        published = handoff_state.published(before, handoff_state.left(root))
         if published is None:
             # A deadline a copy or scan ran into is this handoff's budget, as in `cutover`.
             result = _abandoned(None, DEADLINE if isinstance(error, TimeoutError) else REFUSED)
             return {**result, "code": code, "outcome": ABANDONED}
         return {"mode": "collections-store", "step": "apply", "status": "raised", "code": code,
                 "outcome": published}
-    published = _published(before, _left(root))
+    published = handoff_state.published(before, handoff_state.left(root))
     if result.get("status") == "marker_admitted":
         outcome = MIGRATED
     elif published == UNSAFE:

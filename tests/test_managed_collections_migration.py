@@ -708,10 +708,11 @@ def test_a_failure_after_publication_that_a_rerun_clears_finishes_in_the_same_ha
         serving.stop()
 
 
-def test_a_migrator_the_supervisor_stopped_is_recorded_as_timed_out_with_its_output(
+def test_a_migrator_the_supervisor_stopped_before_it_published_completes_in_files_with_its_output(
         service, tmp_path, monkeypatch, capsys):
-    """A timed-out migrator recorded as an unrecognized outcome, or whose last output never reaches
-    the service journal because the supervisor closed its output before the migrator stopped."""
+    """A migrator stopped before it published anything that fails the upgrade into recovery, is
+    recorded as an unrecognized outcome, or whose last output never reaches the service journal
+    because the supervisor closed its output before the migrator stopped."""
     root = service
     operator_file(tmp_path)
     monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 4.0)
@@ -728,6 +729,40 @@ def test_a_migrator_the_supervisor_stopped_is_recorded_as_timed_out_with_its_out
         "migration.settle_handoff = settle_handoff\n"))
     capsys.readouterr()
     result = upgrade(tmp_path, Handoff(tmp_path, root), hung)
-    assert not result["ok"]
-    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "timed_out"}
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "abandoned", "code": "timed_out"}
     assert "the migrator stopped mid-step" in capsys.readouterr().out
+    assert authority.read_marker(root) is None and not connection.store_path(root).exists()
+
+
+def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_serving(
+        service, tmp_path, monkeypatch):
+    """A migrator the supervisor's wait stopped while its published store finished, as on a store
+    larger than the finishing reserve, that fails the upgrade into recovery; every resume then meets
+    the same wall until the owner applies offline."""
+    root = service
+    operator_file(tmp_path)
+    # Short, so the lease each stopped migrator keeps expires within the test.
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
+    monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 10.0)
+    monkeypatch.setattr(service_manager, "MIGRATION_FINISH_SECONDS", 4.0)
+    # Every finish outlasts the wait: the marker install never returns before the stop.
+    slow = candidate(tmp_path, MIGRATE, name="-slow-finish", fault=(
+        "import time\n"
+        "from exomem.collection_store import admission\n"
+        "def install_marker(*arguments, **options):\n"
+        "    time.sleep(60)\n"
+        "admission._install_marker = install_marker\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), slow)
+    assert result["ok"], result
+    assert result["phase"] == "ready"
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "pending", "code": "timed_out",
+        "first_attempt": {"outcome": "pending", "code": "timed_out"}}
+    assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
+    serving = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        assert KEY in rows(root, WORK)
+    finally:
+        serving.stop()
