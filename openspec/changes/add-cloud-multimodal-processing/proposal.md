@@ -1,12 +1,20 @@
+## Delivery status (2026-10-17)
+
+Documents and OCR shipped in [#1661](https://github.com/Artexis10/exomem/pull/1661), with fleet defaults in [#1798](https://github.com/Artexis10/exomem/pull/1798).
+[#1807](https://github.com/Artexis10/exomem/pull/1807) corrected CJK keyword recall.
+Recorded deployment acceptance covers PDF, English OCR and Japanese OCR through the Cloud MCP connector.
+The task checklist separates that delivery from remaining engine selection, image search, speech, HEIC and broader resource acceptance.
+This change stays active; documents/OCR delivery does not imply whole-change completion.
+
 ## Why
 
-Exomem Cloud cells search text only. The Cloud image is built without media engines, so images, documents beyond plain text, audio and video are stored but cannot be searched by what they contain:
+The original Cloud cells searched text only. The original Cloud image was built without media engines, so images, documents beyond plain text, audio and video are stored but cannot be searched by what they contain:
 
 - no Tesseract and no Pillow, so images get no OCR;
 - no CLIP, so images cannot be found by what they show;
 - no speech engine, so audio and video get no transcript.
 
-The media worker still starts in every cell and fails each job:
+Before the documents/OCR slice, the media worker started in every cell and failed each job:
 
 - jobs stay blocked forever, with a message that tells the tenant to install a dependency;
 - every query reports `degraded: ["clip"]`.
