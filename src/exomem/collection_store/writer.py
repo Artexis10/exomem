@@ -2206,6 +2206,7 @@ class CollectionWriter:
         held=None,
         sources=(),
         request_id=None,
+        _prepare=None,
     ):
         records._validate_why(why)
         hold = records._validate_hold(hold)
@@ -2291,6 +2292,9 @@ class CollectionWriter:
                     if delivery is not None
                     else None
                 )
+                if _prepare is not None and existing is not None:
+                    # A prepared append always creates, as the file-mode preparation does.
+                    raise collections.CollectionError("RECORD_ID_CONFLICT", "record key already exists")
                 if existing is not None:
                     insert = self.connection.execute(
                         "SELECT t.transition_id FROM audit_effects e JOIN txns t ON t.txn_id = e.txn_id WHERE e.row_id = ? AND e.version_before IS NULL AND e.effect IN ('insert', 'resume') ORDER BY e.txn_id LIMIT 1",
@@ -2330,6 +2334,10 @@ class CollectionWriter:
                         )
                     else:
                         path = f"{manifest.storage.source}/{key}.md"
+                    if _prepare is not None:
+                        # A curation seal asks what this append would commit, then stops before any row.
+                        _prepare({"manifest": manifest, "item_key": key, "path": path, "payload_hash": payload,
+                                  "body": body, "container_hash": before_container})
                     verified, source_guards = self._sources(sources)
                     self._preflight_views(([path] if _renders_rows(manifest) else [])
                                           + ([resumed["view_path"]] if resumed else []))
@@ -2387,6 +2395,7 @@ class CollectionWriter:
         held=None,
         sources=(),
         request_id=None,
+        _prepare=None,
     ):
         records._validate_why(why)
         hold = records._validate_hold(hold)
@@ -2516,6 +2525,10 @@ class CollectionWriter:
                             "NOOP_RECORD_PRESENTATION", "managed presentation is already current"
                         )
                 self._twins(manifest.collection_id, key, _natural_key(manifest, final))
+                if _prepare is not None:
+                    # A curation seal asks what this update would commit, then stops before any row.
+                    _prepare({"manifest": manifest, "item_key": key, "path": before["view_path"],
+                              "container_hash": self._container(row), "item_version": self._version(before)})
                 verified, source_guards = self._sources(sources)
                 self._preflight_views(([before["view_path"]] if _renders_rows(manifest) else [])
                                       + ([resumed["view_path"]] if resumed else []))

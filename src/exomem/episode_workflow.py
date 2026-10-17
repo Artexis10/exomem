@@ -274,6 +274,20 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     return _projection(_Session(vault_root, episode))
 
 
+def bound_runs(vault_root: Path, episode: Any) -> list[str]:
+    """The curation runs this episode's leaves are bound to; none for an unknown episode."""
+    try:
+        state = _Session(vault_root, episode).state
+    except (curation.CurationError, model.EpisodeError):
+        return []
+    return [
+        leaf["binding"]["run_id"]
+        for candidate in state["candidates"]
+        for leaf in candidate["leaves"]
+        if leaf["binding"] is not None
+    ]
+
+
 # --- the final coverage pass (close-memory-loop 4.2) --------------------------
 
 
@@ -287,6 +301,26 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     post = item.get("postcondition") if isinstance(item, Mapping) else None
     path = post.get("path") if isinstance(post, Mapping) else None
     return path if isinstance(path, str) else None
+
+
+def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str) -> bool:
+    """Whether the page a committed leaf wrote can be read back.
+
+    A Records item on the store thread has a generated view that the store publishes after its
+    commit, so until then the store's own transaction answers for it, not the file.
+    """
+    if (vault_root / path).is_file():
+        return True
+    try:
+        item = curation.CurationStore(vault_root).load_plan(binding["run_id"])["binding_manifest"][
+            binding["ordinal"]
+        ]
+    except (curation.CurationError, KeyError, IndexError, TypeError):
+        return False
+    return (
+        item.get("kind") in curation.RECORDS_STEP_KINDS
+        and curation.store_writer(vault_root, item.get("prepared") or {}) is not None
+    )
 
 
 #: Distinct candidates landing on one page before the pass reports it.
@@ -379,7 +413,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                 path = _written_path(session.vault_root, leaf["binding"])
                 if (
                     path is None
-                    or not (session.vault_root / path).is_file()
+                    or not _page_is_there(session.vault_root, leaf["binding"], path)
                     or (keep is not None and not keep(path))
                 ):
                     path, readback = None, "unavailable"
@@ -833,6 +867,7 @@ def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
     """
     from . import record_governance
     from . import structured_collections as collections
+    from .collection_store.preview import selected_writer
     from .vault import PathGuardError
 
     try:
@@ -840,6 +875,11 @@ def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
         step = plan["steps"][binding["ordinal"]]
         item = plan["binding_manifest"][binding["ordinal"]]
         if step["kind"] in curation.RECORDS_STEP_KINDS:
+            writer = selected_writer(vault_root, item["prepared"]["collection_id"])
+            if writer is not None:
+                # On the store thread: the collection is released to this caller, or it reads as absent.
+                with writer.read_collection(item["prepared"]["collection_id"]):
+                    return False
             manifest = record_governance.resolve_collection_for_mutation(
                 vault_root, item["prepared"]["manifest_path"]
             )

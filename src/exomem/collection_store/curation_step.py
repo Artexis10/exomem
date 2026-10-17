@@ -1,0 +1,240 @@
+"""A curation or episode Records step on a collection the store owns (P1b.4b).
+
+The step runs on the store thread, through the writer's own append and update, under the
+store's guards: the collection's container hash and the item's version. The write carries
+the step's operation identity as its request id, so the store's transaction row for that id
+is the witness that the step committed. Curation derives its evidence file from that row.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from pathlib import Path
+
+from .. import structured_collections as collections
+from .. import writer_lease
+from . import authority, preview
+
+
+def writer_for(vault_root, selector):
+    """The bound store writer when the vault's marker routes ``selector`` to the store, else None."""
+    return preview.selected_writer(vault_root, selector)
+
+
+def _stale(reason):
+    return collections.CollectionError("CURATION_BINDING_STALE", reason)
+
+
+class _Prepared(Exception):
+    """Carries the writer's last check out of it before it commits."""
+
+    def __init__(self, prepared):
+        super().__init__("prepared")
+        self.prepared = prepared
+
+
+def prepare(vault_root, action, args):
+    """What the writer would commit for this step now, without committing it.
+
+    The writer itself runs resolution, release, value validation, key derivation and both
+    guards, and stops at its last check before the transaction, so a step is prepared by the
+    very path that later executes it. A refused value is raised, never held.
+    """
+    try:
+        preview.dispatch(vault_root, "records", action, {**args, "hold": False, "_prepare": _stop})
+    except _Prepared as stopped:
+        prepared = stopped.prepared
+    else:
+        raise collections.CollectionError(
+            "RECORD_PREPARE_INCOMPLETE", "the write did not stop before its transaction"
+        )
+    manifest = prepared["manifest"]
+    # One file per item: the witness must name the item alone, so a log or a summary refuses.
+    if manifest.storage.strategy != "markdown-items" or manifest.view_mode != "items":
+        raise collections.CollectionError(
+            "CURATION_RECORDS_STORAGE_UNSUPPORTED", "a Records leaf writes to a markdown-items collection"
+        )
+    return {
+        "collection_id": manifest.collection_id,
+        "manifest_path": manifest.path,
+        "semantic_profile": manifest.semantic_profile,
+        "item_key": prepared["item_key"],
+        "path": prepared["path"],
+        "payload_hash": prepared.get("payload_hash"),
+        "body": prepared.get("body"),
+        "expected_container_hash": prepared["container_hash"],
+        "expected_item_version": prepared.get("item_version"),
+    }
+
+
+def _stop(prepared):
+    raise _Prepared(prepared)
+
+
+def _current(writer, collection_id, item_key):
+    """The store's own container hash for a collection, and the item's version when one is named."""
+    with writer.read_snapshot():
+        row, _manifest, _declared = writer._collection(collection_id)
+        container = writer._container(row)
+        if item_key is None:
+            return container, None
+        item = writer._item(collection_id, item_key)
+        if item is None:
+            raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+        return container, writer._version(item)
+
+
+def resolve_guards(vault_root, writer, binding, args):
+    """The container hash and item version the store write must carry, or a stale-seal refusal.
+
+    A step sealed for the store binds `{collection_id, expected_container_hash,
+    expected_item_version}` and must still equal the store's own. A step sealed before the
+    migration bound the collection's file views; it maps to the store only when those views
+    are the store's published state, so it never applies blind.
+    """
+    prepared = binding["prepared"]
+    collection_id, item_key = prepared["collection_id"], prepared.get("item_key")
+    update = "expected_item_version" in args
+    try:
+        container, version = _current(writer, collection_id, item_key if update else None)
+    except collections.CollectionError as error:
+        # nosemgrep: ep-word-membership -- the writer's two absence codes, fixed by the writer.
+        if error.code in {"COLLECTION_NOT_FOUND", "RECORD_NOT_FOUND"}:
+            raise _stale("the sealed collection or item is gone") from error
+        raise
+    sealed = prepared.get("store")
+    if sealed is not None:
+        if sealed["expected_container_hash"] != container:
+            raise _stale("the collection changed after the seal")
+        if update and sealed["expected_item_version"] != version:
+            raise _stale("the item changed after the seal")
+        return container, version
+    _prove_views(vault_root, writer, binding, args)
+    return container, version
+
+
+def _prove_views(vault_root, writer, binding, args):
+    """Whether the views a pre-migration seal bound are, byte for byte, what the store has published.
+
+    The seal's container hash and item hash were taken from the collection's files. They map to
+    the store only if the collection's current views hash to the sealed container, the store
+    holds no view of it unpublished, and each view's bytes are the ones the store published.
+    """
+    from .. import curation, record_formats, records
+
+    prepared = binding["prepared"]
+    root = Path(vault_root)
+    manifest_path, collection_id = prepared["manifest_path"], prepared["collection_id"]
+    try:
+        text, manifest_hash = curation._read_target(root, manifest_path)  # noqa: SLF001
+        manifest = collections.parse_manifest_bytes(root, manifest_path, text.encode("utf-8"))
+        # The file adapter directly: `load_adapter` would answer from the store this proof checks.
+        snapshot = record_formats.MarkdownItemsAdapter(root, manifest, None, None).read()
+    except (curation.CurationError, collections.CollectionError, OSError, ValueError) as error:
+        raise _stale("the sealed collection's views cannot be read") from error
+    if records._container_hash(manifest, snapshot) != args["expected_container_hash"]:  # noqa: SLF001
+        raise _stale("the collection's views are not the state the seal bound")
+    states = writer.connection.execute(
+        "SELECT path, published_sha256, state FROM projection_state WHERE collection_id = ?", (collection_id,)
+    ).fetchall()
+    published = {path: digest for path, digest, state in states if state == "current"}
+    if any(state != "current" for _path, _digest, state in states):
+        raise _stale("the store has views of this collection that it has not published")
+    views = {manifest_path: manifest_hash, **{version.path: version.hash for version in snapshot.source_versions}}
+    if any(published.get(path) != digest for path, digest in views.items()):
+        raise _stale("a view of the collection differs from the one the store published")
+    if "expected_item_version" in args and args["expected_item_version"] != prepared.get("before_item_hash"):
+        raise _stale("the sealed item version is not the item the seal bound")
+
+
+def commit(vault_root, writer, action, args, binding, request_id):
+    """Run the writer's own append or update with the operation identity as its request id."""
+    container, version = resolve_guards(vault_root, writer, binding, args)
+    values = {
+        **args,
+        "item_key": binding["prepared"]["item_key"],
+        "expected_container_hash": container,
+        "hold": False,
+        "request_id": request_id,
+    }
+    if action == "update":
+        values["expected_item_version"] = version
+    _selected, result = preview.dispatch(vault_root, "records", action, values)
+    # The dispatcher classes a failure from here on as one after the commit, as for a file leaf.
+    writer_lease.mark_active_mutation_committed()
+    return result
+
+
+def committed(writer, request_id):
+    """The store's transaction row for a request id: its receipt and commit time, or None.
+
+    That row is the step's witness: the store commits it with the write, so it exists exactly
+    when the step committed.
+    """
+    with writer.read_snapshot():
+        found = writer.connection.execute(
+            "SELECT collection_id, receipt_json, committed_at FROM txns WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if found is None:
+            return None
+        writer._operation.require_collection(found[0])  # noqa: SLF001
+        return {"receipt": json.loads(found[1]), "committed_at": found[2]}
+
+
+def verify(writer, request_id, *, collection_id, item_key, path, after_item_hash):
+    """Whether the transaction row for ``request_id`` shows this step's committed result, still current."""
+    found = committed(writer, request_id)
+    receipt = None if found is None else found["receipt"]
+    if (
+        receipt is None
+        or receipt.get("outcome") != "committed"
+        or receipt.get("collection_id") != collection_id
+        or receipt.get("item_key") != item_key
+        or path not in receipt.get("affected_paths", ())
+        or receipt.get("after_item_hash") != after_item_hash
+    ):
+        return False
+    # An item changed since is no longer the step's result, as an edited file's receipt is not.
+    return _current(writer, collection_id, item_key)[1] == after_item_hash
+
+
+def needs_store(root, marker, command, arguments):
+    """Whether a curation or episode command runs a Records step on a collection the marker routes to the store.
+
+    A step on a store collection runs only on the store thread, so the whole command runs there;
+    every other curation keeps its current path. The collections come from the sealed plans the
+    command names, or from the leaves an episode prepare proposes. Anything unreadable is not
+    routed: the command's own checks then refuse it.
+    """
+    from .. import curation, episode_workflow
+    from ..cli_ops import OpError
+
+    selectors = set()
+    runs = []
+    if command == "maintain_memory":
+        if arguments.get("mode") == "curation" and isinstance(arguments.get("run_id"), str):
+            runs.append(arguments["run_id"])
+    elif arguments.get("action") == "prepare":
+        proposal = arguments.get("proposal")
+        leaves = proposal.get("leaves") if isinstance(proposal, Mapping) else None
+        for leaf in leaves if isinstance(leaves, list) else ():
+            args = leaf.get("args") if isinstance(leaf, Mapping) else None
+            if (
+                isinstance(args, Mapping)
+                and leaf.get("kind") in curation.RECORDS_STEP_KINDS
+                and isinstance(args.get("collection"), str)
+            ):
+                selectors.add(args["collection"])
+    # nosemgrep: ep-word-membership -- the episode command's own action enum fixes these two.
+    elif arguments.get("action") in {"resume", "coverage"}:
+        try:
+            runs.extend(episode_workflow.bound_runs(root, arguments.get("episode")))
+        except (OSError, ValueError, OpError):
+            return False
+    for run in runs:
+        selectors.update(curation.records_collections(root, run))
+    try:
+        return any(authority.selected_entry(root, marker, selector) is not None for selector in selectors)
+    except (collections.CollectionError, ValueError):
+        return False
