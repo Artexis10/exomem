@@ -1477,9 +1477,13 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
 def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     """Read the bounded canonical epoch used by a private publication ticket.
 
-    This deliberately consults only the floor and checkpoint artifacts.  The
-    sidecar acknowledgement is derived state and must never be opened from the
-    short canonical publication hold.
+    This deliberately consults only the floor and checkpoint artifacts, so it
+    never opens the sidecar. The acknowledgement is derived state: a caller
+    that must bind it under the short canonical publication hold reads it
+    separately through `acknowledgement_state`, whose read is bounded by
+    `_ACK_READ_BUSY_TIMEOUT_SECONDS` and reports contention as `busy`. A behind
+    publication's ticket does this, once, because the acknowledgement it keeps
+    is what its publication must not move.
     """
     floor_status, floor = floor_state(vault_root)
     checkpoint_status, checkpoint = checkpoint_state(vault_root)

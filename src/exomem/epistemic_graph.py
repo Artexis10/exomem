@@ -158,6 +158,11 @@ class _DrainCoverage:
         return self.committed if self.missing == 0 else None
 
 
+def _log_behind_refusal(reason: str) -> None:
+    """The line an operator reads to learn why a pass did not publish behind."""
+    log.info("graph rebuild cannot publish behind reason=%s", reason)
+
+
 def _log_drain_outcome(queued: int, withheld: str | None, coverage: _DrainCoverage) -> None:
     """Name how a drain pass that reached publication ended. Counts and outcome words only."""
     committed = coverage.committed
@@ -245,8 +250,10 @@ _FALLBACK_DISPOSITIONS = {
 #: re-target at all -- it publishes behind (`_prepare_behind_build`) and the
 #: drain repairs the movement. What still re-targets is a pass that saw a
 #: retitled or vanished page, a resolver proof that moved before any page was
-#: read, and every pass of a caller whose contract is a converged graph. Hitting either bound raises Class C (`GraphProjectionMoved`) only on
-#: unexplained movement, and Class B (`GraphPublicationUnavailable`) otherwise.
+#: read, a pass that `_behind_refusal` turns away, and every pass of a caller
+#: whose contract is a converged graph. Hitting either bound raises Class C
+#: (`GraphProjectionMoved`) only on unexplained movement, and Class B
+#: (`GraphPublicationUnavailable`) otherwise.
 REBUILD_STABILIZATION_DEADLINE_SECONDS = 120.0
 REBUILD_STABILIZATION_MAX_ATTEMPTS = 8
 #: Per-vault backoff for a *refused* availability proof, keyed by vault root and
@@ -4050,30 +4057,25 @@ class EpistemicGraphIndex:
         """Finish a behind sidecar and its proofs before canonical authority, or None.
 
         The sidecar keeps the live acknowledgement: it does not project the
-        generations that landed during the pass, so it may not claim them. A
-        lineage nothing acknowledges yet -- a checkpoint with no live
-        acknowledgement -- publishes current or not at all. An unscoped external
-        mark names no paths to queue, so it refuses too. Each refusal logs its
-        reason, so an operator can tell why a pass re-targeted instead.
+        generations that landed during the pass, so it may not claim them.
+        `_behind_refusal` is checked again here, because time passed since the
+        pass checked it. Each refusal logs its reason, so an operator can tell
+        why a pass re-targeted instead.
         """
 
         def refused(reason: str) -> _BehindPublicationTicket | None:
-            log.info("graph rebuild cannot publish behind reason=%s", reason)
+            _log_behind_refusal(reason)
             return None
 
         try:
+            lineage = behind.lineage
+            reason = self._behind_refusal(lineage)
+            if reason is not None:
+                return refused(reason)
             acknowledgement = self._live_acknowledged_checkpoint()
-            epoch = graph_sync.canonical_publication_epoch(self.vault_root)
-            if epoch.checkpoint is not None and acknowledgement is None:
-                return refused("unacknowledged_lineage")
-            if freshness.external_pending_unscoped(self.vault_root):
-                return refused("unscoped_external_mark")
             external_epoch = freshness.external_pending_epoch(self.vault_root)
             policy_snapshot = access.publication_policy_snapshot(self.vault_root)
-            lineage = behind.lineage
-            if policy_snapshot is None or recall_policy.recall_policy_identity(
-                self.vault_root
-            ) != (lineage.policy_version, lineage.access_policy_fingerprint):
+            if policy_snapshot is None:
                 return refused("policy_moved")
             stale = self._rows_behind_their_sources(temporary, behind.versions)
             if not self._write_temporary_acknowledgement(temporary, acknowledgement):
@@ -4118,6 +4120,51 @@ class EpistemicGraphIndex:
             graph_sync.GraphEpochUnreadable,
         ) as error:
             return refused(type(error).__name__)
+
+    def _behind_refusal(self, lineage: freshness.RecallFreshnessCheckpoint) -> str | None:
+        """Why a behind publication from `lineage` would be refused now, or None.
+
+        A pass checks these before it prepares a behind build and re-targets
+        exactly as before on any of them. A refusal found only at the ticket
+        costs a whole publication attempt, and no fresh pass in this run is
+        likely to change these:
+
+        - A checkpoint that nothing acknowledges yet gives the sidecar no
+          acknowledgement to keep.
+        - An unscoped external mark names no paths to queue.
+        - A moved policy means the lineage no longer describes what recall admits.
+        - Registry history that no longer reaches back to the lineage cannot
+          say what moved since.
+
+        No SQLite beyond one bounded read of the live sidecar's acknowledgement
+        (never `self.path`, which is the private temporary during a pass), and
+        no walk. A busy acknowledgement is no verdict; the ticket reads it again.
+        """
+        try:
+            if freshness.external_pending_unscoped(self.vault_root):
+                return "unscoped_external_mark"
+            epoch = graph_sync.canonical_publication_epoch(self.vault_root)
+            # Two of `acknowledgement_state`'s own closed states: neither leaves
+            # an acknowledgement to keep. `busy` is no verdict, and `valid` keeps.
+            if epoch.checkpoint is not None and graph_sync.acknowledgement_state(
+                self.vault_root
+            )[0] in {"absent", "malformed"}:
+                return "unacknowledged_lineage"
+            if recall_policy.recall_policy_identity(self.vault_root) != (
+                lineage.policy_version,
+                lineage.access_policy_fingerprint,
+            ):
+                return "policy_moved"
+            if not freshness.recall_delta_since(self.vault_root, "vault", lineage).complete:
+                return "registry_history_incomplete"
+        except (
+            OSError,
+            sqlite3.Error,
+            graph_sync.GraphEpochIncoherent,
+            graph_sync.GraphEpochUnreadable,
+        ) as error:
+            return type(error).__name__
+        return None
 
     def _rows_behind_their_sources(
         self, temporary: Path, versions: dict[str, GraphSourceSignature]
@@ -4324,9 +4371,13 @@ class EpistemicGraphIndex:
             Never after Class C evidence in this run: that owes the registry its
             mark, and a behind publication would not outrun it.
             """
-            return not projection_moved and self._prepare_behind_build(
-                resolver, lineage, resolver_versions
-            )
+            if projection_moved or lineage is None:
+                return False
+            reason = self._behind_refusal(lineage)
+            if reason is not None:
+                _log_behind_refusal(reason)
+                return False
+            return self._prepare_behind_build(resolver, lineage, resolver_versions)
 
         # #576. Whether the *last* attempt was invalidated by a moving
         # projection, which is the only condition worth re-targeting: the
@@ -7031,13 +7082,28 @@ class EpistemicGraphIndex:
                     withheld = "recall_checkpoint"
                 elif freshness.external_pending_epoch(self.vault_root) != external_epoch:
                     withheld = "external_epoch"
+                elif deferred_index.graph_repair_owed_outside(
+                    self.vault_root,
+                    (
+                        rel
+                        for path in batch
+                        if (rel := _vault_rel(self.vault_root, path)) is not None
+                    ),
+                ):
+                    # Repair outside this batch is still queued: a truncated
+                    # batch, or the rest of a deferral queued at one instant.
+                    # Its pages' rows may be stale, so this batch may neither
+                    # restore readability nor acknowledge, even a checkpoint
+                    # it fully covers; the drain that empties the queue does.
+                    withheld = "queued"
                 if withheld is not None:
-                    # The vault moved elsewhere under the pass. Every row it
-                    # wrote is proven against its own bytes, which the
-                    # resolver's checkpoint describes, so the rows land and
-                    # their receipts retire; the movement queued its own.
-                    # The marker, lineage and acknowledgement describe the whole
-                    # projection, and wait for a drain it holds still for.
+                    # The vault moved elsewhere under the pass, or work outside
+                    # it is still owed. Every row it wrote is proven against
+                    # its own bytes, which the resolver's checkpoint describes,
+                    # so the rows land and their receipts retire; the movement
+                    # queued its own. The marker, lineage and acknowledgement
+                    # describe the whole projection, and wait for a drain that
+                    # the vault holds still for and that leaves nothing queued.
                     #
                     # The resolver topology is not one of them: it describes
                     # the rows, and the two proofs that read it -- a

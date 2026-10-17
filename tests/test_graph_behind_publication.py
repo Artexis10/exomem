@@ -135,9 +135,12 @@ def _owe_a_whole_vault_rebuild(root: Path) -> None:
 
 
 def _drain_to_empty(root: Path) -> None:
+    """Run drain cycles until nothing is queued and readers can open the graph."""
     for _ in range(12):
-        if not deferred_index.list_graph_paths(root) and (
-            deferred_index.graph_full_rebuild_pending(root) is None
+        if (
+            not deferred_index.list_graph_paths(root)
+            and deferred_index.graph_full_rebuild_pending(root) is None
+            and EpistemicGraphIndex(root).available()
         ):
             return
         graph_drain._work_once(root)
@@ -208,6 +211,49 @@ def test_a_body_edit_mid_pass_publishes_behind_and_drains_to_a_fresh_rebuild(
     graph_drain._work_once(vault)
 
     _assert_published_behind_then_converges(vault, passes, fenced, {PAGE_B})
+
+
+def test_a_drain_batch_that_leaves_repair_queued_does_not_publish_current(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The behind repair drains in batches, and the newest write's page goes first.
+
+    C's link to B is removed, then A is edited: A is the newest checkpoint's only
+    page. A batch that holds A but not C covers that checkpoint, and publishing
+    it as current served C's removed edge to B while C was still queued. The
+    drain reports the graph current only once nothing outside its batch is
+    queued.
+    """
+    monkeypatch.setattr(graph_drain, "DRAIN_LIMIT", 1)
+
+    def unlink_c_then_edit_a(_number: int) -> None:
+        _governed_write(vault, PAGE_C, _page("C", "C cites nothing now."))
+        _governed_write(
+            vault, PAGE_A, _page("A", "A still claims against [[behind-b]] and cites [[behind-d]].")
+        )
+
+    passes = _Passes(monkeypatch, after=unlink_c_then_edit_a)
+    fenced = _replacements(monkeypatch, vault)
+    _owe_a_whole_vault_rebuild(vault)
+    graph_drain._work_once(vault)
+    assert fenced == [True]
+    queued = deferred_index.list_graph_paths(vault)
+    assert queued[0] == PAGE_A and PAGE_C in queued, f"the batch order this case needs: {queued}"
+
+    graph_drain._work_once(vault)
+
+    assert passes.count == 1, "barrier recovery ran a whole-vault pass while the queue drained"
+    assert PAGE_C in deferred_index.list_graph_paths(vault)
+    assert EpistemicGraphIndex(vault).available() is False, (
+        "a drain that left C queued published the graph as current"
+    )
+
+    _drain_to_empty(vault)
+
+    assert passes.count == 1, "the drain paid a second whole-vault pass"
+    assert EpistemicGraphIndex(vault).available() is True
+    assert epistemic_graph.graph_drift(vault) == []
+    _assert_matches_a_fresh_rebuild(vault)
 
 
 def test_a_page_created_mid_pass_publishes_behind_and_drains_to_a_fresh_rebuild(
@@ -319,6 +365,37 @@ def test_a_page_removed_before_the_pass_read_it_is_never_published_behind(
     _assert_matches_a_fresh_rebuild(vault)
 
 
+def test_a_behind_refusal_no_fresh_pass_can_change_costs_no_extra_pass(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registry history that no longer reaches the pass's lineage cannot be queued.
+
+    Two writes land in every pass and the history keeps one event, so no pass
+    can say what moved since its lineage. Found only at the ticket, that
+    refusal started a whole new publication attempt each time. The pass checks
+    it first and re-targets within its own budget, as before behind publication.
+    """
+    monkeypatch.setattr(freshness, "DELTA_HISTORY_LIMIT", 1)
+    monkeypatch.setattr(epistemic_graph, "REBUILD_STABILIZATION_DEADLINE_SECONDS", 0.0)
+    writes = [0]
+
+    def two_writes(_number: int) -> None:
+        for _ in range(2):
+            writes[0] += 1
+            _governed_write(vault, PAGE_B, _page("B", f"B revision {writes[0]}."))
+
+    passes = _Passes(monkeypatch, after=two_writes, times=EVERY_PASS)
+    fenced = _replacements(monkeypatch, vault)
+    _owe_a_whole_vault_rebuild(vault)
+
+    graph_drain._work_once(vault)
+
+    assert fenced == [], f"a pass with incomplete history published: {fenced}"
+    assert passes.count == epistemic_graph.REBUILD_STABILIZATION_ATTEMPTS, (
+        f"the refusal paid {passes.count} whole-vault passes"
+    )
+
+
 def _marks(monkeypatch: pytest.MonkeyPatch, root: Path) -> list[tuple[str, ...]]:
     marks: list[tuple[str, ...]] = []
     original_mark = freshness.mark_external_pending
@@ -379,7 +456,9 @@ def test_an_unrecorded_edit_during_the_resolver_proof_is_class_c_scoped_to_its_p
     marks = _marks(monkeypatch, vault)
 
     def retitle_out_of_band(number: int) -> None:
-        (vault / PAGE_B).write_text(_page(f"B{number}", "Edited outside every recorder."), encoding="utf-8")
+        (vault / PAGE_B).write_text(
+            _page(f"B{number}", "Edited outside every recorder."), encoding="utf-8"
+        )
 
     _after_each_resolver(monkeypatch, retitle_out_of_band)
 
