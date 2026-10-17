@@ -186,7 +186,8 @@ async def daemon(root, port, unit, env_file=None):
     await token(root)
 
     class FixtureRuntime(WorkerRuntime):
-        async def _spawn(self, command, *, standby=False):
+        async def _spawn(self, command, *, standby=False, **options):
+            # Forward the real _spawn's other options (a child's environment, its stdout).
             if "worker" in command:
                 socket_path = self.standby_socket if standby else self.socket_path
                 command = [
@@ -201,7 +202,7 @@ async def daemon(root, port, unit, env_file=None):
                     command.append("--standby")
             elif "maintain" in command:
                 command = [sys.executable, __file__, "migrate", str(root)]
-            await super()._spawn(command, standby=standby)
+            await super()._spawn(command, standby=standby, **options)
 
         def migration_required(self, target):
             if (root / "declare-migration").exists():
