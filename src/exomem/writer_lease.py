@@ -4578,8 +4578,14 @@ class LeaseManager:
         attachment_now: int | None = None,
         session_open_admission: bool = False,
         activation_admission: bool = False,
+        advance_generation: bool = True,
     ) -> Iterator[VaultMutationCoordinator]:
-        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        """Hold the shared vault mutation boundary and revalidate writer authority.
+
+        ``advance_generation=False`` keeps the commit generation where it is, so every
+        captured validity stamp stays current. Only a holder that changes no canonical
+        vault content passes it: one that writes only a projection rebuilt from it.
+        """
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -4613,10 +4619,11 @@ class LeaseManager:
                 finally:
                     # Bump while the boundary is still held, so the counter is
                     # serialized with the mutations it fingerprints. Every
-                    # governed writer exits through here (wide or narrow), which
-                    # is what lets the validity-stamp comparison skip the
-                    # in-boundary corpus stat-walk.
-                    _bump_commit_generation(self.config.state_dir, vault_root)
+                    # governed writer of canonical content exits through here
+                    # (wide or narrow), which is what lets the validity-stamp
+                    # comparison skip the in-boundary corpus stat-walk.
+                    if advance_generation:
+                        _bump_commit_generation(self.config.state_dir, vault_root)
         finally:
             _ACTIVE_LEASE_MANAGER.reset(manager_token)
             if direct_token is not None:
