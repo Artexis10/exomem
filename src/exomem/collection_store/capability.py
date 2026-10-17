@@ -83,6 +83,14 @@ def collection_views_enabled(root=None, *, conn=None) -> bool:
     return root is None or not records_summary_disabled(root)
 
 
+def views_published(root=None) -> bool:
+    """Whether the serving store publishes pending views, between requests and on quiesce.
+
+    Either release lets it: edit-back's, or the summary slice's, whose pages publish so.
+    """
+    return collection_views_enabled(root) or records_summary_enabled(root)
+
+
 def summary_route_open(vault_root, manifest) -> bool:
     """Whether this release serves a request on ``manifest``'s collection: always, unless it is summary."""
     return manifest.view_mode != "summary" or records_summary_enabled(vault_root)

@@ -318,6 +318,44 @@ def test_log_capture_preserves_full_frame_and_adapter_order(tmp_path):
         )
 
 
+def _x3_log(tmp_path, rewrite):
+    """The X3 log with its file bytes rewritten, ready to capture."""
+    root = tmp_path / "vault"
+    path = copy_x3_fixture(root) / "_collection.md"
+    (root / "Knowledge Base/log.md").write_text("# Activity\n")
+    source = path.parent / "Training Log.md"
+    source.write_bytes(rewrite(source.read_bytes()))
+    return root, path
+
+
+def test_a_legacy_log_whose_child_rows_are_spaced_by_hand_imports(tmp_path):
+    """Defect: the import refuses a hand-kept log whose child rows parse to the values the store
+    renders but are spaced otherwise, so the owner's migration stops for nothing."""
+    root, path = _x3_log(tmp_path, lambda data: data
+                         .replace(b"- Overhead Press | blue short | 12\n", b"- Overhead Press|blue short|12\n")
+                         .replace(b"- Deadlift | green short | 24\n", b"  - Deadlift | green short | 24\n")
+                         .replace(b"- Bent Row | blue short | 13\n", b"- Bent Row |  blue short | 13\n"))
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        conn.execute("BEGIN")
+        legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == len(captured.snapshot.records)
+
+
+@pytest.mark.parametrize("line", [b"- note: felt strong\n", b"<!-- felt strong -->\n",
+                                  b"- Tricep Press | blue short | 17 | easy\n"],
+                         ids=["shaped-like-a-child-row", "comment", "four-cells"])
+def test_a_line_in_a_legacy_log_block_that_no_value_holds_refuses_the_import(tmp_path, line):
+    """Defect: a line inside a legacy log block that none of the row's values holds is imported,
+    then lost when the store first renders the block."""
+    root, path = _x3_log(tmp_path, lambda data: data.replace(
+        b"- Tricep Press | blue short | 17\n", b"- Tricep Press | blue short | 17\n" + line, 1))
+    with _capture(tmp_path, root, path) as (audit, captured), _connection() as conn:
+        conn.execute("BEGIN")
+        with pytest.raises(legacy_import.LegacyProofError) as refused:
+            legacy_import.import_legacy_collection(conn, captured, audit=audit, context=CONTEXT)
+    assert refused.value.check == "b" and "log block" in str(refused.value)
+
+
 def test_planning_uses_complete_hierarchy_without_append_defaults(tmp_path):
     # Importing a dangling parent or silently supplying defaults changes authored intent.
     values = {

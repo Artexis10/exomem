@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, records, vault
 from .. import structured_collections as collections
-from . import chain, governance, summary, tokens, types
+from . import chain, governance, log_view, summary, tokens, types
 from .connection import CollectionStoreError
 from .legacy import LegacyAuditProof, LegacyAuditSpool
 
@@ -79,16 +79,8 @@ class CapturedLogFrame:
     final_newline: bool
 
     def as_json(self) -> str:
-        return _json(
-            {
-                "version": 1,
-                "text": self.prefix.decode("utf-8"),
-                "suffix": self.suffix.decode("utf-8"),
-                "bom": self.bom,
-                "newline": self.newline,
-                "final_newline": self.final_newline,
-            }
-        )
+        return log_view.LogFrame(self.prefix.decode("utf-8"), self.suffix.decode("utf-8"), self.bom,
+                                 self.newline, self.final_newline).as_json()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,31 +185,9 @@ def _capture_log_frame(manifest, snapshot):
     if manifest.storage.strategy != "markdown-log":
         return None
     data = dict(snapshot.source_bytes)[manifest.storage.source]
-    data.decode("utf-8")  # Frame persistence must not silently replace invalid bytes.
-    section = manifest.storage.descriptor["section"]
-    headings = record_formats._headings_outside_fences(data)
-    heading = next(
-        item
-        for item in headings
-        if item.level == section["level"] and item.title == section["title"]
-    )
-    end = next(
-        (
-            item.start
-            for item in headings
-            if item.start > heading.start and item.level <= heading.level
-        ),
-        len(data),
-    )
-    start = snapshot.records[0].span.start if snapshot.records else end
-    match = re.search(rb"\r\n|\n|\r", data)
-    return CapturedLogFrame(
-        data[:start],
-        data[end:],
-        data.startswith(b"\xef\xbb\xbf"),
-        match.group().decode() if match else "\n",
-        data.endswith((b"\n", b"\r")),
-    )
+    frame = log_view.capture(manifest, data, snapshot.records)
+    return CapturedLogFrame(frame.text.encode("utf-8"), frame.suffix.encode("utf-8"), frame.bom, frame.newline,
+                            frame.final_newline)
 
 
 def _recheck(captured):
@@ -635,6 +605,19 @@ def _prove_round_trip(captured, key, values, body, natural):
         _refuse("b", "render/parse values, body, identity or natural key differ")
 
 
+def _prove_log_block(captured, record, key):
+    """Check (b) for a log block: its first render keeps every line of the owner's text.
+
+    The store keeps a block's values only, and the projector and the export render the
+    block from them, so a line that no value holds would be lost at the first render. The
+    values themselves are proved by the round trip; their spacing may change.
+    """
+    data = dict(captured.snapshot.source_bytes)[captured.manifest.storage.source]
+    if log_view.stray_lines(data[record.span.start:record.span.end], record):
+        line = data[:record.span.start].count(b"\n") + 1
+        _refuse("b", f"log block {key} at line {line} holds text that its row cannot render")
+
+
 def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash):
     manifest = captured.manifest
     cid = manifest.collection_id
@@ -660,6 +643,8 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
         ):
             _refuse("b", "stored values, body or natural key differ")
         _prove_round_trip(captured, key, values, body, natural)
+        if manifest.storage.strategy == "markdown-log":
+            _prove_log_block(captured, record, key)
     count, head, previous = 0, None, None
     checkpoint_seen = False
     ordered = hashlib.sha256(b"legacy-audit-ordered-v1\0")
