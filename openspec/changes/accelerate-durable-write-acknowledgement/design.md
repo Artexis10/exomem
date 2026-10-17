@@ -548,9 +548,9 @@ not eligible for review.
   is generation-bound and CAS-revisioned; stale work can run but cannot become
   current or clear newer custody.
 - **[Risk] A queue backlog makes recall warm indefinitely.** → Prompt drains,
-  periodic reconciliation, age/depth alarms, fair rotation, and live acceptance
-  prove convergence after a burst. Warming is preferable to stale answers when
-  the overlay cannot be complete.
+  bounded committed recovery, age/depth alarms, fair rotation, and live acceptance
+  prove convergence after a burst. Known paths remain suppressed while unaffected
+  recall continues. Only unknown custody requires whole-request unavailability.
 - **[Risk] Async advisories arrive after the writing conversation.** → The
   terminal carries an exact opaque result reference; results never appear in an
   unrelated conversation, attention, or due-state. Explicit `suggestions=true`
