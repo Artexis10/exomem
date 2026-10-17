@@ -135,14 +135,16 @@ def _report(
         "transport": "direct",
         "samples_per_operation": 30,
         "fast_durable_ack": "active",
+        "condition": "warm",
         "operations": {
             name: {
                 "samples": 30,
                 "p50_ms": 900.0,
-                "p90_ms": 1_800.0,
+                "p90_ms": 950.0,
+                "p95_ms": 975.0,
                 "max_ms": 1_900.0,
             }
-            for name in ("remember", "edit")
+            for name in ("remember", "edit_memory", "record_memory", "plan_memory")
         },
         "recall_admission": "ready",
         "read_your_write": {"exact": 60, "warming": 0, "stale": 0},
@@ -230,6 +232,7 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
             transport="direct",
             samples_per_operation=1,
             state_dir=tmp_path / "acceptance-state",
+            package_mode="source",
             convergence_bound_seconds=60.0,
         )
     finally:
@@ -241,7 +244,17 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
     # An admitted catalogue is what makes the read after a write exact. Warming
     # stays a truthful answer under the contract; it is not a truthful answer
     # for a harness that never had a catalogue to answer from.
-    assert report["read_your_write"] == {"exact": 2, "warming": 0, "stale": 0}
+    assert report["read_your_write"] == {"exact": 8, "warming": 0, "stale": 0, "unknown": 0}
+    assert report["package"]["mode"] == "source"
+    assert set(report["operations"]) == set(module.OPERATIONS)
+    for operation in module.OPERATIONS:
+        cases = [case for case in report["cases"] if case["operation"] == operation]
+        assert [case["condition"] for case in cases] == ["cold", "warm"]
+        assert all(case["terminal_outcome"] == "ok" for case in cases)
+        assert all(case["thread_cpu_ms"] >= 0 for case in cases)
+        measured = report["operations"][operation]
+        assert measured["samples"] == 1
+        assert measured["p95_ms"] == cases[1]["elapsed_ms"]
 
 
 def test_a_warm_up_that_cannot_admit_fails_the_measure(
@@ -273,7 +286,8 @@ def test_a_warm_up_that_cannot_admit_fails_the_measure(
                 transport="direct",
                 samples_per_operation=1,
                 state_dir=tmp_path / "acceptance-state",
-                convergence_bound_seconds=5.0,
+                package_mode="source",
+            convergence_bound_seconds=5.0,
             )
         # A warm-up that raises after managing the runtime would otherwise
         # leave this process managed for good.
@@ -614,6 +628,7 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
             transport="direct",
             samples_per_operation=1,
             state_dir=tmp_path / "acceptance-state",
+            package_mode="source",
             convergence_bound_seconds=60.0,
         )
     finally:
@@ -633,7 +648,9 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
             continue
         assert value is None or isinstance(value, (int, float)), (key, value)
         assert not isinstance(value, str), (key, value)
-    rendered = json.dumps(report, sort_keys=True, default=str)
+    # Package import provenance intentionally names the installed/source file;
+    # the measurement payload must still contain no vault content or paths.
+    rendered = json.dumps({key: value for key, value in report.items() if key != "package"}, sort_keys=True, default=str)
     for token in ("Knowledge Base", str(vault), "acceptance-", ".md"):
         assert token not in rendered, (token, rendered)
 
@@ -696,3 +713,135 @@ def test_convergence_is_not_declared_over_stuck_or_claimed_work(
     assert converged is False
     assert drain["stuck"] == 2
     assert drain["passes"] == 1
+
+
+@pytest.mark.parametrize("operation", ("remember", "edit_memory", "record_memory", "plan_memory"))
+def test_warm_p95_enforces_the_shared_strict_bar(operation: str) -> None:
+    module = _acceptance()
+    bar = module.request_latency_contract.load_contract().bar("ordinary-write-warm")
+    report = _report()
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms
+    with pytest.raises(SystemExit, match=f"{operation} warm p95=.*ordinary-write-warm"):
+        module.check(report)
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms - 0.01
+    module.check(report)
+    report["condition"] = "contended"
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms * 2
+    module.check(report)
+
+
+def test_installed_proof_refuses_the_source_import() -> None:
+    module = _acceptance()
+    with pytest.raises(SystemExit, match="non-editable installed"):
+        module._package_identity("installed")
+    identity = module._package_identity("source")
+    assert identity["mode"] == "source"
+    assert identity["version"] == module.exomem.__version__
+    assert Path(identity["import_location"]) == Path(module.exomem.__file__).resolve()
+    assert identity["source_revision"]
+
+
+def test_disposable_measurement_refuses_conflicting_ambient_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path / "other-vault"))
+    with pytest.raises(SystemExit, match="conflicting ambient vault"):
+        module.measure(
+            tmp_path / "vault", transport="direct", samples_per_operation=1,
+            state_dir=tmp_path / "state", package_mode="source",
+        )
+
+
+@pytest.mark.parametrize("tool_error", (False, True))
+def test_connector_measures_the_requested_public_command_and_rejects_tool_errors(
+    monkeypatch: pytest.MonkeyPatch, tool_error: bool,
+) -> None:
+    from email.message import Message
+
+    module = _acceptance()
+    sent = []
+
+    class Response:
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            request = sent[-1]
+            return json.dumps({
+                "jsonrpc": "2.0", "id": request["id"],
+                "result": {"isError": tool_error, "structuredContent": {"outcome": "committed"}},
+            }).encode()
+
+    def respond(request, **_kwargs):
+        sent.append(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr(module, "urlopen", respond)
+    client = module._ConnectorTransport("https://example.invalid/mcp", None)
+    arguments = {"path": "Knowledge Base/Entities/Concepts/example.md", "operation": {"kind": "replace_string", "old_string": "before", "new_string": "after"}, "why": "correct observation"}
+    if tool_error:
+        with pytest.raises(SystemExit, match="tool returned an error"):
+            client.call("edit_memory", arguments)
+    else:
+        elapsed, result = client.call("edit_memory", arguments)
+        assert elapsed >= 0 and result["outcome"] == "committed"
+    assert sent[0]["params"] == {"name": "edit_memory", "arguments": arguments}
+
+
+
+def test_external_contract_uses_the_shared_validator_and_reports_its_bytes(tmp_path: Path) -> None:
+    import hashlib
+
+    module = _acceptance()
+    original, _ = module._load_contract()
+    document = original.model_dump(mode="json")
+    document["revision"] += "-matched-trial"
+    contract_file = tmp_path / "contract.json"
+    source = json.dumps(document).encode()
+    contract_file.write_bytes(source)
+    contract, digest = module._load_contract(contract_file)
+    assert contract.revision == document["revision"]
+    assert digest == hashlib.sha256(source).hexdigest()
+    assert contract.bar("ordinary-write-warm") == original.bar("ordinary-write-warm")
+    module.check(_report(), contract=contract)
+
+
+def test_failed_remember_skips_only_its_edit_and_preserves_independent_timings(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    real_call = module._DirectTransport.call
+
+    def fail_remember(self, name, arguments):
+        if name == "remember":
+            raise ValueError("sensitive diagnostic must stay private")
+        return real_call(self, name, arguments)
+
+    monkeypatch.setattr(module._DirectTransport, "call", fail_remember)
+    report = module.measure(
+        vault, transport="direct", samples_per_operation=1,
+        state_dir=tmp_path / "acceptance-state", package_mode="source",
+        convergence_bound_seconds=60,
+    )
+    assert report["operations"]["remember"]["samples"] == 1
+    assert report["operations"]["edit_memory"]["samples"] == 0
+    assert report["operations"]["edit_memory"]["p95_ms"] is None
+    for operation in ("record_memory", "plan_memory"):
+        assert report["operations"][operation]["samples"] == 1
+    for case in report["cases"]:
+        if case["operation"] == "remember":
+            assert case["terminal_outcome"] == "error"
+            assert case["elapsed_ms"] >= 0
+        if case["operation"] == "edit_memory":
+            assert case["terminal_outcome"] == "skipped"
+            assert case["elapsed_ms"] is None
+    assert "sensitive diagnostic" not in json.dumps(report)
+    with pytest.raises(SystemExit, match="failed or skipped"):
+        module.check(report)

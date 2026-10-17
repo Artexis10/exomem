@@ -9,7 +9,8 @@ the transport are real.
 
 Four things have to hold together, and each can fail the run on its own:
 
-* default-write p50 at or below 3.0 s and p90 at or below 5.0 s, per operation;
+* existing default-write p50/p90 bars and the shared ordinary warm-write p95
+  bar, per public operation, with cold priming calls reported separately;
 * the read immediately after a write is exact, or explicitly warming -- a stale
   answer is never acceptable, because deferring derived work must not become
   losing it;
@@ -19,10 +20,9 @@ Four things have to hold together, and each can fail the run on its own:
 * the backlog a burst creates converges within a bounded window rather than
   leaving recall warm indefinitely.
 
-Everything this prints is content-free: closed codes, counts, percentiles and
-ages. No path, title, excerpt, query term or exception text leaves the process,
-because an acceptance artifact is read and pasted by people who are not the
-vault's owner.
+Reports contain synthetic case timings, closed outcomes, counts and ages.
+Package provenance includes its import location, version and source revision;
+vault paths, titles, excerpts and exception text stay out of the report.
 
 It runs against a disposable vault it is handed and nothing else. Resolving a
 vault from the ambient environment is refused rather than discouraged: pointing
@@ -32,41 +32,54 @@ this at a live cell is the one way it could do harm.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
+import importlib.resources
 import json
 import os
 import statistics
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
+# Source trials must opt in before importing the product. Installed runs never
+# add the repository source tree, including through the shared warm-up helper.
+_bootstrap = argparse.ArgumentParser(add_help=False)
+_bootstrap.add_argument("--package-mode", choices=("installed", "source"), default="installed")
+if _bootstrap.parse_known_args()[0].package_mode == "source":
     sys.path.insert(0, str(SRC))
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import managed_recall  # noqa: E402
+import records_live_acceptance  # noqa: E402
+import yaml  # noqa: E402
 
+import exomem  # noqa: E402
 from exomem import (  # noqa: E402
+    call_spans,
     commands,
     deferred_index,
     derived_drain,
     derived_receipts,
-    memory_refs,
     mode,
     pending_recall,
     readiness,
+    request_latency_contract,
     semantic_contract,
-    semantic_writes,
+    vault,
     writer_lease,
 )
 from exomem import find as find_module  # noqa: E402
+from exomem.cli_ops import OpError  # noqa: E402
 
 #: The design's installed-product numbers. Not this script's to tune.
 P50_MS = 3_000.0
@@ -78,7 +91,8 @@ MIN_SAMPLES_PER_OPERATION = 30
 #: oldest-required-component alarm, so exceeding it here is the same breach the
 #: rollout would pause on.
 CONVERGENCE_BOUND_SECONDS = 300.0
-OPERATIONS = ("remember", "edit")
+# These are the public commands this acceptance protocol measures.
+OPERATIONS = ("remember", "edit_memory", "record_memory", "plan_memory")
 TRANSPORTS = ("direct", "connector")
 
 #: Bounded so one pathological response cannot be read into memory.
@@ -92,36 +106,6 @@ def _percentile(values: list[float], fraction: float) -> float:
         len(ordered) - 1, max(0, int(len(ordered) * fraction + 0.999) - 1)
     )
     return ordered[index]
-
-
-def _identity(index: int) -> str:
-    return str(uuid.UUID(int=index + 1))
-
-
-def _acceptance_path(index: int) -> str:
-    # An entity page belongs under Entities/: the semantic contract pairs a
-    # declared type with its location, and a benchmark that fought that
-    # contract would be measuring the refusal.
-    return f"Knowledge Base/Entities/Concepts/acceptance-{index:04d}.md"
-
-
-def _page(title: str, marker: str, identity: str) -> str:
-    return (
-        "---\n"
-        f"title: {title}\n"
-        # An entity page carrying observations is the shape the deterministic
-        # gate already writes, and the one whose edit route does not demand a
-        # relation-disposition handoff -- so this measures acknowledgement
-        # latency rather than the cost of satisfying a review contract.
-        "type: entity\n"
-        "status: active\n"
-        "updated: 2026-09-02\n"
-        f"{memory_refs.ID_FIELD}: {identity}\n"
-        "---\n\n"
-        f"# {title}\n\n"
-        "## Observations\n\n"
-        f"- [config] {marker} #acceptance (live) ^acceptance-anchor\n"
-    )
 
 
 def _remember_content(title: str, marker: str, relation_target: str | None) -> str:
@@ -140,95 +124,98 @@ def _remember_content(title: str, marker: str, relation_target: str | None) -> s
     return content
 
 
+def _load_contract(path: Path | None = None) -> tuple[request_latency_contract.LatencyContract, str]:
+    if path is None:
+        contract = request_latency_contract.load_contract()
+        source = importlib.resources.files("exomem").joinpath("request_latency_contract.json").read_bytes()
+    else:
+        source = path.read_bytes()
+        contract = request_latency_contract.LatencyContract.model_validate_json(source)
+    return contract, hashlib.sha256(source).hexdigest()
+
+
+def _package_identity(package_mode: str) -> dict[str, Any]:
+    origin = Path(exomem.__file__).resolve()
+    distribution = importlib.metadata.distribution("exomem")
+    installed_origin = Path(distribution.locate_file("exomem/__init__.py")).resolve()
+    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
+    editable = bool(direct_url.get("dir_info", {}).get("editable"))
+    installed = origin == installed_origin and not editable
+    if package_mode == "installed" and not installed:
+        raise SystemExit("installed acceptance requires a non-editable installed exomem package")
+    revision = direct_url.get("vcs_info", {}).get("commit_id")
+    if package_mode == "source":
+        result = subprocess.run(
+            ["git", "-C", str(origin.parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        revision = result.stdout.strip() if result.returncode == 0 else None
+    return {
+        "mode": package_mode,
+        "version": exomem.__version__,
+        "distribution_version": distribution.version,
+        "import_location": str(origin),
+        "installed_origin_matches": installed,
+        "source_revision": revision,
+        "role": "observer-and-direct-runtime",
+    }
+
+
+def _require_disposable_environment(vault_root: Path, state_dir: Path) -> None:
+    # A wrong refusal costs a disposable run; a wrong admission can mutate live
+    # data. Restrict local writes to explicit temporary paths and reject conflicts.
+    temporary = Path(tempfile.gettempdir()).resolve()
+    if not vault_root.resolve().is_relative_to(temporary) or not state_dir.resolve().is_relative_to(temporary):
+        raise SystemExit("write acceptance requires disposable vault and state paths under the temporary directory")
+    ambient = os.environ.get("EXOMEM_VAULT_PATH")
+    if ambient and Path(ambient).resolve() != vault_root.resolve():
+        raise SystemExit("write acceptance refuses a conflicting ambient vault")
+    for key in ("EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR"):
+        value = os.environ.get(key)
+        if value and not Path(value).resolve().is_relative_to(temporary):
+            raise SystemExit("write acceptance refuses non-temporary ambient state")
+    if not os.environ.get("EXOMEM_STATE_ROOT"):
+        os.environ["EXOMEM_STATE_ROOT"] = str(state_dir / "product")
+    if not os.environ.get("EXOMEM_CONFIG_PATH"):
+        os.environ["EXOMEM_CONFIG_PATH"] = str(state_dir / "no-config.json")
+
+
 class _DirectTransport:
-    """The in-process server: the real lease manager over the real leaves."""
+    """The same public command descriptors and lease boundary as the server."""
 
     name = "direct"
 
     def __init__(self, vault_root: Path, state_dir: Path) -> None:
         self.vault_root = vault_root
-        self.manager = writer_lease.LeaseManager(
-            writer_lease.LeaseConfig(state_dir=state_dir)
-        )
-        self._remember = next(
-            command for command in commands.PRODUCT_COMMANDS if command.name == "remember"
-        )
-        self._relation_target: str | None = None
-        self._relation_target_chosen = False
+        self.manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=state_dir))
 
-    def remember(self, index: int, marker: str) -> tuple[float, str]:
-        """The real `remember` command through the lease manager, as a served call runs it.
-
-        It runs the creation preflight, the relation review and the commit. The
-        server chooses the page, so the page's path comes back with the time.
-        """
-        if not self._relation_target_chosen:
-            # Chosen before the clock starts: any page a typed relation may target.
-            eligible = semantic_contract.build_corpus_context(
-                self.vault_root
-            ).eligible_governed_paths
-            self._relation_target = min(eligible).removesuffix(".md") if eligible else None
-            self._relation_target_chosen = True
-        title = f"Acceptance {index:04d}"
-        arguments = {
-            "content": _remember_content(title, marker, self._relation_target),
-            "title": title,
-            "note_type": "insight",
-            "suggestions": False,
-            "response_detail": "compact",
-        }
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+        token = str(uuid.uuid4())
+        context = call_spans.MCP_CALL_TOKEN.set(token)
+        cpu_started = time.thread_time()
         started = time.perf_counter()
-        result = self.manager.invoke(
-            self._remember,
-            (self.vault_root,),
-            arguments,
-            mutation_request_id=str(uuid.uuid4()),
-            implicit_idempotency_scope="session:live-write-acceptance",
-        )
-        elapsed = (time.perf_counter() - started) * 1_000.0
-        rel_path = str(result["path"])
-        rel_path = rel_path if rel_path.endswith(".md") else f"{rel_path}.md"
-        if self._relation_target is None:
-            # An empty vault's first page is the target every later page relates to.
-            self._relation_target = rel_path.removesuffix(".md")
-        return elapsed, rel_path
-
-    def edit(self, _index: int, rel_path: str, before_marker: str, after_marker: str) -> float:
-        """Replace one observation marker on the page `remember` created."""
-        before = (self.vault_root / rel_path).read_text(encoding="utf-8")
-        after = before.replace(before_marker, after_marker)
-
-        def leaf(root: Path):
-            preflight = semantic_writes.preflight_existing(
-                root, path=rel_path, after_source=after, operation="observe"
+        try:
+            result = self.manager.invoke(
+                command, (self.vault_root,), arguments,
+                read_only=commands.invocation_is_read_only(command, arguments),
+                mutation_request_id=str(uuid.uuid4()),
+                implicit_idempotency_scope="session:live-write-acceptance",
             )
-            if preflight.contract_result.should_block:
-                codes = [
-                    item.code
-                    for item in preflight.contract_result.blocking_findings
-                ]
-                raise RuntimeError(f"acceptance write was blocked: {codes}")
-            semantic_writes.commit_existing(root, preflight=preflight)
-            return {"path": rel_path, "warnings": []}
-
-        command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
-        started = time.perf_counter()
-        self.manager.invoke(
-            command,
-            (self.vault_root,),
-            {"response_detail": "compact"},
-            mutation_request_id=str(uuid.uuid4()),
-        )
-        return (time.perf_counter() - started) * 1_000.0
+            elapsed = (time.perf_counter() - started) * 1_000.0
+        finally:
+            self.thread_cpu_ms = (time.thread_time() - cpu_started) * 1_000.0
+            spans = call_spans.pop_call_spans(token)
+            call_spans.MCP_CALL_TOKEN.reset(context)
+            self.phase_cpu = [
+                {"name": span["name"], "thread_cpu_us": span["fields"]["thread_cpu_us"]}
+                for span in spans if "thread_cpu_us" in span.get("fields", {})
+            ]
+        return elapsed, result
 
 
 class _ConnectorTransport:
-    """The connector in front of the cell, measured separately by design.
-
-    A connector run that cannot reach a connector fails: silently measuring the
-    in-process path under the connector's name would report the one number the
-    acceptance exists to measure separately.
-    """
+    """A caller-verified disposable connector; its URL proves no isolation."""
 
     name = "connector"
 
@@ -236,44 +223,66 @@ class _ConnectorTransport:
         self.url = url
         self.token = token
 
-    def remember(self, index: int, marker: str) -> tuple[float, str]:
-        rel_path = _acceptance_path(index)
-        return self.write(rel_path, _page(f"Acceptance {index:04d}", marker, _identity(index))), rel_path
-
-    def edit(self, index: int, rel_path: str, _before_marker: str, after_marker: str) -> float:
-        return self.write(rel_path, _page(f"Acceptance {index:04d}", after_marker, _identity(index)))
-
-    def write(self, rel_path: str, source: str) -> float:
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": str(uuid.uuid4()),
-                "method": "tools/call",
-                "params": {
-                    "name": "remember",
-                    "arguments": {"path": rel_path, "content": source},
-                },
-            }
-        ).encode("utf-8")
-        headers = {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-        }
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+        request_id = str(uuid.uuid4())
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }).encode("utf-8")
+        headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
         if self.token:
             headers["authorization"] = f"Bearer {self.token}"
         request = Request(self.url, data=payload, headers=headers, method="POST")
         started = time.perf_counter()
         try:
             with urlopen(request, timeout=_CONNECTOR_TIMEOUT_SECONDS) as response:
-                response.read(_MAX_HTTP_RESPONSE_BYTES)
+                body = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+                content_type = records_live_acceptance._content_type(response)
         except (HTTPError, URLError, TimeoutError) as error:
-            # The class only: a transport error's message can carry a host, a
-            # path or a token fragment.
-            raise SystemExit(
-                f"live write acceptance failed: connector call failed "
-                f"({type(error).__name__})"
-            ) from error
-        return (time.perf_counter() - started) * 1_000.0
+            raise SystemExit(f"connector call failed ({type(error).__name__})") from error
+        elapsed = (time.perf_counter() - started) * 1_000.0
+        if len(body) > _MAX_HTTP_RESPONSE_BYTES:
+            raise SystemExit("connector response exceeds size limit")
+        envelope = records_live_acceptance._decode_http_response(body, content_type, request_id)
+        result = envelope["result"]
+        if result.get("isError"):
+            raise SystemExit("connector tool returned an error")
+        structured = result.get("structuredContent")
+        if structured is None:
+            content = result.get("content", [])
+            if len(content) != 1 or content[0].get("type") != "text":
+                raise SystemExit("connector response has no domain result")
+            structured = json.loads(content[0]["text"])
+        if not isinstance(structured, dict):
+            raise SystemExit("connector domain result must be an object")
+        return elapsed, structured
+
+
+def _prepare_collections(client: Any) -> tuple[dict[str, Any], str]:
+    _, described = client.call("record_memory", {"action": "describe"})
+    example = described["examples"]["minimal"]
+    client.call("record_memory", {
+        "action": "create", "manifest_path": example["manifest_path"],
+        "manifest_text": example["manifest_text"], "why": "prepare disposable acceptance",
+    })
+    # Reuse the shipped example's collection envelope and the Planning field
+    # shape. Defaults and accepted Planning values remain product-owned.
+    manifest, _, _ = vault.parse_frontmatter(example["manifest_text"], strict=True)
+    manifest.update({
+        "semantic_profile": "planning", "title": "Acceptance plans",
+        "exomem_id": str(uuid.uuid4()),
+        "item_schema": {"natural_key": ["title"], "fields": {
+            field: {"type": "string", **({"required": True} if field == "title" else {})}
+            for field in ("title", "kind", "status", "lifecycle", "priority", "commitment", "horizon", "health", "area", "parent")
+        }},
+    })
+    planning_path = "Knowledge Base/Planning/Acceptance/_collection.md"
+    client.call("plan_memory", {
+        "action": "create", "manifest_path": planning_path,
+        "manifest_text": "---\n" + yaml.safe_dump(manifest, sort_keys=False) + "---\n",
+        "why": "prepare disposable acceptance",
+    })
+    return example, planning_path
 
 
 def _read_your_write(vault_root: Path, marker: str, rel_path: str) -> str:
@@ -541,88 +550,161 @@ def measure(
     connector_url: str | None = None,
     connector_token: str | None = None,
     convergence_bound_seconds: float = CONVERGENCE_BOUND_SECONDS,
+    package_mode: str = "installed",
+    condition: str = "warm",
+    contract_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run one transport's acceptance burst and return a content-free report."""
+    """Measure public acknowledgements, keeping cold and contended cases separate.
+
+    The connector operator must verify its process uses this disposable vault
+    and isolated state before invocation. Local paths cannot prove remote state.
+    """
     root = Path(vault_root)
+    _require_disposable_environment(root, state_dir)
+    package = _package_identity(package_mode)
+    contract, contract_hash = _load_contract(contract_path)
+    contract.bar("ordinary-write-warm")
+    if samples_per_operation < 1:
+        raise SystemExit("acceptance requires a positive sample count")
     if transport == "connector":
         if not connector_url:
-            raise SystemExit(
-                "live write acceptance failed: connector transport requires a "
-                "--connector-url or EXOMEM_CONNECTOR_URL"
-            )
+            raise SystemExit("connector transport requires --connector-url")
         client: Any = _ConnectorTransport(connector_url, connector_token)
     else:
-        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         client = _DirectTransport(root, state_dir)
 
     os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
-    # Managed admission, because the pending overlay is scoped to managed
-    # recall and an offline caller keeps its source-walk fallback -- and
-    # asserted, not merely recorded. `warming` is a truthful outcome of the
-    # read contract, but a harness that never had an admitted catalogue answers
-    # `warming` to everything and measures an unwarmed corpus-context build on
-    # every write. Measured on a 3,789-page copy, that was the difference
-    # between a 377ms edit median with exact reads and a 2,623ms one with a
-    # 27.7s first sample and no exact read at all. The acceptance would have
-    # been reporting the harness.
-    #
-    # This is the served process's own warm-up, shared with the deterministic
-    # gate as one object: see `scripts/managed_recall.py`.
     durations: dict[str, list[float]] = {name: [] for name in OPERATIONS}
-    outcomes = {"exact": 0, "warming": 0, "stale": 0}
-    # The warm-up manages the runtime, so it belongs inside the same `finally`
-    # that gives it back: a warm-up that raises after managing would otherwise
-    # leave this process managed for good.
-    try:
-        recall_admission = str(
-            managed_recall.enter_managed_recall(root).get("state", "unknown")
-        )
-        full_receipts_before = _full_receipt_count(root)
-        for index in range(samples_per_operation):
-            create_marker = f"acceptanceremember{index:04d}"
-            remember_ms, rel_path = client.remember(index, create_marker)
-            durations["remember"].append(remember_ms)
-            outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+    cases: list[dict[str, Any]] = []
+    outcomes = {"exact": 0, "warming": 0, "stale": 0, "unknown": 0}
+    relation_target: str | None = None
 
-            edit_marker = f"acceptanceedit{index:04d}"
-            durations["edit"].append(client.edit(index, rel_path, create_marker, edit_marker))
-            outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
+    def skipped(name: str, index: int, error: BaseException | None = None) -> None:
+        cases.append({
+            "case": index, "operation": name, "condition": "cold" if index == 0 else condition,
+            "elapsed_ms": None, "terminal_outcome": "skipped", "thread_cpu_ms": None,
+            "thread_cpu_source": "unavailable", "phase_cpu": [],
+            "error_class": type(error).__name__ if error else None,
+        })
+
+    def measured_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, Any] | None:
+        result = None
+        error_class = None
+        terminal = "ok"
+        started = time.perf_counter()
+        client.thread_cpu_ms = None
+        client.phase_cpu = []
+        try:
+            elapsed, result = client.call(name, arguments)
+            # These are structured terminal fields, not inferred prose.
+            if result.get("outcome") in ("held", "refused") or result.get("ok") is False:
+                terminal = "refused"
+        except (Exception, SystemExit) as error:  # noqa: BLE001 - retain all timed terminals without their content
+            elapsed = (time.perf_counter() - started) * 1_000.0
+            terminal = "refused" if isinstance(error, OpError) else "error"
+            error_class = type(error).__name__
+        cpu_ms = client.thread_cpu_ms
+        cases.append({
+            "case": index, "operation": name, "condition": "cold" if index == 0 else condition,
+            "elapsed_ms": elapsed, "terminal_outcome": terminal,
+            "thread_cpu_ms": cpu_ms,
+            "thread_cpu_source": "public-boundary-thread" if cpu_ms is not None else "unavailable",
+            "phase_cpu": client.phase_cpu,
+            "error_class": error_class,
+        })
+        if index > 0:
+            durations[name].append(elapsed)
+        return result if terminal == "ok" else None
+
+    def collection_read(name: str, collection: str, field: str, marker: str) -> str:
+        try:
+            _, result = client.call(name, {
+                "action": "query", "collection": collection,
+                "filters": [{"column": field, "op": "eq", "value": marker}],
+            })
+            return "exact" if any(row.get(field) == marker for row in result["rows"]) else "stale"
+        except (Exception, SystemExit):  # noqa: BLE001 - a failed read proves no visibility
+            return "unknown"
+
+    try:
+        example, planning_path = _prepare_collections(client)
+        recall_admission = str(managed_recall.enter_managed_recall(root).get("state", "unknown"))
+        eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
+        relation_target = min(eligible).removesuffix(".md") if eligible else None
+        full_receipts_before = _full_receipt_count(root)
+        # The first public call of each operation is reported as cold; it primes
+        # per-operation state before any sample may claim the warm population.
+        for index in range(samples_per_operation + 1):
+            create_marker = f"acceptanceremember{index:04d}"
+            result = measured_call("remember", {
+                "content": _remember_content(f"Acceptance {index:04d}", create_marker, relation_target),
+                "title": f"Acceptance {index:04d}", "note_type": "insight",
+                "suggestions": False, "response_detail": "compact",
+            }, index)
+            if result is None:
+                skipped("edit_memory", index)
+                outcomes["unknown"] += 2
+            else:
+                rel_path = str(result["path"])
+                if not rel_path.endswith(".md"):
+                    rel_path += ".md"
+                relation_target = relation_target or rel_path.removesuffix(".md")
+                outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+                edit_marker = f"acceptanceedit{index:04d}"
+                edited = measured_call("edit_memory", {
+                    "path": rel_path, "why": "correct disposable acceptance observation",
+                    "operation": {"kind": "replace_string", "old_string": create_marker, "new_string": edit_marker},
+                }, index)
+                outcomes[_read_your_write(root, edit_marker, rel_path) if edited is not None else "unknown"] += 1
+
+            record_marker = f"acceptancerecord{index:04d}"
+            try:
+                _, inspected = client.call("record_memory", {"action": "inspect", "collection": example["manifest_path"]})
+            except (Exception, SystemExit) as error:  # noqa: BLE001 - skip only the write whose guard is unknown
+                skipped("record_memory", index, error)
+                outcomes["unknown"] += 1
+            else:
+                recorded = measured_call("record_memory", {
+                    "action": "append", "collection": example["manifest_path"],
+                    "item": dict(example["append_item"], label=record_marker), "item_key": str(uuid.uuid4()),
+                    "expected_container_hash": inspected["snapshot"], "why": "record disposable acceptance event",
+                }, index)
+                outcomes[collection_read("record_memory", example["manifest_path"], "label", record_marker) if recorded is not None else "unknown"] += 1
+
+            plan_marker = f"acceptanceplan{index:04d}"
+            planned = measured_call("plan_memory", {
+                "action": "add", "collection": planning_path,
+                "item": {"title": plan_marker}, "why": "save disposable acceptance intent",
+            }, index)
+            outcomes[collection_read("plan_memory", planning_path, "title", plan_marker) if planned is not None else "unknown"] += 1
     finally:
         readiness.unmanage_runtime()
 
-    convergence_seconds, converged, drain = _converge(
-        root, bound_seconds=convergence_bound_seconds
-    )
+    convergence_seconds, converged, drain = _converge(root, bound_seconds=convergence_bound_seconds)
     full_receipts_after = _full_receipt_count(root)
-    uncovered = (
-        -1
-        if full_receipts_before < 0 or full_receipts_after < 0
-        else max(0, full_receipts_after - full_receipts_before)
-    )
+    uncovered = -1 if full_receipts_before < 0 or full_receipts_after < 0 else max(0, full_receipts_after - full_receipts_before)
     return {
-        "transport": transport,
-        "samples_per_operation": samples_per_operation,
-        "fast_durable_ack": (
-            "active" if writer_lease.fast_durable_ack_active() else "inactive"
-        ),
+        "transport": transport, "package": package, "condition": condition,
+        "boundary": "public-write-v1",
+        "contract": {"revision": contract.revision, "sha256": contract_hash},
+        "connector_environment": "caller-verified-disposable" if transport == "connector" else None,
+        "connector_runtime_provenance": "caller-verified" if transport == "connector" else None,
+        "cold_definition": "first-public-call-per-operation-after-catalog-admission",
+        "samples_per_operation": samples_per_operation, "cases": cases,
+        "fast_durable_ack": "active" if writer_lease.fast_durable_ack_active() else "inactive",
         "operations": {
-            name: {
-                "samples": len(values),
-                "p50_ms": round(statistics.median(values), 1),
-                "p90_ms": round(_percentile(values, 0.90), 1),
-                "max_ms": round(max(values), 1),
-            }
+            name: {"samples": len(values), "p50_ms": statistics.median(values) if values else None,
+                   "p90_ms": _percentile(values, 0.90) if values else None,
+                   "p95_ms": _percentile(values, 0.95) if values else None,
+                   "max_ms": max(values) if values else None}
             for name, values in durations.items()
         },
-        "recall_admission": recall_admission,
-        "read_your_write": outcomes,
+        "recall_admission": recall_admission, "read_your_write": outcomes,
         "uncovered_full_receipts": uncovered,
         "post_burst_convergence_seconds": convergence_seconds,
-        "post_burst_convergence_bound_seconds": round(
-            float(convergence_bound_seconds), 1
-        ),
-        "post_burst_converged": converged,
-        "drain": drain,
+        "post_burst_convergence_bound_seconds": float(convergence_bound_seconds),
+        "post_burst_converged": converged, "drain": drain,
         "reconciliation_demanded": _reconciliation_demanded(root),
     }
 
@@ -687,9 +769,14 @@ def _convergence_failure(report: dict[str, Any]) -> str:
     )
 
 
-def check(report: dict[str, Any]) -> None:
+def check(
+    report: dict[str, Any],
+    *,
+    contract: request_latency_contract.LatencyContract | None = None,
+) -> None:
     """Fail the acceptance on any breach, naming it without naming content."""
     failures: list[str] = []
+    warm_bar = (contract or request_latency_contract.load_contract()).bar("ordinary-write-warm")
     for name in OPERATIONS:
         measured = report["operations"][name]
         if int(measured["samples"]) < MIN_SAMPLES_PER_OPERATION:
@@ -697,6 +784,9 @@ def check(report: dict[str, Any]) -> None:
                 f"{name} samples={measured['samples']} < "
                 f"{MIN_SAMPLES_PER_OPERATION}"
             )
+        if not measured["samples"]:
+            failures.append(f"{name} has no timed terminals")
+            continue
         if float(measured["p50_ms"]) > P50_MS:
             failures.append(
                 f"{name} p50={float(measured['p50_ms']):.1f}ms > {P50_MS:.1f}ms"
@@ -705,6 +795,19 @@ def check(report: dict[str, Any]) -> None:
             failures.append(
                 f"{name} p90={float(measured['p90_ms']):.1f}ms > {P90_MS:.1f}ms"
             )
+        if report.get("condition") == "warm":
+            if int(measured["samples"]) < warm_bar.min_samples:
+                failures.append(f"{name} warm sample count below contract minimum")
+            threshold = warm_bar.threshold_ms
+            p95 = float(measured["p95_ms"])
+            if threshold is None or (p95 >= threshold if warm_bar.comparison == "<" else p95 > threshold):
+                failures.append(f"{name} warm p95={p95:.1f}ms breaches {warm_bar.id}")
+    incomplete = sum(case["terminal_outcome"] != "ok" for case in report.get("cases", []))
+    if incomplete:
+        failures.append(f"{incomplete} failed or skipped public write(s)")
+    unknown_reads = int(report["read_your_write"].get("unknown", 0))
+    if unknown_reads:
+        failures.append(f"{unknown_reads} read(s) have unknown visibility")
     stale = int(report["read_your_write"]["stale"])
     if stale:
         failures.append(f"{stale} stale read(s) after an acknowledged write")
@@ -728,6 +831,9 @@ def check(report: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--transport", choices=TRANSPORTS, required=True)
+    parser.add_argument("--package-mode", choices=("installed", "source"), default="installed")
+    parser.add_argument("--condition", choices=("warm", "contended"), default="warm")
+    parser.add_argument("--contract", type=Path, help="shared controller contract for matched installed versions")
     parser.add_argument(
         "--samples-per-operation", type=int, default=MIN_SAMPLES_PER_OPERATION
     )
@@ -772,10 +878,13 @@ def main(argv: list[str] | None = None) -> int:
         connector_url=connector_url,
         connector_token=os.environ.get("EXOMEM_CONNECTOR_TOKEN"),
         convergence_bound_seconds=args.convergence_bound,
+        package_mode=args.package_mode,
+        condition=args.condition,
+        contract_path=args.contract,
     )
     print(json.dumps(report, sort_keys=True))
     if args.check:
-        check(report)
+        check(report, contract=_load_contract(args.contract)[0])
     return 0
 
 
