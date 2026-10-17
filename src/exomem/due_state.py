@@ -2680,9 +2680,9 @@ def served_entries(
     answer rebuilds, so a revocation stays immediate; the artifact-role
     findings are served again and compared, so advice whose source changed
     out of band is omitted until reconcile exactly as before; a page deleted
-    out of band is dropped from the hit the way the build drops it. Every
-    write replaces the projection file, so the next read after a write
-    rebuilds once. A projection that could not be persisted is never cached,
+    out of band is dropped from the hit the way the build drops it. A write
+    that changes the projection beyond its emission ledger rebuilds once on the
+    next read (`_served_content_token`). A projection that could not be persisted is never cached,
     because a write then updates it in memory with no file to notice.
     """
     from .governance import egress as egress_module
@@ -2788,12 +2788,12 @@ def served_entries(
 
 
 def _served_content_token(vault_root: Path) -> str | None:
-    """Identity of what a served build reads from the projection, or None when absent.
+    """Identity of the projection without its emission ledger, or None when absent.
 
-    A build reads only the projection's `categories` and `role_state`. Every
-    governed write rewrites the file to tick its emission ledger, so keying the
-    served cache on the file would rebuild the served list -- a release decision
-    per due item -- on every write, even one that changes no due item.
+    Every governed write rewrites the file to tick the emission ledger, which no
+    served build reads, so keying the served cache on the file would rebuild the
+    served list -- a release decision per due item -- on every write. Everything
+    else is hashed, so a key a build starts reading invalidates by default.
     """
     token = _file_token(state_path(vault_root))
     if token is None:
@@ -2808,7 +2808,7 @@ def _served_content_token(vault_root: Path) -> str | None:
         return None
     digest = hashlib.sha256(
         json.dumps(
-            {"categories": payload.get("categories"), "role_state": payload.get("role_state")},
+            {key: value for key, value in payload.items() if key != "emission"},
             sort_keys=True,
             separators=(",", ":"),
             default=str,
