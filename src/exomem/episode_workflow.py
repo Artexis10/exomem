@@ -304,23 +304,27 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
 
 
 def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str) -> bool:
-    """Whether the page a committed leaf wrote can be read back.
+    """Whether the page a committed leaf wrote is there to read back.
 
-    A Records item on the store thread has a generated view that the store publishes after its
-    commit, so until then the store's own transaction answers for it, not the file.
+    A Records item on a store collection has a generated view that the store publishes after its
+    commit, so its file may not exist yet. Its leaf is there when the vault routes the item's
+    collection to the store: the leaf's witness is then checked against the store's transaction
+    (`_tip_is_live`), and the file is not the evidence.
     """
+    from .collection_store.preview import selected_writer
+
     if (vault_root / path).is_file():
         return True
     try:
         item = curation.CurationStore(vault_root).load_plan(binding["run_id"])["binding_manifest"][
             binding["ordinal"]
         ]
+        return (
+            item.get("kind") in curation.RECORDS_STEP_KINDS
+            and selected_writer(vault_root, item["prepared"]["collection_id"]) is not None
+        )
     except (curation.CurationError, KeyError, IndexError, TypeError):
         return False
-    return (
-        item.get("kind") in curation.RECORDS_STEP_KINDS
-        and curation.store_writer(vault_root, item.get("prepared") or {}) is not None
-    )
 
 
 #: Distinct candidates landing on one page before the pass reports it.
@@ -877,8 +881,10 @@ def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
         if step["kind"] in curation.RECORDS_STEP_KINDS:
             writer = selected_writer(vault_root, item["prepared"]["collection_id"])
             if writer is not None:
-                # On the store thread: the collection is released to this caller, or it reads as absent.
-                with writer.read_collection(item["prepared"]["collection_id"]):
+                # On the store thread, under the policy the write itself meets: the whole collection
+                # is released to this caller, or it reads as absent.
+                with writer.read_collection(item["prepared"]["collection_id"], facade_profile="records",
+                                            mutation=True):
                     return False
             manifest = record_governance.resolve_collection_for_mutation(
                 vault_root, item["prepared"]["manifest_path"]

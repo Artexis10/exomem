@@ -324,27 +324,31 @@ class CollectionWriter:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
 
     @contextmanager
-    def read_snapshot(self):
-        """Join canonical reads under one SQLite and policy snapshot."""
+    def read_snapshot(self, *, mutation=False):
+        """Join canonical reads under one SQLite and policy snapshot.
+
+        ``mutation`` reads under the policy a write is held to: a collection withheld in part
+        reads as absent, as the write itself would find it.
+        """
         self._require_operation_context()
         self.handle.release_cache.check()
         if self.connection.in_transaction:
-            with self._authorization(mutation=False):
+            with self._authorization(mutation=mutation):
                 yield
             return
         self.connection.execute("BEGIN")
         try:
-            with self._authorization(mutation=False):
+            with self._authorization(mutation=mutation):
                 yield
         finally:
             self.connection.execute("ROLLBACK")
 
     @contextmanager
-    def read_collection(self, selector, *, facade_profile: str | None = None):
+    def read_collection(self, selector, *, facade_profile: str | None = None, mutation=False):
         """Resolve and read one collection under one SQLite and policy snapshot."""
         if facade_profile is None and isinstance(selector, collections.CollectionManifest):
             facade_profile = selector.semantic_profile
-        with self.read_snapshot():
+        with self.read_snapshot(mutation=mutation):
             manifest = self._collection(selector, facade_profile=facade_profile)[1]
             yield self._operation.field_plan(manifest).manifest
 
@@ -716,18 +720,63 @@ class CollectionWriter:
                 raise collections.CollectionError(
                     "INVALID_REQUEST_ID", "request identity must be non-empty"
                 )
-            stored = self.connection.execute(
-                "SELECT request_hash, receipt_json, collection_id FROM txns WHERE request_id = ?", (identity,)
-            ).fetchone()
+            stored = self.request_receipt(identity)
             if stored is not None:
-                self._operation.require_collection(stored[2])
-                if stored[0] != digest:
+                if stored["request_hash"] != digest:
                     raise collections.CollectionError(
                         "IDEMPOTENCY_KEY_REUSED",
                         "request identity already names different arguments",
                     )
-                return identity, digest, mutation_terminal._CanonicalRequestReplay(json.loads(stored[1]))
+                return identity, digest, mutation_terminal._CanonicalRequestReplay(stored["receipt"])
         return identity, digest, None
+
+    def request_receipt(self, request_id: str) -> dict[str, Any] | None:
+        """The transaction a request id committed: its request hash, collection, receipt and commit time.
+
+        None when no transaction carries the id. A collection this caller may not see reads as absent,
+        so the refusal is the one a missing collection gives. Call it inside a snapshot or a mutation.
+        """
+        found = self.connection.execute(
+            "SELECT request_hash, collection_id, receipt_json, committed_at FROM txns WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        if found is None:
+            return None
+        self._operation.require_collection(found[1])
+        return {
+            "request_hash": found[0],
+            "collection_id": found[1],
+            "receipt": json.loads(found[2]),
+            "committed_at": found[3],
+        }
+
+    def published_views(self, collection_id: str) -> list[tuple[str, str, str | None, str]]:
+        """The store's view of each generated file of a collection: path, kind, published digest, state.
+
+        A state other than ``current`` is a file the store has not yet published or has held.
+        Call it inside a snapshot.
+        """
+        return [
+            tuple(row)
+            for row in self.connection.execute(
+                "SELECT path, kind, published_sha256, state FROM projection_state WHERE collection_id = ?",
+                (collection_id,),
+            )
+        ]
+
+    def current_guards(self, selector, item_key: str | None = None) -> tuple[str, str | None]:
+        """The container hash a write to this collection must carry, and the item's version when one is named.
+
+        Raises ``RECORD_NOT_FOUND`` for a named item that does not exist.
+        """
+        with self.read_snapshot():
+            row = self._collection(selector)[0]
+            if item_key is None:
+                return self._container(row), None
+            item = self._item(row["collection_id"], item_key)
+            if item is None:
+                raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+            return self._container(row), self._version(item)
 
     def _txn(
         self,

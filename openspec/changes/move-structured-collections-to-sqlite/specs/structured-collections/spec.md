@@ -607,17 +607,19 @@ Append and targeted update for `markdown-log` and `markdown-items` collections S
 
 #### Scenario: A curation Records step on a store collection commits once through the store
 - **WHEN** a curation or episode Records step (`append-record` or `update-record`) on a collection that the vault's marker routes to the collection store is prepared, applied or resumed through the service that serves the vault
-- **THEN** the whole command runs on the service's store thread, the store writer makes the one transaction, and that transaction row carries the step's operation identity as its request identity
+- **THEN** the whole command runs on the service's store thread, the store writer makes the one transaction, and that transaction row carries the run and the step's operation identity as its request identity, so one run never reads another run's transaction as its own
 - **AND** the seal binds the collection identity, the store's container hash and, for an update, the item version, not the generated views' paths and hashes
-- **AND** a step sealed before the migration, or a run approved before it, commits once through the store only when its file views are, byte for byte, the views the store has published and none is unpublished; otherwise it refuses with `CURATION_BINDING_STALE` and writes nothing
+- **AND** a step sealed before the migration, or a run approved before it, commits once through the store only when its file views are, byte for byte, the views the store has published, the files and the store's published item and manifest views are the same set, and none is unpublished; otherwise, including after a published view was deleted by hand, it refuses with `CURATION_BINDING_STALE` and writes nothing
+- **AND** a collection that the caller can read only in part refuses the leaf as stale before any attempt, as a withheld collection does
 - **AND** a crash after the store commit reconciles from the transaction row and records `recovered-committed` once, and a replay writes nothing
+- **AND** a resume that runs a page leaf and a store Records leaf together commits each once
 
-#### Scenario: A curation Records step off the store thread refuses and writes nothing
-- **WHEN** such a step is prepared, applied or resumed where the store thread does not run it
-- **THEN** it refuses with `CURATION_RECORDS_STORE_UNSUPPORTED` and writes nothing: an apply records no approval, and the store and the collection's views are unchanged
-- **AND** a resume of a run approved before the migration records no receipt, so the run does not fail and stays resumable
+#### Scenario: A curation Records step with no service serving the vault refuses and writes nothing
+- **WHEN** such a step is prepared, applied or resumed through the command dispatcher on a vault that no service serves, so no store thread runs it
+- **THEN** the dispatcher routes the command nowhere and the step's own resolution refuses with `CURATION_RECORDS_STORE_UNSUPPORTED`: a prepare seals no plan, an apply records no approval, and the store and the collection's views are unchanged
+- **AND** a resume of a run approved before the migration records no receipt, so the run does not fail and stays resumable once the service serves the vault
 - **AND** the refusal names the Records action that makes the change there, `record_memory append` for an append step or `record_memory update` for an update step
-- **AND** a caller from whom the collection is withheld gets the refusal that a missing collection gives
+- **AND** a caller from whom the collection is withheld gets the refusal that a missing collection gives, before any answer that says the collection exists
 
 #### Scenario: A curation Records step into a store collection that keeps one log refuses before any seal
 - **WHEN** a curation or episode Records step is prepared for a store collection whose storage is a log or a summary

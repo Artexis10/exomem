@@ -265,6 +265,24 @@ def _error(code: str, reason: str) -> CurationError:
 RECORDS_STORE_UNSUPPORTED: Final[str] = "CURATION_RECORDS_STORE_UNSUPPORTED"
 
 
+def require_item_files(manifest: Any) -> None:
+    """A Records leaf's witness names one item file, so only a one-file-per-item collection takes one."""
+    if manifest.storage.strategy != "markdown-items" or manifest.view_mode != "items":
+        raise _error(
+            "CURATION_RECORDS_STORAGE_UNSUPPORTED", "a Records leaf writes to a markdown-items collection"
+        )
+
+
+def store_request_id(run_identity: str, operation_identity: str) -> str:
+    """The request id a store step's transaction carries: the operation, within the run that applies it.
+
+    Two runs sealed from one unchanged state on different days share a plan and so an operation
+    identity. Naming the run keeps one run from finding the other's transaction and calling its own
+    step committed; the later run then meets the moved container hash and refuses as stale.
+    """
+    return f"{run_identity}/{operation_identity}"
+
+
 def _records_store_unsupported(kind: str) -> CurationError:
     """A Records leaf on a collection the store owns runs only on the store thread of the service
     that serves it; anywhere else it refuses, and names the Records action that makes the same
@@ -1183,6 +1201,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
         recover_from_trash as recover_module,
     )
     from .collection_store import curation_step
+    from .collection_store.preview import selected_writer
 
     kind = str(step["kind"])
     args = dict(step["args"])
@@ -1340,7 +1359,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
             effect_after = [{"path": path, "exists": True}]
         elif (
             kind in RECORDS_STEP_KINDS
-            and curation_step.writer_for(vault_root, args["collection"]) is not None
+            and selected_writer(vault_root, args["collection"]) is not None
         ):
             # The store owns this collection and this runs on its thread. The writer prepares the
             # step; the seal binds the store's guards, never the generated views' paths and hashes.
@@ -1402,12 +1421,7 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
                 )
             if appended["semantic_profile"] != "records":
                 raise _error("RECORDS_PROFILE_REQUIRED", "a Records leaf writes to Records only")
-            if appended["strategy"] != "markdown-items":
-                # One file per item: the witness must name the item alone.
-                raise _error(
-                    "CURATION_RECORDS_STORAGE_UNSUPPORTED",
-                    "a Records leaf writes to a markdown-items collection",
-                )
+            require_item_files(manifest)
             path = normalize_target_path(appended["path"], field="destination", allow_records=True)
             manifest_path = normalize_target_path(
                 appended["manifest_path"], field="collection", allow_records=True
@@ -1757,7 +1771,7 @@ def _records_store_blockers(
     """
     from . import structured_collections as collections
     from .collection_store import curation_step
-    from .collection_store.preview import require_file_collection
+    from .collection_store.preview import require_file_collection, selected_writer
 
     steps = {step["step_id"]: step for step in plan["steps"]}
     blockers: list[dict[str, Any]] = []
@@ -1769,7 +1783,7 @@ def _records_store_blockers(
         ):
             continue
         manifest_path = prepared.get("manifest_path")
-        writer = curation_step.writer_for(vault_root, prepared["collection_id"])
+        writer = selected_writer(vault_root, prepared["collection_id"])
         if writer is not None:
             owned.add(index)
             try:
@@ -2161,16 +2175,6 @@ def _validate_witness(
     return dict(value)
 
 
-def store_writer(vault_root: Path, prepared: Mapping[str, Any]) -> Any:
-    """The bound store writer when this Records step runs on the store thread, else None."""
-    from .collection_store import curation_step
-
-    collection_id = prepared.get("collection_id")
-    if not isinstance(collection_id, str):
-        return None
-    return curation_step.writer_for(vault_root, collection_id)
-
-
 def records_collections(vault_root: Path, run_id: str) -> set[str]:
     """The collections whose Records steps a sealed plan holds; none when it cannot be read."""
     try:
@@ -2207,7 +2211,7 @@ def _publish_store_witness(
     path = _evidence_path(store, run_identity, operation_identity)
     if path.exists():
         return
-    found = curation_step.committed(writer, operation_identity)
+    found = curation_step.committed(writer, store_request_id(run_identity, operation_identity))
     if found is None:
         return
     receipt = found["receipt"]
@@ -2277,34 +2281,38 @@ def _verify_records_receipt(
     witness: Mapping[str, Any],
     *,
     kind: str = RECORDS_STEP_KIND,
-) -> None:
+) -> bool:
     """A Records leaf's witness holds only while the Records receipt agrees.
 
     The owner verifies the append payload or update preimages against one
     audit transition. Its item identity and hash must match the sealed
-    destination and the witness's own postimage.
+    destination and the witness's own postimage. Returns True when the store's
+    transaction row was that receipt, so the item's file is only a generated view.
     """
     from . import records as records_module
+    from .collection_store.preview import selected_writer
 
     prepared = dict(binding.get("prepared") or {})
     after = list(witness["after"])
     if len(after) != 1:
         raise _error("CURATION_OUTCOME_UNCERTAIN", "the Records postimage is invalid")
-    writer = store_writer(vault_root, prepared)
+    # The evidence this reads may be damaged: a binding without a collection identity is no store step.
+    collection_id = prepared.get("collection_id")
+    writer = selected_writer(vault_root, collection_id) if isinstance(collection_id, str) else None
     if writer is not None:
-        # On the store thread the transaction row for the operation identity is the receipt.
+        # On the store thread the transaction row for the step's request id is the receipt.
         from .collection_store import curation_step
 
         if not curation_step.verify(
             writer,
-            str(witness["operation_id"]),
-            collection_id=str(prepared.get("collection_id")),
+            store_request_id(str(witness["run_id"]), str(witness["operation_id"])),
+            collection_id=collection_id,
             item_key=str(prepared.get("item_key")),
             path=str(after[0].get("path")),
             after_item_hash=str(after[0].get("content_hash")),
         ):
             raise _error("CURATION_OUTCOME_UNCERTAIN", "the store's transaction does not corroborate")
-        return
+        return True
     if kind == "update-record":
         receipt = records_module.update_receipt(
             vault_root,
@@ -2330,6 +2338,7 @@ def _verify_records_receipt(
         != [after[0].get("path"), after[0].get("content_hash")]
     ):
         raise _error("CURATION_OUTCOME_UNCERTAIN", "the Records receipt does not corroborate")
+    return False
 
 
 def _verify_live_postcondition(
@@ -2342,8 +2351,7 @@ def _verify_live_postcondition(
     if step is not None and step.get("kind") in RECORDS_STEP_KINDS:
         if binding is None:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "a Records witness needs its binding")
-        _verify_records_receipt(vault_root, binding, witness, kind=step["kind"])
-        if store_writer(vault_root, binding.get("prepared") or {}) is not None:
+        if _verify_records_receipt(vault_root, binding, witness, kind=step["kind"]):
             # The postimage is the store's item version; the item's file is a generated view.
             return
     for item in witness["after"]:
@@ -2445,18 +2453,19 @@ def _dispatch_step(
         from . import record_governance
         from . import records as records_module
         from .collection_store import curation_step
+        from .collection_store.preview import selected_writer
 
-        writer = curation_step.writer_for(vault_root, prepared["collection_id"])
+        writer = selected_writer(vault_root, prepared["collection_id"])
         if writer is not None:
             assert run is not None
-            # The store's transaction row for the operation identity is this step's witness.
+            # The store's transaction row for this request id is the step's witness.
             result = curation_step.commit(
                 vault_root,
                 writer,
                 "append" if kind == RECORDS_STEP_KIND else "update",
                 args,
                 binding,
-                run["operation"],
+                store_request_id(run["curation_run"], run["operation"]),
             )
             return {**result, "path": prepared["destination"]}
         manifest = record_governance.require_records_profile(
@@ -2825,6 +2834,7 @@ def _execute_next(
     compensation: bool = False,
 ) -> dict[str, Any]:
     from . import curation_witness
+    from .collection_store.preview import selected_writer
 
     store = store or CurationStore(vault_root)
     plan = store.load_plan(run_identity)
@@ -2856,7 +2866,7 @@ def _execute_next(
     evidence_path = _evidence_path(store, run_identity, operation_identity)
     # A Records step on a collection the store owns commits there; its transaction row is the witness.
     writer = (
-        store_writer(vault_root, binding.get("prepared") or {})
+        selected_writer(vault_root, binding["prepared"]["collection_id"])
         if step["kind"] in RECORDS_STEP_KINDS and not compensation
         else None
     )

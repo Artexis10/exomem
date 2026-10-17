@@ -2,24 +2,19 @@
 
 The step runs on the store thread, through the writer's own append and update, under the
 store's guards: the collection's container hash and the item's version. The write carries
-the step's operation identity as its request id, so the store's transaction row for that id
-is the witness that the step committed. Curation derives its evidence file from that row.
+the step's request id (the run and the operation identity), so the store's transaction row
+for that id is the witness that the step committed. Curation derives its evidence file from
+that row.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 
 from .. import structured_collections as collections
 from .. import writer_lease
 from . import authority, preview
-
-
-def writer_for(vault_root, selector):
-    """The bound store writer when the vault's marker routes ``selector`` to the store, else None."""
-    return preview.selected_writer(vault_root, selector)
 
 
 def _stale(reason):
@@ -41,6 +36,8 @@ def prepare(vault_root, action, args):
     guards, and stops at its last check before the transaction, so a step is prepared by the
     very path that later executes it. A refused value is raised, never held.
     """
+    from .. import curation
+
     try:
         preview.dispatch(vault_root, "records", action, {**args, "hold": False, "_prepare": _stop})
     except _Prepared as stopped:
@@ -50,11 +47,7 @@ def prepare(vault_root, action, args):
             "RECORD_PREPARE_INCOMPLETE", "the write did not stop before its transaction"
         )
     manifest = prepared["manifest"]
-    # One file per item: the witness must name the item alone, so a log or a summary refuses.
-    if manifest.storage.strategy != "markdown-items" or manifest.view_mode != "items":
-        raise collections.CollectionError(
-            "CURATION_RECORDS_STORAGE_UNSUPPORTED", "a Records leaf writes to a markdown-items collection"
-        )
+    curation.require_item_files(manifest)
     return {
         "collection_id": manifest.collection_id,
         "manifest_path": manifest.path,
@@ -72,19 +65,6 @@ def _stop(prepared):
     raise _Prepared(prepared)
 
 
-def _current(writer, collection_id, item_key):
-    """The store's own container hash for a collection, and the item's version when one is named."""
-    with writer.read_snapshot():
-        row, _manifest, _declared = writer._collection(collection_id)
-        container = writer._container(row)
-        if item_key is None:
-            return container, None
-        item = writer._item(collection_id, item_key)
-        if item is None:
-            raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-        return container, writer._version(item)
-
-
 def resolve_guards(vault_root, writer, binding, args):
     """The container hash and item version the store write must carry, or a stale-seal refusal.
 
@@ -97,7 +77,7 @@ def resolve_guards(vault_root, writer, binding, args):
     collection_id, item_key = prepared["collection_id"], prepared.get("item_key")
     update = "expected_item_version" in args
     try:
-        container, version = _current(writer, collection_id, item_key if update else None)
+        container, version = writer.current_guards(collection_id, item_key if update else None)
     except collections.CollectionError as error:
         # nosemgrep: ep-word-membership -- the writer's two absence codes, fixed by the writer.
         if error.code in {"COLLECTION_NOT_FOUND", "RECORD_NOT_FOUND"}:
@@ -119,7 +99,9 @@ def _prove_views(vault_root, writer, binding, args):
 
     The seal's container hash and item hash were taken from the collection's files. They map to
     the store only if the collection's current views hash to the sealed container, the store
-    holds no view of it unpublished, and each view's bytes are the ones the store published.
+    holds no view of it unpublished, and the files and the store's published views are the same
+    set, each file with the bytes the store published. A view the store published and a person
+    then deleted is a row the sealed container no longer shows, so it refuses.
     """
     from .. import curation, record_formats, records
 
@@ -135,21 +117,22 @@ def _prove_views(vault_root, writer, binding, args):
         raise _stale("the sealed collection's views cannot be read") from error
     if records._container_hash(manifest, snapshot) != args["expected_container_hash"]:  # noqa: SLF001
         raise _stale("the collection's views are not the state the seal bound")
-    states = writer.connection.execute(
-        "SELECT path, published_sha256, state FROM projection_state WHERE collection_id = ?", (collection_id,)
-    ).fetchall()
-    published = {path: digest for path, digest, state in states if state == "current"}
-    if any(state != "current" for _path, _digest, state in states):
+    with writer.read_snapshot():
+        states = writer.published_views(collection_id)
+    if any(state != "current" for _path, _kind, _digest, state in states):
         raise _stale("the store has views of this collection that it has not published")
+    # The container hash covers the manifest and the item files; the other views do not enter it.
+    # nosemgrep: ep-word-membership -- the two projection kinds the store schema fixes for them.
+    published = {path: digest for path, kind, digest, _state in states if kind in {"manifest", "item"}}
     views = {manifest_path: manifest_hash, **{version.path: version.hash for version in snapshot.source_versions}}
-    if any(published.get(path) != digest for path, digest in views.items()):
-        raise _stale("a view of the collection differs from the one the store published")
+    if published != views:
+        raise _stale("the collection's views are not the ones the store published")
     if "expected_item_version" in args and args["expected_item_version"] != prepared.get("before_item_hash"):
         raise _stale("the sealed item version is not the item the seal bound")
 
 
 def commit(vault_root, writer, action, args, binding, request_id):
-    """Run the writer's own append or update with the operation identity as its request id."""
+    """Run the writer's own append or update with the step's request id."""
     container, version = resolve_guards(vault_root, writer, binding, args)
     values = {
         **args,
@@ -170,33 +153,43 @@ def committed(writer, request_id):
     """The store's transaction row for a request id: its receipt and commit time, or None.
 
     That row is the step's witness: the store commits it with the write, so it exists exactly
-    when the step committed.
+    when the step committed. A row in a collection this caller may not see leaves the outcome
+    uncertain to that caller, never "not committed".
     """
-    with writer.read_snapshot():
-        found = writer.connection.execute(
-            "SELECT collection_id, receipt_json, committed_at FROM txns WHERE request_id = ?", (request_id,)
-        ).fetchone()
-        if found is None:
-            return None
-        writer._operation.require_collection(found[0])  # noqa: SLF001
-        return {"receipt": json.loads(found[1]), "committed_at": found[2]}
+    from .. import curation
+
+    try:
+        with writer.read_snapshot():
+            found = writer.request_receipt(request_id)
+    except collections.CollectionError as error:
+        raise curation.CurationError(
+            "CURATION_OUTCOME_UNCERTAIN", "the store's transaction cannot be read by this caller"
+        ) from error
+    return None if found is None else {"receipt": found["receipt"], "committed_at": found["committed_at"]}
 
 
 def verify(writer, request_id, *, collection_id, item_key, path, after_item_hash):
-    """Whether the transaction row for ``request_id`` shows this step's committed result, still current."""
-    found = committed(writer, request_id)
-    receipt = None if found is None else found["receipt"]
-    if (
-        receipt is None
-        or receipt.get("outcome") != "committed"
-        or receipt.get("collection_id") != collection_id
-        or receipt.get("item_key") != item_key
-        or path not in receipt.get("affected_paths", ())
-        or receipt.get("after_item_hash") != after_item_hash
-    ):
+    """Whether the transaction row for ``request_id`` shows this step's committed result, still current.
+
+    A row, collection or item this caller cannot find is no corroboration: False, not an error.
+    """
+    try:
+        with writer.read_snapshot():
+            found = writer.request_receipt(request_id)
+            receipt = None if found is None else found["receipt"]
+            if (
+                receipt is None
+                or receipt.get("outcome") != "committed"
+                or receipt.get("collection_id") != collection_id
+                or receipt.get("item_key") != item_key
+                or path not in receipt.get("affected_paths", ())
+                or receipt.get("after_item_hash") != after_item_hash
+            ):
+                return False
+            # An item changed since is no longer the step's result, as an edited file's receipt is not.
+            return writer.current_guards(collection_id, item_key)[1] == after_item_hash
+    except collections.CollectionError:
         return False
-    # An item changed since is no longer the step's result, as an edited file's receipt is not.
-    return _current(writer, collection_id, item_key)[1] == after_item_hash
 
 
 def needs_store(root, marker, command, arguments):

@@ -6907,7 +6907,8 @@ def owner_only_aggregate(
         operation = writer._operation
         try:
             for entry in reserved_paths.list_generic_tree(vault_root, "."):
-                if entry.identity.kind != "file":
+                # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
+                if entry.identity.kind != "file" or not entry.relative_path.startswith(f"{kb_dirname()}/"):
                     continue
                 canonical = operation.projection_decision(entry.relative_path)
                 if canonical is None:

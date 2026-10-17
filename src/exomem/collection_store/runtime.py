@@ -783,12 +783,11 @@ def _curation_route(command, root, arguments):
 
     A step on a collection the store owns commits through the store writer, which only the store
     thread holds, so the whole command runs there. Every other curation, in a vault with a store
-    or without one, keeps its path. A vault whose marker cannot be read routes nothing here: the
-    step's own resolution then refuses a store collection, as it does off the thread.
+    or without one, keeps its path. Where no service serves the vault, or the marker cannot be
+    read, nothing is routed: the step's own resolution then refuses, and it alone decides whether
+    this caller may hear that the collection exists. Raising here would tell every caller first.
     """
-    from ..cli_ops import OpError
     from . import authority, curation_step
-    from .preview import UNSERVED
 
     try:
         raw = authority.read_marker(root)
@@ -800,12 +799,7 @@ def _curation_route(command, root, arguments):
     if not curation_step.needs_store(root, marker, command, arguments):
         return None
     connection.load_store_libraries()
-    server = _server(root)
-    if server is None:
-        raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
-        )
-    return server
+    return _server(root)
 
 
 def projection_route(vault_root, path):
