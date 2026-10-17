@@ -103,6 +103,8 @@ def _traced_commit(vault: Path, rels: list[str], *, command: str = "edit_memory"
     """One governed commit of several pages under one mutation trace: what a
     multi-page command writes, at one time."""
     token = writer_lease._ACTIVE_MUTATION_TRACE.set(("request-under-test", command, "none"))
+    # Match the command lifetime: a simulated commit must not leak into the next test.
+    commit_token = writer_lease._ACTIVE_MUTATION_COMMITTED.set(False)
     try:
         vault_module.batch_atomic_write(
             [
@@ -115,6 +117,7 @@ def _traced_commit(vault: Path, rels: list[str], *, command: str = "edit_memory"
             vault_root=vault,
         )
     finally:
+        writer_lease._ACTIVE_MUTATION_COMMITTED.reset(commit_token)
         writer_lease._ACTIVE_MUTATION_TRACE.reset(token)
 
 
