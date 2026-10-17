@@ -330,17 +330,19 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     full_items = _collect_items("full lean suite", None, [])
     workflow = _workflow()
     core_job = workflow["jobs"]["core-tests"]
-    serial_module = core_job["env"]["EXOMEM_SERIAL_CORE_MODULE"]
-    assert '--ignore="$EXOMEM_SERIAL_CORE_MODULE"' in _run_step(core_job)["run"]
+    # Job-level environment values select the timing modules; runtime defaults live on the steps.
+    serial_modules = list(core_job["env"].values())
+    for variable in core_job["env"]:
+        assert f'--ignore="${variable}"' in _run_step(core_job)["run"]
     serial_step = next(
         step for step in core_job["steps"]
-        if '"$EXOMEM_SERIAL_CORE_MODULE"' in step.get("run", "")
+        if all(f'"${variable}"' in step.get("run", "") for variable in core_job["env"])
     )
     assert serial_step["if"] == "matrix.shard == 1 && steps.scope.outputs.docs_only != 'true'"
     assert "--splits" not in serial_step["run"]
     assert "-serial.xml" in serial_step["run"]
-    core_items = _collect_items("pooled core tier", "core", [f"--ignore={serial_module}"])
-    serial_items = _collect_items("serial core checks", "core", [serial_module])
+    core_items = _collect_items("pooled core tier", "core", [f"--ignore={module}" for module in serial_modules])
+    serial_items = _collect_items("serial core checks", "core", serial_modules)
     serial = {item.nodeid for item in serial_items}
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])

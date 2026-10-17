@@ -35,6 +35,7 @@ jobs:
     env:
       # These timing checks need the runner to themselves, before the worker pool.
       EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
+      EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
     # anything release-please does not manage. Lint, build (packages, Cloud
@@ -106,7 +107,7 @@ jobs:
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
-      - name: Check governance overhead before the worker pool
+      - name: Check timing budgets before the worker pool
         if: matrix.shard == 1 && steps.scope.outputs.docs_only != 'true'
         env: &core-test-env
           # The suite runs without the embeddings/media extras; these mirror the
@@ -119,6 +120,7 @@ jobs:
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           "$EXOMEM_SERIAL_CORE_MODULE"
+          "$EXOMEM_SERIAL_ANALYTICS_MODULE"
           -o timeout=180
           --durations-path=.test_durations.json
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}-serial.xml
@@ -138,6 +140,7 @@ jobs:
           --max-worker-restart=0
           -o timeout=180
           --ignore="$EXOMEM_SERIAL_CORE_MODULE"
+          --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
