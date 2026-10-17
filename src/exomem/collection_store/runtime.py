@@ -518,6 +518,7 @@ class CollectionStoreRuntime:
 
     @contextmanager
     def checkout(self):
+        from ..cli_ops import OpError
         from . import capability
 
         capability.require_not_disabled(self.root)
@@ -532,12 +533,24 @@ class CollectionStoreRuntime:
         with self.manager._collection_store_checkout():
             # A rollback between the first check and borrowing must also refuse this checkout.
             capability.require_not_disabled(self.root)
-            lease = self.manager.ensure_writer()
-            self._admit(lease.fencing_token, reads=True)
-            if self._handle is None or self._writer_token != lease.fencing_token:
+            with self.manager._lock:
+                token = self.manager._fencing_token
+            if token is not None:
+                try:
+                    # Admission checks coordinator expiry and revocation without renewing write activity.
+                    self._admit(token, reads=True)
+                except OpError as error:
+                    if error.code != "WRITER_FENCED":
+                        raise
+                    token = None
+            if token is None:
+                # Reacquire only before lending the handle; in-flight authority checks never reacquire.
+                token = self.manager.ensure_writer(cause="read").fencing_token
+                self._admit(token, reads=True)
+            if self._handle is None or self._writer_token != token:
                 with self.manager.consistency_guard(self.root, operation="collection_store_open"):
                     with self.manager._lock:
-                        if self._handle is not None and self._writer_token != lease.fencing_token:
+                        if self._handle is not None and self._writer_token != token:
                             if (self.manager._store_borrowers != {threading.get_ident(): 1}
                                     or not self._retire_handle()):
                                 raise connection.CollectionStoreError(
@@ -553,12 +566,12 @@ class CollectionStoreRuntime:
                             opening = [True]
                             self._handle = connection.open_writer(
                                 self.path, lease_check=lambda: self._authority(
-                                    lease.fencing_token, reads=opening[0]),
+                                    token, reads=opening[0]),
                                 schema_guard=lambda version: self._record_schema(
-                                    lease.fencing_token, version, reads=True),
+                                    token, version, reads=True),
                             )
                             opening[0] = False
-                            self._writer_token = lease.fencing_token
+                            self._writer_token = token
             handle, changed = self._handle, False
             before = handle.connection.total_changes
             try:

@@ -27,6 +27,9 @@ commands, vault-scoped lease and synchronous item-view publication protocol.
 It does not lift file-mode caps and refuses to time a pending-only append.
 Native Windows and mixed-authority acceptance remain outside this diagnostic;
 these numbers cannot retire the store's phase-acceptance gate.
+``--phase-probes`` adds a synthetic 10% ref-withheld audience split and one
+bulk-500 call in store mode. It reports refusal and successful append timings
+separately, without claiming the remaining platform or fsync evidence.
 """
 
 from __future__ import annotations
@@ -36,11 +39,13 @@ import contextlib
 import cProfile
 import datetime as dt
 import functools
+import hashlib
 import io
 import json
 import os
+import platform
 import pstats
-import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -52,6 +57,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 COLLECTION = "Knowledge Base/Records/Field Log/_collection.md"
+
+# Closed measurement budgets from the store design, section 12; these are not product vocabulary.
+BUDGETS_MS = {
+    "dispatcher": 5, "lease": 2, "resolution": 1, "validation": 2,
+    "governance": 2, "store_view": 4, "fanout": 0, "carriers": 2, "receipt": 1,
+}
 
 MANIFEST = """---
 type: collection
@@ -113,7 +124,7 @@ def _item(index: int) -> dict[str, object]:
 def _pct(values: list[float], q: float) -> float:
     ordered = sorted(values)
     if not ordered:
-        return 0.0
+        raise ValueError("a percentile needs at least one measured sample")
     rank = (len(ordered) - 1) * q
     lo, hi = int(rank), min(int(rank) + 1, len(ordered) - 1)
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)
@@ -123,20 +134,78 @@ def _pct(values: list[float], q: float) -> float:
 
 
 class Stages:
-    """Inclusive wall time per named stage, outermost entry only, main thread only."""
+    """Main-thread exclusive budgets and separate inclusive diagnostic timers."""
 
     def __init__(self) -> None:
         self.main = threading.get_ident()
         self.depth: dict[str, int] = defaultdict(int)
         self.total: dict[str, float] = defaultdict(float)
         self.calls: dict[str, int] = defaultdict(int)
+        self.exclusive: dict[str, float] = defaultdict(float)
+        self.budget_calls: dict[str, int] = defaultdict(int)
+        self.frames: list[list] = []
+        self.instrumentation: dict[str, str | None] = {"dispatcher.root": "dispatcher"}
+        self.missing: dict[str, str] = {}
+        self.last_sample: dict[str, object] = {}
 
     def reset(self) -> None:
         self.total.clear()
         self.calls.clear()
+        self.exclusive.clear()
+        self.budget_calls.clear()
 
-    def wrap(self, owner: object, attr: str, name: str) -> None:
-        original = getattr(owner, attr)
+    def begin(self, budget: str, start: float | None = None) -> list:
+        frame = [budget, time.perf_counter() if start is None else start, 0.0]
+        self.frames.append(frame)
+        self.budget_calls[budget] += 1
+        return frame
+
+    def end(self, frame: list, stop: float | None = None) -> None:
+        elapsed = (time.perf_counter() if stop is None else stop) - frame[1]
+        assert self.frames.pop() is frame
+        self.exclusive[frame[0]] += elapsed - frame[2]
+        if self.frames:
+            self.frames[-1][2] += elapsed
+
+    @contextlib.contextmanager
+    def frame(self, budget: str | None):
+        frame = self.begin(budget) if budget and threading.get_ident() == self.main else None
+        try:
+            yield
+        finally:
+            if frame is not None:
+                self.end(frame)
+
+    def sample(self, wall: float, cpu: float, spans: list, error_code: str | None) -> dict:
+        missing = list(self.missing)
+        error = sum(self.exclusive.values()) - wall
+        if abs(error) > 1e-8:
+            raise RuntimeError("exclusive budgets do not reconcile with the measured interval")
+        return {
+            "elapsed_ms": wall * 1000, "thread_cpu_ms": cpu * 1000,
+            "non_cpu_elapsed_ms": (wall - cpu) * 1000,
+            "exclusive_ms": {
+                name: None if name in self.missing.values() else self.exclusive.get(name, 0.0) * 1000
+                for name in BUDGETS_MS
+            },
+            "reconciliation_error_ms": error * 1000,
+            "missing_instrumentation": missing, "error_code": error_code, "call_spans": spans,
+            "stages": {
+                name: {"status": "missing" if name in self.missing.values() else
+                       "reached" if self.budget_calls[name] else "not_reached",
+                       "calls": self.budget_calls[name]}
+                for name in BUDGETS_MS
+            },
+        }
+
+    def wrap(self, owner: object, attr: str, name: str, budget: str | None = None) -> None:
+        original = getattr(owner, attr, None)
+        if budget:
+            self.instrumentation[name] = budget if original is not None else None
+            if original is None:
+                self.missing[name] = budget
+        if original is None:
+            return
         stages = self
 
         @functools.wraps(original)
@@ -147,7 +216,8 @@ class Stages:
             stages.depth[name] += 1
             start = time.perf_counter()
             try:
-                return original(*args, **kwargs)
+                with stages.frame(budget):
+                    return original(*args, **kwargs)
             finally:
                 stages.depth[name] -= 1
                 if stages.depth[name] == 0:
@@ -155,36 +225,60 @@ class Stages:
 
         setattr(owner, attr, timed)
 
-    def wrap_cm(self, owner: object, attr: str, name: str) -> None:
+    def wrap_cm(self, owner: object, attr: str, name: str, budget: str | None = None,
+                *, lifetime: bool = False) -> None:
         """Time a @contextmanager's acquisition and its release separately."""
-        original = getattr(owner, attr)
+        original = getattr(owner, attr, None)
+        if budget:
+            self.instrumentation[name] = budget if original is not None else None
+            if original is None:
+                self.missing[name] = budget
+        if original is None:
+            return
         stages = self
 
         @functools.wraps(original)
         @contextlib.contextmanager
         def timed(*args, **kwargs):  # type: ignore[no-untyped-def]
+            if threading.get_ident() != stages.main:
+                with original(*args, **kwargs) as value:
+                    yield value
+                return
             manager = original(*args, **kwargs)
-            start = time.perf_counter()
-            value = manager.__enter__()
-            stages.total[f"{name}.enter"] += time.perf_counter() - start
-            stages.calls[f"{name}.enter"] += 1
-            try:
-                yield value
-            except BaseException:
-                if not manager.__exit__(*sys.exc_info()):
-                    raise
-            else:
+
+            def boundary(suffix, method, *arguments):
                 start = time.perf_counter()
-                manager.__exit__(None, None, None)
-                stages.total[f"{name}.exit"] += time.perf_counter() - start
-                stages.calls[f"{name}.exit"] += 1
+                stages.calls[f"{name}.{suffix}"] += 1
+                try:
+                    with stages.frame(None if lifetime else budget):
+                        return method(*arguments)
+                finally:
+                    stages.total[f"{name}.{suffix}"] += time.perf_counter() - start
+
+            with stages.frame(budget if lifetime else None):
+                value = boundary("enter", manager.__enter__)
+                try:
+                    yield value
+                except BaseException:
+                    if not boundary("exit", manager.__exit__, *sys.exc_info()):
+                        raise
+                else:
+                    boundary("exit", manager.__exit__, None, None, None)
 
         setattr(owner, attr, timed)
 
 
 def _child(args: argparse.Namespace) -> dict[str, object]:
+    # This diagnostic owns its configuration; inherited endpoints could change a live writer lease.
+    for name in tuple(os.environ):
+        if name.startswith(("EXOMEM_", "KB_MCP_")):
+            del os.environ[name]
+    with tempfile.TemporaryDirectory(prefix="exomem-append-latency-") as raw, contextlib.ExitStack() as cleanup:
+        return _measure_child(args, Path(raw), cleanup)
+
+
+def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.ExitStack) -> dict[str, object]:
     size = args.size
-    tmp = Path(tempfile.mkdtemp(prefix="exomem-append-latency-"))
     os.environ.update(
         {
             "XDG_STATE_HOME": str(tmp / "xdg"),
@@ -226,6 +320,9 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     from exomem import vault as vault_module
     from exomem.governance import egress, principal
 
+    manager = writer_lease.get_manager()
+    cleanup.callback(manager.close)
+
     if args.lift_caps and args.storage == "files":
         # Measurement only: the product refuses a collection above 2,000 items. This
         # lifts every cap so the cost curve can be read past it.
@@ -253,6 +350,7 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         (vault / evidence).write_text("# Invented latency seed\n", encoding="utf-8")
         with principal.library_scope(), writer_lease.get_manager().mutation_guard(vault, operation="latency-seed"):
             handle = store_connection.open_writer(store_connection.store_path(vault), vault_root=vault)
+            cleanup.callback(handle.close)
             with preview_store(vault, handle) as writer:
                 created = writer.create_collection(COLLECTION, MANIFEST, why="synthetic seed", scaffold=False)
                 guard = created["after_container_hash"]
@@ -279,20 +377,59 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
             occupied.add(relative)
             (vault / relative).write_text(text, encoding="utf-8")
     seed_seconds = time.perf_counter() - started
+    # Drain graph writes before closing the owned handles and deleting their temporary state.
+    cleanup.callback(graph_sync.drain_active_rebuilds)
+
+    complete_principal = partial_principal = None
+    fixture = None
+    if args.phase_probes:
+        from exomem.governance import policy
+
+        keys = handle.connection.execute("SELECT collection_id, item_key FROM items ORDER BY row_id").fetchall()
+        selected = keys[:size // 10]
+        if len(keys) != size:
+            raise RuntimeError("phase fixture seed count differs from the requested size")
+        governance_dir = vault / "Knowledge Base/_Governance"
+        scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        scope = governance_dir / "scopes/latency.yaml"
+        scope.parent.mkdir(parents=True)
+        scope.write_text(
+            f"governance_version: 1\nid: {scope_id}\nname: Synthetic selected rows\n"
+            + "refs: " + json.dumps([f"exomem://record/{cid}/{key}" for cid, key in selected]) + "\n",
+            encoding="utf-8",
+        )
+        for audience, ceiling, rule_id in (
+            ("partial", 0, "01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            ("complete", 6, "01ARZ3NDEKTSV4RRFFQ69G5FB1"),
+        ):
+            rule = governance_dir / f"rules/{audience}.yaml"
+            rule.parent.mkdir(exist_ok=True)
+            rule.write_text(
+                f"governance_version: 1\nid: {rule_id}\nscope_ids: [{scope_id}]\n"
+                f"audience: {audience}\nceiling: {ceiling}\n", encoding="utf-8",
+            )
+        compiled = policy.load(vault)
+        if compiled.empty or compiled.blocked:
+            raise RuntimeError("synthetic ref-withheld policy did not compile")
+        complete_principal = principal.RequestPrincipal("complete", surface="mcp")
+        partial_principal = principal.RequestPrincipal("partial", surface="mcp")
+        fixture = {"seeded_rows": len(keys), "selected_refs": len(selected)}
 
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "record_memory")
     stages = Stages()
-    stages.wrap(record_memory_module, "_validate_arguments", "validate.arguments")
-    stages.wrap(records, "_validate_values", "validate.values")
-    stages.wrap(records, "_validate_why", "validate.why_body")
-    stages.wrap(records, "_validate_body", "validate.why_body")
-    stages.wrap(record_governance, "resolve_collection_for_mutation", "collection.resolve")
+    stages.wrap(record_memory_module, "_validate_arguments", "validate.arguments", "validation")
+    stages.wrap(records, "_validate_values", "validate.values", "validation")
+    stages.wrap(records, "_validate_why", "validate.why_body", "validation")
+    stages.wrap(records, "_validate_body", "validate.why_body", "validation")
+    for attr in ("_validate_hold", "_validate_item_key", "_refuse_excluded_authored_names"):
+        stages.wrap(records, attr, f"validate.{attr}", "validation")
+    stages.wrap(record_governance, "resolve_collection_for_mutation", "collection.resolve", "resolution")
     stages.wrap(record_governance, "require_records_profile", "collection.profile")
-    stages.wrap_cm(writer_lease.LeaseManager, "mutation_guard", "boundary")
+    stages.wrap_cm(writer_lease.LeaseManager, "mutation_guard", "boundary", "lease")
     stages.wrap(records, "_load_guarded_manifest", "guard.manifest_load")
     stages.wrap(collections, "parse_manifest_bytes", "guard.manifest_parse")
-    stages.wrap(record_governance, "require_mutation_visibility", "authz.visibility")
-    stages.wrap(record_governance, "precommit_authorize_mutation", "authz.precommit")
+    stages.wrap(record_governance, "require_mutation_visibility", "authz.visibility", "governance")
+    stages.wrap(record_governance, "precommit_authorize_mutation", "authz.precommit", "governance")
     stages.wrap(record_formats, "load_adapter", "guard.load_adapter")
     stages.wrap(record_formats.MarkdownItemsAdapter, "read", "guard.snapshot_read")
     stages.wrap(records, "_natural_key_twins", "guard.natural_key_twins")
@@ -304,10 +441,15 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     stages.wrap(records, "_audit_body", "audit.body")
     stages.wrap(records, "_plan_required_audit", "audit.plan")
     stages.wrap(vault_module, "batch_atomic_write", "write.batch_atomic_write")
-    stages.wrap(vault_module, "post_commit_batch_fanout", "write.post_commit_fanout")
-    stages.wrap(index_sync, "upsert_after_write", "index.upsert_after_write")
-    stages.wrap(records, "_due_state_carrier", "post.due_state_carrier")
-    stages.wrap(records, "_capture_sweep_carrier", "post.capture_sweep_carrier")
+    stages.wrap(vault_module, "post_commit_batch_fanout", "write.post_commit_fanout", "fanout")
+    stages.wrap(index_sync, "upsert_after_write", "index.upsert_after_write", "fanout")
+    from exomem import file_watcher
+
+    stages.wrap(file_watcher, "register_self_write", "write.register_self_write", "fanout")
+    stages.wrap(records, "_due_state_carrier", "post.due_state_carrier", "carriers")
+    stages.wrap(records, "_capture_sweep_carrier", "post.capture_sweep_carrier", "carriers")
+    stages.wrap(records, "_result", "receipt.result", "receipt")
+    stages.wrap(writer_lease, "project_terminal", "receipt.project_terminal", "receipt")
     stages.wrap(writer_lease.IdempotencyStore, "run", "ledger.run")
     stages.wrap(writer_lease.IdempotencyStore, "completed_terminal", "ledger.completed_terminal")
     stages.wrap(writer_lease, "_command_digest", "ledger.command_digest")
@@ -320,15 +462,24 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     stages.wrap(graph_sync, "join_registered_if_settled", "graph.join_registered")
     if handle is not None:
         from exomem.collection_store import governance as store_governance
+        from exomem.collection_store.views import PublicationBatch
         from exomem.collection_store.writer import CollectionWriter
 
         stages.wrap_cm(store_connection.WriterConnection, "transaction", "store.transaction")
-        stages.wrap(CollectionWriter, "_collection", "store.collection_resolve")
-        stages.wrap(CollectionWriter, "_collection_manifest", "store.manifest_contract")
+        stages.wrap(CollectionWriter, "_identity", "store.identity", "dispatcher")
+        stages.wrap(CollectionWriter, "_collection", "store.collection_resolve", "resolution")
+        stages.wrap(CollectionWriter, "_collection_row", "store.collection_row", "resolution")
+        stages.wrap(CollectionWriter, "_collection_manifest", "store.manifest_contract", "resolution")
+        stages.wrap(CollectionWriter, "_validate", "store.validate", "validation")
+        stages.wrap_cm(CollectionWriter, "_authorization", "store.authorization", "governance")
+        stages.wrap(CollectionWriter, "_precommit", "store.precommit", "governance")
+        stages.wrap_cm(CollectionWriter, "_mutation", "store.mutation", "store_view", lifetime=True)
+        stages.wrap(PublicationBatch, "stage_all", "store.view_stage")
+        stages.wrap(PublicationBatch, "publish", "store.view_publish")
         stages.wrap(CollectionWriter, "_write_item", "store.item_write")
         stages.wrap(CollectionWriter, "_insert_txn", "store.audit_write")
         stages.wrap(CollectionWriter, "_pending", "store.pending_projection")
-        stages.wrap(store_governance.OperationAuthorization, "require_collection", "store.authorize_collection")
+        stages.wrap(store_governance.OperationAuthorization, "require_collection", "store.authorize_collection", "governance")
 
     leaf_time = {"leaf": 0.0}
     original_leaf = command.leaf
@@ -355,27 +506,42 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
 
     index_sync.upsert_after_write = spying_upsert
 
-    def invoke(**kwargs: object) -> tuple[float, float, object, list[dict[str, object]]]:
+    def invoke(*, audience=None, **kwargs: object) -> tuple[float, float, object, list[dict[str, object]]]:
         token = f"harness-{uuid.uuid4().hex}"
-        call_spans.MCP_CALL_TOKEN.set(token)
-        start = time.perf_counter()
+        context_token = call_spans.MCP_CALL_TOKEN.set(token)
+        stages.reset()
+        who = complete_principal if audience is None else audience
+        scope = principal.library_scope() if who is None else principal.request_scope(who)
+        error_code = None
         cpu_start = time.thread_time()
-        with principal.library_scope():
-            if handle is None:
-                result = writer_lease.invoke_command(timed_command, vault, **kwargs)
-            else:
-                with preview_store(vault, handle):
+        start = time.perf_counter()
+        root = stages.begin("dispatcher", start)
+        try:
+            with scope:
+                if handle is None:
                     result = writer_lease.invoke_command(timed_command, vault, **kwargs)
-        cpu = time.thread_time() - cpu_start
-        wall = time.perf_counter() - start
+                else:
+                    with preview_store(vault, handle):
+                        result = writer_lease.invoke_command(timed_command, vault, **kwargs)
+        except BaseException as error:
+            error_code = getattr(error, "code", type(error).__name__)
+            raise
+        finally:
+            stop = time.perf_counter()
+            cpu = time.thread_time() - cpu_start
+            wall = stop - start
+            stages.end(root, stop)
+            spans = call_spans.pop_call_spans(token)
+            call_spans.MCP_CALL_TOKEN.reset(context_token)
+            stages.last_sample = stages.sample(wall, cpu, spans, error_code)
         if kwargs.get("action") == "inspect":
             if not isinstance(result, dict) or not isinstance(result.get("contract"), dict):
                 raise RuntimeError("inspect lost its public collection contract; timing refused")
             versions = result.get("source_versions", [])
             committed = result["coverage"]["committed"]
-            if len(versions) != min(committed + 1, record_governance._MAX_ITEM_ENTRIES):
+            if (partial_principal is None or who != partial_principal) and len(versions) != min(committed + 1, record_governance._MAX_ITEM_ENTRIES):
                 raise RuntimeError("inspect lost public source versions; timing refused")
-        return wall, cpu, result, call_spans.pop_call_spans(token)
+        return wall, cpu, result, spans
 
     def refresh_hash() -> tuple[float, float, str]:
         wall, cpu, result, _ = invoke(action="inspect", collection=COLLECTION)
@@ -410,6 +576,15 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         row["dispatcher_outside_leaf"] = wall - leaf_time["leaf"]
         return wall, row, spans
 
+    if fixture is not None:
+        _, _, complete_inspect, _ = invoke(action="inspect", collection=COLLECTION)
+        _, _, partial_inspect, _ = invoke(audience=partial_principal, action="inspect", collection=COLLECTION)
+        fixture.update(complete_inspect_rows=complete_inspect["coverage"]["committed"],
+                       partial_inspect_rows=partial_inspect["coverage"]["committed"])
+        if (fixture["complete_inspect_rows"] != size
+                or fixture["partial_inspect_rows"] != size - fixture["selected_refs"]):
+            raise RuntimeError("public inspection does not prove the synthetic release split")
+
     # Warm-up: imports, first-call caches, and one-time state directory creation.
     one_append(5000, False, None)
 
@@ -427,14 +602,46 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     out: dict[str, object] = {
         "size": size, "appends": n, "seed_seconds": round(seed_seconds, 2),
         "storage_mode": args.storage, "phase_acceptance": False,
-        "command_path": {"lease": "vault-scoped", "inspect": "full public",
+        "command_path": {"lease": "vault-scoped", "coordinator": "disabled in isolated diagnostic",
+                         "inspect": "full public",
                          "projection": "synchronous item-view protocol" if handle is not None else "file publication"},
         "timing_clocks": {
             "elapsed": "perf_counter", "cpu": "thread_time", "cpu_scope": "invoking thread",
             "profile": "thread_time",
             "non_cpu_elapsed": "elapsed minus invoking-thread CPU; includes descheduling and work/wait elsewhere",
         },
+        "run_metadata": {
+            "platform": platform.system(), "architecture": platform.machine(),
+            "python_version": platform.python_version(), "sqlite_version": sqlite3.sqlite_version,
+            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "filesystem": None, "native_windows_ntfs": None, "commit_fsync_count": None,
+        },
+        "phase_evidence_missing": [
+            "complete 1000 and 10000 row acceptance runs", "native Windows/NTFS run",
+            "filesystem identification", "commit/fsync trace", "query/resource phase evidence",
+            "managed coordinated-store request path",
+        ],
+        "budget_accounting": {
+            "kind": "main-thread exclusive elapsed", "budgets_ms": BUDGETS_MS,
+            "diagnostics": "inclusive stage timers, call_spans and cProfile are not additive budgets",
+            "instrumentation": stages.instrumentation,
+        },
     }
+
+    def budget_summary(samples):
+        result = {}
+        for name, budget in BUDGETS_MS.items():
+            values = [sample["exclusive_ms"][name] for sample in samples]
+            missing = not values or any(value is None for value in values)
+            result[name] = {
+                "budget_ms": budget,
+                "p50_ms": None if missing else _pct(values, 0.5),
+                "p95_ms": None if missing else _pct(values, 0.95),
+                "status": "missing" if missing else "reached" if any(
+                    sample["stages"][name]["calls"] for sample in samples) else "not_reached",
+                "calls": sum(sample["stages"][name]["calls"] for sample in samples),
+            }
+        return result
 
     # A: guarded append; the client pays a container-version read before every append.
     guarded_rows: list[dict[str, float]] = []
@@ -442,6 +649,7 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     refresh_ms: list[float] = []
     walls: list[float] = []
     paired_samples: list[dict[str, dict[str, float]]] = []
+    budget_samples = []
 
     def sample(wall: float, cpu: float) -> dict[str, float]:
         return {"elapsed": round(1000 * wall, 3), "thread_cpu": round(1000 * cpu, 3),
@@ -453,12 +661,15 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         wall, row, spans = one_append(index, True, expected)
         walls.append(wall)
         guarded_rows.append(row)
+        budget_samples.append(stages.last_sample)
         paired_samples.append({"inspect": sample(refresh_wall, refresh_cpu),
                                "append": sample(wall, row["thread_cpu"])})
         span_rows.append({str(s.get("name")): float(s.get("ms", 0)) / 1000 for s in spans})
     out["guarded_append"] = summarize(guarded_rows)
     out["guarded_call_spans"] = summarize(span_rows)
     out["guarded_operation_samples_ms"] = paired_samples
+    out["guarded_budget_samples"] = budget_samples
+    out["guarded_exclusive_budgets"] = budget_summary(budget_samples)
     out["guarded_append_wall_ms"] = {
         "p50": round(1000 * _pct(walls, 0.5), 2),
         "p95": round(1000 * _pct(walls, 0.95), 2),
@@ -468,7 +679,8 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
         "p95": round(1000 * _pct(refresh_ms, 0.95), 2),
     }
     out["guard_round_trip_ms"] = {
-        "p50": round(1000 * (_pct(refresh_ms, 0.5) + _pct(walls, 0.5)), 2),
+        "p50": round(1000 * _pct([read + write for read, write in zip(refresh_ms, walls, strict=True)], 0.5), 2),
+        "p95": round(1000 * _pct([read + write for read, write in zip(refresh_ms, walls, strict=True)], 0.95), 2),
     }
     out["stage_calls_last_append"] = dict(stages.calls)
     out["index_component_outcomes"] = dict(component_outcomes)
@@ -509,11 +721,80 @@ def _child(args: argparse.Namespace) -> dict[str, object]:
     pstats.Stats(profile, stream=buffer).sort_stats("tottime").print_stats(25)
     out["profile_refresh_tottime"] = buffer.getvalue()
 
+    if fixture is not None:
+        complete_samples = []
+        for index in range(n):
+            _, _, expected = refresh_hash()
+            one_append(10000 + index, True, expected)
+            complete_samples.append(stages.last_sample)
+
+        def canonical_state():
+            database = handle.connection
+            return {
+                "head": database.execute("SELECT value FROM store_meta WHERE key='store_head_hash'").fetchone()[0],
+                "rows": database.execute("SELECT count(*) FROM items").fetchone()[0],
+                "transactions": database.execute("SELECT count(*) FROM txns").fetchone()[0],
+                "audit_effects": database.execute("SELECT count(*) FROM audit_effects").fetchone()[0],
+                "canonical_sha256": hashlib.sha256("\n".join(database.iterdump()).encode()).hexdigest(),
+                "rendered_views_sha256": hashlib.sha256(json.dumps({
+                    path.relative_to(vault).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in sorted(manifest_file.parent.rglob("*.md"))
+                }, sort_keys=True).encode()).hexdigest(),
+            }
+
+        _, _, refusal_expected = refresh_hash()
+        before = canonical_state()
+        refusal_samples = []
+        from exomem.cli_ops import OpError
+
+        for index in range(n):
+            try:
+                invoke(audience=partial_principal, action="append", collection=COLLECTION,
+                       item=_item(size + 20000 + index), why="synthetic partial-audience probe",
+                       expected_container_hash=refusal_expected)
+            except (OpError, collections.CollectionError) as error:
+                if error.code != "COLLECTION_NOT_FOUND":
+                    raise
+            else:
+                raise RuntimeError("partial audience unexpectedly admitted an append")
+            refusal_samples.append(stages.last_sample)
+        after = canonical_state()
+        if after != before:
+            raise RuntimeError("partial-audience refusal changed canonical data or rendered views")
+        _, _, expected = refresh_hash()
+        wall, cpu, bulk, spans = invoke(
+            action="bulk_upsert", collection=COLLECTION,
+            rows=[{"item": _item(size + 30000 + index)} for index in range(500)],
+            why="synthetic bulk diagnostic", source=evidence, expected_container_hash=expected,
+        )
+        if not isinstance(bulk, dict) or bulk.get("state") != "committed":
+            raise RuntimeError(f"bulk diagnostic did not commit: {str(bulk)[:500]}")
+        if "projection_pending" in bulk.get("warnings", []):
+            raise RuntimeError("bulk diagnostic left synchronous views pending")
+        stored_delta = handle.connection.execute("SELECT count(*) FROM items").fetchone()[0] - after["rows"]
+        if stored_delta != 500:
+            raise RuntimeError("bulk diagnostic did not store exactly 500 unique rows")
+        out["phase_probes"] = {
+            "fixture": fixture, "complete_append_samples": complete_samples,
+            "complete_append_budgets": budget_summary(complete_samples),
+            "complete_append_wall_ms": {
+                "p50": _pct([sample["elapsed_ms"] for sample in complete_samples], 0.5),
+                "p95": _pct([sample["elapsed_ms"] for sample in complete_samples], 0.95),
+            },
+            "partial_refusal_samples": refusal_samples,
+            "partial_refusal_budgets": budget_summary(refusal_samples),
+            "partial_refusal_wall_ms": {
+                "p50": _pct([sample["elapsed_ms"] for sample in refusal_samples], 0.5),
+                "p95": _pct([sample["elapsed_ms"] for sample in refusal_samples], 0.95),
+            },
+            "refusal_state_before": before, "refusal_state_after": after,
+            "refusal_state_unchanged": after == before,
+            "bulk_500": {"elapsed_ms": wall * 1000, "thread_cpu_ms": cpu * 1000,
+                         "stored_count_delta": stored_delta, "call_spans": spans},
+        }
+
     _, _, final_inspect, _ = invoke(action="inspect", collection=COLLECTION)
     out["final_inspect"] = final_inspect
-    if handle is not None:
-        handle.close()
-    shutil.rmtree(tmp, ignore_errors=True)
     return out
 
 
@@ -553,6 +834,7 @@ def _parent(args: argparse.Namespace) -> int:
                 "--storage",
                 args.storage,
                 *(["--lift-caps"] if args.lift_caps else []),
+                *(["--phase-probes"] if args.phase_probes else []),
             ],
             capture_output=True,
             text=True,
@@ -579,6 +861,8 @@ def main() -> int:
     parser.add_argument("--appends", type=int, default=30)
     parser.add_argument("--out", default="records-append-latency.json")
     parser.add_argument("--storage", choices=("files", "store-preview"), default="files")
+    parser.add_argument("--phase-probes", action="store_true",
+                        help="add store-only 10%% ref-withheld and bulk-500 diagnostics")
     parser.add_argument(
         "--lift-caps",
         action="store_true",
@@ -587,6 +871,10 @@ def main() -> int:
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--size", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.phase_probes and (args.storage != "store-preview" or any(
+        size < 10 or size % 10 for size in ([args.size] if args.child else map(int, args.sizes.split(",")))
+    )):
+        parser.error("--phase-probes requires store-preview and sizes divisible by 10 (at least 10)")
     if args.child:
         print("RESULT-JSON:" + json.dumps(_child(args)))
         return 0
