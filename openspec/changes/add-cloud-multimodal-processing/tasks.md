@@ -1,0 +1,54 @@
+# Tasks
+
+## 1. Delivered documents and OCR
+
+- [x] 1.1 Run extraction in the serialized cell-local worker, with no extraction in the serving process. Verify the worker boundary in `tests/test_media_worker.py`.
+- [x] 1.2 Ship documents and OCR through the CPU-only media extra and offline image gate. Verify real format samples with `scripts/check-media-samples.py`.
+- [x] 1.3 Add EPUB, OpenDocument and RTF extraction while preserving plain text, email and calendar processing without a switch. Verify `tests/test_media_processing.py`.
+- [x] 1.4 Route OCR through installed script models and language packs, preserving CJK keyword text. Verify the configured samples and the correction in #1807.
+- [x] 1.5 Add anonymous-memory admission, VmData limits, pressure stops and bounded timeout recovery. Verify `tests/test_media_brakes.py` and `tests/test_media_worker.py`.
+- [x] 1.6 Requeue jobs when a missing engine appears, and keep disabled engines free of jobs or tenant install instructions. Verify the media processing and worker suites.
+- [x] 1.7 Add per-cell engine selection and a fleet default without restarting cells whose enabled engines stay unchanged. Verify `infra/cellctl/tests/test_media_engine_selection.py`.
+- [x] 1.8 Document engine rollout, budgets and recovery in `docs/runbooks/cloud-media.md`. Verify its configuration against the image and controller defaults.
+
+Evidence: [#1661](https://github.com/Artexis10/exomem/pull/1661) delivered the first slice, including its extraction, pressure and recovery checks.
+[#1798](https://github.com/Artexis10/exomem/pull/1798) added the fleet default; [#1807](https://github.com/Artexis10/exomem/pull/1807) corrected CJK recall.
+Recorded 2026-10-17 deployment acceptance covers PDF, English OCR and Japanese OCR ingestion and keyword recall through the Cloud MCP connector.
+These checks do not establish every format on a production cell, claude.ai attachment links, or the broader acceptance gates below.
+
+## 2. Remaining documents and OCR acceptance
+
+- [ ] 2.1 Reconcile the service-v1 memory gate with the media memory measure through the resource-policy owner. Verify one agreed measure before further acceptance.
+- [ ] 2.2 Qualify owner-sized documents/OCR backfill against the existing latency, freshness, memory and node-headroom gates. State the drain bound before the run, and report excluded over-budget jobs.
+- [ ] 2.3 Verify the known-content subset against a personal install under a predeclared agreement bound. Reuse existing image samples where their version and conditions match.
+- [ ] 2.4 Record each accepted engine's anonymous-memory and VmData budgets, image size and OOM-group setting. Verify no OOM or serving restart during acceptance.
+- [ ] 2.5 Resolve whether new OCR packs need explicit reprocessing of completed sidecars. Verify that completed text stays unchanged unless that mode is requested.
+
+Automatic ingestion is delivered. Manual `process_media` exposure remains a separate decision in `adopt-exomem-cloud-plain-cells` task 2.3a.
+
+## 3. Image search and optional captions
+
+- [ ] 3.1 Select the image model from published multilingual retrieval results under design D5. Record CPU speed, peak memory and shareable weights before implementation.
+- [ ] 3.2 Ship its pinned offline runtime through the shared-model contract. Verify same-precision parity where the existing vector space is retained.
+- [ ] 3.3 Record model, width, precision and artifact identity in the image sidecar. Verify legacy-space reads, space-change backfill and refusal to mix spaces.
+- [ ] 3.4 Add the aligned multilingual query encoder. Verify supported-language retrieval and that a space-preserving encoder change keeps stored image vectors.
+- [ ] 3.5 Resolve HEIC decoder licensing before adding its dependency. Verify a real HEIC sample through the image gate and document the supported format.
+- [ ] 3.6 Record whether to ship optional frozen captions under design D5. If selected, verify their independent switch, default-off behavior and sidecar search.
+- [ ] 3.7 Recheck disabled and empty image lanes without loading the query encoder. Verify neither state reports warming or degradation.
+
+Image search, HEIC and captions are not delivered by the documents/OCR slice. Model selection and caption selection remain open decisions.
+
+## 4. Speech
+
+- [ ] 4.1 Complete the selection record under design D6 and the shared-model contract. Verify benchmark comparability, language metrics and the required confidence bounds.
+- [ ] 4.2 Ship the selected offline speech engine with measured budgets. Verify transcripts, silent-media markers and missing-engine recovery through the same worker path.
+- [ ] 4.3 Document the speech configuration and rollout procedure. Verify its switch and rollback leave existing sidecars readable and lexical recall serving.
+
+The selection record must precede speech implementation; no candidate is selected yet.
+
+## 5. Integration and closure
+
+- [ ] 5.1 Before each remaining engine rolls out, run its existing per-engine acceptance on the owner-sized cell and backlog. Verify resource gates, drain and content agreement.
+- [ ] 5.2 For model-bearing engines, verify file-backed weights with node-level Pss evidence. Record sharing and measured budgets without counting shared pages twice.
+- [ ] 5.3 Roll out each accepted engine under an operator-approved live change. Verify every cell, the fleet default and unchanged start times where no restart is expected.
+- [ ] 5.4 Synchronize the completed deltas and archive this change only after its remaining contracts and acceptance tasks close. Verify strict OpenSpec validation before and after archival.
