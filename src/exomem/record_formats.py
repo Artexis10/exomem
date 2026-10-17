@@ -738,6 +738,7 @@ def validate_storage_contract(manifest: collections.CollectionManifest) -> None:
 _LOG_STAMP_KEYS = ("s", "i", "v", "h")  # nosemgrep: ep-word-set -- the stamp's fixed keys.
 # The stamp comment is this module's own fixed format; the pattern checks its shape only.
 _LOG_STAMP = re.compile(
+    # nosemgrep: ep-regex-over-markup -- it matches only the stamp line this module writes, never parsed markup.
     rb"<!-- exomem-view s=([0-9a-fA-F-]{36}) i=([0-9a-fA-F-]{36}) v=([1-9][0-9]{0,18}) h=([0-9a-f]{12}) -->"
 )
 

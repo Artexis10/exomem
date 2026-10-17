@@ -63,7 +63,7 @@ UNBOUND = "VIEW_UNBOUND"
 KEEP_INVALID_IN_PLACE = True
 
 #: The view kinds edit-back reads; the others are generated read-only output.
-# nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+# nosemgrep: ep-word-membership, ep-word-set -- The projection_state.kind CHECK fixes these kinds.
 EDITABLE_KINDS = ("item", "manifest", "log")
 #: The kinds whose invalid edit stays at its view path (O2). A log view shows every row, so a hold
 #: kept there would keep every later row out of it; a log view's holds take its bytes aside instead.
