@@ -740,8 +740,6 @@ def measure(
     if transport == "connector":
         if not connector_url:
             raise SystemExit("connector transport requires --connector-url")
-        if connector_token:
-            raise SystemExit("connector isolation proof requires an unauthenticated loopback endpoint")
         connector_environment, connector_runtime = _require_disposable_connector(connector_url, connector_pid, host_network_namespace, root, state_dir)
         client: Any = _ConnectorTransport(connector_url, connector_token)
     else:

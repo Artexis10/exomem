@@ -759,6 +759,7 @@ def test_connector_measures_the_requested_public_command_and_rejects_tool_errors
     module = _acceptance()
     sent = []
     correlation_ids = []
+    authorization_headers = []
 
     class Response:
         headers = Message()
@@ -780,10 +781,11 @@ def test_connector_measures_the_requested_public_command_and_rejects_tool_errors
     def respond(request, **_kwargs):
         sent.append(json.loads(request.data))
         correlation_ids.append(request.get_header("X-exomem-request-id"))
+        authorization_headers.append(request.get_header("Authorization"))
         return Response()
 
     monkeypatch.setattr(module, "urlopen", respond)
-    client = module._ConnectorTransport("https://example.invalid/mcp", None)
+    client = module._ConnectorTransport("http://127.0.0.1:8765/mcp", "synthetic-session")
     arguments = {"path": "Knowledge Base/Entities/Concepts/example.md", "operation": {"kind": "replace_string", "old_string": "before", "new_string": "after"}, "why": "correct observation"}
     if tool_error:
         with pytest.raises(SystemExit, match="tool returned an error"):
@@ -792,6 +794,7 @@ def test_connector_measures_the_requested_public_command_and_rejects_tool_errors
         elapsed, result = client.call("edit_memory", arguments)
         assert elapsed >= 0 and result["outcome"] == "committed"
     assert sent[0]["params"] == {"name": "edit_memory", "arguments": arguments}
+    assert authorization_headers == ["Bearer synthetic-session"]
     import uuid
 
     assert str(uuid.UUID(correlation_ids[0])) == client.request_id == sent[0]["id"]
@@ -874,6 +877,7 @@ def test_connector_refuses_unproven_service_before_any_fixture_write(isolated_co
     with pytest.raises(SystemExit, match="connector"):
         module.measure(root, transport="connector", connector_url=url, connector_pid=pid,
                        host_network_namespace=host_namespace,
+                       connector_token="synthetic-session",
                        state_dir=state, samples_per_operation=1, package_mode="source")
 
 
@@ -917,6 +921,7 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
     def public_call(client, name, arguments):
         import uuid
 
+        assert client.token == "synthetic-session"
         client.request_id = str(uuid.uuid4())
         calls.append((name, arguments, client.request_id))
         if name == "record_memory" and arguments["action"] == "describe":
@@ -954,6 +959,7 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
     monkeypatch.setattr(module._ConnectorTransport, "call", public_call)
     report = module.measure(root, transport="connector", connector_url="http://127.0.0.1:8765/mcp", connector_pid=4321,
                             host_network_namespace="net:[1]",
+                            connector_token="synthetic-session",
                             state_dir=state, samples_per_operation=1, package_mode="source")
 
     assert report["read_your_write"] == {"exact": 8, "warming": 0, "unavailable": 0, "stale": 0, "unknown": 0}
