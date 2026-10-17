@@ -90,8 +90,40 @@ def test_rewriting_the_projection_rebuilds_once(
     calls = _spy(monkeypatch)
     now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
     due_state.served_entries(tmp_path, now=now, principal=_principal())
-    _persist(tmp_path, "b")
+    payload = due_state.load(tmp_path)
+    payload["categories"]["predictions"][PAGE]["open"].append({"path": PAGE, "id": "second"})
+    due_state.save(tmp_path, payload)
     due_state.served_entries(tmp_path, now=now, principal=_principal())
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    assert len(calls) == 2
+
+
+def test_a_write_that_only_ticks_the_emission_ledger_reuses_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every governed write rewrites the projection; only its due content may rebuild."""
+    _persist(tmp_path, "a")
+    calls = _spy(monkeypatch)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    payload = due_state.load(tmp_path)
+    payload["emission"] = {"writes": 41, "emitted": 3}
+    due_state.save(tmp_path, payload)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    assert len(calls) == 1
+
+
+def test_a_record_write_that_changes_collection_claims_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claims decide which candidate and observation rows survive, so they key the build."""
+    _persist(tmp_path, "a")
+    calls = _spy(monkeypatch)
+    now = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
+    due_state.served_entries(tmp_path, now=now, principal=_principal())
+    payload = due_state.load(tmp_path)
+    payload["claims"] = {"example-collection": {"terms": ["covered-term"]}}
+    due_state.save(tmp_path, payload)
     due_state.served_entries(tmp_path, now=now, principal=_principal())
     assert len(calls) == 2
 
