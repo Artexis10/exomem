@@ -923,6 +923,23 @@ def test_a_summary_create_without_lease_coordination_names_the_setup_before_enro
     assert not connection.store_path(root).exists()
 
 
+def test_a_summary_create_on_a_cloud_cell_names_no_remedy_its_tenant_cannot_apply(tmp_path, monkeypatch):
+    """A Cloud tenant told to set the lease URL, a variable the cell's manifests forbid, after the
+    summary release made the create reach the coordination refusal (D7)."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1}))
+    root = tmp_path / "vault"
+    init_vault(root)
+    with pytest.raises(CollectionStoreError) as refused:
+        call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+             why="summary")
+    assert refused.value.code == admission.COORDINATION_REQUIRED
+    assert "EXOMEM_WRITER_LEASE_URL" not in refused.value.reason
+    assert not connection.store_path(root).exists()
+
+
 def test_a_coordinator_without_the_store_fence_names_the_release_to_upgrade_to(tmp_path, monkeypatch):
     """A preflight that takes an older coordinator's silence for collections-store-v1 support,
     or refuses without naming the release that serves it (ruled N3)."""
