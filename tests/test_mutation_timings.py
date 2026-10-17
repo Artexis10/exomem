@@ -986,9 +986,7 @@ def test_completion_and_fallback_work_have_exact_timing_spans(
     clock = [100.0]
     monkeypatch.setattr(
         call_spans, "time",
-        SimpleNamespace(
-            perf_counter=lambda: clock[0], monotonic=lambda: clock[0], thread_time=lambda: 0.0
-        ),
+        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=lambda: clock[0]),
     )
     monkeypatch.setattr(file_watcher, "register_self_write", lambda *a, **kw: ([], False))
     monkeypatch.setattr(graph_sync, "register_outer_fanout_failure", lambda *a: None)

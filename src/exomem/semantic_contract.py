@@ -1786,9 +1786,9 @@ def current_writer_resolver_entries(
         if not freshness.is_live(root, "vault"):
             return decline("events_not_live")
         checkpoint = freshness.consumer_checkpoint(root, "vault")
-        if checkpoint.triple is None or (
-            freshness_key is not None and freshness_key != checkpoint.triple
-        ):
+        if checkpoint.triple is None:
+            return decline("checkpoint_absent")
+        if freshness_key is not None and freshness_key != checkpoint.triple:
             return decline("freshness_differs")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
@@ -1797,7 +1797,7 @@ def current_writer_resolver_entries(
             if entry is None or language_hash is None:
                 return decline("corpus_absent")
             if caption != checkpoint:
-                return decline("corpus_behind")
+                return decline("corpus_checkpoint_differs")
             census, context = entry
             entries = context.resolver_entries
 

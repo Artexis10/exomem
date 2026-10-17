@@ -218,22 +218,14 @@ def span(name: str, fields: dict[str, Any] | None = None):
 
     The `fields` dict is yielded so the body can fill it with what it learned
     -- how many items it covered, how many characters it encoded -- and it is
-    read on the way out. Every span also carries `thread_cpu_ms`, so a caller
-    that measures nothing but time still learns whether the phase worked.
+    read on the way out. A caller that measures nothing but time passes
+    nothing and the span is shaped exactly as it always was.
     """
     started = time.perf_counter()
-    cpu_started = time.thread_time()
     try:
         yield fields
     finally:
-        measured = dict(fields) if fields else {}
-        # CPU this thread spent inside the phase. Against the wall `ms` it says
-        # whether a slow phase worked or waited (on the GIL, a lock, the disk):
-        # the same duration means different fixes. Work handed to another
-        # thread is not counted, so read a low value on such a phase as "not
-        # here", never as "idle".
-        measured["thread_cpu_ms"] = round((time.thread_time() - cpu_started) * 1000.0)
-        record_span(name, (time.perf_counter() - started) * 1000.0, measured)
+        record_span(name, (time.perf_counter() - started) * 1000.0, fields)
 
 
 def timed(name: str):

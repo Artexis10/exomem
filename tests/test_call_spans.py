@@ -104,10 +104,7 @@ def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, 
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
         assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
-        assert set(stages[name]) - {"fields"} == {"name", "count", "ms"}
-        # The one field a timed phase carries is an integer CPU reading.
-        assert set(stages[name].get("fields", {})) <= {"thread_cpu_ms"}
-        assert all(isinstance(v, int) for v in stages[name].get("fields", {}).values())
+        assert set(stages[name]) == {"name", "count", "ms"}
 
 
 def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -> None:
@@ -122,10 +119,7 @@ def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
         assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
-        assert set(stages[name]) - {"fields"} == {"name", "count", "ms"}
-        # The one field a timed phase carries is an integer CPU reading.
-        assert set(stages[name].get("fields", {})) <= {"thread_cpu_ms"}
-        assert all(isinstance(v, int) for v in stages[name].get("fields", {}).values())
+        assert set(stages[name]) == {"name", "count", "ms"}
 
 
 def test_span_measures_real_elapsed_time(token) -> None:

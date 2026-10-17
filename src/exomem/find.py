@@ -6272,11 +6272,13 @@ def writer_resolver_snapshot(
     A fresh matching cached resolver is forked. Otherwise exactly current
     corpus metadata builds a one-off resolver and leaves the shared cache
     untouched. Only when neither proves current does preparation read the
-    disk, and that build becomes the shared resolver (as a reader's would), so
-    one write per process pays it rather than every write. Callers that
-    already measured direct disk freshness may supply that key to bypass
-    potentially stale event-registry state.
+    disk. That build runs outside `_RESOLVER_LOCK`, and a copy of it fills
+    the shared cache when nothing current is there, so a preview or a write
+    that never commits does not leave the next one to read the disk again.
+    Callers that already measured direct disk freshness may supply that key
+    to bypass potentially stale event-registry state.
     """
+    from . import freshness as freshness_module
     from . import semantic_contract
     from .vault import WikilinkResolver
 
@@ -6300,11 +6302,21 @@ def writer_resolver_snapshot(
             measured["corpus_entries"] = 1
             return WikilinkResolver.from_entries(root, entries)
         measured["disk"] = 1
-        # Keep the disk build as the shared resolver and hand out a fork: the
-        # watcher patches the shared one from here on, so the next write forks
-        # it instead of re-reading the whole vault, and pending destinations
-        # still land only on this call's copy.
-        return _get_query_resolver(root, current_freshness).fork()
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        resolver = WikilinkResolver(root)
+        # Copied before it is shared: once published, the watcher patches the
+        # shared instance under the lock, and pending destinations must stay on
+        # the caller's copy.
+        shared = resolver.fork()
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached is None or cached[0] != current_freshness:
+                _RESOLVER_CACHE[root] = (current_freshness, shared)
+                if checkpoint.triple == current_freshness:
+                    _RESOLVER_CHECKPOINTS[root] = checkpoint
+                else:
+                    _RESOLVER_CHECKPOINTS.pop(root, None)
+        return resolver
 
 
 def _patch_broad_resolver(
