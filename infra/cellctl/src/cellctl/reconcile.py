@@ -1509,10 +1509,10 @@ async def _cell_health_alerts(
     seconds = int(thresholds.unavailable_after.total_seconds())
     if unavailable != memory.unavailable_cells:
         if unavailable:
-            logger.warning("cellctl: %d serving cell(s) have been unready for %d seconds or more: %s",
-                           len(unavailable), seconds, ", ".join(unavailable))
+            logger.warning("cellctl: %s: %d serving cell(s) have been unready for %d seconds or more: %s",
+                           alerts.UNAVAILABLE_ALERT, len(unavailable), seconds, ", ".join(unavailable))
         else:
-            logger.info("cellctl: no serving cell has been unready for %d seconds", seconds)
+            logger.info("cellctl: %s: no serving cell has been unready for %d seconds", alerts.UNAVAILABLE_ALERT, seconds)
         memory.unavailable_cells = unavailable
     firing = alerts.cells_unavailable(rows, observations, memory.unready_since, now, after=thresholds.unavailable_after)
     if firing is not None:
@@ -1522,10 +1522,10 @@ async def _cell_health_alerts(
     low = alerts.low_disk_cells(rows, memory.free_bytes, floor=floor)
     if low != memory.low_disk_cells:
         if low:
-            logger.warning("cellctl: %d serving cell(s) had less than %d bytes free at their last backup: %s",
-                           len(low), floor, ", ".join(low))
+            logger.warning("cellctl: %s: %d serving cell(s) had less than %d bytes free at their last backup: %s",
+                           alerts.DISK_LOW_ALERT, len(low), floor, ", ".join(low))
         else:
-            logger.info("cellctl: every measured serving cell has at least %d bytes free", floor)
+            logger.info("cellctl: %s: every measured serving cell has at least %d bytes free", alerts.DISK_LOW_ALERT, floor)
         memory.low_disk_cells = low
     firing = alerts.disk_low(rows, memory.free_bytes, floor=floor)
     if firing is not None:
