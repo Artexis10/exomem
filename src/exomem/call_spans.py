@@ -370,7 +370,11 @@ def measure_ms(key: str):
 _GC_TOTALS = [0, 0.0]
 #: When the running collection started. Collections never overlap: one runs
 #: at a time, holding the interpreter.
-_GC_STARTED = [0.0]
+_GC_STARTED: list[float | None] = [None]
+#: Open `gc_window`s. The callback stays installed for the process, so with
+#: none open it returns at once: no clock read and no work in a collection
+#: that nothing measures.
+_GC_WINDOWS = [0]
 _GC_INSTALL_LOCK = threading.Lock()
 _GC_INSTALLED = False
 
@@ -378,10 +382,13 @@ _GC_INSTALLED = False
 def _on_gc(phase: str, _info: Mapping[str, Any]) -> None:
     # Runs inside every collection, so it only stamps and adds.
     if phase == "start":
-        _GC_STARTED[0] = time.perf_counter()
-    else:
-        _GC_TOTALS[1] += time.perf_counter() - _GC_STARTED[0]
+        _GC_STARTED[0] = time.perf_counter() if _GC_WINDOWS[0] else None
+        return
+    started = _GC_STARTED[0]
+    if started is not None:
+        _GC_TOTALS[1] += time.perf_counter() - started
         _GC_TOTALS[0] += 1
+        _GC_STARTED[0] = None
 
 
 def _install_gc_callback() -> None:
@@ -406,10 +413,14 @@ def gc_window():
     call that paid no pause carries no such span.
     """
     _install_gc_callback()
+    with _GC_INSTALL_LOCK:
+        _GC_WINDOWS[0] += 1
     collections, paused = _GC_TOTALS[0], _GC_TOTALS[1]
     try:
         yield
     finally:
+        with _GC_INSTALL_LOCK:
+            _GC_WINDOWS[0] -= 1
         ran = _GC_TOTALS[0] - collections
         if ran > 0:
             record_span(
