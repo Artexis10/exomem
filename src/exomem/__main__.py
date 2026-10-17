@@ -37,6 +37,7 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -3968,6 +3969,12 @@ def _simple_adopt_main(argv: list[str]) -> int:
     return _core_op_main(_with_json(core, args.json))
 
 
+def _offline_vault_root(vault: str | None) -> Path:
+    from .vault import resolve_vault
+
+    return Path(vault).expanduser() if vault is not None else resolve_vault()
+
+
 def _run_offline_state_migration(
     *,
     vault: str | None,
@@ -3977,9 +3984,8 @@ def _run_offline_state_migration(
     """Run the sole state-mutating entrypoint under explicit offline authority."""
 
     from . import state_migration
-    from .vault import resolve_vault
 
-    vault_root = Path(vault).expanduser() if vault is not None else resolve_vault()
+    vault_root = _offline_vault_root(vault)
     authority = state_migration.assert_offline_migration_authority(
         source="exomem maintain --migrate-state --offline",
     )
@@ -4061,6 +4067,23 @@ def _simple_maintain_main(argv: list[str]) -> int:
             "rollback governance store"
         ),
     )
+    parser.add_argument(
+        "--migrate-collections",
+        action="store_true",
+        help=(
+            "with --migrate-state --offline: also finish the collections migration that a managed "
+            "standby pre-imported, as a managed upgrade's migrator; needs the operator credential "
+            "and --deadline-monotonic, and fails the upgrade only when the store it left is unsafe to serve"
+        ),
+    )
+    parser.add_argument(
+        "--deadline-monotonic",
+        type=float,
+        help=(
+            "with --migrate-collections: the system monotonic clock reading by which a collections "
+            "migration not yet sealed is abandoned"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -4076,6 +4099,15 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--adopt-state requires --migrate-state --offline")
     if args.arm_connector_boundary and (not args.migrate_state or args.adopt_state):
         parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
+    if args.migrate_collections and (
+        not args.migrate_state or args.adopt_state or args.arm_connector_boundary
+    ):
+        parser.error("--migrate-collections requires --migrate-state --offline without other state steps")
+    if (args.deadline_monotonic is not None) != args.migrate_collections or (
+        args.deadline_monotonic is not None
+        and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0)
+    ):
+        parser.error("--migrate-collections requires a positive --deadline-monotonic, and only it takes one")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
@@ -4093,23 +4125,43 @@ def _simple_maintain_main(argv: list[str]) -> int:
             else:
                 print(f"Error: {error}", file=sys.stderr)
             return 1
+        collections, unsafe = None, False
+        if args.migrate_collections:
+            from .collection_store import migration
+            from .governance.principal import library_scope
+
+            try:
+                with library_scope():
+                    collections = migration.settle_handoff(
+                        _offline_vault_root(args.vault), deadline=args.deadline_monotonic
+                    )
+            except Exception as error:  # noqa: BLE001 - settle_handoff raises only when it cannot read what it left
+                failed = {"outcome": migration.UNSAFE}
+                if args.json:
+                    print(json.dumps({"success": False, "error": {"message": str(error)},
+                                      "data": {"collections": failed}}))
+                else:
+                    print(f"Error: {error}", file=sys.stderr)
+                return 1
+            unsafe = collections["outcome"] == migration.UNSAFE
         if args.json:
-            print(
-                json.dumps(
-                    {
-                        "success": True,
-                        "data": {
-                            "state_root": str(resolution.state_dir),
-                            "migrated": resolution.migrated,
-                            "dual_state": resolution.dual_state,
-                            "adopted": args.adopt_state,
-                        },
-                    }
-                )
-            )
+            data = {
+                "state_root": str(resolution.state_dir),
+                "migrated": resolution.migrated,
+                "dual_state": resolution.dual_state,
+                "adopted": args.adopt_state,
+            }
+            if collections is not None:
+                data["collections"] = collections
+            print(json.dumps({"success": True, "data": data}))
         else:
             print(f"Machine-local state is ready at {resolution.state_dir}")
-        return 0
+            if collections is not None:
+                print(f"Collections: {collections['outcome']}")
+        # Only a store this host cannot serve fails the handoff. A published store that still
+        # carries its intent is served, read-only behind a cut fence or in file mode before the
+        # cut, until the next handoff or the owner's offline apply finishes it; it is pending.
+        return 1 if unsafe else 0
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:

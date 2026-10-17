@@ -619,7 +619,10 @@ Run the coordinator under the service manager on the same host, bound to
 writer credential through `EXOMEM_LEASE_COORDINATOR_TOKEN`. Keep its distinct
 operator credential in `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN` in the protected
 coordinator environment and offline operator storage. Ordinary service requests
-receive only the writer credential. Keep the existing vault identifier,
+receive only the writer credential. A managed service that moves file collections
+into the store at an upgrade reads the operator credential from `operator.env`
+beside `service.env`, for its migrator alone, as `docs/managed-service-upgrades.md`
+describes. Keep the existing vault identifier,
 replica identifier, signing key, and FastMCP home stable.
 
 The source template is `scripts/exomem-lease-coordinator.service`. Render

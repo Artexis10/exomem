@@ -509,6 +509,26 @@ def recorded_meta(path: Path, key: str) -> str | None:
         return None
 
 
+#: The reserved-path family of the migration's retained staging directories (``migration`` owns them).
+MIGRATION_STAGING = "collection-migration"
+
+
+def migration_staging_directories(vault_root: Path) -> list[Path]:
+    """The migration staging directories retained beside this vault's live store, by name.
+
+    The launcher reads them here, without the store libraries, to learn whether a handoff
+    has a pre-import to finish; ``migration`` reads the same list for its own steps.
+    """
+    from .. import reserved_paths, state_paths
+
+    state = state_paths.vault_state_dir(Path(vault_root))
+    if not state.is_dir():
+        return []
+    return sorted(path for path in state.iterdir()
+                  if reserved_paths.classify_logical(path.name).descriptor_id == MIGRATION_STAGING
+                  and path.is_dir() and not path.is_symlink())
+
+
 def recorded_schema(path: Path) -> int | None:
     """The schema that a store records, also one newer than this release opens, or None if unreadable."""
     value = recorded_meta(path, schema.META_SCHEMA_VERSION)

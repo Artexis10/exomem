@@ -431,6 +431,167 @@ a store from an earlier release. Back up the store with the earlier release
 before the upgrade, as "A release that changes the collection store's schema" in
 `docs/deployment.md` describes.
 
+### Moving file collections into the store at a handoff
+
+From the release that enables `collections-migrate-v1`, a seamless upgrade can
+move the vault's file Records and Planning collections into the collection
+store. A target that keeps that release fence off declares no such migration,
+and its upgrade runs as the sections above describe.
+
+The supervisor decides whether to ask for this step, so the launcher's release
+decides it. A seamless upgrade replaces only the worker. Upgrade the launcher
+offline to a release with this step before you rely on it.
+
+The step has four parts:
+
+- The standby pre-imports every file collection into private staging under the
+  vault's state directory, as the last part of its warm. It takes no lease and
+  changes no vault file. It does this only when the supervisor tells it that
+  this handoff can run the step: the target declares the migration and the
+  operator credential file is usable. Otherwise it removes the staging that an
+  earlier warm left. Its cutover component, `collections_migration`, is ready
+  once the pre-import ran, however it ended. A pre-import that fails or finds
+  nothing to move leaves no staging.
+- After the old worker stops, the supervisor runs the migrator only if the
+  target declares the migration, the operator credential file is usable, and
+  the vault holds the staging or a published store that the migration has not
+  finished.
+- The migrator compares every collection with what the standby imported. When
+  nothing changed, it keeps the staging. When a collection changed, it imports
+  all of them again inside its budget.
+- The migrator then publishes the store, cuts the coordinator's store fence,
+  records the compatibility descriptor, publishes the replica and installs the
+  marker.
+
+The supervisor waits 15 s for the migrator. The migrator abandons a migration
+that it has not sealed 9 s after the supervisor started it. The other 6 s are
+for the steps after the seal, which always finish once they start. They took
+about 3 s on a test vault with about 3,900 items, and they grow with the store.
+
+#### The operator credential file
+
+The migrator needs the coordinator's operator credential to cut the store
+fence. The supervisor reads it from one file, and only when it starts the
+migrator. It gives the credential to the migrator's environment alone, never
+to the serving worker or the standby, and never on a command line.
+
+1. Find the directory that holds the unit's `service.env`, usually `~/.config/exomem`.
+2. Create the file `operator.env` in that directory.
+3. Write one line in it: `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token>`.
+4. Run `chmod 600 operator.env`.
+5. Make sure that the service user owns the file and that the file is not a symlink.
+
+Do not add `operator.env` to the unit as an `EnvironmentFile=`, and do not put
+the operator credential in `service.env`. Either way, every worker would get it.
+
+The supervisor reads the file at each handoff, so a new or changed file needs no
+restart. A missing file, an unreadable file, a file that is not a regular file,
+or a file that another user can read or write means no migration. The release
+still completes, in file mode.
+
+#### What the handoff record shows
+
+`handoff.migration.collections` reports the step. It is absent when the target
+declares no collections migration.
+
+- `{"state": "skipped", "reason": "nothing staged"}`: the standby prepared
+  nothing, for example because every collection is already in the store.
+- `{"state": "skipped", "reason": "operator credential file missing"}`: the
+  file is absent. The other reasons are `unreadable`, `is not a regular file`,
+  `is not private to its owner` and `holds no operator credential`.
+- `{"state": "skipped", "reason": "target migration probe failed"}`: the
+  target release could not report whether it has the migration. Check that
+  release before you upgrade to it again.
+- `{"state": "ran", "outcome": "migrated"}`: the vault now routes every
+  migrated collection to the store.
+- `{"state": "ran", "outcome": "abandoned"}`: the migrator published nothing.
+- `{"state": "ran", "outcome": "blocked"}`: a collection failed its proof, and
+  the migrator published nothing.
+- `{"state": "ran", "outcome": "pending"}`: the migrator published the store
+  but did not finish, and the supervisor's rerun did not finish it either. The
+  service runs, and no write is lost. See below.
+- `{"state": "ran", "outcome": "unsafe"}`: the migrator stopped while the live
+  store was set aside, or left a store or marker that cannot be read. The
+  upgrade fails. See below.
+- `{"state": "ran", "outcome": "timed_out"}`: the supervisor stopped the
+  migrator at the end of its 15 s in a handoff that also migrated state, which
+  the stop may have cut. The upgrade fails. See below.
+
+An outcome can carry a `code`, which names the refusal or error that the
+migrator ran into. `"code": "timed_out"` means that the supervisor stopped the
+migrator at the end of its 15 s, and the outcome is what the stopped migrator
+left: `abandoned`, `pending`, `migrated` or `unsafe`. After a rerun, `first_attempt` holds the outcome and code of
+the attempt before it. The migrator's full report goes to the service journal. For
+an abandoned migration, `abandoned_because` is `deadline`, `live_store_changed`
+or `refused`. For a blocked one, the report names the collection and the failed
+check.
+
+#### An abandoned migration
+
+An abandoned migration publishes nothing. The new release serves the vault in
+file mode, and the next handoff tries the migration again. A vault whose store
+changes during every handoff, or whose collections take longer than the
+budget, migrates offline instead:
+
+1. Stop the Exomem service.
+2. Run `(set -a; . ~/.config/exomem/operator.env; exomem collections migrate --vault <vault> --apply)`.
+3. Start the Exomem service.
+
+Step 2 reads the operator credential from the protected file in a subshell, so
+the credential never enters your shell history or your login shell. Use the
+directory that holds your `operator.env` if it is not `~/.config/exomem`. The apply reports
+`marker_admitted` when the migration is finished. For a blocked collection,
+fix its files as the report says, then repeat the steps.
+
+#### A pending migration
+
+When the migrator publishes the store and then fails before it installs the
+marker, the supervisor runs it once more before it starts the new release. The
+migrator that failed keeps its lease for the lease time-to-live,
+`EXOMEM_WRITER_LEASE_TTL`, 30 s by default, so the supervisor waits that long
+first. The rerun adds the time-to-live and up to 15 s to the handoff. When it
+finishes the migration, the outcome is `migrated` and the new release serves
+the store. The supervisor tries only once, because each attempt costs a
+time-to-live of downtime, and a fault that persists does not clear on a second
+try.
+
+A `pending` outcome means that the rerun did not finish the migration either.
+The supervisor starts the new release anyway, and the service answers reads.
+On a first migration, what happens to writes depends on how far the migrator
+got:
+
+- When the migrator had cut the coordinator's store fence, the fence refuses
+  every write until the migration finishes.
+- When it failed before the cut, the fence is not enrolled. The vault stays in
+  file mode, and writes go to the files, which are still canonical.
+
+In both cases no write is lost. On a vault whose store was already live, the
+next migration restores or supersedes the published store as the offline apply
+does.
+
+The next handoff finishes the migration. To finish it sooner, fix the cause
+that `code` names, then do the offline steps under "An abandoned migration"
+above. Either way, the migrator first compares every collection with the files
+that it imported. When a file changed meanwhile, for example through a sync
+client, it imports the collections again before it installs the marker. A
+migration that runs within the time-to-live after a failed one is refused with
+`COLLECTION_STORE_SERVICE_ACTIVE` and stays `pending`.
+
+#### A migrator that timed out or left the store unsafe
+
+For the outcomes `timed_out` and `unsafe`, the supervisor reports
+`recovery-required`. A stopped migrator that left a published store gets the
+same rerun and the same `pending` as one that failed.
+
+1. For `timed_out`, wait for the lease time-to-live, 30 s by default.
+2. For `unsafe` with no `collections.sqlite` in the vault's state directory,
+   rename the most recently modified `collections.sqlite.superseded-<suffix>`
+   there back to `collections.sqlite`.
+3. Run the private `--resume` command above.
+
+The resume runs the migrator again. The result is `migrated`, or `pending` as
+described above.
+
 ### The service environment file
 
 A worker child is spawned with every `EnvironmentFile=` the unit declares,
