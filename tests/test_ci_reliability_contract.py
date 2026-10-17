@@ -18,6 +18,8 @@ from pytest_split.algorithms import Algorithms
 ROOT = Path(__file__).parents[1]
 
 FULL_CI_JOBS = {
+    "frozen-verifier",
+    "cloud-cellctl",
     "retrieval-quality",
     "retrieval-latency",
     "governance-projection-wire",

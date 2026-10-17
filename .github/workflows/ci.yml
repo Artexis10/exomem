@@ -419,6 +419,15 @@ jobs:
           path: test-results/e2e-logs
           if-no-files-found: ignore
 
+  # Reuse the specialized suites so release evidence includes them at its base.
+  frozen-verifier:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    uses: ./.github/workflows/frozen-verifier.yml
+
+  cloud-cellctl:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    uses: ./.github/workflows/cloud-cellctl.yml
+
   retrieval-quality:
     name: retrieval quality (golden gate, embeddings)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -906,6 +915,8 @@ jobs:
       - windows-held-filesystem
       - tui
       - product-e2e
+      - frozen-verifier
+      - cloud-cellctl
       - retrieval-quality
       - retrieval-latency
       - governance-projection-wire
