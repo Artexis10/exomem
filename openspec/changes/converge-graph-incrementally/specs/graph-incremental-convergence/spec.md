@@ -289,6 +289,15 @@ A batch truncated by the drain limit, a batch left over from an earlier generati
 a full-scope marker SHALL each acknowledge nothing and leave the work queued for the
 drain that does cover it.
 
+A drain SHALL NOT acknowledge or publish the availability marker while graph repair
+outside its batch is still owed: a queued receipt for another page, a whole-vault
+marker, or a queue it cannot read. This holds even when the batch covers the committed
+checkpoint. The marker and the acknowledgement describe the whole graph, and that
+page's rows may be stale. The drain that leaves nothing queued publishes. An
+acknowledgement that is still behind afterwards is closed by one bounded drain of the
+committed checkpoint. While a drain clears receipts and leaves work queued, barrier
+recovery SHALL wait for the queue rather than run a whole-vault pass.
+
 Coverage SHALL be membership in the processed batch rather than in the indexed set. A
 deletion named by a checkpoint is processed by removing its rows and has no source bytes
 to index, so an indexed-set test would stall every generation containing one
@@ -297,7 +306,8 @@ proof.
 
 #### Scenario: A covering drain makes the epoch current
 
-- **WHEN** a drain processes every path named by the committed checkpoint
+- **WHEN** a drain processes every path named by the committed checkpoint, and no
+  repair outside its batch is queued
 - **THEN** the graph sync epoch reports the committed generation as current
 - **AND** the graph reports itself available
 
@@ -306,6 +316,14 @@ proof.
 - **WHEN** a drain processes only some of the paths the committed checkpoint names
 - **THEN** the epoch is not advanced to that generation
 - **AND** the remaining paths stay queued
+
+#### Scenario: A batch that covers the newest checkpoint leaves older repair queued
+
+- **WHEN** a drain batch holds every page of the committed checkpoint while receipts
+  for other pages remain queued
+- **THEN** the graph is not reported current and the epoch is not advanced
+- **AND** the drains that empty the queue make the graph current with no whole-vault
+  pass
 
 ### Requirement: A queued repair is not rescheduled as a whole-vault rebuild
 
@@ -405,6 +423,17 @@ page by the title and existence that its row stores, so such a graph could serve
 a stale edge as current. A caller whose contract is a converged graph SHALL NOT
 publish behind. A registered rebuild that publishes behind SHALL report its
 waiters pending with `GRAPH_SYNC_REPAIR_QUEUED`, never converged.
+
+A pass SHALL also re-target as before, without preparing a behind publication, when
+its ticket would be refused for a reason that no fresh pass in the run is likely to
+change:
+
+- there is no acknowledgement to keep;
+- an unscoped external mark stands;
+- the recall policy moved;
+- the registry history no longer reaches the pass's recall checkpoint.
+
+A refusal found only at the ticket would start a whole new publication attempt.
 
 #### Scenario: A publication retires the debt it observed and nothing newer
 

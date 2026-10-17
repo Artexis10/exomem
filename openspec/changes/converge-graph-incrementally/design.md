@@ -504,3 +504,19 @@ The same classification now decides the resolver proof that runs before any page
 read. That proof failed whenever a write landed between the walk and the proof, and it
 marked the registry externally pending with no scope. It is now Class C only on a
 difference the registry's history does not explain, and the mark names those paths.
+
+The repair set is queued at one instant, so its receipts share a timestamp and the drain
+takes them in path order, a batch at a time. A batch can therefore hold every page of
+the newest checkpoint while older pages wait behind it. Acknowledging that checkpoint
+and publishing the marker after such a batch served those pages' stale rows as current.
+So a drain publishes and acknowledges only when nothing outside its batch is queued.
+The same gate closes older single-instant deferrals: a cold resolver and an adopted
+residue. The drain that empties the queue publishes. An acknowledgement still behind
+after it is closed by the existing bounded drain of the committed checkpoint. Between
+batches the barrier stands, so barrier recovery waits while the queue makes progress,
+rather than pay the whole-vault pass this design removes.
+
+A pass checks the ticket's run-stable refusals before it prepares a behind build: no
+acknowledgement to keep, an unscoped mark, a moved policy, and registry history that
+no longer reaches its lineage. Found only at the ticket, each started a whole new
+publication attempt. With the check first, the pass re-targets within its own budget.
