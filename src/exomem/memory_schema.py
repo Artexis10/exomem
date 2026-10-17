@@ -1517,7 +1517,9 @@ def save_contract(
         [
             vault.PlannedWrite(
                 path=path, content=rendered,
-                expected_hash=current_hash if current_hash is not None else vault.MISSING_CONTENT_HASH,
+                expected_hash=(
+                    current_hash if current_hash is not None else vault.MISSING_CONTENT_HASH
+                ),
             )
         ],
         vault_root=vault_root,
