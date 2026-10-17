@@ -35,6 +35,9 @@ IMAGE_B = "registry.example/cell@sha256:" + "b" * 64
 NIGHTLY_SNAPSHOT = "0" * 64  # a real-looking nightly snapshot id already on the row
 ATTEMPT_SNAPSHOT = "1" * 64
 CONFIG = ReconcileConfig()
+# An unready target applied this long ago is past the readiness deadline. Written from the
+# config, so the tests that restore a timed-out canary follow the deadline, not a literal.
+PAST_READY_DEADLINE = CONFIG.upgrade_ready_deadline + timedelta(minutes=1)
 
 
 def row(**overrides) -> CellRow:
@@ -887,10 +890,10 @@ def test_upgrade_with_an_existing_nightly_snapshot_still_backs_up_and_uses_only_
             statefulset_image=IMAGE_B,
             statefulset_replicas=1,
             statefulset_hold_kind="upgrade",
-            statefulset_hold_started_at=NOW - timedelta(minutes=11),
+            statefulset_hold_started_at=NOW - PAST_READY_DEADLINE,
             statefulset_previous_image=IMAGE_A,
             statefulset_pre_upgrade_snapshot=ATTEMPT_SNAPSHOT,
-            statefulset_target_applied_at=NOW - timedelta(minutes=11),
+            statefulset_target_applied_at=NOW - PAST_READY_DEADLINE,
             pod_ready=False,
         ),
         now=NOW,
@@ -1030,17 +1033,17 @@ def test_canary_fails_readiness_timeout_switches_to_restore_and_pauses_in_the_sa
     # before the switch is applied, so no other cell can start the same
     # known-bad image in between.
     decision = decide(
-        row(hold_kind="upgrade", hold_started_at=NOW - timedelta(minutes=11), observed_image=IMAGE_A),
+        row(hold_kind="upgrade", hold_started_at=NOW - PAST_READY_DEADLINE, observed_image=IMAGE_A),
         rollout(),
         obs(
             statefulset_exists=True,
             statefulset_image=IMAGE_B,
             statefulset_replicas=1,
             statefulset_hold_kind="upgrade",
-            statefulset_hold_started_at=NOW - timedelta(minutes=11),
+            statefulset_hold_started_at=NOW - PAST_READY_DEADLINE,
             statefulset_previous_image=IMAGE_A,
             statefulset_pre_upgrade_snapshot=ATTEMPT_SNAPSHOT,
-            statefulset_target_applied_at=NOW - timedelta(minutes=11),
+            statefulset_target_applied_at=NOW - PAST_READY_DEADLINE,
             pod_ready=False,
         ),
         now=NOW,
@@ -1059,9 +1062,9 @@ def test_canary_fails_readiness_timeout_switches_to_restore_and_pauses_in_the_sa
 
 
 def test_readiness_deadline_is_anchored_to_target_applied_at_not_hold_started_at() -> None:
-    # M5: a 12-minute-old hold (longer than the 10-minute readiness deadline)
-    # whose backup alone took 11 of those minutes, and whose target was only
-    # just applied, must not be treated as already timed out.
+    # M5: a 12-minute-old hold (longer than a 5-minute readiness deadline, the
+    # chart's minimum) whose backup alone took 11 of those minutes, and whose
+    # target was only just applied, must not be treated as already timed out.
     decision = decide(
         row(hold_kind="upgrade", hold_started_at=NOW - timedelta(minutes=12), observed_image=IMAGE_A),
         rollout(),
@@ -1079,7 +1082,7 @@ def test_readiness_deadline_is_anchored_to_target_applied_at_not_hold_started_at
         now=NOW,
         cell_image=IMAGE_B,
         start_upgrade=False,
-        config=CONFIG,
+        config=ReconcileConfig(upgrade_ready_deadline=timedelta(minutes=5)),
     )
     assert decision.hold_kind == "upgrade"  # still waiting, not restoring
 
@@ -1209,7 +1212,7 @@ def test_stopped_mid_canary_that_never_gets_ready_is_restored_not_declared() -> 
         _upgrade_hold_obs(
             statefulset_image=IMAGE_B,
             statefulset_replicas=1,
-            statefulset_target_applied_at=NOW - timedelta(minutes=11),
+            statefulset_target_applied_at=NOW - PAST_READY_DEADLINE,
             pod_exists=True,
             pod_uses_volume=True,
         ),
@@ -1221,6 +1224,37 @@ def test_stopped_mid_canary_that_never_gets_ready_is_restored_not_declared() -> 
     assert decision.hold_kind == "restore"
     assert decision.replicas == 0
     assert decision.rollout_updates["error_code"] == "UPGRADE_READINESS_TIMEOUT"
+
+
+def test_a_canary_still_unready_after_eleven_minutes_keeps_waiting_and_completes_once_ready() -> None:
+    # A first start that rebuilds the cell's retrieval catalogue answers "warming"
+    # (not ready) for minutes. A 10-minute deadline would restore such a cell at
+    # 11 minutes and pause the rollout; the default 30 minutes lets it finish.
+    started = {
+        "statefulset_image": IMAGE_B,
+        "statefulset_replicas": 1,
+        "statefulset_hold_started_at": NOW - timedelta(minutes=13),
+        "statefulset_target_applied_at": NOW - timedelta(minutes=11),
+        "pod_exists": True,
+        "pod_uses_volume": True,
+    }
+    held = row(hold_kind="upgrade", hold_started_at=NOW - timedelta(minutes=13), observed_image=IMAGE_A)
+
+    warming = decide(
+        held, rollout(last_good_image=IMAGE_A), _upgrade_hold_obs(**started),
+        now=NOW, cell_image=IMAGE_B, start_upgrade=False, config=CONFIG,
+    )
+    assert warming.hold_kind == "upgrade"
+    assert warming.replicas == 1
+    assert warming.rollout_updates == {}
+
+    ready = decide(
+        held, rollout(last_good_image=IMAGE_A),
+        _upgrade_hold_obs(**started, pod_ready=True, ready_pod_image=IMAGE_B),
+        now=NOW, cell_image=IMAGE_B, start_upgrade=False, config=CONFIG,
+    )
+    assert ready.hold_kind is None
+    assert ready.rollout_updates == {"last_good_image": IMAGE_B}
 
 
 def test_a_successful_pre_upgrade_backup_also_records_last_backup() -> None:

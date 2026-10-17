@@ -52,6 +52,11 @@ _RESET_MEMBERS = (
 # hashes and a duplicated created-path array. Keep a small format margin while
 # still refusing arbitrary multi-megabyte synced inputs.
 _CHECKPOINT_READ_LIMIT = 3_200_000
+# A node row stores its page's structural summary, about seven times the
+# page's own size (a 0.6 MB page stores 4.4 MB), so the checkpoint bound
+# above cannot double as the row bound. This one still caps what a tampered
+# sidecar can make a read allocate.
+_GRAPH_ROW_READ_LIMIT = 64 * 1024 * 1024
 _RECEIPT_READ_LIMIT = 65_536
 _FLOOR_READ_LIMIT = 8_192
 # Re-reads of a *busy* epoch, not of a broken one. The sidecar reader already
@@ -182,12 +187,31 @@ def _is_exact_canonical_json(raw: str | bytes, value: object) -> bool:
     return isinstance(rendered, bytes) and rendered == _canonical_json(value)
 
 
-def limit_graph_metadata_read(conn: sqlite3.Connection) -> None:
-    """Bound untrusted sidecar TEXT before SQLite allocates it for parsing."""
+def _limit_sidecar_read(conn: sqlite3.Connection, limit: int) -> None:
     setlimit = getattr(conn, "setlimit", None)
     category = getattr(sqlite3, "SQLITE_LIMIT_LENGTH", None)
     if callable(setlimit) and isinstance(category, int):
-        setlimit(category, _CHECKPOINT_READ_LIMIT)
+        setlimit(category, limit)
+
+
+def limit_graph_metadata_read(conn: sqlite3.Connection) -> None:
+    """Bound untrusted sidecar TEXT before SQLite allocates it for parsing.
+
+    For a connection that reads only `graph_meta`: no value it reads may
+    exceed the checkpoint format.
+    """
+    _limit_sidecar_read(conn, _CHECKPOINT_READ_LIMIT)
+
+
+def limit_graph_row_read(conn: sqlite3.Connection) -> None:
+    """Bound every sidecar value a connection that reads graph rows loads.
+
+    A row past the bound fails the whole statement, so a node the bound
+    cannot hold withholds every neighbour and count read beside it.
+    Checkpoint values parsed through such a connection keep their own
+    format bound in `GraphSyncCheckpoint.parse`.
+    """
+    _limit_sidecar_read(conn, _GRAPH_ROW_READ_LIMIT)
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -376,6 +400,11 @@ class GraphSyncCheckpoint:
 
     @classmethod
     def parse(cls, raw: str | bytes) -> GraphSyncCheckpoint | None:
+        # The format's own bound, held here so it applies however the bytes
+        # were read: a graph snapshot reads them under the larger row bound.
+        encoded = raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else raw
+        if len(encoded) > _CHECKPOINT_READ_LIMIT:
+            return None
         try:
             value = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
             if not isinstance(value, dict) or set(value) != {

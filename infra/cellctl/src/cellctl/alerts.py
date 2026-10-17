@@ -4,12 +4,15 @@ One alert fires while a running cell's last successful backup is older than
 its schedule allows (task 2.8), and one while a local cell past 80% use cannot
 grow, because its node has no room or it is at its cap (D10). Two more fire
 for a dedicated host before any cell runs there: its cell array is degraded
-(task 5.5) or its thin pool is nearly full (task 5.6). Each goes through the existing alert receiver
-as the same content-free transition the hosted scheduler evaluator sends
-(`infra/helm/platform/files/scheduler_runtime.py`). Substrate's receiver
-(`alert-receiver.ts`) is the contract both senders follow: it accepts exactly
-these five keys, and it emails only when an alert's state differs from the last
-one it delivered. So a restarted cellctl can resend the current state without a
+(task 5.5) or its thin pool is nearly full (task 5.6). Two more fire for a
+serving cell, with thresholds from the observability contract
+(cloud-platform-operations, "Monitoring spans independent failure domains"):
+it has stayed unready, or its volume has little free space left. Each goes
+through the existing alert receiver as the same content-free transition the
+hosted scheduler evaluator sends (`infra/helm/platform/files/scheduler_runtime.py`).
+Substrate's receiver (`alert-receiver.ts`) is the contract both senders follow:
+it accepts exactly these five keys, and it emails only when an alert's state
+differs from the last one it delivered. So a restarted cellctl can resend the current state without a
 duplicate email.
 
 They are alerts, never gates: nothing here changes what a pass does. The cells
@@ -24,6 +27,7 @@ import math
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
@@ -50,11 +54,25 @@ THIN_POOL_METRICS = ("topolvm_thinpool_data_percent", "topolvm_thinpool_metadata
 ARRAY_STATE = "node_md_state"
 ARRAY_DISKS = "node_md_disks"
 ARRAY_DISKS_REQUIRED = "node_md_disks_required"
+# A serving cell that stayed unready, and one whose volume is nearly full.
+# Protocol tokens: the receiver keys on them and the runbook names them; they are not vocabulary.
+UNAVAILABLE_ALERT = "cell-unavailable"
+DISK_LOW_ALERT = "cell-disk-low"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
 NIGHTLY_ALERT_AFTER = timedelta(hours=26)
 SERVING_STATES = ("running", "read_only")
+
+
+@dataclass(frozen=True)
+class AlertThresholds:
+    """The observability contract's `alerts.*` values the two cell alerts read.
+    The chart renders them into cellctl's environment from the contract file,
+    and main.py refuses to start without them: no second copy lives in code."""
+
+    unavailable_after: timedelta  # pending_operation_warn_seconds
+    disk_free_floor_bytes: int  # pvc_reserved_free_bytes
 
 
 def stale_backups(
@@ -81,6 +99,60 @@ def stale_backups(
         if since is not None and now - since > (HOURLY_ALERT_AFTER if hourly else NIGHTLY_ALERT_AFTER):
             stale.append(row.cell_id)
     return sorted(stale)
+
+
+def unavailable_cells(unready_since: Mapping[str, datetime], now: datetime, *, after: timedelta) -> list[str]:
+    """Serving cells that have been observed unready for at least `after`.
+    `unready_since` is cellctl's per-cell clock (LoopMemory)."""
+
+    return sorted(cell for cell, since in unready_since.items() if now - since >= after)
+
+
+def cells_unavailable(
+    rows: Iterable[CellRow],
+    observations: Mapping[str, ClusterObservation],
+    unready_since: Mapping[str, datetime],
+    now: datetime,
+    *,
+    after: timedelta,
+) -> bool | None:
+    """Whether any serving cell has stayed unready for `after`. The answer is
+    unknown (None), never "resolved", while a serving cell is unready for less
+    than that, or could not be observed and has no clock: a cellctl restart
+    forgets every clock, and a RESOLVED sent then would email an operator
+    about an outage that is still going on. False only when every serving
+    cell is ready, or held by an upgrade, backup or restore."""
+
+    if unavailable_cells(unready_since, now, after=after):
+        return True
+    serving = [row for row in rows if row.desired_state in SERVING_STATES]
+    pending = any(row.cell_id in unready_since or row.cell_id not in observations for row in serving)
+    return None if pending else False
+
+
+def low_disk_cells(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: int) -> list[str]:
+    """Serving cells whose last measured free space is below `floor`.
+    `free_bytes` holds what each cell's latest backup reported (total minus
+    used): hourly on local storage, nightly otherwise, so a reading can be a
+    day old. It lives in cellctl's memory only."""
+
+    return sorted(
+        row.cell_id for row in rows
+        if row.desired_state in SERVING_STATES and row.cell_id in free_bytes and free_bytes[row.cell_id] < floor
+    )
+
+
+def disk_low(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: int) -> bool | None:
+    """Whether any serving cell is below `floor`. Unknown (None), never
+    "resolved", while a serving cell has no reading and none is low: after a
+    restart until each cell has been measured again (like growth_blocked), and
+    for as long as a cell is never measured; the backup-age alert fires for that."""
+
+    rows = list(rows)
+    if low_disk_cells(rows, free_bytes, floor=floor):
+        return True
+    unmeasured = any(row.desired_state in SERVING_STATES and row.cell_id not in free_bytes for row in rows)
+    return None if unmeasured else False
 
 
 def growth_blocked(

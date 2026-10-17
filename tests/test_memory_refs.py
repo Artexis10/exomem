@@ -53,6 +53,26 @@ def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     assert index.resolve(identity) == "Knowledge Base/Notes/new.md"
 
 
+def test_a_crlf_page_is_held_at_the_digest_of_its_bytes(tmp_path: Path) -> None:
+    """Recall custody proves a page by its byte digest; CRLF must not change the answer."""
+    import hashlib
+
+    vault = tmp_path / "vault"
+    page = vault / "Knowledge Base" / "Evidence" / "capture.md"
+    page.parent.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    page.write_bytes(_page(identity).replace("\n", "\r\n").encode("utf-8"))
+    rel = "Knowledge Base/Evidence/capture.md"
+
+    index = memory_refs.ReferenceIndex(vault)
+    assert index.rebuild_all()["indexed"] == 1
+    digest = hashlib.sha256(page.read_bytes()).hexdigest()
+
+    assert memory_refs.holds_content_identities(vault, {rel: digest}) == {rel: True}
+    assert index.resolve(identity) == rel
+    assert memory_refs.drift(vault) == []
+
+
 def test_bulk_reference_lookup_uses_index_and_refreshes_only_missing_paths(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     notes = vault / "Knowledge Base" / "Notes"

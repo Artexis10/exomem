@@ -6272,7 +6272,8 @@ def writer_resolver_snapshot(
     A fresh matching cached resolver is forked.  A cold/stale cache remains
     untouched and preparation gets a one-off resolver built from disk. Callers
     that already measured direct disk freshness may supply that key to bypass
-    potentially stale event-registry state.
+    potentially stale event-registry state. When the corpus route declines,
+    the span records why as one closed `declined_<reason>` field.
     """
     from . import semantic_contract
     from .vault import WikilinkResolver
@@ -6291,6 +6292,7 @@ def writer_resolver_snapshot(
         entries = semantic_contract.current_writer_resolver_entries(
             root,
             freshness_key=current_freshness,
+            declined=measured,
         )
         if entries is not None:
             measured["corpus_entries"] = 1

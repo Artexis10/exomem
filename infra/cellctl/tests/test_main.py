@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import timedelta
 
 import pytest
 
 from cellctl import main
+from cellctl.alerts import AlertThresholds
 from cellctl.storage.b2 import B2Config
 
 from .test_manifests import RELOCATING_KEYS
@@ -158,3 +160,46 @@ def test_invalid_dedicated_selection_fails_at_startup(monkeypatch, selection) ->
     monkeypatch.setenv("CELLCTL_DEDICATED_CELL_IDS", json.dumps(selection))
     with pytest.raises(ValueError, match="dedicated"):
         main.build_cluster_config()
+
+
+def test_the_cell_alert_thresholds_load_from_the_environment_the_chart_renders(monkeypatch) -> None:
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "1234")
+    monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", "2147483648")
+
+    assert main.build_cluster_config().alert_thresholds == AlertThresholds(
+        unavailable_after=timedelta(seconds=1234), disk_free_floor_bytes=2 * 1024**3
+    )
+
+
+@pytest.mark.parametrize("name", ["CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES"])
+@pytest.mark.parametrize(
+    "bad",
+    [None, "0", "1.073741824e+09"],
+    ids=["missing", "not-positive", "helm-float-form"],
+)
+def test_cellctl_refuses_to_start_without_a_valid_alert_threshold(monkeypatch, name: str, bad: str | None) -> None:
+    # A default would be a second copy of the contract's number; a guessed
+    # threshold alerts wrongly while looking configured.
+    _settings_env(monkeypatch, {})
+    if bad is None:
+        monkeypatch.delenv(name)
+    else:
+        monkeypatch.setenv(name, bad)
+
+    with pytest.raises(ValueError, match=name):
+        main.build_cluster_config()
+
+
+@pytest.mark.parametrize("bad", [None, "0"], ids=["missing", "not-positive"])
+def test_cellctl_refuses_to_start_without_a_valid_upgrade_readiness_deadline(monkeypatch, bad: str | None) -> None:
+    # The chart owns the number: a guessed one either rolls back a healthy slow
+    # start or keeps a broken image up too long.
+    name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
+    if bad is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, bad)
+
+    with pytest.raises(ValueError, match=name):
+        main.build_reconcile_config()

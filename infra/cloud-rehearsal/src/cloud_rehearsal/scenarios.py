@@ -758,7 +758,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
             seen.add(row["hold_kind"])
         return "restore" in seen and _running_ready(previous)(row)
 
-    # D6: 15-minute backup deadline, 10-minute readiness deadline, restore.
+    # D6: 15-minute backup deadline, readiness deadline (10 minutes here, platform.cellctl_values), restore.
     row = await ctx.wait_cell(ctx.a.cell_id, returned, timeout=max(0, deadline - time.monotonic()), interval=2, description="the forced canary failure to restore tenant A onto its previous image")
     record.evidence["controller_restart"]["upgrade_hold_preserved"] = True
     rollout = await ctx.rollout()

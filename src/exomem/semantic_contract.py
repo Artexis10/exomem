@@ -1756,6 +1756,7 @@ def current_writer_resolver_entries(
     vault_root: Path,
     *,
     freshness_key: tuple[int, int, str] | None = None,
+    declined: dict[str, int] | None = None,
 ) -> tuple[tuple[str, str], ...] | None:
     """Return broad resolver entries from an exactly current resident corpus.
 
@@ -1764,27 +1765,39 @@ def current_writer_resolver_entries(
     broad Markdown membership still all identify the same corpus.  This is
     intentionally read-only: a miss must leave both corpus and resolver caches
     untouched for the existing disk fallback to handle.
+
+    A caller passing `declined` learns which proof failed, as one closed
+    `declined_<reason>` counter for its timing span.
     """
+
+    def decline(reason: str) -> None:
+        if declined is not None:
+            declined[f"declined_{reason}"] = 1
+
     root = Path(vault_root)
     try:
         cache_key = _corpus_cache_key(root)
     except Exception:  # noqa: BLE001 - an unkeyable root has no authority
-        return None
+        return decline("unkeyable")
 
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
+        if freshness.external_pending(root):
+            return decline("external_pending")
+        if not freshness.is_live(root, "vault"):
+            return decline("events_not_live")
         checkpoint = freshness.consumer_checkpoint(root, "vault")
-        if checkpoint.triple is None or (
-            freshness_key is not None and freshness_key != checkpoint.triple
-        ):
-            return None
+        if checkpoint.triple is None:
+            return decline("checkpoint_absent")
+        if freshness_key is not None and freshness_key != checkpoint.triple:
+            return decline("freshness_differs")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if entry is None or caption != checkpoint or language_hash is None:
-                return None
+            if entry is None or language_hash is None:
+                return decline("corpus_absent")
+            if caption != checkpoint:
+                return decline("corpus_checkpoint_differs")
             census, context = entry
             entries = context.resolver_entries
 
@@ -1796,7 +1809,7 @@ def current_writer_resolver_entries(
             sorted(path.relative_to(root).as_posix() for path in vault.walk_vault_md(root))
         )
     except Exception:  # noqa: BLE001 - an incomplete proof must decline reuse
-        return None
+        return decline("proof_failed")
 
     if (
         configuration is None
@@ -1813,23 +1826,25 @@ def current_writer_resolver_entries(
         or tuple(path for path, _title in entries) != membership
         or _config_census(root) != configuration
     ):
-        return None
+        return decline("identity_changed")
 
     with _CORPUS_CONTEXT_UPDATE_LOCK:
-        if freshness.external_pending(root) or not freshness.is_live(root, "vault"):
-            return None
-        if freshness.consumer_checkpoint(root, "vault") != checkpoint:
-            return None
+        if (
+            freshness.external_pending(root)
+            or not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return decline("changed_during_proof")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             current = _CORPUS_CONTEXT_CACHE.get(cache_key)
-            return (
-                entries
-                if current is not None
+            if (
+                current is not None
                 and current[1] is context
                 and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) == checkpoint
                 and _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key) == language_hash
-                else None
-            )
+            ):
+                return entries
+            return decline("changed_during_proof")
 
 
 def _resolve_reference_wikilink_from_context(

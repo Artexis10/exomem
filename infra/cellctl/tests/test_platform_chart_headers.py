@@ -14,6 +14,7 @@ thing, or its rate limiting would silently key on nothing useful.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -36,10 +37,10 @@ EDGE_NAMESPACE = "exomem-edge"
 TRAEFIK = "platform-header-test-traefik"
 
 
-def _helm_render(*extra_args: str) -> subprocess.CompletedProcess[str]:
+def _helm_render(*extra_args: str, chart: Path = PLATFORM_CHART) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            HELM, "template", "platform-header-test", str(PLATFORM_CHART),
+            HELM, "template", "platform-header-test", str(chart),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
             *extra_args,
@@ -51,8 +52,8 @@ def _helm_render(*extra_args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _helm_template(*extra_args: str) -> list[dict[str, Any]]:
-    result = _helm_render(*extra_args)
+def _helm_template(*extra_args: str, chart: Path = PLATFORM_CHART) -> list[dict[str, Any]]:
+    result = _helm_render(*extra_args, chart=chart)
     assert result.returncode == 0, result.stderr
     return [doc for doc in yaml.safe_load_all(result.stdout) if isinstance(doc, dict)]
 
@@ -1358,3 +1359,59 @@ def test_cellctl_is_told_and_allowed_to_reach_the_pods_that_serve_the_host_metri
         ), selector
     role = _find(documents, "ClusterRole", "cellctl")
     assert any("pods" in rule["resources"] and "list" in rule["verbs"] for rule in role["rules"])
+
+
+def _cellctl_env(documents: list[dict[str, Any]]) -> dict[str, str | None]:
+    deployment = _find(documents, "Deployment", "cellctl")
+    return {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_cell_alert_thresholds_the_observability_contract_declares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The alerts' numbers live only in the contract; the chart hands them to
+    # cellctl, which refuses any value it cannot read as a whole number.
+    from cellctl.main import build_alert_thresholds
+
+    alerts = json.loads((REPO_ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8"))["alerts"]
+    env = _cellctl_env(_helm_template())
+    for name in ("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "CELLCTL_PVC_RESERVED_FREE_BYTES"):
+        monkeypatch.setenv(name, env[name])
+
+    thresholds = build_alert_thresholds()
+
+    assert thresholds.unavailable_after.total_seconds() == alerts["pending_operation_warn_seconds"]
+    assert thresholds.disk_free_floor_bytes == alerts["pvc_reserved_free_bytes"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_a_changed_contract_value_changes_what_cellctl_is_given(tmp_path: Path) -> None:
+    chart = tmp_path / "platform"
+    shutil.copytree(PLATFORM_CHART, chart)
+    contract_file = chart / "files/observability-v1.json"
+    contract = json.loads(contract_file.read_text(encoding="utf-8"))
+    contract["alerts"]["pending_operation_warn_seconds"] = 1800
+    contract["alerts"]["pvc_reserved_free_bytes"] = 3 * 1024**3
+    changed = json.dumps(contract, indent=2) + "\n"
+    contract_file.write_text(changed, encoding="utf-8")
+
+    env = _cellctl_env(_helm_template(
+        "--set", f"observability.contractSha256={hashlib.sha256(changed.encode()).hexdigest()}", chart=chart))
+
+    assert env["CELLCTL_PENDING_OPERATION_WARN_SECONDS"] == "1800"
+    assert env["CELLCTL_PVC_RESERVED_FREE_BYTES"] == str(3 * 1024**3)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_upgrade_readiness_deadline_the_chart_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The chart's default, the rendered env, the parser and the tests' dataclass default must agree.
+    from cellctl.decide import ReconcileConfig
+    from cellctl.main import build_reconcile_config
+
+    name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
+    monkeypatch.setenv(name, _cellctl_env(_helm_template())[name])
+    assert build_reconcile_config().upgrade_ready_deadline == ReconcileConfig().upgrade_ready_deadline
+
+    changed = _cellctl_env(_helm_template("--set", "cellctl.upgradeReadyDeadlineMinutes=45"))
+    assert changed[name] == "45"

@@ -88,6 +88,9 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
         "b2BucketId": "rehearsal-bucket-id",
         "b2AccountId": "rehearsal-account-id",
         "b2Endpoint": stack.object_store.endpoint(from_host=False),
+        # The forced-canary step waits out this deadline inside a 40-minute budget; the
+        # chart's production default (30) would leave it no margin.
+        "upgradeReadyDeadlineMinutes": 10,
         "databaseEgressCidrs": [f"{stack.postgres.ip}/32"],
     }
 
