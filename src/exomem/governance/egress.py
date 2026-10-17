@@ -6904,16 +6904,20 @@ def owner_only_aggregate(
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
     if writer is not None and (who is None or (raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who))):
+        from ..collection_store import authority
+
         operation = writer._operation
         try:
             for entry in reserved_paths.list_generic_tree(vault_root, "."):
-                if entry.identity.kind != "file":
+                path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
+                # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
+                if entry.identity.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
                     continue
-                canonical = operation.projection_decision(entry.relative_path)
+                canonical = operation.projection_decision(path)
                 if canonical is None:
                     continue
                 decision = _decide_path(
-                    vault_root, entry.relative_path, policy=operation.policy,
+                    vault_root, path, policy=operation.policy,
                     principal=operation.who, audience=operation.who.audience_id, purpose=operation.purpose,
                     grants_hash=_grants_hash(operation.policy),
                     authorization_context=operation.context,

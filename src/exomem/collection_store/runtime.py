@@ -692,6 +692,10 @@ class CollectionStoreRuntime:
 
 #: The facades whose collection selectors the vault's marker can route to the store.
 _STORE_COMMANDS = frozenset({"record_memory", "plan_memory"})
+#: The commands that carry a curation or episode Records step. They go to the store thread only
+#: when a step they run or seal writes a collection the marker routes to the store (``route``).
+# nosemgrep: ep-word-set -- the two command names the command registry fixes for curation steps.
+_CURATION_COMMANDS = frozenset({"maintain_memory", "episode_memory"})
 #: How long the idle store thread waits for a request before it looks for import jobs again.
 IMPORT_IDLE_SECONDS = 1.0
 #: How long it leaves running jobs that advanced nothing (blocked or refused) alone.
@@ -727,8 +731,9 @@ def serve(vault_root, manager):
 def route(command, vault_root, arguments):
     """The store thread a request must run on, or None when file collections answer it.
 
-    A selector the vault's marker routes to the store, a NEW summary collection's create
-    and Records discovery run on the store thread of the service serving this vault;
+    A selector the vault's marker routes to the store, a NEW summary collection's create,
+    Records discovery, and a curation or episode command that runs a Records step on a
+    store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
@@ -737,7 +742,11 @@ def route(command, vault_root, arguments):
     from .preview import UNSERVED, bound_writer
 
     root = Path(vault_root).resolve()
-    if command not in _STORE_COMMANDS or bound_writer(root) is not None:
+    if bound_writer(root) is not None:
+        return None
+    if command in _CURATION_COMMANDS:
+        return _curation_route(command, root, arguments)
+    if command not in _STORE_COMMANDS:
         return None
     from . import authority
 
@@ -768,6 +777,29 @@ def route(command, vault_root, arguments):
         )
     return server
 
+
+def _curation_route(command, root, arguments):
+    """The store thread for a curation or episode command that runs a Records step on a store collection.
+
+    A step on a collection the store owns commits through the store writer, which only the store
+    thread holds, so the whole command runs there. Every other curation, in a vault with a store
+    or without one, keeps its path. Where no service serves the vault, or the marker cannot be
+    read, nothing is routed: the step's own resolution then refuses, and it alone decides whether
+    this caller may hear that the collection exists. Raising here would tell every caller first.
+    """
+    from . import authority, curation_step
+
+    try:
+        raw = authority.read_marker(root)
+        if raw is None:
+            return None
+        marker = authority.parse_marker(root, raw)
+    except connection.CollectionStoreError:
+        return None
+    if not curation_step.needs_store(root, marker, command, arguments):
+        return None
+    connection.load_store_libraries()
+    return _server(root)
 
 
 def projection_route(vault_root, path):
