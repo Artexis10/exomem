@@ -517,6 +517,17 @@ Reverse export is whole-vault. A store-native collection or a file-mode bound vi
 | item view render + staging fsync + publish | on the ack path, < 4 ms p95 | inside the write | 0.6 ms p95 (spike); 2.6–3.8 ms p50/p95 for the whole sync-projection storage layer (#1457 prototype) |
 | guard refresh through full public `inspect` | p95 < 15 ms | 416 / 546 ms at N=1,000 after #1457's fixes | 0.02–0.04 ms guard extraction only (#1457 prototype) |
 
+**Diagnostic baseline, 2026-10-17.** Source `b6bffc9bf`, script SHA-256 `2689cb9c883ca38ca6ebd7b0a1dfbc6768b3b7870582b6785944be12ecea8114`, Python 3.14.6 and SQLite 3.53.1. These sequential Linux/WSL runs used ext4 and the isolated store-preview dispatcher path. Each run measured 30 samples per append, inspection and refusal case, plus one bulk call. The writer boundary was local; coordinator requests were disabled.
+
+| Seeded rows | Guarded append p95, ms | Full inspect p95, ms | Complete-audience append p95, ms | Partial-audience refusal p95, ms | Bulk 500 elapsed, ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 53.57 | 38.32 | 46.47 | 15.29 | 8,289.31 |
+| 10,000 | 48.54 | 704.45 | 48.45 | 23.31 | 4,749.60 |
+
+The public inspections proved seeded/full/partial counts of 1,000/1,000/900 and 10,000/10,000/9,000. Each refusal preserved the canonical state and rendered-view hashes. Each bulk call stored exactly 500 new rows without pending publication. Peak RSS was 207,060 KiB and 406,144 KiB respectively, measured by `time -v` over each parent and child run.
+
+Report SHA-256 values: `store-latency-1k.json` is `aebc2634b3771312d002983dde372b24af5c98211f7af25e4261aa8f84242124`; `store-latency-10k.json` is `e309e2284f9b89e9f74dcb8065255d4cb9059ef6bf9c5ebd8a9f4a984e6b6c34`. These runs miss the phase targets. They do not establish a latency curve or a speed change. Native Windows/NTFS, the managed coordinated-store path, commit/fsync tracing and query/resource acceptance remain unmeasured here. P1a.15 stays open.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:

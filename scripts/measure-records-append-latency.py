@@ -767,6 +767,9 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             rows=[{"item": _item(size + 30000 + index)} for index in range(500)],
             why="synthetic bulk diagnostic", source=evidence, expected_container_hash=expected,
         )
+        bulk_stages = dict(stages.total)
+        bulk_stage_calls = dict(stages.calls)
+        bulk_budget_sample = stages.last_sample
         if not isinstance(bulk, dict) or bulk.get("state") != "committed":
             raise RuntimeError(f"bulk diagnostic did not commit: {str(bulk)[:500]}")
         if "projection_pending" in bulk.get("warnings", []):
@@ -790,7 +793,9 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             "refusal_state_before": before, "refusal_state_after": after,
             "refusal_state_unchanged": after == before,
             "bulk_500": {"elapsed_ms": wall * 1000, "thread_cpu_ms": cpu * 1000,
-                         "stored_count_delta": stored_delta, "call_spans": spans},
+                         "stored_count_delta": stored_delta, "call_spans": spans,
+                         "inclusive_stage_ms": {name: value * 1000 for name, value in bulk_stages.items()},
+                         "stage_calls": bulk_stage_calls, "exclusive_budget_sample": bulk_budget_sample},
         }
 
     _, _, final_inspect, _ = invoke(action="inspect", collection=COLLECTION)
