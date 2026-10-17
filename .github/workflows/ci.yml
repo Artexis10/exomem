@@ -102,6 +102,10 @@ jobs:
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
+      - name: Sample CPU during tests (xdist experiment)
+        run: |
+          nproc
+          nohup vmstat 5 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env:
           # The suite runs without the embeddings/media extras; these mirror the
@@ -119,6 +123,11 @@ jobs:
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --splits=12
+          -n 4
+          --dist loadfile
+          --max-worker-restart=0
+          -o timeout=180
+          -vv
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
@@ -128,6 +137,10 @@ jobs:
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
+      - name: Summarize CPU use (xdist experiment)
+        if: always()
+        run: |
+          awk 'NR>2 {n++; idle+=$15} END {if (n) printf "vmstat samples %d, mean CPU busy %.0f%%\n", n, 100-idle/n}' "$RUNNER_TEMP/vmstat.log" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -197,6 +210,10 @@ jobs:
         run: >-
           uv run --frozen --compile-bytecode --python ${{ matrix.python-version }}
           python -m compileall -q src/exomem
+      - name: Sample CPU during tests (xdist experiment)
+        run: |
+          nproc
+          nohup vmstat 5 > "$RUNNER_TEMP/vmstat.log" 2>&1 &
       - name: Run tests (harness tier — benchmark-importing modules)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -209,6 +226,11 @@ jobs:
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --splits=6
+          -n 4
+          --dist loadfile
+          --max-worker-restart=0
+          -o timeout=180
+          -vv
           --group=${{ matrix.shard }}
           --splitting-algorithm=duration_based_chunks
           --durations-path=.test_durations.json
@@ -218,6 +240,10 @@ jobs:
           --junitxml=test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ steps.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
+      - name: Summarize CPU use (xdist experiment)
+        if: always()
+        run: |
+          awk 'NR>2 {n++; idle+=$15} END {if (n) printf "vmstat samples %d, mean CPU busy %.0f%%\n", n, 100-idle/n}' "$RUNNER_TEMP/vmstat.log" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4
