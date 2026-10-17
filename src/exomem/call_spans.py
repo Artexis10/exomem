@@ -302,6 +302,134 @@ def record_span_since(name: str, mark_name: str) -> None:
         pass
 
 
+#: Measurement keys the shared read seams report into an open `meter`, so a
+#: seam and the span that collects from it spell each name once.
+#: Catalogue rows a maintained-catalogue read returned, and its wall time.
+CATALOGUE_ROWS = "rows_read"
+CATALOGUE_MS = "catalogue_ms"
+#: Unit-parent pages read from Markdown and parsed, and their wall time.
+PAGES_PARSED = "pages_parsed"
+HYDRATION_MS = "hydration_ms"
+#: A carry rung's work: the request's admitted pages, the rows its per-stem
+#: counts scanned, the candidate rows its corroboration test examined, and
+#: whether admitted ranking statistics were rebuilt rather than reused.
+ADMITTED_PAGES = "admitted"
+STEM_ROWS = "stem_rows"
+CANDIDATES = "candidates"
+STATS_REBUILT = "stats_rebuilt"
+
+#: The meter open on this thread of control, innermost first: the counts a
+#: span collects from code several calls below it. A ContextVar rather than a
+#: parameter, because the counts come from catalogue and Markdown seams that
+#: every caller shares; only a span that opened a meter receives them.
+_METER: ContextVar[dict[str, float] | None] = ContextVar("exomem_span_meter", default=None)
+
+
+@contextmanager
+def meter(*keys: str):
+    """Collect the named counts that calls below this point report.
+
+    The yielded dict starts at zero for every key and is what a span hands to
+    `record_span` as its fields, so the keys are the span's fixed field names
+    (at most `MAX_FIELDS_PER_SPAN`). `measure` adds only to a key the
+    innermost meter declared: a seam that reports a count nobody asked for
+    costs one lookup and adds nothing.
+    """
+    measured: dict[str, float] = dict.fromkeys(keys[:MAX_FIELDS_PER_SPAN], 0)
+    handle = _METER.set(measured)
+    try:
+        yield measured
+    finally:
+        _METER.reset(handle)
+
+
+def measure(key: str, value: float = 1) -> None:
+    """Add `value` to `key` of the innermost open meter, if it declared `key`."""
+    try:
+        measured = _METER.get()
+        if measured is not None and key in measured:
+            measured[key] += value
+    except Exception:  # noqa: BLE001 - instrumentation must never break a call
+        pass
+
+
+@contextmanager
+def measure_ms(key: str):
+    """Add the elapsed wall milliseconds of the block to `key` (see `measure`)."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        measure(key, (time.perf_counter() - started) * 1000.0)
+
+
+#: Process-wide garbage-collection pauses since the first `gc_window`:
+#: `[collections, pause seconds]`. A collection stops every thread, so a call
+#: is delayed by any pause inside its own wall interval, whichever thread's
+#: allocation triggered it; one global total read at both ends says that.
+_GC_TOTALS = [0, 0.0]
+#: When the running collection started. Collections never overlap: one runs
+#: at a time, holding the interpreter.
+_GC_STARTED: list[float | None] = [None]
+#: Open `gc_window`s. The callback stays installed for the process, so with
+#: none open it returns at once: no clock read and no work in a collection
+#: that nothing measures.
+_GC_WINDOWS = [0]
+_GC_INSTALL_LOCK = threading.Lock()
+_GC_INSTALLED = False
+
+
+def _on_gc(phase: str, _info: Mapping[str, Any]) -> None:
+    # Runs inside every collection, so it only stamps and adds.
+    if phase == "start":
+        _GC_STARTED[0] = time.perf_counter() if _GC_WINDOWS[0] else None
+        return
+    started = _GC_STARTED[0]
+    if started is not None:
+        _GC_TOTALS[1] += time.perf_counter() - started
+        _GC_TOTALS[0] += 1
+        _GC_STARTED[0] = None
+
+
+def _install_gc_callback() -> None:
+    global _GC_INSTALLED
+
+    if _GC_INSTALLED:
+        return
+    with _GC_INSTALL_LOCK:
+        if not _GC_INSTALLED:
+            import gc
+
+            gc.callbacks.append(_on_gc)
+            _GC_INSTALLED = True
+
+
+@contextmanager
+def gc_window():
+    """Record the collector's pauses inside the block as `runtime.gc`.
+
+    The span's duration is the pause time and its `collections` field the
+    number of collections. Nothing is recorded when no collection ran, so a
+    call that paid no pause carries no such span.
+    """
+    _install_gc_callback()
+    with _GC_INSTALL_LOCK:
+        _GC_WINDOWS[0] += 1
+    collections, paused = _GC_TOTALS[0], _GC_TOTALS[1]
+    try:
+        yield
+    finally:
+        with _GC_INSTALL_LOCK:
+            _GC_WINDOWS[0] -= 1
+        ran = _GC_TOTALS[0] - collections
+        if ran > 0:
+            record_span(
+                "runtime.gc",
+                (_GC_TOTALS[1] - paused) * 1000.0,
+                {"collections": ran},
+            )
+
+
 def pop_call_spans(token: str | None) -> list[dict[str, Any]]:
     """Pop this call's phase timings, slowest first.
 

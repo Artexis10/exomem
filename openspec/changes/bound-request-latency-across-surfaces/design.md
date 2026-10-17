@@ -114,6 +114,35 @@ Use isolated installed before/after arms on identical inputs and reference state
 
 Report case-paired differences and their confidence intervals, plus CPU, RSS, failures, quality, freshness and packet/result identity separately. An interval including zero shows no measured change. Model-free CI proves its declared profile only. Runtime fixes require scoped regression checks; reuse the existing full corpus at product delivery. This artifact batch runs OpenSpec and privacy checks only.
 
+### 7. Bound the retrieval carry by the turn and the rarity cap
+
+Attribution put most abstaining activation time in the retrieval carry, and its cost grew with the knowledge base. Three mechanisms caused this, and each is now bounded without changing an answer:
+
+- A word's rarity count over the admitted pages stops at `cap + RETRIEVAL_CARRY_FETCH + 1` qualifying rows. Past that window no count changes a decision, so the scan no longer reads every page that holds a common word. Past the early stop, a page whose status label cannot be classified is no longer read, so it no longer raises `ReaderViewUnavailable`; the rarity decisions are unchanged.
+- Configuration decides which statistics a ranking uses (`RequestQueryContext.catalogue_ranking`, set by `working_set_runtime.request_admission`). The owner ranks on the catalogue's statistics only when `egress.release_walk_filter` returns `None`: no governance policy, collection-store marker, bound collection writer or lifecycle marker, and unrestricted owner access. That owner no longer rebuilds Okapi statistics from every admitted page after each catalogue write. A restricted reader, and the owner under any of those, filters and ranks on the admitted pages, as both rungs did for every reader before. Admission is still decided on every request.
+- A corroborated ranking checks rows in rank order and stops once it holds its rows. When phrase groups are the whole test, the index names the rows that can pass first, on `+fts.rowid` so that the bm25 figures stay those of the one MATCH.
+
+Every carry rung records a span with its admitted pages, scanned stem rows, examined candidates and a statistics-rebuild count. Every role lane records its catalogue rows, parsed pages and the time inside each read. These spans give the measurement for this decision.
+
+**Declared behaviour change.** A request whose admission withholds nothing now ranks both rungs on the catalogue's bm25 scores, not on Okapi scores over the admitted pages. The catalogue counts raw material and pages outside the knowledge base, and FTS5 floors the IDF of a term on more than half the rows. Scores move, so such a packet can differ in five ways:
+
+- the order of named domains, and therefore which three are carried, when more than three phrases each name one page;
+- the order of the pages an abstention lists at `retrieval_named`;
+- which current pages fit in a carry window crowded by retired pages, which can change whether a phrase names one page or two;
+- whether a single named page clears `RETRIEVAL_CARRY_MIN_SCORE`, which moves it between carried and listed;
+- which turn units the term budget keeps and which common words it drops, because the budget reads catalogue frequencies.
+
+The ranking mode never depends on which pages exist, so adding or removing a withheld page cannot switch it. Each withholding source was checked against the catalogue the statistics read:
+
+- Under a governance policy the owner's walk withholds by page content, with no owner-audience rule: a page with frontmatter shaped like a bridge but no approval, an unresolved scope membership, an undecodable page, or a file that vanished after the catalogue saw it. A rule for the owner therefore cannot be the test; the policy's presence is.
+- A deletion or recovery marker can leave the marked path's row in the catalogue, and an unreadable lifecycle state withholds every path. Any marker, or that state, ranks on admission.
+- A collection-store marker sends its owned paths, and any path it cannot place, through the full decision, which can withhold them. A marker ranks on admission.
+- The access policy's `excluded` folders never enter the catalogue, and a changed access policy makes the catalogue stale until it is rebuilt. `readonly` only refuses writes. Neither affects the mode, so an owner with only an access policy keeps the catalogue's statistics.
+
+In catalogue mode each snapshot still checks that the admission withholds no page row. The request's predicate there admits every path, so only a caller that builds a context claiming catalogue ranking with a narrower predicate can fail the check. It then ranks on the admitted pages and logs `catalogue_ranking_withheld_row`.
+
+A request that ranks on admission, owner or restricted, ranks the phrase rung as before. Its title rung now filters and ranks on the admitted pages too, where the owner's title rung used to rank on the unfiltered catalogue and leave withheld pages to the served guard. Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts. A request that ranks on admission still rebuilds its admitted statistics once per catalogue revision. Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

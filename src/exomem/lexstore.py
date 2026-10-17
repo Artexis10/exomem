@@ -2179,6 +2179,9 @@ def _term_units(units) -> list[list[object]]:
 _TERM_FREQUENCY_CACHE_MAX = 50_000
 #: Admitted corpora retained per store: one per distinct admitted page set.
 _ADMITTED_STATISTICS_MAX = 4
+#: The closed reason logged when a request configured for catalogue ranking
+#: finds a withheld page row in its snapshot, and so ranks on admission.
+CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
 
 
 @dataclass
@@ -2187,14 +2190,19 @@ class RequestQueryContext:
 
     It retains no readiness or hits. The reader and lifecycle basis belong
     to this request; the catalogue generation decides whether paths can recur.
+    `catalogue_ranking` is the caller's configuration-only finding that this
+    admission can withhold no page, so a ranking may use the catalogue's own
+    statistics; which pages exist never decides it. `complete` is each
+    snapshot's check of that finding.
     """
 
     vault_root: Path
     visible: Callable[[str], bool]
     status_basis: Any
-    restricted: bool = True
+    catalogue_ranking: bool = False
     generation: tuple | None = None
     admitted_paths: set[str] | None = None
+    complete: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2462,7 +2470,10 @@ def carry_term_statistics(
     recall_checkpoint: Any | None = None,
     query_context: RequestQueryContext | None = None,
 ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
-    """Admitted carry counts and bounded discount paths from one SQL snapshot."""
+    """Admitted carry counts and bounded discount paths from one SQL snapshot.
+
+    Counts are exact up to `path_limit(pages)` and read `path_limit(pages) + 1`
+    past it (see `LexicalStore.carry_term_statistics`)."""
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     return get_store(vault_root).carry_term_statistics(
@@ -2583,6 +2594,19 @@ def term_document_paths(
 #: and never changes the rows.
 _FTS_PAGES = "fts CROSS JOIN pages p ON p.rowid = fts.rowid"
 _UNIT_FTS_UNITS = "unit_fts CROSS JOIN semantic_units u ON u.rowid = unit_fts.rowid"
+
+
+def _group_match(groups: Iterable[Iterable[str]]) -> str:
+    """The FTS5 expression for rows holding every term of some group.
+
+    A superset of the rows the corroboration all-of test keeps: that test
+    looks for each term as a whole word of `fts.stemmed`, which the index
+    holds as tokens, so a row that passes it matches this expression.
+    """
+    return " OR ".join(
+        "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
+        for group in groups
+    )
 
 
 def _page_carryable(
@@ -7216,6 +7240,15 @@ class LexicalStore:
         recall_checkpoint: Any | None,
         query_context: RequestQueryContext | None = None,
     ) -> CatalogQueryResult[tuple[dict[str, int], int, dict[str, tuple[str, ...]], set[str]]]:
+        """Admitted carry counts, admitted page total, bounded paths and the
+        admitted set, from one snapshot.
+
+        A stem's count is exact up to `path_limit(pages)` and reads one more
+        past it, so the scan per stem stops at `path_limit(pages) + 1`
+        qualifying rows however many pages hold the word. Its paths are
+        exactly the qualifying pages, in path order, whenever the count is
+        within the limit; a stem counted past it lists some `limit` of them.
+        """
         def query(conn: sqlite3.Connection):
             context = query_context or RequestQueryContext(self.vault_root, visible, status_basis)
             if context.visible is not visible or context.status_basis is not status_basis:
@@ -7248,33 +7281,42 @@ class LexicalStore:
 
             frequencies: dict[str, int] = {}
             paths: dict[str, tuple[str, ...]] = {}
+            scanned = 0
             for token in stemmed_tokens:
                 count = 0
                 bounded: list[str] = []
+                # Unordered, so the scan can stop: the count is exact up to
+                # `limit` and reads `limit + 1` past it, and the paths are
+                # sorted here, where they are at most `limit + 1`.
                 rows = conn.execute(
                     f"SELECT p.path, p.status FROM {_FTS_PAGES} "
-                    "WHERE fts MATCH ? AND p.in_kb = 1"
-                    + excluded
-                    + " ORDER BY p.path",
+                    "WHERE fts MATCH ? AND p.in_kb = 1" + excluded,
                     (f'"{token}"', *params),
                 )
-                for path, status in rows:
-                    path = str(path)
-                    if path not in admitted:
-                        continue
-                    allowed = carryable.get(status)
-                    if allowed is None:
-                        allowed = by_path.get(path)
-                    if allowed is None:
-                        allowed = by_path[path] = _page_carryable(
-                            status_basis, status, path, carryable, released
-                        )
-                    if allowed:
-                        count += 1
-                        if len(bounded) < limit:
+                try:
+                    for path, status in rows:
+                        path = str(path)
+                        if path not in admitted:
+                            continue
+                        scanned += 1
+                        allowed = carryable.get(status)
+                        if allowed is None:
+                            allowed = by_path.get(path)
+                        if allowed is None:
+                            allowed = by_path[path] = _page_carryable(
+                                status_basis, status, path, carryable, released
+                            )
+                        if allowed:
+                            count += 1
                             bounded.append(path)
+                            if count > limit:
+                                break
+                finally:
+                    rows.close()
                 frequencies[token] = count
-                paths[token] = tuple(bounded)
+                paths[token] = tuple(sorted(bounded)[:limit])
+            call_spans.measure(call_spans.ADMITTED_PAGES, pages)
+            call_spans.measure(call_spans.STEM_ROWS, scanned)
             return frequencies, pages, paths, admitted
 
         return self._serve_from_ready_catalog_result(
@@ -7489,6 +7531,7 @@ class LexicalStore:
                 cached = self._admitted_statistics.get(key)
             if cached is not None:
                 return cached
+            call_spans.measure(call_spans.STATS_REBUILT)
             col = "in_vault" if scope == "vault" else "in_kb"
             statistics = bm25_module.CorpusStatistics.of({
                 path: stemmed.split() for path, stemmed in conn.execute(
@@ -7518,13 +7561,30 @@ class LexicalStore:
         if context.generation != generation or context.admitted_paths is None:
             raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
             col = "in_vault" if scope == "vault" else "in_kb"
+            in_scope = f"p.{col} = 1" + raw_clause
             # Hidden labels never reach classification; navigation and retired
             # pages still belong in the admitted denominator.
-            context.admitted_paths = {
-                str(row[0]) for row in conn.execute(
-                    f"SELECT p.path FROM pages p WHERE p.{col} = 1" + raw_clause, raw_params
-                ) if context.visible(str(row[0]))
-            }
+            candidates = [
+                str(row[0])
+                for row in conn.execute(f"SELECT p.path FROM pages p WHERE {in_scope}", raw_params)
+            ]
+            context.admitted_paths = {path for path in candidates if context.visible(path)}
+            # Checked only where configuration allows catalogue ranking: its
+            # statistics count every page row, raw material and pages outside
+            # the scope included. Stops at the first withheld row.
+            context.complete = context.catalogue_ranking and (
+                len(context.admitted_paths) == len(candidates)
+                and all(
+                    context.visible(str(row[0]))
+                    for row in conn.execute(
+                        f"SELECT p.path FROM pages p WHERE NOT ({in_scope})", raw_params
+                    )
+                )
+            )
+            if context.catalogue_ranking and not context.complete:
+                # Configuration said nothing can be withheld and this snapshot
+                # found a withheld row: rank on admission and say so, by code.
+                log.warning("carry ranking %s", CATALOGUE_RANKING_CONTRACT_VIOLATION)
             context.generation = generation
         return context.admitted_paths
 
@@ -7573,10 +7633,12 @@ class LexicalStore:
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
         if query_context is not None:
+            # Configuration decides: a request whose admission can withhold
+            # nothing ranks on the catalogue, and every other request filters
+            # and ranks on what it admits, so a withheld page neither takes a
+            # row nor moves a score.
             current_paths = self._request_admitted_paths(conn, query_context, scope)
-            admitted_paths = (
-                current_paths if admitted_paths is not None or query_context.restricted else None
-            )
+            admitted_paths = None if query_context.complete else current_paths
         admitted = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
@@ -7631,12 +7693,25 @@ class LexicalStore:
         if allowed_paths is not None:
             allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        groups = [group for group in (corroboration_groups or []) if group]
+        # A row the all-of test keeps holds every stem of some group, so the
+        # index can name those rows first. Without this the test ran once per
+        # row the whole query matched: on a long turn that is nearly every
+        # page, times every group. Only when the groups are the whole test: a
+        # distinct-unit count is an alternative that needs no group. The test
+        # itself still decides; the rows are unchanged.
+        narrowing = _group_match(groups) if groups and min_matched_terms <= 1 else None
+        if narrowing is not None and admitted is None:
+            # On `+fts.rowid`, which keeps it out of the full-text cursor:
+            # pushed into it, each candidate re-runs the MATCH and its bm25
+            # figures. The rank stays the one MATCH's bm25 over the catalogue.
+            allowed_clause += " AND +fts.rowid IN (SELECT rowid FROM fts WHERE fts MATCH ?)"
+            params.append(narrowing)
         # The ranking step's own clause and parameters end here; the
         # corroboration test's follow. A bounded query runs them as two steps.
         ranking_clause = allowed_clause
         corroboration_at = len(params)
         corroborated = ""
-        groups = [group for group in (corroboration_groups or []) if group]
         if min_matched_terms > 1 and corroboration_tokens is None and term_units is None:
             term_units = [[stem, index, 1] for index, stem in enumerate(dict.fromkeys(tokens))]
         if admitted is None and (min_matched_terms > 1 or groups):
@@ -7689,7 +7764,6 @@ class LexicalStore:
             # only groups gets the all-of test and no flat count, which is
             # how "this page qualifies on a phrase or not at all" is said.
             corroborated = "(" + " OR ".join(clauses) + ")"
-            allowed_clause += " AND " + corroborated
         corroboration_end = len(params)
         # Excluded before LIMIT, for the same reason as corroboration.
         excluded_clause, excluded_params = _excluded_rows_clause(
@@ -7698,17 +7772,9 @@ class LexicalStore:
         allowed_clause += excluded_clause
         params.extend(excluded_params)
         if admitted is not None:
-            if groups and min_matched_terms <= 1:
-                # A row the all-of test keeps holds every stem of some group,
-                # so the index can name those rows first. Without this the
-                # test ran once per row the whole query matched: on a long
-                # turn that is nearly every page, times every group. This
-                # branch scores in Python, so the MATCH only selects rows and
-                # the test itself still decides; the rows are unchanged.
-                params[0] = f"({match}) AND (" + " OR ".join(
-                    "(" + " AND ".join('"' + term.replace('"', '""') + '"' for term in group) + ")"
-                    for group in groups
-                ) + ")"
+            if narrowing is not None:
+                # This branch scores in Python, so the MATCH only selects rows.
+                params[0] = f"({match}) AND ({narrowing})"
             # SQL admits before scoring or cap. The scorer then corroborates
             # with the same Counter it needs for each document's score.
             ranking_clause += (
@@ -7725,36 +7791,28 @@ class LexicalStore:
                     ranking_params,
                 )
             }
+            call_spans.measure(call_spans.CANDIDATES, len(candidates))
             return admitted.score(
                 candidates, tokens, k, min_matched_terms=min_matched_terms,
                 term_units=term_units, corroboration_tokens=corroboration_tokens,
                 corroboration_groups=groups,
             )
-        if term_budget is not None and corroborated:
-            # Bounded: rank every row the kept units match that passes the
-            # scope, path and exclusion filters, then run the corroboration
-            # test on those rows in rank order, stopping once `k` qualify. No
-            # row is left out, so the result is the one-statement query's for
-            # the same units. The inner ORDER BY ... LIMIT -1 keeps SQLite
-            # from flattening the ranking into the outer query, which would
-            # run the test on every matched row and sort afterwards.
-            rows = conn.execute(
-                "SELECT c.path, -c.bm25 FROM ("
-                "SELECT p.path AS path, fts.rowid AS rid, bm25(fts) AS bm25 "
-                f"FROM {_FTS_PAGES} "
-                f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause + excluded_clause
-                + " ORDER BY bm25(fts), p.path LIMIT -1"
-                ") AS c JOIN fts ON fts.rowid = c.rid "
-                "WHERE " + corroborated + " "
-                "ORDER BY c.bm25, c.path LIMIT ?",
-                [
-                    *params[:corroboration_at],
-                    *params[corroboration_end:],
-                    *params[corroboration_at:corroboration_end],
-                    k,
-                ],
-            ).fetchall()
-            return [(p, float(s)) for p, s in rows]
+        if corroborated:
+            # Filtered before LIMIT so one-unit hits cannot crowd out valid
+            # pages: rank every row the MATCH admits that passes the scope,
+            # path and exclusion filters, then run the corroboration test on
+            # those rows in rank order, stopping once `k` qualify. No row is
+            # left out, so the result is the one-statement query's.
+            return self._corroborated_in_rank_order(
+                conn,
+                f"SELECT p.path, fts.rowid, bm25(fts) FROM {_FTS_PAGES} "
+                f"WHERE fts MATCH ? AND p.{col} = 1" + ranking_clause
+                + excluded_clause + " ORDER BY bm25(fts), p.path",
+                [*params[:corroboration_at], *params[corroboration_end:]],
+                corroborated,
+                params[corroboration_at:corroboration_end],
+                k,
+            )
         params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
@@ -7764,6 +7822,61 @@ class LexicalStore:
             params,
         ).fetchall()
         return [(p, float(s)) for p, s in rows]
+
+    @staticmethod
+    def _corroborated_in_rank_order(
+        conn: sqlite3.Connection,
+        ranking: str,
+        ranking_params: list[object],
+        test: str,
+        test_params: list[object],
+        k: int,
+    ) -> list[tuple[str, float]]:
+        """The first `k` rows of `ranking` that pass `test`, in its order, as
+        `(path, -bm25)`.
+
+        `ranking` yields `(path, rowid, bm25)` for every admitted row, best
+        first; `test` is the corroboration predicate over `fts.stemmed`. The
+        rows are checked in that order, a batch at a time, the batch doubling
+        from `k`, and the read stops once `k` pass. SQLite's own planner may
+        sort the joined rows before it limits them, which runs the test on
+        every matched row; this order is the query's, so it never does.
+        `k` reads as SQL's `LIMIT k` did: 0 returns nothing and a negative `k`
+        returns every passing row.
+        """
+        out: list[tuple[str, float]] = []
+        if k == 0:
+            return out
+        limit = k if k > 0 else None
+        check = (
+            "SELECT fts.rowid FROM fts WHERE fts.rowid IN (SELECT value FROM json_each(?)) AND "
+            + test
+        )
+        cursor = conn.execute(ranking, ranking_params)
+        try:
+            # Batches double from `k`; an unlimited read reads every row
+            # anyway, so its first batch size only bounds one fetch.
+            size = k if limit is not None else 256
+            while limit is None or len(out) < limit:
+                batch = cursor.fetchmany(size)
+                if not batch:
+                    break
+                call_spans.measure(call_spans.CANDIDATES, len(batch))
+                passed = {
+                    int(row[0])
+                    for row in conn.execute(
+                        check, [json.dumps([int(rowid) for _path, rowid, _bm25 in batch]), *test_params]
+                    )
+                }
+                out.extend(
+                    (str(path), -float(bm25))
+                    for path, rowid, bm25 in batch
+                    if int(rowid) in passed
+                )
+                size *= 2
+        finally:
+            cursor.close()
+        return out if limit is None else out[:limit]
 
     def catalog_readiness(
         self,
@@ -8231,6 +8344,27 @@ class LexicalStore:
             return None
 
     def _serve_from_ready_catalog_result(
+        self,
+        scope: str,
+        freshness: tuple | None,
+        query_fn: Callable[[sqlite3.Connection], _CatalogValue],
+        failure_message: str,
+        *,
+        recall_checkpoint: Any | None = None,
+        allow_delta: bool = True,
+    ) -> CatalogQueryResult[_CatalogValue]:
+        """`_serve_ready_catalog`, reporting its wall time and the rows it
+        returned (a list or mapping value) to an open `call_spans.meter`."""
+        with call_spans.measure_ms(call_spans.CATALOGUE_MS):
+            result = self._serve_ready_catalog(
+                scope, freshness, query_fn, failure_message,
+                recall_checkpoint=recall_checkpoint, allow_delta=allow_delta,
+            )
+        if isinstance(result.value, (list, dict)):
+            call_spans.measure(call_spans.CATALOGUE_ROWS, len(result.value))
+        return result
+
+    def _serve_ready_catalog(
         self,
         scope: str,
         freshness: tuple | None,

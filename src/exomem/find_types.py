@@ -692,13 +692,23 @@ class FindTimings:
         }
 
     @contextmanager
-    def span(self, name: str, *, source: str = SOURCE_COMPUTED, **fields: Any):
+    def span(
+        self,
+        name: str,
+        *,
+        source: str = SOURCE_COMPUTED,
+        measured: Mapping[str, Any] | None = None,
+        **fields: Any,
+    ):
         """Time one stage, record where its answer came from, and what held it.
 
         `source` is the stage's static answer. A stage that only learns it
         inside the span calls `mark_source` instead; this exit still performs
         the write. `**fields` carries small scalar facts a stage knows about
         itself and may not touch the accounting — see `_validated_fields`.
+        `measured` is the integer counts the body collected (usually a
+        `call_spans.meter`), read on the way out and recorded as the ledger
+        span's fields; it never enters this table.
         """
         _validated_source(source)
         _validated_fields(name, fields)
@@ -737,7 +747,7 @@ class FindTimings:
             # semantic.search, and their own costs explain a slow call. The
             # ledger keeps its existing name bound; spans are inclusive timings.
             # Off the MCP path record_span is a no-op.
-            call_spans.record_span(f"recall.{name}", elapsed)
+            call_spans.record_span(f"recall.{name}", elapsed, measured)
             entry.update(fields)
 
     def mark_source(self, name: str, source: str) -> None:
@@ -819,12 +829,13 @@ def timing_span(
     name: str,
     *,
     source: str = SOURCE_COMPUTED,
+    measured: Mapping[str, Any] | None = None,
     **fields: Any,
 ):
     """A timing span when a collector is present, else a no-op context."""
     if timings is None:
         return nullcontext()
-    return timings.span(name, source=source, **fields)
+    return timings.span(name, source=source, measured=measured, **fields)
 
 
 def timing_mark_source(timings: FindTimings | None, name: str, source: str) -> None:

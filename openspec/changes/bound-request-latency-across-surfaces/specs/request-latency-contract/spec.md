@@ -74,6 +74,37 @@ Live warm `activate_context` SHALL have p95 below 1,000 ms, from public activati
 - **THEN** its p95 is below 1,000 ms and the report identifies its complete measurement scope
 - **AND** before/after checks show equivalent packet content and authorization behavior under the same CPU cap
 
+### Requirement: Activation's carry stays bounded by the turn and the rarity cap
+
+Activation's retrieval carry MUST NOT rebuild ranking statistics from the knowledge base for an owner whose configuration can withhold no page. It MUST NOT scan every page holding a turn word, and it MUST NOT test corroboration on every matched row. A word's rarity count SHALL stop one qualifying page past the window in which the count can still change a decision. A corroborated ranking SHALL check rows in rank order and stop once it holds the rows it needs. The carry SHALL decide the request's admission on every request and MUST NOT keep it across requests. Configuration SHALL decide which statistics a ranking uses, and the pages that exist MUST NOT. A restricted reader SHALL always filter and rank on the pages it admits. The owner SHALL rank on the catalogue's own statistics only when no governance policy, collection-store marker, bound collection writer or lifecycle marker exists and the owner's content access is unrestricted. With any of those configured, the owner SHALL filter and rank on the pages it admits, even while nothing is withheld. When a request configured for catalogue statistics finds a withheld page row in its snapshot, it SHALL rank on the pages it admits and log a closed reason code.
+
+#### Scenario: An unresolved turn follows a catalogue write
+
+- **WHEN** a turn that resolves nothing reaches both carry rungs right after a catalogue write, for an owner whose configuration can withhold no page
+- **THEN** the carry rebuilds no ranking statistics from the knowledge base
+- **AND** each word's rarity scan stops within the rarity window and the corroboration checks stop at the requested rows
+
+#### Scenario: Bounded work answers as unbounded work did
+
+- **WHEN** the carry counts rarity or checks corroboration within its bounds
+- **THEN** its rarity decisions, the pages it discounts and its first ranked rows equal those of the unbounded computation
+
+#### Scenario: The only withheld page is present or absent
+
+- **WHEN** a restricted reader's admission, or the owner's under a governance policy, withholds exactly one page that holds the turn's words
+- **THEN** both carry rungs return the same rows and scores as for the same vault without that page
+
+#### Scenario: An excluded page leaves the owner on the catalogue
+
+- **WHEN** the access policy excludes a page and no governance policy exists
+- **THEN** the page has no catalogue row, the owner ranks on the catalogue's statistics, and a catalogue write rebuilds no statistics
+
+#### Scenario: An owner whose configuration withholds nothing ranks on the catalogue
+
+- **WHEN** the owner's configuration can withhold no page and the phrase rung or the title rung ranks the pages a turn names
+- **THEN** it orders them by the catalogue's bm25 scores
+- **AND** the packet can differ in the order of named domains, the order of listed named pages, which current pages a window crowded by retired pages holds, whether a single named page clears the minimum carry score, and which turn units the term budget keeps
+
 ### Requirement: Known terminal outcomes remain in their declared population
 
 Every eligible terminal with known timing SHALL contribute to its declared population, including errors, refusals and abstentions, unless its owning contract explicitly excludes it. Reports SHALL identify outcome restrictions and their owner. A success-only percentile MUST NOT establish an all-request bar. Existing recall warming and contended-sample rules SHALL remain unchanged.

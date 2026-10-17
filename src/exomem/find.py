@@ -2319,11 +2319,18 @@ def _read_unit_parent(vault_root: Path, parent_path: str) -> _UnitParent | None:
     """One parent as unit hydration reads it, before any row is checked.
 
     `None` when recall does not admit the page or a page filter rejects it.
+    Reports each page it reads, and its wall time, to an open `call_spans.meter`.
     """
+    with call_spans.measure_ms(call_spans.HYDRATION_MS):
+        return _read_unit_parent_unmeasured(vault_root, parent_path)
+
+
+def _read_unit_parent_unmeasured(vault_root: Path, parent_path: str) -> _UnitParent | None:
     from . import semantic_index
 
     if not recall_policy.is_recall_candidate(vault_root, vault_root / parent_path):
         return None
+    call_spans.measure(call_spans.PAGES_PARSED)
     page = _CACHE.get(vault_root / parent_path, vault_root)
     if page is None:
         return _UnitParent(page=None)

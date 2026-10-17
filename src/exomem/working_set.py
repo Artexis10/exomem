@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from . import (
     activation_conventions,
     activation_result,
+    call_spans,
     context_intents,
     context_roles,
     lifecycle_statuses,
@@ -275,6 +276,22 @@ RETRIEVAL_CARRY_MAX_DOMAINS = 3
 #: case and would also reject a short turn made entirely of real names,
 #: which is the turn this feature exists to serve.
 RETRIEVAL_CARRY_MIN_PAGES = 100
+
+#: The ledger fields of each carry rung's span (`recall.working_set.carry.phrase`,
+#: `recall.working_set.carry.title`) and of each `working_set.lanes.<position>`
+#: span. The rung spans are ledger-only: the activation timing table stays flat.
+CARRY_SPAN_FIELDS = (
+    call_spans.ADMITTED_PAGES,
+    call_spans.STEM_ROWS,
+    call_spans.CANDIDATES,
+    call_spans.STATS_REBUILT,
+)
+LANE_SPAN_FIELDS = (
+    call_spans.CATALOGUE_ROWS,
+    call_spans.PAGES_PARSED,
+    call_spans.CATALOGUE_MS,
+    call_spans.HYDRATION_MS,
+)
 
 PACKET_BLOCKS = (
     # First, and in resolved and abstained packets alike: a fresh session opens
@@ -1086,7 +1103,10 @@ def run_lanes(
             raise BudgetExhausted(lane_stage)
         failed = False
         result = LaneResult(())
-        with _span(timings, lane_stage):
+        with (
+            call_spans.meter(*LANE_SPAN_FIELDS) as measured,
+            _span(timings, lane_stage, measured),
+        ):
             try:
                 precedent_pages: frozenset[str] = frozenset()
                 standing_pages: frozenset[str] = frozenset()
@@ -1682,18 +1702,21 @@ def _material_lane(
     for rank, (path, _score) in enumerate(pointers[:MAX_ITEMS_PER_ROLE]):
         if admit is not None and not admit(path, None):
             continue
-        page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
+        with call_spans.measure_ms(call_spans.HYDRATION_MS):
+            page = find._CACHE.get(Path(vault_root) / path, Path(vault_root))
         if page is None or pointer_hashes.get(path) != page.snapshot_hash:
             raise RuntimeError("material page unavailable")
         if not _is_current_page(vault_root, path, status_basis=status_basis):
             continue
-        document = semantic_units.parse_semantic_units(
-            page.body, path=path, validate=False,
-            language_registry=semantic_language_registry.for_attached_projects(
-                language, tuple(find._all_projects(page.frontmatter)),
-            ),
-            relation_registry=relations, page_type=page.page_type,
-        )
+        call_spans.measure(call_spans.PAGES_PARSED)
+        with call_spans.measure_ms(call_spans.HYDRATION_MS):
+            document = semantic_units.parse_semantic_units(
+                page.body, path=path, validate=False,
+                language_registry=semantic_language_registry.for_attached_projects(
+                    language, tuple(find._all_projects(page.frontmatter)),
+                ),
+                relation_registry=relations, page_type=page.page_type,
+            )
         prose = page.body
         for unit in sorted(document.units, key=lambda unit: unit.span.start_offset, reverse=True):
             prose = prose[:unit.span.start_offset] + "\n" + prose[unit.span.end_offset:]
@@ -1912,11 +1935,12 @@ def _evidence_lane(
 # --------------------------------------------------------------------------- #
 
 
-def _span(timings: Any, name: str):
-    """One timing span under the existing collector, or a no-op without one."""
+def _span(timings: Any, name: str, measured: Mapping[str, Any] | None = None):
+    """One timing span under the existing collector, or a no-op without one.
+    `measured` becomes the ledger span's integer fields (`call_spans.meter`)."""
     from . import find_types
 
-    return find_types.timing_span(timings, name)
+    return find_types.timing_span(timings, name, measured=measured)
 
 
 class BudgetExhausted(RuntimeError):
@@ -2333,7 +2357,11 @@ def _carry_by_retrieval(
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
-    with _span(timings, "working_set.carry"):
+    with (
+        _span(timings, "working_set.carry"),
+        call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
+        call_spans.span("recall.working_set.carry.phrase", measured),
+    ):
         from . import working_set_runtime
 
         hits, state = working_set_runtime.carry_candidates(
@@ -2417,7 +2445,11 @@ def _carry_groups_by_retrieval(
         except Exception:  # noqa: BLE001 - an unreadable snapshot carries nothing
             log.debug("activation carry freshness unavailable", exc_info=True)
             return ()
-    with _span(timings, "working_set.carry"):
+    with (
+        _span(timings, "working_set.carry"),
+        call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
+        call_spans.span("recall.working_set.carry.phrase", measured),
+    ):
         from . import working_set_runtime
 
         groups, state = working_set_runtime.carry_named_groups(
@@ -2592,7 +2624,11 @@ def _title_named_anchors(
         except Exception:  # noqa: BLE001 - an unreadable snapshot lists nothing
             log.debug("activation title listing freshness unavailable", exc_info=True)
             return ()
-    with _span(timings, "working_set.carry"):
+    with (
+        _span(timings, "working_set.carry"),
+        call_spans.meter(*CARRY_SPAN_FIELDS) as measured,
+        call_spans.span("recall.working_set.carry.title", measured),
+    ):
         from . import working_set_runtime
 
         hits, state = working_set_runtime.title_named_pages(
@@ -4246,14 +4282,9 @@ def _compile_packet(
     carry_named_nothing = False
     query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
-        from . import lexstore
-        from .governance import egress
+        from . import working_set_runtime
 
-        admitted = visible if visible is not None else egress.release_walk_filter(root)
-        query_context = lexstore.RequestQueryContext(
-            root, admitted if admitted is not None else lambda _path: True, status_basis,
-            restricted=visible is not None,
-        )
+        query_context = working_set_runtime.request_admission(root, visible, status_basis)
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,

@@ -364,6 +364,9 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "egress.cross_check",
         "egress.scrub",
         "spans.overflow",
+        "recall.working_set.carry.phrase",
+        "recall.working_set.carry.title",
+        "runtime.gc",
     }
 )
 
