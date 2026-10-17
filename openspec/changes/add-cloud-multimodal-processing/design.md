@@ -1,6 +1,11 @@
 ## Context
 
-- **Every Cloud cell already runs the media machinery.** It starts the media supervisor (`server_runtime.py`) and its serialized, disposable child (`media_worker.py`). But the `cloud` image installs only `.[embeddings-onnx]`:
+The following baseline describes the proposal before its first delivery.
+[#1661](https://github.com/Artexis10/exomem/pull/1661) shipped documents, OCR, engine switches and memory brakes.
+[#1798](https://github.com/Artexis10/exomem/pull/1798) added fleet defaults; [#1807](https://github.com/Artexis10/exomem/pull/1807) corrected CJK OCR recall.
+The task checklist preserves remaining engine and acceptance work. No image-search or speech completion is claimed.
+
+- **Every Cloud cell already ran the media machinery.** It starts the media supervisor (`server_runtime.py`) and its serialized, disposable child (`media_worker.py`). But the `cloud` image installs only `.[embeddings-onnx]`:
   - no torch;
   - no Pillow, Tesseract or faster-whisper.
 
@@ -101,7 +106,7 @@ Reuse wins where it fits.
 
   Orientation and script detection runs first, and then only that script's models run. So installed models cost image size only, never time or memory on an unrelated page.
   - When detection names no script, which happens on images with little text, OCR reads with the deployment's configured default language packs.
-  - Today every install calls Tesseract without a language, so it reads English only (`extract._ocr_image` and `extract._ocr_pdf_page`).
+  - The original implementation called Tesseract without a language. The delivered OCR slice now selects installed models through their script coverage.
   - The installed set is an image build parameter, which makes it deployment data, never a code list.
   - Each installed pack's script coverage is read from the pack's own data: the script property of its unicharset, or Tesseract's documented equivalent. Implementation verifies which one Tesseract exposes. If neither can be read at run time, the image build derives a coverage file from the installed packs; it is never hand-written.
   - A pack belongs to every script its data covers. Kanji-only Japanese may be detected as Han, so the Han route includes the deployment's Japanese packs.
@@ -221,8 +226,8 @@ Run on the owner-sized cell with that engine's backlog active:
 ## Open Questions
 
 - The speech engine: pending the bake-off (D6).
-- Whether `markitdown` or per-format libraries cover D4 at an acceptable size and licence.
-- The default OCR language packs used when script detection names no script, how many consecutive memory stops end the cycle, and the pressure stall threshold (D2). All are deployment values that acceptance sets.
+- D4 is delivered through MarkItDown, odfdo and striprtf. HEIC decoding remains pending its decoder licence review and format proof.
+- Documents/OCR ship defaults for fallback OCR packs, consecutive memory stops and pressure stalls. Budgets for later engines still need their own acceptance.
 - **Reconcile the memory gate before the first acceptance run.** The service-v1 peak gate counts page cache, and media acceptance reads anonymous plus non-reclaimable memory. The owner of `add-cloud-service-resource-policy` decides how the two measures agree. This change does not edit that change.
 - The agreement bounds for the known-content subsets and the drain-time bound are stated before each run.
 - Whether installing a new OCR pack re-extracts images whose OCR completed without it. The spec keeps completed text unless an explicit reprocessing mode asks, which is today's rule.
