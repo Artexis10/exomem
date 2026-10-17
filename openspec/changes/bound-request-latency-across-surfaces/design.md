@@ -114,6 +114,24 @@ Use isolated installed before/after arms on identical inputs and reference state
 
 Report case-paired differences and their confidence intervals, plus CPU, RSS, failures, quality, freshness and packet/result identity separately. An interval including zero shows no measured change. Model-free CI proves its declared profile only. Runtime fixes require scoped regression checks; reuse the existing full corpus at product delivery. This artifact batch runs OpenSpec and privacy checks only.
 
+### 7. Bound the retrieval carry by the turn and the rarity cap
+
+Attribution put most abstaining activation time in the retrieval carry, and its cost grew with the knowledge base. Three mechanisms caused this, and each is now bounded without changing an answer:
+
+- A word's rarity count over the admitted pages stops at `cap + RETRIEVAL_CARRY_FETCH + 1` qualifying rows. Past that window no count changes a decision, so the scan no longer reads every page that holds a common word.
+- The owner's phrase rung ranks on catalogue statistics, as the title rung already did. It no longer rebuilds Okapi statistics from every admitted page after each catalogue write. A restricted reader still ranks on statistics over its admitted pages, and admission is still decided on every request.
+- A corroborated ranking checks rows in rank order and stops once it holds its rows. When phrase groups are the whole test, the index names the rows that can pass first, on `+fts.rowid` so that the bm25 figures stay those of the one MATCH.
+
+Every carry rung records a span with its admitted pages, scanned stem rows, examined candidates and a statistics-rebuild count. Every role lane records its catalogue rows, parsed pages and the time inside each read. These spans give the measurement for this decision.
+
+**Declared behaviour change.** The owner's phrase rung now orders pages by the catalogue's bm25 scores, not by Okapi scores over the admitted corpus. Scores move, so an owner's packet can differ in three ways:
+
+- the order of named domains, and therefore which three are carried, when more than three phrases each name one page;
+- the order of the pages an abstention lists at `retrieval_named`;
+- which current pages fit in a carry window crowded by retired pages, which can change whether a phrase names one page or two.
+
+Restricted readers' rankings do not change. Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission still reads every page's path. Catalogue ranking still reads every row that holds a turn word, and a write still invalidates the catalogue's cached word counts. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

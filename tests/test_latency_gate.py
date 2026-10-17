@@ -918,6 +918,95 @@ def test_working_set_compiler_does_not_scale_linearly(tmp_path: Path, model_free
     )
 
 
+# --- Retrieval-carry bound (bound-request-latency-across-surfaces). A turn
+# that resolves nothing pays the carry's two rungs and then abstains, and on a
+# written-to catalogue nothing a previous turn computed may be reused. The
+# carry is not flat like the compiler's seed-capped stages: its windows grow
+# with the rarity cap, 0.5% of the knowledge base by design
+# (`working_set.carry_fetch_size`: 11 rows at 2k notes, 41 at 8k), it admits
+# every page on each request, and its catalogue ranking reads the pages that
+# hold the turn's words, which here are words every generated note holds. The
+# bound admits that growth and refuses work that grows with the whole corpus.
+# MEASURED BASIS (2026-10-17, Python 3.12.3 with SQLite 3.45.1 as in CI, a
+# 20-core laptop, the dense vault plus its entity overlay, median of five
+# samples each after a catalogue write): on 0.121.0 the carry took 118ms @ 2k
+# and 607ms @ 8k (5.2x). It rebuilt ranking statistics from every page,
+# scanned every page holding each turn word, and tested corroboration on
+# every matched row. With the carry bounded, 40ms and 93ms (2.4x).
+CEIL_CARRY_RATIO = 3.0
+CARRY_RATIO_SLACK_MS = 50.0
+CARRY_SAMPLES = 5
+#: Resolves no anchor and names no page, so both carry rungs run and the turn
+#: abstains. Its everyday words occur on every generated note; its three
+#: invented words on none, so they pair as distinctive and the phrase rung
+#: reaches its catalogue query.
+CARRY_TURN = "how is the prose paragraph about the quillon vantry ceiling realistically ranked"
+
+
+def _measure_unresolved_carry(vault: Path) -> list[float]:
+    """The `working_set.carry` stage of an abstaining activation, each sample
+    taken right after a catalogue write.
+
+    A write gives the catalogue a new revision, which is what retires any
+    statistics a previous turn cached. It is published outside the timed call,
+    as the watcher would. The other stages a write makes the next call pay
+    belong to the index refresh, not to the carry, so this gate times the
+    carry's own stage.
+    """
+    from exomem import commands, working_set_runtime
+
+    _prepare_working_set_vault(vault)
+    notes = sorted((vault / "Knowledge Base").rglob("note-0000*.md"))
+
+    def call() -> dict:
+        working_set_runtime.reset_caches_for_tests(packets_only=True)
+        gc.collect()
+        return commands.op_activate_context(vault, turn=CARRY_TURN, include_timings=True)
+
+    first = call()
+    assert first["abstained"] is True and first["abstention"]["reason"] == "unresolved", first
+    samples: list[float] = []
+    for index in range(CARRY_SAMPLES):
+        note = notes[index % len(notes)]
+        note.write_text(
+            note.read_text(encoding="utf-8") + f"\nRevised line {index}.\n", encoding="utf-8"
+        )
+        freshness.on_files_changed(vault, changed=[note])
+        lexstore.ensure_fresh(vault)
+        stages = call()["timings"]["stages"]
+        # Both rungs ran: a carry the catalogue refused would time nothing.
+        assert stages["working_set.carry"].get("calls") == 2, stages.get("working_set.carry")
+        samples.append(float(stages["working_set.carry"]["ms"]))
+    return samples
+
+
+@pytest.mark.timeout(600)
+def test_unresolved_carry_does_not_scale_with_the_corpus(tmp_path: Path, model_free) -> None:
+    from synth_vault import gen_entity_overlay
+
+    from exomem import working_set, working_set_runtime
+
+    medians: dict[int, float] = {}
+    for notes, overlay in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
+        vault = _build_dense_vault(tmp_path, notes)
+        gen_entity_overlay(vault, overlay, seed=23)
+        _seed_freshness_live(vault)
+        lexstore.ensure_fresh(vault)
+        rare, pages, state = working_set_runtime.rare_turn_terms(
+            vault, working_set_runtime.pairable_stems(CARRY_TURN)
+        )
+        assert state == "available" and len(rare) >= 2, (state, rare)
+        assert pages >= working_set.RETRIEVAL_CARRY_MIN_PAGES, pages
+        medians[notes] = statistics.median(_measure_unresolved_carry(vault))
+
+    small_ms, large_ms = medians[N_NOTES], medians[N_NOTES_LARGE]
+    bound = max(small_ms * CEIL_CARRY_RATIO, small_ms + CARRY_RATIO_SLACK_MS)
+    assert large_ms < bound, (
+        f"an unresolved turn's carry scaled {small_ms:.1f}ms @ {N_NOTES} to "
+        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} after a catalogue write (bound {bound:.1f}ms)"
+    )
+
+
 #: Distinct pages the full ring's events fall on, the same at every corpus
 #: size, so the ratio measures the corpus and not a differently shaped ring.
 RING_PAGES = 512

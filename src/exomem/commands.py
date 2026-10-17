@@ -6557,6 +6557,8 @@ def op_activate_context(
         # The dispatcher runs this as a foreground request, ahead of in-process
         # bulk passes (`writer_lease._foreground_priority_request`).
         with (
+            # Collector pauses inside the call, as the `runtime.gc` span.
+            call_spans_module.gc_window(),
             state_paths_module.resolution_scope(),
             working_set_runtime_module.defer_index_refreshes(),
         ):

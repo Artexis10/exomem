@@ -74,6 +74,37 @@ Live warm `activate_context` SHALL have p95 below 1,000 ms, from public activati
 - **THEN** its p95 is below 1,000 ms and the report identifies its complete measurement scope
 - **AND** before/after checks show equivalent packet content and authorization behavior under the same CPU cap
 
+### Requirement: Activation's carry and role lanes stay bounded by the request
+
+Activation's retrieval carry SHALL bound its work by the turn, the rarity cap and the request's admitted pages. Its role lanes SHALL bound their work by the anchor neighbourhood and its bounded reach. Neither SHALL grow with the size of the knowledge base. The carry SHALL decide the request's admission on every request and MUST NOT keep it across requests. A word's rarity count SHALL stop one qualifying page past the window in which the count can still change a decision. A corroborated ranking SHALL check rows in rank order and stop once it holds the rows it needs. The owner's carry SHALL rank on the maintained catalogue's own statistics. A restricted reader's carry SHALL rank on statistics over the pages that reader may see.
+
+#### Scenario: An unresolved turn follows a catalogue write
+
+- **WHEN** a turn that resolves nothing reaches both carry rungs right after a catalogue write
+- **THEN** the owner's carry rebuilds no ranking statistics from the knowledge base
+- **AND** each word's rarity scan and the corroboration checks stay within the rarity window and the requested rows
+
+#### Scenario: Bounded work answers as unbounded work did
+
+- **WHEN** the carry counts rarity or checks corroboration within its bounds
+- **THEN** its rarity decisions, the pages it discounts and its first ranked rows equal those of the unbounded computation
+
+#### Scenario: A page withheld from a restricted reader holds the turn's words
+
+- **WHEN** a restricted reader's turn reaches the carry
+- **THEN** the carry's rows and scores equal those of the same vault without the withheld page
+
+#### Scenario: The owner's carry orders pages by catalogue scores
+
+- **WHEN** the owner's phrase rung ranks the pages a turn names
+- **THEN** it orders them by the catalogue's scores, as the title rung already does
+- **AND** this can change the order of named domains, the order of listed named pages, and which current pages a window crowded by retired pages holds
+
+#### Scenario: A resolved turn's role lanes read their material
+
+- **WHEN** the role lanes of a resolved turn read units and pages
+- **THEN** they read only the anchor neighbourhood and its bounded reach, never pages selected by corpus size
+
 ### Requirement: Known terminal outcomes remain in their declared population
 
 Every eligible terminal with known timing SHALL contribute to its declared population, including errors, refusals and abstentions, unless its owning contract explicitly excludes it. Reports SHALL identify outcome restrictions and their owner. A success-only percentile MUST NOT establish an all-request bar. Existing recall warming and contended-sample rules SHALL remain unchanged.

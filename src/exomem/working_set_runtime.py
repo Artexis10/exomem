@@ -1396,6 +1396,19 @@ def rare_turn_terms(
     return rare, int(corpus_pages), "available"
 
 
+def ranks_on_admitted(visible: Callable[[str], bool] | None) -> bool:
+    """Does a carry query for this reader rank on admitted statistics?
+
+    The owner (`visible` is `None`) sees every page, so the maintained
+    catalogue's own statistics describe its corpus: no per-request rebuild,
+    which on a written-to catalogue was one read of every page per turn. A
+    restricted reader ranks on statistics over the pages it may see, so a
+    withheld page neither takes a row nor moves a visible page's rank.
+    Admission itself is still decided on every request.
+    """
+    return visible is not None
+
+
 def phrase_components(
     pairs: Sequence[tuple[str, str]],
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
@@ -1490,7 +1503,9 @@ def carry_named_groups(
     Everything else is `carry_candidates`' contract, unchanged: the
     maintained catalogue only, no foreground delta, an incomplete catalogue
     reported rather than repaired, raw material, navigation and retired
-    pages dropped before anyone counts.
+    pages dropped before anyone counts. Rarity is counted over the request's
+    admitted pages; the ranking uses the catalogue's statistics for the owner
+    and the admitted pages' for a restricted reader (`ranks_on_admitted`).
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find, lexstore
@@ -1548,7 +1563,7 @@ def carry_named_groups(
                 term_budget=lexical_term_budget(),
                 exclude_navigation=True,
                 exclude_raw_material=True,
-                admitted_paths=admitted_paths,
+                admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
                 query_context=query_context,
             )
             if not result.readiness.complete:
@@ -1584,7 +1599,7 @@ def carry_named_groups(
                 recall_checkpoint=recall_checkpoint,
                 contacts=contacts,
                 status_basis=status_basis,
-                admitted_paths=admitted_paths,
+                admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
                 query_context=query_context,
             )
         return tuple(groups), "available"
@@ -1608,7 +1623,7 @@ def _carry_title_groups(
     limit: int | None,
     freshness,
     recall_checkpoint,
-    admitted_paths: set[str],
+    admitted_paths: set[str] | None,
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
@@ -1910,9 +1925,6 @@ def title_named_pages(
         if not corpus.readiness.complete:
             return (), corpus.readiness.status
         _frequencies, corpus_pages, _paths, admitted_paths = corpus.value
-        # The owner keeps catalogue ranking; restricted readers use admitted
-        # statistics so hidden pages cannot move a visible page's rank.
-        restricted = visible is not None
         result = lexstore.search_bm25_result(
             vault_root,
             turn,
@@ -1928,7 +1940,7 @@ def title_named_pages(
             term_budget=lexical_term_budget(),
             exclude_navigation=True,
             exclude_raw_material=True,
-            admitted_paths=admitted_paths if restricted else None,
+            admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
             query_context=query_context,
         )
         if not result.readiness.complete:
