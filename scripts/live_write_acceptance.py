@@ -1,11 +1,10 @@
 """Installed-product acceptance for fast durable write acknowledgement.
 
-What this measures is the complete public write a person actually waits for --
-entry to acknowledgement -- and the read that immediately follows it, on a real
-installed cell, separately for the in-process server and for the connector in
-front of it. The deterministic gate in ``semantic_write_latency.py`` proves the
-shape on synthetic corpora; this proves it where the corpus, the hardware and
-the transport are real.
+The connector measures HTTP entry to acknowledgement and the public read that
+immediately follows it. Its service owns startup and background convergence.
+Direct mode is an in-process helper diagnosis, not maintained-runtime proof.
+The deterministic gate in ``semantic_write_latency.py`` proves the shape on
+synthetic corpora.
 
 Four things have to hold together, and each can fail the run on its own:
 
@@ -37,6 +36,7 @@ import importlib.metadata
 import importlib.resources
 import json
 import os
+import socket
 import statistics
 import sys
 import tempfile
@@ -45,6 +45,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,11 +134,11 @@ def _load_contract(path: Path | None = None) -> tuple[request_latency_contract.L
     return contract, hashlib.sha256(source).hexdigest()
 
 
-def _package_identity(package_mode: str) -> dict[str, Any]:
+def _package_identity(package_mode: str, *, role: str = "observer-and-direct-runtime") -> dict[str, Any]:
     from installed_package_identity import package_identity
 
     try:
-        return package_identity(package_mode, role="observer-and-direct-runtime")
+        return package_identity(package_mode, role=role)
     except ValueError as error:
         raise SystemExit(
             "installed acceptance requires a non-editable installed exomem package"
@@ -163,6 +164,88 @@ def _require_disposable_environment(vault_root: Path, state_dir: Path) -> None:
         os.environ["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_dir)
     if not os.environ.get("EXOMEM_CONFIG_PATH"):
         os.environ["EXOMEM_CONFIG_PATH"] = str(state_dir / "no-config.json")
+
+
+def _require_disposable_connector(
+    url: str, pid: int | None, host_network_namespace: str | None, vault_root: Path, state_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # A wrong refusal costs a private run; a wrong admission risks production
+    # writes. Bind loopback to an isolated process before creating fixtures.
+    try:
+        endpoint = urlsplit(url)
+        port = endpoint.port
+    except ValueError as error:
+        raise SystemExit("connector requires a literal loopback MCP URL") from error
+    if port is None or not 0 < port < 65536 or url != f"http://127.0.0.1:{port}/mcp":
+        raise SystemExit("connector requires http://127.0.0.1:<port>/mcp without authentication, query or fragment")
+    if pid is None or pid <= 0:
+        raise SystemExit("connector requires an explicit --connector-pid")
+    if not host_network_namespace:
+        raise SystemExit("connector requires an explicit --host-network-namespace observed by the launcher")
+    try:
+        collector_network = os.readlink("/proc/self/ns/net")
+        service_network = os.readlink(f"/proc/{pid}/ns/net")
+        # A private Linux namespace has only its kernel loopback interface.
+        interfaces = [name for _index, name in socket.if_nameindex()]
+        environment = dict(
+            field.decode().split("=", 1)
+            for field in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            if b"=" in field
+        )
+    except (OSError, UnicodeError, ValueError) as error:
+        raise SystemExit("connector process isolation proof is unreadable") from error
+    if collector_network != service_network or collector_network == host_network_namespace or interfaces != ["lo"]:
+        raise SystemExit("connector and observer require the same loopback-only network namespace, distinct from the host anchor")
+    # These are the fixed environment fields that bind the disposable runtime.
+    expected = {
+        "EXOMEM_VAULT_PATH": str(vault_root.resolve()),
+        "EXOMEM_STATE_ROOT": str(Path(os.environ["EXOMEM_STATE_ROOT"]).resolve()),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(state_dir.resolve()),
+    }
+    if any(environment.get(key) != value for key, value in expected.items()):
+        raise SystemExit("connector initial environment does not match the explicit disposable vault and state")
+    instance = environment.get("EXOMEM_INSTANCE_ID", "").strip()
+    if not instance:
+        raise SystemExit("connector initial environment requires EXOMEM_INSTANCE_ID")
+    try:
+        request = Request(f"http://127.0.0.1:{port}/health/ready", method="GET")
+        try:
+            response = urlopen(request, timeout=_CONNECTOR_TIMEOUT_SECONDS)
+        except HTTPError as error:
+            # Startup may truthfully report not_ready. Its identity still binds
+            # the endpoint; health alone never proves full startup readiness.
+            if error.code != 503:
+                raise
+            response = error
+        with response:
+            body = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+            status = response.status
+        if len(body) > _MAX_HTTP_RESPONSE_BYTES:
+            raise ValueError("health response exceeds size limit")
+        health = json.loads(body)
+    except (OSError, ValueError) as error:
+        raise SystemExit("connector readiness identity proof is unreadable") from error
+    if not isinstance(health, dict) or health.get("instance_id") != instance:
+        raise SystemExit("connector readiness instance does not match the explicit process")
+    return {
+        "connector_pid": pid,
+        "collector_network_namespace": collector_network,
+        "service_network_namespace": service_network,
+        "host_network_namespace": host_network_namespace,
+        "host_network_namespace_source": "launcher-observed",
+        "network_interfaces": interfaces,
+        "initial_environment_matches": {key: environment[key] == value for key, value in expected.items()},
+        "instance_id": instance,
+    }, {
+        "source": "service-health-ready",
+        "http_status": status,
+        "status": health.get("status"),
+        "instance_id": health["instance_id"],
+        "release": health.get("release"),
+        "mcp_tool_surface_sha256": health.get("mcp_tool_surface_sha256"),
+        "retrieval": health.get("retrieval"),
+        "runtime_readiness": "externally-unverified",
+    }
 
 
 class _DirectTransport:
@@ -201,7 +284,7 @@ class _DirectTransport:
 
 
 class _ConnectorTransport:
-    """A caller-verified disposable connector; its URL proves no isolation."""
+    """External HTTP observer; measure() proves the disposable process first."""
 
     name = "connector"
 
@@ -209,13 +292,15 @@ class _ConnectorTransport:
         self.url = url
         self.token = token
 
-    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, Any]:
         request_id = str(uuid.uuid4())
+        self.request_id = request_id
         payload = json.dumps({
             "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         }).encode("utf-8")
-        headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+        headers = {"content-type": "application/json", "accept": "application/json, text/event-stream",
+                   "x-exomem-request-id": request_id}
         if self.token:
             headers["authorization"] = f"Bearer {self.token}"
         request = Request(self.url, data=payload, headers=headers, method="POST")
@@ -239,8 +324,11 @@ class _ConnectorTransport:
             if len(content) != 1 or content[0].get("type") != "text":
                 raise SystemExit("connector response has no domain result")
             structured = json.loads(content[0]["text"])
-        if not isinstance(structured, dict):
-            raise SystemExit("connector domain result must be an object")
+        # FastMCP wraps union/list return schemas in this result envelope.
+        if isinstance(structured, dict) and set(structured) == {"result"}:
+            structured = structured["result"]
+        if not isinstance(structured, (dict, list)):
+            raise SystemExit("connector domain result must be an object or list")
         return elapsed, structured
 
 
@@ -284,6 +372,38 @@ def _read_your_write(vault_root: Path, marker: str, rel_path: str) -> str:
     except Exception:  # noqa: BLE001 - an unreadable answer is not an exact one
         return "stale"
     return "exact" if any(hit.path == rel_path for hit in hits) else "stale"
+
+
+def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
+    """Check a fresh marker through public recall and the selected page read."""
+    try:
+        _, result = client.call("ask_memory", {
+            "query": marker, "scope": "kb-only", "mode": "keyword", "limit": 5,
+            "detail": "full", "graph": False, "rerank": False,
+        })
+        if isinstance(result, dict):
+            failure = result.get("error")
+            if isinstance(failure, dict):
+                if failure.get("code") == "RETRIEVAL_INDEX_WARMING" and failure.get("status") == "warming":
+                    return "warming"
+                return "unknown"
+            hits = result.get("hits")
+            warming = bool(result.get("warming"))
+        else:
+            hits, warming = result, False
+        if not isinstance(hits, list):
+            return "unknown"
+        hit = next((hit for hit in hits if hit.get("path") == rel_path), None)
+        if hit is None:
+            return "warming" if warming else "stale"
+        _, page = client.call("read_memory", {"path": hit.get("ref") or hit["path"]})
+        if not isinstance(page, dict) or page.get("error") or page.get("success") is False:
+            return "unknown"
+        if page.get("path") != rel_path or not isinstance(page.get("body"), str) or marker not in page["body"]:
+            return "stale"
+        return "exact"
+    except (Exception, SystemExit):  # noqa: BLE001 - a failed public read proves no visibility
+        return "unknown"
 
 
 def _full_receipt_count(vault_root: Path) -> int:
@@ -531,6 +651,26 @@ def _converge(
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
 
+def _observe_convergence(
+    vault_root: Path, *, bound_seconds: float, started: float | None = None,
+) -> tuple[float, bool, dict[str, Any]]:
+    """Observe worker-owned receipts without entering the collector runtime."""
+    started = time.monotonic() if started is None else started
+    deadline = started + float(bound_seconds)
+    observations = 0
+    while True:
+        observation = _drain_observation(vault_root)
+        observations += 1
+        elapsed = time.monotonic() - started
+        drain = {**observation, "owner": "service", "observations": observations,
+                 "bound_overrun_seconds": round(max(0.0, elapsed - bound_seconds), 3)}
+        readable = all(value >= 0 for value in observation.values())
+        settled = readable and observation["pending"] == observation["due"] == observation["claimed"] == 0
+        if not readable or settled or time.monotonic() >= deadline:
+            return round(elapsed, 3), settled and elapsed <= bound_seconds, drain
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
 def measure(
     vault_root: Path,
     *,
@@ -539,6 +679,8 @@ def measure(
     state_dir: Path,
     connector_url: str | None = None,
     connector_token: str | None = None,
+    connector_pid: int | None = None,
+    host_network_namespace: str | None = None,
     convergence_bound_seconds: float = CONVERGENCE_BOUND_SECONDS,
     package_mode: str = "installed",
     condition: str = "warm",
@@ -546,12 +688,11 @@ def measure(
 ) -> dict[str, Any]:
     """Measure public acknowledgements, keeping cold and contended cases separate.
 
-    The connector operator must verify its process uses this disposable vault
-    and isolated state before invocation. Local paths cannot prove remote state.
+    Connector setup and queue progress belong to the separate service process.
     """
     root = Path(vault_root)
     _require_disposable_environment(root, state_dir)
-    package = _package_identity(package_mode)
+    package = _package_identity(package_mode, role="observer-only" if transport == "connector" else "observer-and-direct-runtime")
     contract, contract_hash = _load_contract(contract_path)
     contract.bar("ordinary-write-warm")
     if samples_per_operation < 1:
@@ -559,16 +700,21 @@ def measure(
     if transport == "connector":
         if not connector_url:
             raise SystemExit("connector transport requires --connector-url")
+        if connector_token:
+            raise SystemExit("connector isolation proof requires an unauthenticated loopback endpoint")
+        connector_environment, connector_runtime = _require_disposable_connector(connector_url, connector_pid, host_network_namespace, root, state_dir)
         client: Any = _ConnectorTransport(connector_url, connector_token)
     else:
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         client = _DirectTransport(root, state_dir)
 
-    os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
+    if transport == "direct":
+        os.environ["EXOMEM_FAST_DURABLE_ACK"] = "1"
     durations: dict[str, list[float]] = {name: [] for name in OPERATIONS}
     cases: list[dict[str, Any]] = []
     outcomes = {"exact": 0, "warming": 0, "stale": 0, "unknown": 0}
     relation_target: str | None = None
+    last_acknowledged: float | None = None
 
     def skipped(name: str, index: int, error: BaseException | None = None) -> None:
         cases.append({
@@ -579,17 +725,21 @@ def measure(
         })
 
     def measured_call(name: str, arguments: dict[str, Any], index: int) -> dict[str, Any] | None:
+        nonlocal last_acknowledged
         result = None
         error_class = None
         terminal = "ok"
         started = time.perf_counter()
         client.thread_cpu_ms = None
         client.phase_attribution = []
+        client.request_id = None
         try:
             elapsed, result = client.call(name, arguments)
             # These are structured terminal fields, not inferred prose.
-            if result.get("outcome") in ("held", "refused") or result.get("ok") is False:
+            if result.get("outcome") in ("held", "refused") or result.get("ok") is False or result.get("success") is False:
                 terminal = "refused"
+            else:
+                last_acknowledged = time.monotonic()
         except (Exception, SystemExit) as error:  # noqa: BLE001 - retain all timed terminals without their content
             elapsed = (time.perf_counter() - started) * 1_000.0
             terminal = "refused" if isinstance(error, OpError) else "error"
@@ -601,6 +751,7 @@ def measure(
             "thread_cpu_ms": cpu_ms,
             "thread_cpu_source": "public-boundary-thread" if cpu_ms is not None else "unavailable",
             "phase_attribution": client.phase_attribution,
+            "request_id": client.request_id,
             "error_class": error_class,
         })
         if index > 0:
@@ -613,28 +764,43 @@ def measure(
                 "action": "query", "collection": collection,
                 "filters": [{"column": field, "op": "eq", "value": marker}],
             })
+            if result.get("status") == "warming":
+                return "warming"
+            if result.get("error") or result.get("success") is False:
+                return "unknown"
             return "exact" if any(row.get(field) == marker for row in result["rows"]) else "stale"
         except (Exception, SystemExit):  # noqa: BLE001 - a failed read proves no visibility
             return "unknown"
 
     try:
         example, planning_path = _prepare_collections(client)
-        recall_admission = str(
-            managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
-        )
-        preparation_seconds, preparation_converged, preparation_drain = _converge(
-            root, bound_seconds=convergence_bound_seconds
-        )
-        due_state.reconcile(root)
-        projection = due_state.load(root)
-        due_items = len(due_state.served_entries(root, recover=False))
-        eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
-        relation_target = min(eligible).removesuffix(".md") if eligible else None
+        if transport == "connector":
+            preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
+            projection = due_state.load(root)
+            due_items = None
+            retrieval = connector_runtime.get("retrieval") or {}
+            recall_admission = str(retrieval.get("state", "unverified"))
+            _, recalled = client.call("ask_memory", {"query": "", "scope": "kb-only", "mode": "keyword", "limit": 1, "detail": "full"})
+            hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
+            if isinstance(hits, list) and hits:
+                relation_target = hits[0].get("path", "").removesuffix(".md") or None
+        else:
+            recall_admission = str(
+                managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
+            )
+            preparation_seconds, preparation_converged, preparation_drain = _converge(
+                root, bound_seconds=convergence_bound_seconds
+            )
+            due_state.reconcile(root)
+            projection = due_state.load(root)
+            due_items = len(due_state.served_entries(root, recover=False))
+            eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
+            relation_target = min(eligible).removesuffix(".md") if eligible else None
         full_receipts_before = _full_receipt_count(root)
         # The first public call of each operation is reported as cold; it primes
         # per-operation state before any sample may claim the warm population.
         for index in range(samples_per_operation + 1):
-            create_marker = f"acceptanceremember{index:04d}"
+            create_marker = f"acceptanceremember{uuid.uuid4().hex}" if transport == "connector" else f"acceptanceremember{index:04d}"
             result = measured_call("remember", {
                 "content": _remember_content(f"Acceptance {index:04d}", create_marker, relation_target),
                 "title": f"Acceptance {index:04d}", "note_type": "insight",
@@ -648,13 +814,21 @@ def measure(
                 if not rel_path.endswith(".md"):
                     rel_path += ".md"
                 relation_target = relation_target or rel_path.removesuffix(".md")
-                outcomes[_read_your_write(root, create_marker, rel_path)] += 1
-                edit_marker = f"acceptanceedit{index:04d}"
+                if transport == "connector":
+                    outcomes[_connector_read_your_write(client, create_marker, rel_path)] += 1
+                else:
+                    outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+                edit_marker = f"acceptanceedit{uuid.uuid4().hex}" if transport == "connector" else f"acceptanceedit{index:04d}"
                 edited = measured_call("edit_memory", {
                     "path": rel_path, "why": "correct disposable acceptance observation",
                     "operation": {"kind": "replace_string", "old_string": create_marker, "new_string": edit_marker},
                 }, index)
-                outcomes[_read_your_write(root, edit_marker, rel_path) if edited is not None else "unknown"] += 1
+                if edited is None:
+                    outcomes["unknown"] += 1
+                elif transport == "connector":
+                    outcomes[_connector_read_your_write(client, edit_marker, str(edited.get("path") or rel_path))] += 1
+                else:
+                    outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
 
             record_marker = f"acceptancerecord{index:04d}"
             try:
@@ -677,20 +851,27 @@ def measure(
             }, index)
             outcomes[collection_read("plan_memory", planning_path, "title", plan_marker) if planned is not None else "unknown"] += 1
     finally:
-        readiness.unmanage_runtime()
+        if transport == "direct":
+            readiness.unmanage_runtime()
 
-    convergence_seconds, converged, drain = _converge(root, bound_seconds=convergence_bound_seconds)
+    if transport == "connector":
+        convergence_seconds, converged, drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds, started=last_acknowledged)
+    else:
+        convergence_seconds, converged, drain = _converge(root, bound_seconds=convergence_bound_seconds)
     full_receipts_after = _full_receipt_count(root)
     uncovered = -1 if full_receipts_before < 0 or full_receipts_after < 0 else max(0, full_receipts_after - full_receipts_before)
     return {
         "transport": transport, "package": package, "condition": condition,
         "boundary": "public-write-v1",
         "contract": {"revision": contract.revision, "sha256": contract_hash},
-        "connector_environment": "caller-verified-disposable" if transport == "connector" else None,
-        "connector_runtime_provenance": "caller-verified" if transport == "connector" else None,
+        "connector_environment": connector_environment if transport == "connector" else None,
+        "connector_runtime_provenance": connector_runtime if transport == "connector" else None,
+        "measurement_scope": "external-http-observer" if transport == "connector" else "helper-in-process-diagnosis",
+        "cpu_scope": "server-unmeasured" if transport == "connector" else "in-process-public-boundary-thread",
         "cold_definition": "first-public-call-per-operation-after-product-startup",
         "preparation": {
-            "startup": "product-warm-all",
+            "startup": "service-owned" if transport == "connector" else "product-warm-all",
+            "runtime_readiness": "externally-unverified" if transport == "connector" else "helper-in-process-diagnosis",
             "convergence_seconds": preparation_seconds,
             "converged": preparation_converged,
             "drain": preparation_drain,
@@ -698,7 +879,7 @@ def measure(
             "due_items": due_items,
         },
         "samples_per_operation": samples_per_operation, "cases": cases,
-        "fast_durable_ack": "active" if writer_lease.fast_durable_ack_active() else "inactive",
+        "fast_durable_ack": "externally-unverified" if transport == "connector" else ("active" if writer_lease.fast_durable_ack_active() else "inactive"),
         "operations": {
             name: {"samples": len(values), "p50_ms": statistics.median(values) if values else None,
                    "p90_ms": _percentile(values, 0.90) if values else None,
@@ -735,6 +916,10 @@ def _convergence_failure(report: dict[str, Any]) -> str:
     drain = report.get("drain")
     if not isinstance(drain, dict):
         return headline
+    if drain.get("owner") == "service":
+        if any(int(drain.get(key, -1)) < 0 for key in ("pending", "due", "claimed")):
+            return f"{headline}: service queue observation was unreadable"
+        return f"{headline}: observed {drain['pending']} pending service component(s), {drain['claimed']} under live claim(s)"
     passes = int(drain.get("passes", 0))
     stuck = int(drain.get("stuck", 0))
     failed = int(drain.get("failed", 0))
@@ -858,6 +1043,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--connector-url")
+    parser.add_argument("--connector-pid", type=int, help="PID of the service in the observer's private network namespace")
+    parser.add_argument("--host-network-namespace", help="network namespace readlink observed by the host launcher before isolation")
     parser.add_argument(
         "--convergence-bound",
         type=float,
@@ -888,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir or (args.vault.parent / "acceptance-state"),
         connector_url=connector_url,
         connector_token=os.environ.get("EXOMEM_CONNECTOR_TOKEN"),
+        connector_pid=args.connector_pid,
+        host_network_namespace=args.host_network_namespace,
         convergence_bound_seconds=args.convergence_bound,
         package_mode=args.package_mode,
         condition=args.condition,
