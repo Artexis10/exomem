@@ -1,8 +1,8 @@
 """Release capabilities of the collection store (OpenSpec add-collection-query-engine S1.8).
 
 ``records-summary-v1`` is the first slice: creating a NEW summary collection, every
-route on one, and preserved-source import. It stays off until the S1.8 release adds it
-to ``RELEASED`` through the release process. This is a repository-owned release fence,
+route on one, and preserved-source import. The S1.8 release enabled it through the release
+process, after the S1.6 and S1.7 acceptance on a real vault. This is a repository-owned release fence,
 as ``governance.projection_runtime`` keeps for projected serving: every host running
 one release answers the same, so a vault restored on another host behaves as it did.
 No environment variable, caller argument or vault state turns it on. Slice rollback
@@ -31,9 +31,9 @@ COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
 MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 COLLECTION_VIEWS_V1 = "collection-views-v1"
 
-#: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1; P3.6 adds
+#: The release capabilities this release enables. S1.8 added RECORDS_SUMMARY_V1; P3.6 adds
 #: COLLECTIONS_MIGRATE_V1; P2.8 adds COLLECTION_VIEWS_V1.
-RELEASED: frozenset[str] = frozenset()
+RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})
 #: What every store import answer tells the owner until the GA gate (P3.6 of
 #: move-structured-collections-to-sqlite), which deletes it: a pre-GA format change may
 #: need the preserved export imported again into a NEW collection (design O2).
