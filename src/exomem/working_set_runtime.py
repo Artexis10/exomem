@@ -1345,6 +1345,33 @@ def adjacent_rare_pairs(
     )
 
 
+def request_admission(
+    vault_root: Path,
+    visible: Callable[[str], bool] | None,
+    status_basis: lifecycle_statuses.Basis,
+    query_context=None,
+):
+    """The request's carry admission: `query_context` when the caller already
+    holds one, else a new `lexstore.RequestQueryContext` for `visible`.
+
+    An omitted predicate is not proof of complete admission: the owner's walk
+    can still withhold pages (owner-audience rules, tombstones, unplaced
+    collection-store entries). Ask the existing walk owner; only its `None`
+    proves the unrestricted empty-policy case. Each query snapshot then proves
+    whether this admission withholds any page row
+    (`lexstore.RequestQueryContext.complete`), which decides the ranking.
+    """
+    if query_context is not None:
+        return query_context
+    from . import lexstore
+    from .governance import egress
+
+    admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
+    return lexstore.RequestQueryContext(
+        vault_root, admitted if admitted is not None else (lambda _path: True), status_basis
+    )
+
+
 def rare_turn_terms(
     vault_root: Path,
     stems: Sequence[str],
@@ -1352,25 +1379,18 @@ def rare_turn_terms(
     freshness=None,
     recall_checkpoint=None,
     visible: Callable[[str], bool] | None = None,
-    admitted_paths: set[str] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
 ) -> tuple[tuple[str, ...], int, str]:
     """Distinctive stems and corpus size over this request's admitted pages."""
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
-    from .governance import egress
 
-    # An omitted predicate is not proof of complete admission. Ask the existing
-    # walk owner; its None result proves the unrestricted empty-policy case.
-    admitted = (
-        query_context.visible if query_context is not None
-        else visible if visible is not None else egress.release_walk_filter(vault_root)
-    )
+    query_context = request_admission(vault_root, visible, status_basis, query_context)
     result = lexstore.carry_term_statistics(
         vault_root,
         stems,
-        visible=admitted if admitted is not None else lambda _path: True,
+        visible=query_context.visible,
         status_basis=status_basis,
         path_limit=lambda pages: (
             working_set.rare_document_cap(pages) + working_set.RETRIEVAL_CARRY_FETCH
@@ -1381,9 +1401,7 @@ def rare_turn_terms(
     )
     if not result.readiness.complete:
         return (), 0, result.readiness.status
-    frequencies, corpus_pages, paths, admitted_set = result.value
-    if admitted_paths is not None:
-        admitted_paths.update(admitted_set)
+    frequencies, corpus_pages, paths, _admitted = result.value
     cap = working_set.rare_document_cap(corpus_pages)
     frequencies = working_set.discount_superseded_pages(
         vault_root,
@@ -1394,19 +1412,6 @@ def rare_turn_terms(
     )
     rare = tuple(stem for stem in stems if int(frequencies.get(stem, 0)) <= cap)
     return rare, int(corpus_pages), "available"
-
-
-def ranks_on_admitted(visible: Callable[[str], bool] | None) -> bool:
-    """Does a carry query for this reader rank on admitted statistics?
-
-    The owner (`visible` is `None`) sees every page, so the maintained
-    catalogue's own statistics describe its corpus: no per-request rebuild,
-    which on a written-to catalogue was one read of every page per turn. A
-    restricted reader ranks on statistics over the pages it may see, so a
-    withheld page neither takes a row nor moves a visible page's rank.
-    Admission itself is still decided on every request.
-    """
-    return visible is not None
 
 
 def phrase_components(
@@ -1504,11 +1509,13 @@ def carry_named_groups(
     maintained catalogue only, no foreground delta, an incomplete catalogue
     reported rather than repaired, raw material, navigation and retired
     pages dropped before anyone counts. Rarity is counted over the request's
-    admitted pages; the ranking uses the catalogue's statistics for the owner
-    and the admitted pages' for a restricted reader (`ranks_on_admitted`).
+    admitted pages (`request_admission`), and each ranking query decides on
+    its own snapshot whether that admission lets it rank on the catalogue.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import find, lexstore
+
+    query_context = request_admission(vault_root, visible, status_basis, query_context)
 
     # The resolver's own reading of the turn (`analyze_turn`): pair positions
     # are kept in its token coordinates, so both must read the same text.
@@ -1519,7 +1526,6 @@ def carry_named_groups(
         stems = tuple(stem for stem in stems if stem not in skipped) if skipped else stems
         if len(stems) < working_set.RETRIEVAL_CARRY_MIN_RARE_TERMS:
             return (), "available"
-        admitted_paths: set[str] = set()
         rare, corpus_pages, state = rare_turn_terms(
             vault_root,
             stems,
@@ -1527,7 +1533,6 @@ def carry_named_groups(
             recall_checkpoint=recall_checkpoint,
             status_basis=status_basis,
             visible=visible,
-            admitted_paths=admitted_paths,
             query_context=query_context,
         )
         if state != "available":
@@ -1563,7 +1568,6 @@ def carry_named_groups(
                 term_budget=lexical_term_budget(),
                 exclude_navigation=True,
                 exclude_raw_material=True,
-                admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
                 query_context=query_context,
             )
             if not result.readiness.complete:
@@ -1599,7 +1603,6 @@ def carry_named_groups(
                 recall_checkpoint=recall_checkpoint,
                 contacts=contacts,
                 status_basis=status_basis,
-                admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
                 query_context=query_context,
             )
         return tuple(groups), "available"
@@ -1623,7 +1626,6 @@ def _carry_title_groups(
     limit: int | None,
     freshness,
     recall_checkpoint,
-    admitted_paths: set[str] | None,
     contacts: dict[str, set[tuple[int, int]]] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
@@ -1668,7 +1670,6 @@ def _carry_title_groups(
         recall_checkpoint=recall_checkpoint,
         exclude_navigation=True,
         exclude_raw_material=True,
-        admitted_paths=admitted_paths,
         query_context=query_context,
     )
     if not result.readiness.complete or len(result.value or ()) >= fetch:
@@ -1889,14 +1890,18 @@ def title_named_pages(
     The query uses the maintained catalogue only, no foreground
     delta, raw material and navigation excluded before the row limit,
     `carry_fetch_size` rows. `visible` is the caller's reader view, `None`
-    for the owner. A restricted reader's rows are scored over the pages it
-    may see, so a withheld page neither takes a row nor moves another page's
-    rank. The corpus-size floor does not apply: it exists because rarity
-    cannot be measured in a small vault, and nothing here measures rarity.
+    for the owner. Rows are scored on the catalogue only when the request's
+    admission withholds no page; otherwise over the pages it admits, so a
+    withheld page neither takes a row nor moves another page's rank, for the
+    owner and a restricted reader alike. The corpus-size floor does not
+    apply: it exists because rarity cannot be measured in a small vault, and
+    nothing here measures rarity.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     from . import lexstore
     from .governance import egress
+
+    query_context = request_admission(vault_root, visible, status_basis, query_context)
 
     # The resolver's reading of the turn, as the carry reads it.
     turn = working_set_index.subject_text(turn)
@@ -1908,14 +1913,10 @@ def title_named_pages(
         if len({unit for unit in units}) < 2:
             return (), "available"
         # Reuse request admission only after this snapshot proves its generation.
-        admitted = (
-            query_context.visible if query_context is not None
-            else visible if visible is not None else egress.release_walk_filter(vault_root)
-        )
         corpus = lexstore.carry_term_statistics(
             vault_root,
             [],
-            visible=admitted if admitted is not None else lambda _path: True,
+            visible=query_context.visible,
             status_basis=status_basis,
             path_limit=lambda pages: 0,
             freshness=freshness,
@@ -1924,7 +1925,7 @@ def title_named_pages(
         )
         if not corpus.readiness.complete:
             return (), corpus.readiness.status
-        _frequencies, corpus_pages, _paths, admitted_paths = corpus.value
+        _frequencies, corpus_pages, _paths, _admitted = corpus.value
         result = lexstore.search_bm25_result(
             vault_root,
             turn,
@@ -1940,7 +1941,6 @@ def title_named_pages(
             term_budget=lexical_term_budget(),
             exclude_navigation=True,
             exclude_raw_material=True,
-            admitted_paths=admitted_paths if ranks_on_admitted(visible) else None,
             query_context=query_context,
         )
         if not result.readiness.complete:

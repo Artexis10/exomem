@@ -4282,14 +4282,9 @@ def _compile_packet(
     carry_named_nothing = False
     query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
-        from . import lexstore, working_set_runtime
-        from .governance import egress
+        from . import working_set_runtime
 
-        admitted = visible if visible is not None else egress.release_walk_filter(root)
-        query_context = lexstore.RequestQueryContext(
-            root, admitted if admitted is not None else lambda _path: True, status_basis,
-            restricted=working_set_runtime.ranks_on_admitted(visible),
-        )
+        query_context = working_set_runtime.request_admission(root, visible, status_basis)
         contacts = {} if working_set_resolve.possessive_scopes(analysis) else None
         groups = _carry_groups_by_retrieval(
             root,

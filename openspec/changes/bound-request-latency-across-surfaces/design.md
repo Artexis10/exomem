@@ -118,19 +118,23 @@ Report case-paired differences and their confidence intervals, plus CPU, RSS, fa
 
 Attribution put most abstaining activation time in the retrieval carry, and its cost grew with the knowledge base. Three mechanisms caused this, and each is now bounded without changing an answer:
 
-- A word's rarity count over the admitted pages stops at `cap + RETRIEVAL_CARRY_FETCH + 1` qualifying rows. Past that window no count changes a decision, so the scan no longer reads every page that holds a common word.
-- The owner's phrase rung ranks on catalogue statistics, as the title rung already did. It no longer rebuilds Okapi statistics from every admitted page after each catalogue write. A restricted reader still ranks on statistics over its admitted pages, and admission is still decided on every request.
+- A word's rarity count over the admitted pages stops at `cap + RETRIEVAL_CARRY_FETCH + 1` qualifying rows. Past that window no count changes a decision, so the scan no longer reads every page that holds a common word. Past the early stop, a page whose status label cannot be classified is no longer read, so it no longer raises `ReaderViewUnavailable`; the rarity decisions are unchanged.
+- A ranking query uses the catalogue's statistics when its snapshot proves that the request's admission withholds no page row (`RequestQueryContext.complete`). It then no longer rebuilds Okapi statistics from every admitted page after each catalogue write. Any other query filters and ranks on the admitted pages, as both rungs did for every reader before. The owner is not exempt: its own walk can withhold pages through owner-audience rules, tombstones and unplaced collection-store entries. Admission is still decided on every request.
 - A corroborated ranking checks rows in rank order and stops once it holds its rows. When phrase groups are the whole test, the index names the rows that can pass first, on `+fts.rowid` so that the bm25 figures stay those of the one MATCH.
 
 Every carry rung records a span with its admitted pages, scanned stem rows, examined candidates and a statistics-rebuild count. Every role lane records its catalogue rows, parsed pages and the time inside each read. These spans give the measurement for this decision.
 
-**Declared behaviour change.** The owner's phrase rung now orders pages by the catalogue's bm25 scores, not by Okapi scores over the admitted corpus. Scores move, so an owner's packet can differ in three ways:
+**Declared behaviour change.** A request whose admission withholds nothing now ranks both rungs on the catalogue's bm25 scores, not on Okapi scores over the admitted pages. The catalogue counts raw material and pages outside the knowledge base, and FTS5 floors the IDF of a term on more than half the rows. Scores move, so such a packet can differ in five ways:
 
 - the order of named domains, and therefore which three are carried, when more than three phrases each name one page;
 - the order of the pages an abstention lists at `retrieval_named`;
-- which current pages fit in a carry window crowded by retired pages, which can change whether a phrase names one page or two.
+- which current pages fit in a carry window crowded by retired pages, which can change whether a phrase names one page or two;
+- whether a single named page clears `RETRIEVAL_CARRY_MIN_SCORE`, which moves it between carried and listed;
+- which turn units the term budget keeps and which common words it drops, because the budget reads catalogue frequencies.
 
-Restricted readers' rankings do not change. Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission still reads every page's path. Catalogue ranking still reads every row that holds a turn word, and a write still invalidates the catalogue's cached word counts. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
+The ranking mode depends on whether the admission withholds any page row, not on which page it withholds. Within either mode a withheld page takes no row and moves no score. The first withheld page, or the removal of the last one, switches the mode, and scores can move with it.
+
+A request whose admission withholds a page, owner or restricted, ranks the phrase rung as before. Its title rung now filters and ranks on the admitted pages too, where the owner's title rung used to rank on the unfiltered catalogue and leave withheld pages to the served guard. Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts. A request with withheld pages still rebuilds its admitted statistics once per catalogue revision. Its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
 
 ## Risks / Trade-offs
 

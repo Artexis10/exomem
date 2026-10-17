@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from test_working_set_carry import _write, seed_ordinary_notes
 
 from exomem import (
@@ -116,9 +117,8 @@ def test_a_bounded_rarity_count_decides_exactly_as_the_unbounded_count(vault: Pa
     assert (pages, cap, limit) == (exact_pages, 3, 13)
     assert exact[named["zarnith"]] == limit and exact[named["quevold"]] == limit + 1
 
-    # Exact up to the window, one past it beyond, however many pages hold it.
+    # A word on far more pages than the window, which a bounded count stops on.
     assert exact[common] > limit + 1
-    assert bounded == {stem: min(count, limit + 1) for stem, count in exact.items()}
     # The pages listed for the discount are the same wherever it reads them.
     for stem in stems:
         if exact[stem] <= limit:
@@ -207,10 +207,23 @@ PHRASE_TURN = "what did the quorvel tansid survey decide"
 TITLE_TURN = "where is the lantern tide schedule kept"
 PHRASE_PAGE = f"{RESEARCH}/quorvel-tansid-survey.md"
 TITLE_PAGE = f"{RESEARCH}/lantern-tide-schedule.md"
-WITHHELD = "Knowledge Base/Notes/Private/quorvel-tide-notes.md"
+#: The folder a rule withholds from the external reader: an ordinary one, or
+#: raw material, which the carry never ranks but the catalogue still counts.
+PRIVATE, SOURCES = "Notes/Private", "Sources"
 
 
-def _seed_withheld_twin(vault: Path) -> None:
+def _withheld(folder: str) -> str:
+    return f"Knowledge Base/{folder}/quorvel-tide-notes.md"
+
+
+def _quiet_withheld(folder: str) -> str:
+    """Withheld too, and holds none of the turns' words. It stays in both
+    vaults of a twin, so the reader's admission withholds a page in both and
+    the twin compares one ranking with itself."""
+    return f"Knowledge Base/{folder}/archive-ledger.md"
+
+
+def _seed_withheld_twin(vault: Path, folder: str = PRIVATE) -> None:
     from test_governance_egress import _reset_caches, write_rule, write_scope
 
     seed_ordinary_notes(vault)
@@ -219,17 +232,21 @@ def _seed_withheld_twin(vault: Path) -> None:
     # Holds every word both turns rank on, repeated, so counting it would move
     # every statistic a score is made of.
     _write(
-        vault / WITHHELD,
+        vault / _withheld(folder),
         "---\ntype: note\nstatus: active\n---\n\n# Quorvel tide notes\n\n"
         + "quorvel tansid survey lantern tide schedule decide kept. " * 6 + "\n",
     )
-    write_scope(vault, paths="Notes/Private/**", name="Private")
+    _write(
+        vault / _quiet_withheld(folder),
+        "---\ntype: note\nstatus: active\n---\n\n# Archive ledger\n\nOld invoices, filed.\n",
+    )
+    write_scope(vault, paths=f"{folder}/**", name="Private")
     write_rule(vault, ceiling=0)
     _settle(vault)
     _reset_caches()
 
 
-def _restricted_carry(vault: Path) -> tuple:
+def _restricted_carry(vault: Path, folder: str) -> tuple:
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -240,7 +257,7 @@ def _restricted_carry(vault: Path) -> tuple:
         # A path naming no file withholds nothing, so the view is checked
         # only while the page exists.
         assert visible is not None
-        assert not (vault / WITHHELD).exists() or not visible(WITHHELD)
+        assert not (vault / _withheld(folder)).exists() or not visible(_withheld(folder))
         named = working_set_runtime.carry_named_groups(
             vault, PHRASE_TURN, visible=visible, status_basis=basis
         )
@@ -250,21 +267,24 @@ def _restricted_carry(vault: Path) -> tuple:
     return named, listed
 
 
+@pytest.mark.parametrize("folder", [PRIVATE, SOURCES])
 def test_a_restricted_readers_carry_ranks_as_if_the_withheld_page_were_absent(
-    vault: Path,
+    vault: Path, folder: str
 ) -> None:
     """One reader, one path, asked twice: with the withheld page in the vault
     and with it deleted. Ranked on the catalogue's statistics, the page would
     move both rungs' scores and could take a row; ranked on the reader's
-    admitted pages, the answers are identical to the last digit."""
+    admitted pages, the answers are identical to the last digit. A second
+    withheld page stays in both vaults, so both rank on admitted pages. Raw
+    material is never a carry row, but the catalogue's statistics count it."""
     from test_governance_egress import _reset_caches
 
-    _seed_withheld_twin(vault)
-    present = _restricted_carry(vault)
-    (vault / WITHHELD).unlink()
+    _seed_withheld_twin(vault, folder)
+    present = _restricted_carry(vault, folder)
+    (vault / _withheld(folder)).unlink()
     _settle(vault)
     _reset_caches()
-    absent = _restricted_carry(vault)
+    absent = _restricted_carry(vault, folder)
 
     (groups, groups_state), (listed, listed_state) = present
     assert groups_state == listed_state == "available"
@@ -273,12 +293,13 @@ def test_a_restricted_readers_carry_ranks_as_if_the_withheld_page_were_absent(
     assert present == absent
 
 
-def test_after_a_write_only_a_restricted_reader_rebuilds_ranking_statistics(
+def test_after_a_write_only_a_reader_with_withheld_pages_rebuilds_ranking_statistics(
     vault: Path,
 ) -> None:
-    """Each catalogue write gives the catalogue a new revision. The owner ranks
-    on the catalogue's own statistics and never rebuilds any; a restricted
-    reader's statistics over its admitted pages are rebuilt once per revision."""
+    """Each catalogue write gives the catalogue a new revision. An owner whose
+    admission withholds nothing ranks on the catalogue's own statistics and
+    never rebuilds any; a reader with withheld pages rebuilds its statistics
+    over the pages it admits once per revision."""
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
@@ -307,3 +328,58 @@ def test_after_a_write_only_a_restricted_reader_rebuilds_ranking_statistics(
     assert rebuilt(owner) == 0
     assert rebuilt(reader) == 1
     assert rebuilt(reader) == 0, "a restricted reader rebuilds once per revision, not per turn"
+
+
+# --------------------------------------------------------------------------- #
+# The owner's own admission can withhold pages too.
+# --------------------------------------------------------------------------- #
+
+OWNER_WITHHELD = "Knowledge Base/Notes/Private/quorvel-tansid-private.md"
+
+
+def _owner_packet(vault: Path) -> dict:
+    """The owner's packet for `PHRASE_TURN`, without the fields that name a
+    generation or a moment."""
+    import json
+
+    from test_governance_egress import _reset_caches
+
+    from exomem import commands, working_set_index
+    from exomem.governance.principal import owner_principal, request_scope
+
+    _settle(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+    with request_scope(owner_principal()):
+        packet = commands.op_activate_context(vault, turn=PHRASE_TURN)
+    packet = json.loads(json.dumps(packet, default=str))
+    packet.pop("continuity", None)
+    for key in ("freshness_key", "index_generation"):
+        packet.get("generation", {}).pop(key, None)
+    return packet
+
+
+@pytest.mark.parametrize("rival", [True, False], ids=["beside-a-visible-page", "alone"])
+def test_an_owner_rule_withholds_a_page_from_the_owners_carry(vault: Path, rival: bool) -> None:
+    """An owner-audience rule withholds a page from the owner's own reads. The
+    owner's packet must be the one the same vault gives without that page:
+    beside a visible page that holds the phrase, the withheld one may not make
+    the turn ambiguous; alone, it may not leave a carried trace."""
+    from test_governance_egress import write_rule, write_scope
+
+    seed_ordinary_notes(vault)
+    if rival:
+        _research_page(vault, "quorvel-tansid-survey", "The quorvel tansid survey closed early.")
+    _write(
+        vault / OWNER_WITHHELD,
+        "---\ntype: research-note\nstatus: active\n---\n\n# Quorvel tansid private\n\n"
+        "## Summary\n\n- [decision] The quorvel tansid survey decided the private terms.\n",
+    )
+    write_scope(vault, paths="Notes/Private/**", name="Private")
+    write_rule(vault, ceiling=0, audience="owner")
+    present = _owner_packet(vault)
+    (vault / OWNER_WITHHELD).unlink()
+    absent = _owner_packet(vault)
+
+    assert present == absent

@@ -2187,14 +2187,17 @@ class RequestQueryContext:
 
     It retains no readiness or hits. The reader and lifecycle basis belong
     to this request; the catalogue generation decides whether paths can recur.
+    `complete` is that snapshot's proof that `visible` admits every catalogue
+    page row, so the catalogue's own statistics describe exactly what this
+    request may see.
     """
 
     vault_root: Path
     visible: Callable[[str], bool]
     status_basis: Any
-    restricted: bool = True
     generation: tuple | None = None
     admitted_paths: set[str] | None = None
+    complete: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -7287,10 +7290,10 @@ class LexicalStore:
                 )
                 try:
                     for path, status in rows:
-                        scanned += 1
                         path = str(path)
                         if path not in admitted:
                             continue
+                        scanned += 1
                         allowed = carryable.get(status)
                         if allowed is None:
                             allowed = by_path.get(path)
@@ -7553,13 +7556,23 @@ class LexicalStore:
         if context.generation != generation or context.admitted_paths is None:
             raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
             col = "in_vault" if scope == "vault" else "in_kb"
+            in_scope = f"p.{col} = 1" + raw_clause
             # Hidden labels never reach classification; navigation and retired
             # pages still belong in the admitted denominator.
-            context.admitted_paths = {
-                str(row[0]) for row in conn.execute(
-                    f"SELECT p.path FROM pages p WHERE p.{col} = 1" + raw_clause, raw_params
-                ) if context.visible(str(row[0]))
-            }
+            candidates = [
+                str(row[0])
+                for row in conn.execute(f"SELECT p.path FROM pages p WHERE {in_scope}", raw_params)
+            ]
+            context.admitted_paths = {path for path in candidates if context.visible(path)}
+            # Catalogue statistics count every page row, raw material and pages
+            # outside the scope included, so they describe this reader only
+            # when it may see all of them. Stops at the first withheld row.
+            context.complete = len(context.admitted_paths) == len(candidates) and all(
+                context.visible(str(row[0]))
+                for row in conn.execute(
+                    f"SELECT p.path FROM pages p WHERE NOT ({in_scope})", raw_params
+                )
+            )
             context.generation = generation
         return context.admitted_paths
 
@@ -7608,10 +7621,12 @@ class LexicalStore:
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
         if query_context is not None:
+            # Decided on this snapshot: a request whose admission withholds no
+            # page row ranks on the catalogue, and any other request filters
+            # and ranks on what it admits, so a withheld page neither takes a
+            # row nor moves a score.
             current_paths = self._request_admitted_paths(conn, query_context, scope)
-            admitted_paths = (
-                current_paths if admitted_paths is not None or query_context.restricted else None
-            )
+            admitted_paths = None if query_context.complete else current_paths
         admitted = (
             self._admitted_corpus_statistics(conn, scope, admitted_paths)
             if admitted_paths is not None
@@ -7814,18 +7829,23 @@ class LexicalStore:
         from `k`, and the read stops once `k` pass. SQLite's own planner may
         sort the joined rows before it limits them, which runs the test on
         every matched row; this order is the query's, so it never does.
+        `k` reads as SQL's `LIMIT k` did: 0 returns nothing and a negative `k`
+        returns every passing row.
         """
         out: list[tuple[str, float]] = []
-        if k <= 0:
+        if k == 0:
             return out
+        limit = k if k > 0 else None
         check = (
             "SELECT fts.rowid FROM fts WHERE fts.rowid IN (SELECT value FROM json_each(?)) AND "
             + test
         )
         cursor = conn.execute(ranking, ranking_params)
         try:
-            size = k
-            while len(out) < k:
+            # Batches double from `k`; an unlimited read reads every row
+            # anyway, so its first batch size only bounds one fetch.
+            size = k if limit is not None else 256
+            while limit is None or len(out) < limit:
                 batch = cursor.fetchmany(size)
                 if not batch:
                     break
@@ -7844,7 +7864,7 @@ class LexicalStore:
                 size *= 2
         finally:
             cursor.close()
-        return out[:k]
+        return out if limit is None else out[:limit]
 
     def catalog_readiness(
         self,

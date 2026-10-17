@@ -74,36 +74,31 @@ Live warm `activate_context` SHALL have p95 below 1,000 ms, from public activati
 - **THEN** its p95 is below 1,000 ms and the report identifies its complete measurement scope
 - **AND** before/after checks show equivalent packet content and authorization behavior under the same CPU cap
 
-### Requirement: Activation's carry and role lanes stay bounded by the request
+### Requirement: Activation's carry stays bounded by the turn and the rarity cap
 
-Activation's retrieval carry SHALL bound its work by the turn, the rarity cap and the request's admitted pages. Its role lanes SHALL bound their work by the anchor neighbourhood and its bounded reach. Neither SHALL grow with the size of the knowledge base. The carry SHALL decide the request's admission on every request and MUST NOT keep it across requests. A word's rarity count SHALL stop one qualifying page past the window in which the count can still change a decision. A corroborated ranking SHALL check rows in rank order and stop once it holds the rows it needs. The owner's carry SHALL rank on the maintained catalogue's own statistics. A restricted reader's carry SHALL rank on statistics over the pages that reader may see.
+Activation's retrieval carry MUST NOT rebuild ranking statistics from the knowledge base for a request whose admission withholds no page. It MUST NOT scan every page holding a turn word, and it MUST NOT test corroboration on every matched row. A word's rarity count SHALL stop one qualifying page past the window in which the count can still change a decision. A corroborated ranking SHALL check rows in rank order and stop once it holds the rows it needs. The carry SHALL decide the request's admission on every request and MUST NOT keep it across requests. A ranking query SHALL use the catalogue's own statistics only when its snapshot proves that the admission withholds no page row. Every other ranking query SHALL filter and rank on the admitted pages, for the owner and a restricted reader alike.
 
 #### Scenario: An unresolved turn follows a catalogue write
 
-- **WHEN** a turn that resolves nothing reaches both carry rungs right after a catalogue write
-- **THEN** the owner's carry rebuilds no ranking statistics from the knowledge base
-- **AND** each word's rarity scan and the corroboration checks stay within the rarity window and the requested rows
+- **WHEN** a turn that resolves nothing reaches both carry rungs right after a catalogue write, and the admission withholds no page
+- **THEN** the carry rebuilds no ranking statistics from the knowledge base
+- **AND** each word's rarity scan stops within the rarity window and the corroboration checks stop at the requested rows
 
 #### Scenario: Bounded work answers as unbounded work did
 
 - **WHEN** the carry counts rarity or checks corroboration within its bounds
 - **THEN** its rarity decisions, the pages it discounts and its first ranked rows equal those of the unbounded computation
 
-#### Scenario: A page withheld from a restricted reader holds the turn's words
+#### Scenario: A withheld page holds the turn's words
 
-- **WHEN** a restricted reader's turn reaches the carry
-- **THEN** the carry's rows and scores equal those of the same vault without the withheld page
+- **WHEN** a restricted reader's or the owner's own admission withholds a page that holds the turn's words
+- **THEN** the served packet equals the packet of the same vault without the withheld page
 
-#### Scenario: The owner's carry orders pages by catalogue scores
+#### Scenario: An admission that withholds nothing ranks on the catalogue
 
-- **WHEN** the owner's phrase rung ranks the pages a turn names
-- **THEN** it orders them by the catalogue's scores, as the title rung already does
-- **AND** this can change the order of named domains, the order of listed named pages, and which current pages a window crowded by retired pages holds
-
-#### Scenario: A resolved turn's role lanes read their material
-
-- **WHEN** the role lanes of a resolved turn read units and pages
-- **THEN** they read only the anchor neighbourhood and its bounded reach, never pages selected by corpus size
+- **WHEN** the admission withholds no page row and the phrase rung or the title rung ranks the pages a turn names
+- **THEN** it orders them by the catalogue's bm25 scores
+- **AND** the packet can differ in the order of named domains, the order of listed named pages, which current pages a window crowded by retired pages holds, whether a single named page clears the minimum carry score, and which turn units the term budget keeps
 
 ### Requirement: Known terminal outcomes remain in their declared population
 

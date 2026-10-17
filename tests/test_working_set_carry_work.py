@@ -142,8 +142,7 @@ def test_warm_governed_carry_reuses_membership_without_parsing_the_corpus(
         with request_scope(who), state_paths.resolution_scope():
             basis = lifecycle_statuses.Basis(vault)
             visible = egress.reader_view(vault)
-            admitted = visible if visible is not None else egress.release_walk_filter(vault)
-            context = lexstore.RequestQueryContext(vault, admitted, basis, restricted=visible is not None)
+            context = working_set_runtime.request_admission(vault, visible, basis)
             return working_set_runtime.carry_named_groups(
                 vault, TURN, visible=visible, status_basis=basis, query_context=context,
                 freshness=checkpoint.triple, recall_checkpoint=checkpoint,
@@ -220,10 +219,7 @@ def test_warm_governed_carry_reads_the_policy_once_however_many_vault_defined_pa
             with request_scope(who), state_paths.resolution_scope():
                 basis = lifecycle_statuses.Basis(vault)
                 visible = egress.reader_view(vault)
-                admitted = visible if visible is not None else egress.release_walk_filter(vault)
-                context = lexstore.RequestQueryContext(
-                    vault, admitted, basis, restricted=visible is not None
-                )
+                context = working_set_runtime.request_admission(vault, visible, basis)
                 return working_set_runtime.carry_named_groups(
                     vault, TURN, visible=visible, status_basis=basis, query_context=context,
                     freshness=checkpoint.triple, recall_checkpoint=checkpoint,

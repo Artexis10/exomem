@@ -83,8 +83,9 @@ Task 3.5 stays open; neither a live gain nor full deadline acceptance is claimed
 
 Attribution on an installed cell placed most abstaining activation time in the
 retrieval carry. The carry now stops each rarity count one page past its
-decision window. The owner ranks on the catalogue's statistics, and
-corroboration stops once it holds its rows (design decision 7). New ledger
+decision window. A request whose admission withholds no page ranks on the
+catalogue's statistics, and corroboration stops once it holds its rows
+(design decision 7). New ledger
 spans name each carry rung and each role lane's catalogue and hydration work.
 A `runtime.gc` span records collector pauses.
 
@@ -92,8 +93,10 @@ A new model-free gate times an abstaining turn's carry right after a catalogue
 write, at 2,000 and 8,000 notes, on Python 3.12.3 with SQLite 3.45.1 as in CI.
 On 0.121.0 the median carry grew from 118 ms to 607 ms (5.2x), and the gate fails.
 With this change it grew from 40 ms to 93 ms (2.4x), and the gate passes.
-Identity tests show that bounded rarity, rank-order corroboration and the
-restricted reader's ranking give the same answers as before.
+Identity tests show that bounded rarity and rank-order corroboration give the
+same answers as before. Twin tests show that a page withheld from a restricted
+reader, or from the owner by an owner-audience rule, leaves the packet as it
+is without that page.
 
 The installed measurement is still open. Tasks 3.2 and 3.3 stay open until the
 cell reports the new carry spans on at least fifty abstaining carries.
