@@ -9,6 +9,9 @@ that row.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -191,6 +194,84 @@ def verify(writer, request_id, *, collection_id, item_key, path, after_item_hash
             # An item changed since is no longer the step's result, as an edited file's receipt is not.
             return writer.current_guards(collection_id, item_key)[1] == after_item_hash
     except collections.CollectionError:
+        return False
+
+
+def verify_imported(writer, prepared, postimage, *, kind):
+    """Corroborate an existing file witness from immutable import evidence and current state.
+
+    This never recovers a missing witness or decides whether to repeat a write. Older
+    checkpoints without the original byte binding cannot supply this proof.
+    """
+    from .. import records
+    from . import legacy_import, tokens
+
+    try:
+        cid, key = prepared["collection_id"], prepared["item_key"]
+        path, digest = postimage["path"], postimage["content_hash"]
+        if "store" in prepared or path != prepared["destination"]:
+            return False
+        with writer.read_snapshot(mutation=True):
+            collection, manifest, _ = writer._collection(cid)
+            if manifest.storage.strategy != "markdown-items" or manifest.path != prepared["manifest_path"]:
+                return False
+            item = writer._item(cid, key)
+            if item is None or item["view_path"] != path:
+                return False
+            initial = writer.connection.execute(
+                "SELECT payload_hash,txn_id FROM item_versions WHERE row_id=? AND row_version=1",
+                (item["row_id"],),
+            ).fetchone()
+            if (initial is None or item["created_txn"] != initial[1]
+                    or collection["created_txn"] != initial[1]
+                    or writer._version(item) != tokens.item_version(cid, key, 1, initial[0])):
+                return False
+            checkpoint = writer.connection.execute(
+                "SELECT receipt_json,event_hash FROM txns WHERE txn_id=? AND collection_id=? "
+                "AND operation='legacy_import' AND legacy_event_json IS NULL",
+                (initial[1], cid),
+            ).fetchone()
+            if checkpoint is None:
+                return False
+            envelope = json.loads(checkpoint[0])
+            if not isinstance(envelope, Mapping):
+                return False
+            originals = envelope.get("original_items")
+            binding = originals.get(key) if isinstance(originals, Mapping) else None
+            if (not isinstance(binding, Mapping) or binding.get("source_sha256") != digest
+                    or not isinstance(binding.get("transition_id"), str)
+                    or envelope.get("collection_id") != cid
+                    or legacy_import._event_hash(envelope) != checkpoint[1]):
+                return False
+            historical = writer.connection.execute(
+                "SELECT legacy_event_json,receipt_json,event_hash FROM txns "
+                "WHERE transition_id=? AND collection_id=? AND operation='legacy_import' "
+                "AND legacy_event_json IS NOT NULL",
+                (binding["transition_id"], cid),
+            ).fetchone()
+            if historical is None:
+                return False
+            event, imported = json.loads(historical[0]), json.loads(historical[1])
+            if not isinstance(event, Mapping) or not isinstance(imported, Mapping):
+                return False
+            if (imported.get("legacy_event_sha256") != hashlib.sha256(historical[0].encode()).hexdigest()
+                    or legacy_import._event_hash(imported) != historical[2]
+                    or not records._event_matches_transition(event, manifest)
+                    or event["transition_id"] != binding["transition_id"]
+                    or event["item_key"] != key or event["canonical_path"] != path
+                    or event["after_item_hash"] != digest):
+                return False
+            # Curation fixes these two leaf kinds and their sealed preimage field names.
+            if kind == "update-record":
+                return event["operation"] == "update" and all(
+                    event[name] == prepared[name]
+                    for name in ("before_manifest_hash", "before_container_hash", "before_item_hash")
+                )
+            if kind == "append-record":
+                return (event["operation"] == "append"
+                        and event["payload_hash"] == prepared["payload_hash"] == initial[0])
+            return False
+    except (collections.CollectionError, KeyError, TypeError, ValueError, sqlite3.Error):
         return False
 
 
