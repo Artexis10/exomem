@@ -512,12 +512,22 @@ def migration_status(vault_root: Path) -> str:
         manifest = _load_manifest(state_dir, vault_root=vault_root)
     except StateMigrationManifestError:
         return "invalid"
+    return manifest_status(manifest)
+
+
+def manifest_status(manifest: dict[str, Any] | None) -> str:
+    """What a loaded manifest records: absent, unsupported, stale, in-progress or complete.
+
+    Optional compatibility IDs sit beside the physical families in the descriptor
+    list, so only the physical families decide staleness, as at startup admission.
+    """
+
     if manifest is None:
         return "absent"
-    state = str(manifest["state"])
     physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
     if optional - set(supported_state_compatibility_ids()):
         return "unsupported"
+    state = str(manifest["state"])
     if state == "complete" and physical != set(_descriptor_ids()):
         return "stale"
     return state
