@@ -1,0 +1,11 @@
+[Unit]
+Description=exomem read-only recall availability
+
+[Service]
+Type=oneshot
+UMask=0077
+EnvironmentFile={environment_file}
+ExecStart=:{observer_python} -I -m exomem.recall_canary --check availability --samples 1 --mcp-url {mcp_url} --cases {cases} --token-env {token_env} --report-file {report_file} --timeout {call_timeout}
+TimeoutStartSec={execution_timeout}s
+KillMode=control-group
+SendSIGKILL=yes

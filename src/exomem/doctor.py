@@ -3743,6 +3743,28 @@ def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     return checks
 
 
+def _check_recall_canary() -> DoctorCheck:
+    from .canary_systemd import status
+
+    observed = status()
+    state = observed["state"]
+    # These are the canary adapter's closed diagnostic states, never request admission.
+    level = (
+        "pass"
+        if state == "healthy-availability"
+        else "fail"
+        if state in ("failed", "old-success-after-failed-execution")
+        else "warn"
+    )
+    return _check(
+        "recall.canary",
+        level,
+        f"Read-only MCP canary: {state}. Delivery reaches the local unit, journal and doctor.",
+        "Inspect the independent observer with python -m exomem.canary_systemd status.",
+        details=observed,
+    )
+
+
 def doctor(
     *,
     vault: str | None = None,
@@ -3868,6 +3890,7 @@ def doctor(
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
     checks.append(_check_latency())
+    checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())
 
