@@ -256,7 +256,8 @@
   This task retains the unreconciled service, timer and pre-cutover backup evidence; it does not request another cutover or provider deletion.
 - [x] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
   Recorded platform receipts reach revision 92 on 2026-10-17, with the gateway and cellctl Ready.
-  The fleet default and the three existing cells follow published [0.124.0](https://github.com/Artexis10/exomem/releases/tag/v0.124.0), without per-cell pins.
+  The fleet default and the three running cells follow published [0.124.0](https://github.com/Artexis10/exomem/releases/tag/v0.124.0), without per-cell pins.
+  The two stopped cells remain stopped and unpinned; they have no observed running image.
   These are dated deployment receipts, not a fresh production inspection.
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
@@ -278,7 +279,7 @@
 
 The original 0.116 qualification and image-only deployment remain historical evidence.
 They establish no current latency percentile, worst warm peak or full-fleet admission qualification.
-Recorded deployment receipts from 2026-10-17 place the three existing cells and fleet default on published 0.124.0.
+Recorded deployment receipts from 2026-10-17 place the three running cells and fleet default on published 0.124.0.
 The rollout left no per-cell pins and did not change the existing resource profile.
 Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 6.11 retains memory and CPU qualification.
 
