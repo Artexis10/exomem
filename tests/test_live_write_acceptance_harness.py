@@ -877,9 +877,27 @@ def test_connector_refuses_unproven_service_before_any_fixture_write(isolated_co
                        state_dir=state, samples_per_operation=1, package_mode="source")
 
 
-def test_connector_observes_service_without_local_runtime_writes(isolated_connector, monkeypatch):
+@pytest.mark.parametrize("projection_state, expected_entries", [("present", 3), ("missing", None), ("unreadable", None)])
+def test_connector_observes_service_without_local_runtime_writes(isolated_connector, monkeypatch, projection_state, expected_entries):
     module, root, state, _environment, _namespaces, health = isolated_connector
     calls, notes, rows = [], {}, {}
+    projection_path = root.parent / "due-state.json"
+    if projection_state == "present":
+        projection_path.write_text(json.dumps({
+            "version": module.due_state.SCHEMA_VERSION,
+            "categories": {
+                "category-one": {"Notes/first.md": {
+                    "open": [{"ref": "review:first", "due_since": "2026-01-01"}],
+                    "pending": [{"ref": "review:second", "due_on": "2027-01-01"}],
+                }},
+                "category-two": {"Notes/second.md": {
+                    "open": [{"ref": "review:third", "due_since": "2026-01-02"}], "pending": [],
+                }},
+            },
+        }))
+    elif projection_state == "unreadable":
+        projection_path.write_text("unreadable projection")
+    monkeypatch.setattr(module.due_state, "state_path", lambda _root: projection_path)
 
     def local_runtime(*_args, **_kwargs):
         pytest.fail("HTTP observer entered the local runtime")
@@ -892,10 +910,9 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
         (module.readiness, "unmanage_runtime"),
     ):
         monkeypatch.setattr(owner, name, local_runtime)
-    monkeypatch.setattr(module.due_state, "load", lambda _root: {"categories": {}})
-    monkeypatch.setattr(module, "_drain_observation", lambda _root: {"pending": 0, "due": 0, "claimed": 0, "retrying": 0, "failed": 0, "stuck": 0, "max_attempt_count": 0})
-    monkeypatch.setattr(module, "_full_receipt_count", lambda _root: 0)
-    monkeypatch.setattr(module, "_reconciliation_demanded", lambda _root: 0)
+    monkeypatch.setattr(module, "_drain_observation", lambda _root, **_kw: {"pending": 0, "due": 0, "claimed": 0, "retrying": 0, "failed": 0, "stuck": 0, "max_attempt_count": 0})
+    monkeypatch.setattr(module, "_full_receipt_count", lambda _root, **_kw: 0)
+    monkeypatch.setattr(module, "_reconciliation_demanded", lambda _root, **_kw: 0)
 
     def public_call(client, name, arguments):
         import uuid
@@ -939,11 +956,13 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
                             host_network_namespace="net:[1]",
                             state_dir=state, samples_per_operation=1, package_mode="source")
 
-    assert report["read_your_write"] == {"exact": 8, "warming": 0, "stale": 0, "unknown": 0}
+    assert report["read_your_write"] == {"exact": 8, "warming": 0, "unavailable": 0, "stale": 0, "unknown": 0}
     assert report["package"]["role"] == "observer-only"
     assert report["connector_runtime_provenance"]["release"] == health["release"]
     assert report["preparation"]["startup"] == "service-owned"
     assert report["preparation"]["runtime_readiness"] == "externally-unverified"
+    assert report["preparation"]["due_projection_entries"] == expected_entries
+    assert report["preparation"]["due_items"] is None
     assert all(case["thread_cpu_ms"] is None for case in report["cases"])
     public_writes = {request_id for name, arguments, request_id in calls if name in module.OPERATIONS and arguments.get("action") not in ("describe", "create", "inspect", "query")}
     assert {case["request_id"] for case in report["cases"]} == public_writes
@@ -954,6 +973,7 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
     ({"hits": []}, "independent-marker", "stale"),
     ({"success": False, "error": {"code": "NOT_FOUND"}}, "independent-marker", "unknown"),
     ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "warming", "complete": False}}, "independent-marker", "warming"),
+    ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "temporarily_unavailable", "complete": False}}, "independent-marker", "unavailable"),
     ({"hits": [{"path": "different.md"}]}, "independent-marker", "stale"),
     ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "old-marker", "stale"),
     ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "independent-marker", "exact"),
@@ -1001,8 +1021,8 @@ def test_connector_waits_for_service_owned_queue_settlement(vault, monkeypatch):
             with sqlite3.connect(store) as connection:
                 connection.execute("UPDATE derived_batch_components SET state = 'completed'")
 
-    def observation(root):
-        result = observe(root)
+    def observation(root, **kwargs):
+        result = observe(root, **kwargs)
         observed.set()
         return result
 
@@ -1018,6 +1038,55 @@ def test_connector_waits_for_service_owned_queue_settlement(vault, monkeypatch):
     assert report["observations"] >= 2
     assert report["pending"] == report["due"] == report["claimed"] == 0
     assert elapsed < 2.0
+
+
+@pytest.mark.parametrize("store_state", ["current", "old-schema", "missing"])
+def test_connector_receipt_counts_never_repair_or_create_the_observed_store(vault, tmp_path, monkeypatch, store_state):
+    module = _acceptance()
+    store = _seeded_store(vault, [("graph", "retryable", 1, time.time() + 60.0, None)])
+    with sqlite3.connect(store) as connection:
+        connection.execute("INSERT INTO full_upserts VALUES ('../outside.md', 1, 1, 1)")
+        connection.execute("UPDATE derived_batches SET state = 'reconcile_required'")
+        if store_state == "old-schema":
+            connection.execute("DROP TABLE write_advisory_result_candidates")
+
+    def snapshot():
+        with sqlite3.connect(store) as connection:
+            return {
+                "schema": connection.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").fetchall(),
+                "full": connection.execute("SELECT * FROM full_upserts").fetchall(),
+                "batches": connection.execute("SELECT * FROM derived_batches").fetchall(),
+                "components": connection.execute("SELECT * FROM derived_batch_components").fetchall(),
+            }
+
+    before = snapshot()
+
+    def product_reader(*_args, **_kwargs):
+        pytest.fail("connector accounting used a product reader that can repair state")
+
+    for owner, name in (
+        (module.deferred_index, "_connect"), (module.deferred_index, "_connect_readonly"),
+        (module.deferred_index, "list_full_paths"), (module.derived_receipts, "_connect_receipt_read"),
+        (module.derived_receipts, "stranded_batch_count"), (module.derived_receipts, "due_component_count"),
+    ):
+        monkeypatch.setattr(owner, name, product_reader)
+    missing = tmp_path / "missing.sqlite"
+    if store_state == "missing":
+        monkeypatch.setattr(module.deferred_index, "store_path", lambda _root: missing)
+
+    full = module._full_receipt_count(vault, read_only=True)
+    stranded = module._reconciliation_demanded(vault, read_only=True)
+    queue = module._drain_observation(vault, read_only=True)
+
+    if store_state == "current":
+        assert full == 1
+        assert stranded == 1
+        assert queue["due"] == 0
+        assert queue["pending"] == 1
+    else:
+        assert full == stranded == queue["pending"] == queue["due"] == -1
+    assert snapshot() == before
+    assert not missing.exists()
 
 
 

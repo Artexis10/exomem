@@ -37,6 +37,7 @@ import importlib.resources
 import json
 import os
 import socket
+import sqlite3
 import statistics
 import sys
 import tempfile
@@ -384,8 +385,12 @@ def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
         if isinstance(result, dict):
             failure = result.get("error")
             if isinstance(failure, dict):
-                if failure.get("code") == "RETRIEVAL_INDEX_WARMING" and failure.get("status") == "warming":
-                    return "warming"
+                if failure.get("code") == "RETRIEVAL_INDEX_WARMING":
+                    # RetrievalIndexWarming declares both public availability statuses.
+                    if failure.get("status") == "warming":
+                        return "warming"
+                    if failure.get("status") == "temporarily_unavailable":
+                        return "unavailable"
                 return "unknown"
             hits = result.get("hits")
             warming = bool(result.get("warming"))
@@ -406,14 +411,36 @@ def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
         return "unknown"
 
 
-def _full_receipt_count(vault_root: Path) -> int:
+def _readonly_receipt_connection(vault_root: Path) -> sqlite3.Connection:
+    """Observe an existing supported store without product repair wrappers."""
+    connection = sqlite3.connect(
+        f"{deferred_index.store_path(vault_root).as_uri()}?mode=ro", uri=True, timeout=5.0,
+    )
     try:
+        if not derived_receipts._receipt_schema_is_current(connection):
+            raise sqlite3.DatabaseError("unsupported receipt schema")
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def _full_receipt_count(vault_root: Path, *, read_only: bool = False) -> int:
+    try:
+        if read_only:
+            connection = _readonly_receipt_connection(vault_root)
+            try:
+                return int(connection.execute(
+                    f"SELECT count(*) FROM {deferred_index._QUEUE_TABLES['full']}"
+                ).fetchone()[0])
+            finally:
+                connection.close()
         return len(deferred_index.list_full_paths(vault_root))
     except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
         return -1
 
 
-def _reconciliation_demanded(vault_root: Path) -> int:
+def _reconciliation_demanded(vault_root: Path, *, read_only: bool = False) -> int:
     """Batches that fail closed into explicit reconciliation demand.
 
     This is deliberately NOT folded into convergence. A `reconcile_required`
@@ -423,7 +450,16 @@ def _reconciliation_demanded(vault_root: Path) -> int:
     writes producing one is a real acceptance failure, and reporting it as
     "still converging" would let it look like slowness.
     """
-    return derived_receipts.stranded_batch_count(vault_root)
+    if not read_only:
+        return derived_receipts.stranded_batch_count(vault_root)
+    try:
+        connection = _readonly_receipt_connection(vault_root)
+        try:
+            return int(connection.execute(derived_receipts._STRANDED_BATCHES_SQL).fetchone()[0])
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
+        return -1
 
 
 #: A component this many attempts deep has stopped being a transient retry.
@@ -433,7 +469,7 @@ def _reconciliation_demanded(vault_root: Path) -> int:
 STUCK_ATTEMPT_THRESHOLD = 3
 
 
-def _drain_observation(vault_root: Path) -> dict[str, int]:
+def _drain_observation(vault_root: Path, *, read_only: bool = False) -> dict[str, int]:
     """What the store says about components a burst has not settled yet.
 
     Content-free by construction: counts, a mode name and ages -- no batch id,
@@ -467,10 +503,12 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
     An unreadable store reports -1 rather than zero, because a counter that
     cannot be read has not proved anything.
     """
-    try:
-        due = int(derived_receipts.due_component_count(vault_root))
-    except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
-        due = -1
+    due = -1
+    if not read_only:
+        try:
+            due = int(derived_receipts.due_component_count(vault_root))
+        except Exception:  # noqa: BLE001 - an unreadable counter cannot prove zero
+            pass
 
     unreadable = {
         "pending": -1,
@@ -483,8 +521,8 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
     }
     rows: list[tuple[Any, ...]] = []
     try:
-        if deferred_index.store_path(vault_root).exists():
-            connection = deferred_index._connect_readonly(vault_root)
+        if read_only or deferred_index.store_path(vault_root).exists():
+            connection = _readonly_receipt_connection(vault_root) if read_only else deferred_index._connect_readonly(vault_root)
             try:
                 # `is_due` is `due_component_count`'s WHERE clause verbatim,
                 # evaluated per row and against the same `now`.
@@ -503,6 +541,8 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
                     "AND c.state NOT IN ('completed', 'not_required', 'aborted', 'superseded')",
                     {"now": time.time()},
                 ).fetchall()
+                if read_only:
+                    due = sum(int(row[-1] or 0) for row in rows)
             finally:
                 connection.close()
     except Exception:  # noqa: BLE001 - same
@@ -659,7 +699,7 @@ def _observe_convergence(
     deadline = started + float(bound_seconds)
     observations = 0
     while True:
-        observation = _drain_observation(vault_root)
+        observation = _drain_observation(vault_root, read_only=True)
         observations += 1
         elapsed = time.monotonic() - started
         drain = {**observation, "owner": "service", "observations": observations,
@@ -713,6 +753,8 @@ def measure(
     durations: dict[str, list[float]] = {name: [] for name in OPERATIONS}
     cases: list[dict[str, Any]] = []
     outcomes = {"exact": 0, "warming": 0, "stale": 0, "unknown": 0}
+    if transport == "connector":
+        outcomes["unavailable"] = 0
     relation_target: str | None = None
     last_acknowledged: float | None = None
 
@@ -777,6 +819,15 @@ def measure(
         if transport == "connector":
             preparation_seconds, preparation_converged, preparation_drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds)
             projection = due_state.load(root)
+            # Count stored buckets, separately from the audience-filtered served view.
+            try:
+                due_projection_entries = None if projection is None else sum(
+                    len(due_state._unbucket(bucket))
+                    for pages in projection["categories"].values()
+                    for bucket in pages.values()
+                )
+            except (AttributeError, TypeError, ValueError):
+                due_projection_entries = None
             due_items = None
             retrieval = connector_runtime.get("retrieval") or {}
             recall_admission = str(retrieval.get("state", "unverified"))
@@ -796,7 +847,7 @@ def measure(
             due_items = len(due_state.served_entries(root, recover=False))
             eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
             relation_target = min(eligible).removesuffix(".md") if eligible else None
-        full_receipts_before = _full_receipt_count(root)
+        full_receipts_before = _full_receipt_count(root, read_only=transport == "connector")
         # The first public call of each operation is reported as cold; it primes
         # per-operation state before any sample may claim the warm population.
         for index in range(samples_per_operation + 1):
@@ -858,7 +909,7 @@ def measure(
         convergence_seconds, converged, drain = _observe_convergence(root, bound_seconds=convergence_bound_seconds, started=last_acknowledged)
     else:
         convergence_seconds, converged, drain = _converge(root, bound_seconds=convergence_bound_seconds)
-    full_receipts_after = _full_receipt_count(root)
+    full_receipts_after = _full_receipt_count(root, read_only=transport == "connector")
     uncovered = -1 if full_receipts_before < 0 or full_receipts_after < 0 else max(0, full_receipts_after - full_receipts_before)
     return {
         "transport": transport, "package": package, "condition": condition,
@@ -876,6 +927,7 @@ def measure(
             "converged": preparation_converged,
             "drain": preparation_drain,
             "due_projection_present": projection is not None,
+            **({"due_projection_entries": due_projection_entries} if transport == "connector" else {}),
             "due_items": due_items,
         },
         "samples_per_operation": samples_per_operation, "cases": cases,
@@ -892,7 +944,7 @@ def measure(
         "post_burst_convergence_seconds": convergence_seconds,
         "post_burst_convergence_bound_seconds": float(convergence_bound_seconds),
         "post_burst_converged": converged, "drain": drain,
-        "reconciliation_demanded": _reconciliation_demanded(root),
+        "reconciliation_demanded": _reconciliation_demanded(root, read_only=transport == "connector"),
     }
 
 
@@ -1016,7 +1068,9 @@ def check(
     if not report["post_burst_converged"]:
         failures.append(_convergence_failure(report))
     demanded = int(report.get("reconciliation_demanded", 0))
-    if demanded:
+    if demanded < 0:
+        failures.append("reconciliation accounting is unreadable")
+    elif demanded:
         failures.append(
             f"{demanded} batch(es) failed closed into reconciliation demand"
         )
