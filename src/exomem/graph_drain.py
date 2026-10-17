@@ -253,6 +253,17 @@ def _queue_pending(vault_root: Path) -> bool:
         return False
 
 
+def _queue_depth(vault_root: Path) -> int:
+    """How many graph receipts are queued; 0 when unreadable. Never raises."""
+    from . import deferred_index
+
+    try:
+        return deferred_index.graph_queue_age(vault_root)[0]
+    except Exception:  # noqa: BLE001 - an unreadable queue must not kill the worker
+        log.debug("graph drain: queue depth unreadable", exc_info=True)
+        return 0
+
+
 def _requeue_quarantined(vault_root: Path) -> None:
     """Queue quarantined pages that changed or are due a slow retry. Never raises.
 
@@ -454,16 +465,25 @@ def _work_once(vault_root: Path) -> int:
     a publication would have cleared the barrier anyway. A convergence that ran
     no pass -- a busy boundary, an unavailable epoch -- does not hold recovery
     back.
+
+    Recovery also waits while the queue converges: a drain that shrank the
+    queue and left some of it is mid-repair, and the drain that empties it
+    publishes and clears the barrier. A behind publication's repair set drains
+    that way, batch by batch. A queue that did not shrink -- no progress, or
+    writes queueing as fast as it drains -- does not hold recovery back.
     """
     from . import epistemic_graph
 
     processed = 0
     attempted = False
+    converging = False
     if _queue_pending(vault_root):
+        depth = _queue_depth(vault_root)
         with epistemic_graph.observe_full_marker_dispatches() as dispatches:
             processed = _drain_once(vault_root)
         attempted = any(result.whole_vault_attempted for result in dispatches)
-    if attempted:
+        converging = 0 < _queue_depth(vault_root) < depth
+    if attempted or converging:
         return processed
     if _barrier_pending(vault_root):
         if _recover_once(vault_root):

@@ -37,6 +37,7 @@ from . import (
     connection,
     derived_rows,
     legacy_import,
+    log_view,
     owner,
     preflight,
     schema,
@@ -131,17 +132,15 @@ def _render_items(root, conn, manifest, cid):
 
 
 def _render_log(root, conn, manifest, cid, frame_json):
-    """The log file in the frame the import captured, as the legacy file held it, proved to parse to the rows."""
-    frame = json.loads(frame_json)
-    order = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
-    rows = [(key, typed_storage.item_values(conn, row_id)) for row_id, key in conn.execute(
-        f"SELECT row_id,item_key FROM items WHERE collection_id=? ORDER BY created_txn {order}, row_id {order}",
-        (cid,)).fetchall()]
-    data = (frame["text"] + "".join(record_formats.render_markdown_log_item(
-        manifest, values, key, frame["newline"]) for key, values in rows) + frame["suffix"]).encode("utf-8")
+    """The log file in the frame the import captured, as the legacy file held it, proved to parse to the rows.
+
+    It is the store's log view without its block stamps, which file mode has no store to name.
+    """
+    blocks = log_view.rows(conn, manifest)
+    data = log_view.render(manifest, log_view.load(frame_json, manifest), blocks).encode("utf-8")
     parsed = record_formats.MarkdownLogAdapter(Path(root), manifest).read_bytes(data).records
     if [(record.identity.key, collections.normalize_item_values(manifest.schema, record.values))
-            for record in parsed] != rows:
+            for record in parsed] != [(row["item_key"], row["values"]) for row in blocks]:
         legacy_import._refuse("b", "the rendered log does not parse back to the store's rows")
     return [(manifest.storage.source, data)]
 

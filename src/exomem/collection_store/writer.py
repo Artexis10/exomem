@@ -43,6 +43,7 @@ from . import (
     edit_back,
     governance,
     index_migrations,
+    log_view,
     rollups,
     schema,
     summary,
@@ -839,7 +840,7 @@ class CollectionWriter:
         descriptor = None
         digest = hashlib.sha256(text.encode()).hexdigest()
         # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-        if kind in {"manifest", "item", "held", "summary"}:
+        if kind in {"manifest", "item", "held", "summary", "log"}:
             descriptor = self._publication.prepare({
                 "path": path, "collection_id": cid, "kind": kind, "row_id": row_id,
                 "pending_row_version": version, "pending_sha256": digest,
@@ -862,6 +863,8 @@ class CollectionWriter:
         Without the edit-back release, a valid or formatting-only edit waits in place, as
         before edit-back existed.
         """
+        if projection["kind"] == "log":
+            return self._register_log_input(projection, raw, token, slot, source=source)
         batch = self._publication
         path = projection["path"]
         digest = hashlib.sha256(raw).hexdigest()
@@ -915,8 +918,70 @@ class CollectionWriter:
             batch.kept.add(path)
         return True
 
-    def _hold_view_correction(self, projection, code, raw, reference, diagnostics, base, source):
-        """Hold one view correction, governed by the displaced render context, never the human's bytes."""
+    def _register_log_input(self, projection, raw, token, slot, *, source=None):
+        """Classify bytes found at a log view path or displaced by its install, block by block (design §6).
+
+        Without the edit-back release a log edit waits on disk, as an item edit does. Under it,
+        once edit-back has applied the edited blocks, each remaining block that needs the owner
+        is held on its own, under its item: a stale block as ``VIEW_CONFLICT``, an invalid one
+        as ``VIEW_INVALID``, a block naming no row as ``VIEW_UNBOUND``, and a removed one as
+        ``VIEW_DELETED``. Bytes held whole, displaced ones included, are governed by every row
+        the log shows. Either way the human's bytes are in the store or in a hold before the
+        install may displace them.
+        """
+        batch = self._publication
+        path = projection["path"]
+        digest = hashlib.sha256(raw).hexdigest()
+        observed = None if batch.observed is None else batch.observed.get(path)
+        if slot != "offline":
+            found = edit_back.Classification(edit_back.CONFLICT)  # A1: an unseen edit met this publication
+        elif not batch.edit_back or (batch.observed is not None and (observed is None or observed.digest != digest)):
+            batch.pending = True
+            return False
+        else:
+            found = edit_back.classify(self, projection, raw, refusal=observed.refusal if observed else ())
+        if found.code is not None:
+            if found.code == edit_back.FOREIGN:
+                batch.foreign_discovered = True
+            holds = [(found, raw, edit_back.held_id(path, raw=raw), edit_back.whole_log_candidate(), None)]
+        elif any(block.code is None for block in found.blocks):
+            batch.pending = True  # edit-back applies the edited blocks once the view settles
+            return False
+        else:
+            holds = [(block, block.raw, edit_back.held_id(block.path, base=block.current)
+                      if block.code == edit_back.DELETED else edit_back.held_id(block.path, raw=block.raw),
+                      {"action": "view-edit", "item_key": self._log_block_key(projection, block.path)}, block.path)
+                     for block in found.blocks if block.code != edit_back.SAME]
+        for held, held_raw, reference, candidate, block_path in holds:
+            existing = self.connection.execute("SELECT held_bytes FROM held_candidates WHERE held_id=?",
+                                               (reference,)).fetchone()
+            if existing is not None and existing[0] == held_raw:
+                continue  # these bytes are held once
+            diagnostics = {
+                "code": held.code, "path": path, "token": token, "slot": slot,
+                "sha256": hashlib.sha256(held_raw).hexdigest(), "stamp": held.stamp,
+                "base_row_version": held.base, "current_row_version": held.current,
+                **({"block": block_path} if block_path else {}),
+                **({"issues": list(held.issues)} if held.issues else {}),
+            }
+            if not self._hold_view_correction(projection, held.code, held_raw, reference, diagnostics, held.base,
+                                              source, candidate=candidate):
+                return False
+        batch.accept(path, digest)
+        return True
+
+    def _log_block_key(self, projection, block_path):
+        """The item key of a log block's view path ``<log>#<key>``, or None for a block naming no row."""
+        row = self.connection.execute("SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
+                                      (projection["collection_id"], block_path)).fetchone()
+        return None if row is None else row[0]
+
+    def _hold_view_correction(self, projection, code, raw, reference, diagnostics, base, source, *, candidate=None):
+        """Hold one view correction, governed by the displaced render context, never the human's bytes.
+
+        ``candidate`` names what the hold would change, by default the view's own item; a
+        whole log view names every row it shows (``governance.held_targets``).
+        """
         contexts = (source or {}).get("source_contexts", [])
         pairs = {tuple(pair) for name in ("previous_published", "previous_pending")
                  if (pair := (source or {}).get(name)) is not None}
@@ -940,11 +1005,12 @@ class CollectionWriter:
         path = f"{records._held_directory(manifest)}/{reference}.md"
         now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._publication.capture_previous(path)
-        target = None
-        if projection["kind"] == "item":
-            target = self.connection.execute("SELECT item_key FROM items WHERE row_id=?",
-                                             (projection["row_id"],)).fetchone()
-        candidate = {"action": "view-edit", "item_key": target[0] if target else None}
+        if candidate is None:
+            target = None
+            if projection["kind"] == "item":
+                target = self.connection.execute("SELECT item_key FROM items WHERE row_id=?",
+                                                 (projection["row_id"],)).fetchone()
+            candidate = {"action": "view-edit", "item_key": target[0] if target else None}
         diagnostics = _json([diagnostics])
         self._execute(
             "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
@@ -976,10 +1042,12 @@ class CollectionWriter:
         reference = edit_back.held_id(projection["path"], base=current)
         if self.connection.execute("SELECT 1 FROM held_candidates WHERE held_id=?", (reference,)).fetchone():
             return True
+        # A deleted log view stood for every row it showed.
+        candidate = edit_back.whole_log_candidate() if projection["kind"] == "log" else None
         return self._hold_view_correction(projection, edit_back.DELETED, b"", reference, {
             "code": edit_back.DELETED, "path": projection["path"], "base_row_version": current,
             "current_row_version": current,
-        }, current, source)
+        }, current, source, candidate=candidate)
 
     def _resolve_in_place(self, path, base):
         """Release the holds of earlier bytes at a view path once that path is valid again."""
@@ -1054,11 +1122,11 @@ class CollectionWriter:
             result["recovered_stages"] = batch.recovered_stages
             if paths is not None:
                 cursor = self.connection.execute(
-                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') "
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') "
                     f"AND path IN ({','.join('?' for _ in paths)}) ORDER BY path LIMIT ?", (*paths, limit + 1))
             else:
                 cursor = self.connection.execute(
-                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary') AND path>? "
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') AND path>? "
                     "AND (? OR state='pending') ORDER BY path LIMIT ?",
                     (after or "", not pending_only, limit + 1),
                 )
@@ -1165,10 +1233,19 @@ class CollectionWriter:
         It is recorded as a ``view_edit`` transition by ``owner:view-edit``, with a request
         identity derived from the view path, its base version and its bytes, so a replay of
         the same bytes commits nothing new. A leaf refusal raises, and edit-back holds it.
+        An edited log block (``found.path``) is one update of its row, identified by the
+        block's own path and bytes.
         """
-        projection, change = observation.projection, found.change
-        identity = edit_back.request_id(observation.path, found.base, observation.digest)
-        self._view_edit = {"path": observation.path, "digest": observation.digest, "base": found.base}
+        projection, change, base = observation.projection, found.change, found.base
+        if found.path is not None:
+            identity = edit_back.request_id(found.path, found.base, hashlib.sha256(found.raw).hexdigest())
+            # A log's blocks are separate updates of one collection, each guarded by its own row
+            # version; the collection's guard moves with every block applied before it.
+            row = self._collection_row(projection["collection_id"])
+            change, base = {**change, "expected_container_hash": self._container(row)}, row["generation"]
+        else:
+            identity = edit_back.request_id(observation.path, found.base, observation.digest)
+        self._view_edit = {"path": observation.path, "digest": observation.digest, "base": base}
         try:
             if projection["kind"] == "manifest":
                 return self.revise_collection(
@@ -1519,13 +1596,13 @@ class CollectionWriter:
             affected = [manifest.path, *summary.page_paths(manifest)] + ([manifest.storage.source] if scaffold else [])
             log_text = None
             if scaffold and manifest.storage.strategy == "markdown-log":
-                section = manifest.storage.descriptor["section"]
-                log_text = f"{'#' * section['level']} {section['title']}\n"
+                frame = log_view.empty(manifest)
+                log_text = log_view.render(manifest, frame, ())
                 self._execute(
                     "UPDATE collections SET log_frame_json = ? WHERE collection_id = ?",
-                    (_json({"text": log_text}), manifest.collection_id),
+                    (frame.as_json(), manifest.collection_id),
                 )
-                self._pending(manifest.storage.source, manifest.collection_id, "log", 1, log_text)
+                self._pending_log(manifest, 1)
             receipt = records._result(
                 operation="create",
                 manifest=manifest,
@@ -1763,20 +1840,29 @@ class CollectionWriter:
             )
         self._row_counts[cid] += 1
 
-    def _pending_summary(self, manifest, generation):
-        """Commit the summary pages' pending basis with the rows; reconcile publishes them.
+    def _pending_basis(self, path, cid, kind, version):
+        """Commit an aggregate view's pending basis with the rows; reconcile renders and publishes it.
 
-        The receipt says so: until reconcile, the published page shows an older basis.
+        Nothing renders on the acknowledgement path. The receipt says so: until reconcile, the
+        published view shows an older basis.
         """
+        self._publication.pending = True
+        self._confirm_installed(path)
+        self._execute(
+            "INSERT INTO projection_state(path,collection_id,row_id,kind,pending_row_version,pending_sha256,state) "
+            "VALUES (?,?,NULL,?,?,NULL,'pending') ON CONFLICT(path) DO UPDATE SET "
+            "pending_row_version=excluded.pending_row_version,pending_sha256=NULL,state='pending'",
+            (path, cid, kind, version),
+        )
+
+    def _pending_summary(self, manifest, generation):
+        """The summary pages' pending basis (``_pending_basis``)."""
         for path in summary.page_paths(manifest):
-            self._publication.pending = True
-            self._confirm_installed(path)
-            self._execute(
-                "INSERT INTO projection_state(path,collection_id,row_id,kind,pending_row_version,pending_sha256,state) "
-                "VALUES (?,?,NULL,'summary',?,NULL,'pending') ON CONFLICT(path) DO UPDATE SET "
-                "pending_row_version=excluded.pending_row_version,pending_sha256=NULL,state='pending'",
-                (path, manifest.collection_id, generation),
-            )
+            self._pending_basis(path, manifest.collection_id, "summary", generation)
+
+    def _pending_log(self, manifest, generation):
+        """The log view's pending basis (``_pending_basis``); the projector renders the whole log."""
+        self._pending_basis(manifest.storage.source, manifest.collection_id, "log", generation)
 
     def _confirm_installed(self, path):
         """Record a page that a publication installed and no reconcile confirmed yet, before a new basis replaces it.
@@ -1880,7 +1966,7 @@ class CollectionWriter:
         elif queue_log and manifest.view_mode == summary.SUMMARY:
             self._pending_summary(manifest, txn["generation_after"])
         elif queue_log:
-            self._pending_log(manifest, txn)
+            self._pending_log(manifest, txn["generation_after"])
         self._release(resumed)
         self.handle.release_cache.touch(manifest.collection_id,
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
@@ -1918,34 +2004,6 @@ class CollectionWriter:
         item_type = types.type_for_manifest(manifest).item_type
         for key, _, _, _, _, _ in plans:
             self.handle.release_cache.touch(manifest.collection_id, f"exomem://{item_type}/{manifest.collection_id}/{key}")
-
-    def _pending_log(self, manifest, txn):
-        frame_json = self.connection.execute(
-            "SELECT log_frame_json FROM collections WHERE collection_id = ?",
-            (manifest.collection_id,),
-        ).fetchone()[0]
-        section = manifest.storage.descriptor["section"]
-        frame = (
-            json.loads(frame_json)["text"]
-            if frame_json
-            else f"{'#' * section['level']} {section['title']}\n"
-        )
-        order = "DESC" if manifest.storage.descriptor.get("insertion") == "newest-first" else "ASC"
-        cursor = self.connection.execute(
-            f"SELECT item_key, values_json, row_version, payload_hash, row_id, collection_id, encoding FROM items WHERE collection_id = ? ORDER BY created_txn {order}, row_id {order}",
-            (manifest.collection_id,),
-        )
-        names = [column[0] for column in cursor.description]
-        blocks = typed_storage.hydrate(self.connection, [dict(zip(names, row, strict=True)) for row in cursor])
-        identity = self._publication.identity
-        text = frame + "".join(
-            record_formats.render_markdown_log_item(
-                manifest, json.loads(block["values_json"]), block["item_key"], "\n",
-                view_stamp=views.stamp(identity, block["row_version"], block["payload_hash"]),
-            )
-            for block in blocks
-        )
-        self._pending(manifest.storage.source, manifest.collection_id, "log", txn["generation_after"], text)
 
     def _fresh_authorization(self):
         """A new mutation-authority snapshot, independent of any open operation."""
@@ -2099,7 +2157,7 @@ class CollectionWriter:
                     self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
                                      ordinal=ordinal, queue_log=False, scope=scope)
             if is_log:
-                self._pending_log(manifest, txn)
+                self._pending_log(manifest, txn["generation_after"])
             elif manifest.view_mode == summary.SUMMARY:
                 self._pending_summary(manifest, txn["generation_after"])
             result.update(committed=True, after_container_hash=self._advance(txn),

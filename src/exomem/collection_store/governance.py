@@ -14,6 +14,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -357,14 +358,24 @@ def held_item_key(candidate_json: str) -> str | None:
     return key
 
 
-def held_target(conn: sqlite3.Connection, hold: CanonicalSubject) -> CanonicalSubject | None:
-    """The existing item a hold would change, or None when it proposes a new item."""
+def held_shows_every_row(candidate_json: str) -> bool:
+    """Whether a held candidate is a whole log view, which shows every row of its collection."""
+    candidate = json.loads(candidate_json) if isinstance(candidate_json, str) else None
+    return isinstance(candidate, dict) and candidate.get("view") == "log"
+
+
+def held_targets(conn: sqlite3.Connection, hold: CanonicalSubject) -> tuple[CanonicalSubject, ...]:
+    """The existing items a hold would change or show: its one item, every row for a whole log view,
+    or none when it proposes a new item."""
     row = conn.execute("SELECT candidate_json FROM held_candidates WHERE collection_id=? AND held_id=?",
                        (hold.collection_id, hold.row_id)).fetchone()
     key = None if row is None else held_item_key(row[0])
-    if key is None:
-        return None
-    return next(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), None)
+    if key is not None:
+        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), 1))
+    if row is not None and held_shows_every_row(row[0]):
+        return tuple(subject for subject in iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id,
+                                                          include_held=False) if subject.basis.domain == "row")
+    return ()
 
 
 def _bound(subject: CanonicalSubject, logical_vault_id: str) -> CanonicalSubject:
@@ -775,14 +786,16 @@ class OperationAuthorization:
         if decision.level == 0 or subject.basis.domain != "held":
             return decision
         try:
-            target = held_target(self.conn, subject)
+            targets = held_targets(self.conn, subject)
         except ValueError:
             # A hold whose item cannot be read could follow any item, so only the owner sees it.
             owner = raw_protection.is_owner(self.who) and raw_protection.has_unrestricted_access(self.root, self.who)
             return decision if owner else Decision(0)
-        if target is None:
+        if not targets:
             return decision
-        return egress._meet_decisions((decision, self._subject_decision(target, session=session)))
+        # A held whole log view is released as the log view is: only when every row it shows is.
+        return egress._meet_decisions((decision, *(self._subject_decision(target, session=session)
+                                                   for target in targets)))
 
     def _subject_decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
         basis = subject.basis
@@ -1007,7 +1020,7 @@ class OperationAuthorization:
                     "SELECT held_id,candidate_json FROM held_candidates WHERE collection_id=?", (cid,)):
                 identity = f"exomem://collection-held/{cid}/{held_id}"
                 try:
-                    follows = held_item_key(candidate) in changed
+                    follows = held_item_key(candidate) in changed or held_shows_every_row(candidate)
                 except ValueError:
                     continue  # An unreadable hold follows no item; its decision cannot change with one.
                 if follows and identity in state.subjects:

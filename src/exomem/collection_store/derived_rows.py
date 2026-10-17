@@ -59,7 +59,8 @@ COLLECTION_DERIVED = "COLLECTION_DERIVED"
 QUERY_REBUILDING = "QUERY_REBUILDING"
 REBUILD_MISMATCH = "DERIVED_REBUILD_MISMATCH"
 SOURCE_MISSING = "DERIVED_SOURCE_MISSING"
-#: Rows one rebuild step applies in one transaction, so requests are served between steps.
+#: Rows one rebuild step applies in one transaction, so requests are served between steps. A step
+#: also ends after the batch it is applying when its caller asks (``step``).
 REBUILD_STEP_ROWS = 2000
 #: This file's own layout; a file of another one is discarded, and its rows rebuild from the log.
 LAYOUT = 3
@@ -373,8 +374,12 @@ class Store:
         # Inside the vault's mutation boundary with the store's own checks, as every store write is:
         # a writer past a lost lease or a managed handoff must not change rows that the new holder's
         # log counts are built on. The divergence fence guards the store's publication, which this
-        # file never reaches.
-        with active_manager().mutation_guard(self.root, operation="derived_rows"):
+        # file never reaches. The boundary stays: the writer's authority check requires this thread
+        # to hold it, and a release quiesces writers by taking it. This file is a projection of the
+        # store's import log, written only by maintenance (rebuilds, import batches and a new
+        # handle's reconcile), so it takes the projection guard: background work that leaves the
+        # vault commit generation, which no validity stamp of this file depends on, where it is.
+        with active_manager().projection_guard(self.root, operation="derived_rows"):
             self.handle.require_write_authority(allow_diverged=True)
             self.conn.execute("BEGIN IMMEDIATE")
             self._owns_transaction = True
@@ -824,8 +829,11 @@ class _Missing(Exception):
     """A source the log names is absent or no longer the bytes it bound; the argument says why."""
 
 
-def step(root: Path, writer) -> str:
+def step(root: Path, writer, *, aside=lambda: False) -> str:
     """Advance one rebuilding derived collection by one bounded step on the store writer's thread.
+
+    The step holds the vault mutation boundary, so after each batch it asks ``aside()`` whether
+    other work waits; then it records where it stopped and ends.
 
     Returns ``advanced``, ``done`` when a rebuild finished, ``stopped`` when every rebuild is
     stopped and one waits on a missing source, ``mismatched`` when every one stopped on a
@@ -838,7 +846,7 @@ def step(root: Path, writer) -> str:
         store.settle(writer.connection, cid)
     waiting = set()
     for cid in store.rebuilding():
-        outcome = _rebuild(Path(root), writer, store, cid)
+        outcome = _rebuild(Path(root), writer, store, cid, aside)
         if outcome not in ("stopped", "mismatched"):
             return outcome
         waiting.add(outcome)
@@ -877,7 +885,7 @@ def _manifest_refusal(root: Path, ref: str, manifest_sha256: str) -> str:
     return "its selector no longer picks the members the import bound"
 
 
-def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
+def _rebuild(root: Path, writer, store: Store, collection_id: str, aside) -> str:
     """Replay one bounded step of a collection's import log into its rows, through the importer's apply path."""
     from .. import __version__
     from . import import_time, importer
@@ -926,7 +934,7 @@ def _rebuild(root: Path, writer, store: Store, collection_id: str) -> str:
     shas, taken, ended, stopped = binding["source"]["members"]["sha256"], 0, False, False
     try:
         with store.transaction():
-            while taken < REBUILD_STEP_ROWS and not ended:
+            while taken < REBUILD_STEP_ROWS and not ended and not (taken and aside()):
                 batch = importer._next_batch(reader, plan, reader.pending, order)
                 if batch.stop is not None:
                     stopped = True  # a logged member never stopped its import

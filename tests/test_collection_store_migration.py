@@ -261,6 +261,26 @@ def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection
     assert staging_directories(root) == [] and vault_bytes(root) == before
 
 
+def test_text_inside_a_legacy_log_block_blocks_the_migration_and_names_the_block(env, capsys):
+    """Defect: the first render of a migrated log keeps only each block's values, so a line the
+    owner wrote inside a block is lost at the log's first publication, or at an export, which
+    renders the same bytes."""
+    root = legacy_vault(env)
+    log = root / X3.replace("_collection.md", "Training Log.md")
+    log.write_bytes(log.read_bytes().replace(b"- Tricep Press | blue short | 17\n",
+                                             b"- Tricep Press | blue short | 17\nFelt strong today.\n", 1))
+    manifest = collections.load_manifest(root, root / X3)
+    [block] = [record.identity.key for record in record_formats.load_adapter(root, manifest).read().records
+               if record.values["occurred_on"] == "2024-11-19"]
+    before = vault_bytes(root)
+    assert migrate(root, "apply") == 1
+    report = printed(capsys)
+    blocked = {row["path"]: row["blocker"] for row in report["collections"] if row["status"] == "blocked"}
+    assert list(blocked) == [X3] and blocked[X3]["check"] == "b" and block in blocked[X3]["reason"]
+    assert not connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert vault_bytes(root) == before
+
+
 def _apply_and_crash(environment, database, cut, released):
     """`migrate --apply` in a fresh interpreter that dies at ``cut``, as a killed process would."""
     os.environ.clear()
@@ -900,6 +920,23 @@ def test_a_summary_create_without_lease_coordination_names_the_setup_before_enro
         call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
              why="summary")
     assert refused.value.code == admission.COORDINATION_REQUIRED
+    assert not connection.store_path(root).exists()
+
+
+def test_a_summary_create_on_a_cloud_cell_names_no_remedy_its_tenant_cannot_apply(tmp_path, monkeypatch):
+    """A Cloud tenant told to set the lease URL, a variable the cell's manifests forbid, after the
+    summary release made the create reach the coordination refusal (D7)."""
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1}))
+    root = tmp_path / "vault"
+    init_vault(root)
+    with pytest.raises(CollectionStoreError) as refused:
+        call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+             why="summary")
+    assert refused.value.code == admission.COORDINATION_REQUIRED
+    assert "EXOMEM_WRITER_LEASE_URL" not in refused.value.reason
     assert not connection.store_path(root).exists()
 
 

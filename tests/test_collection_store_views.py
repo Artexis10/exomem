@@ -695,3 +695,58 @@ def test_public_alias_read_waits_for_staging_identity_publication(store, monkeyp
         isinstance(result, dict) and "projection_pending" in result["warnings"]
         for result in outcomes
     )
+
+
+#: The invented X3 training log's collection (``record_fixtures.copy_x3_fixture``).
+X3_ID = "9ba8d1cf-d1e7-4309-95ae-cb28d7a6eea8"
+#: One new session row in the X3 log's shape.
+SESSION = {"occurred_on": "2026-08-03", "title": "Pull", "status": "completed",
+           "movements": [{"movement": "Deadlift", "band": "grey", "repetitions": "22"}]}
+SESSION_HEADING = "### 2026-08-03 · Pull".encode()
+
+
+def imported_log(store, tmp_path, rewrite=lambda data: data):
+    """The X3 log, its file bytes rewritten, imported into this store as the migration imports it."""
+    import time
+
+    from record_fixtures import copy_x3_fixture
+    from test_collection_store_legacy_import import CONTEXT
+
+    from exomem.collection_store import legacy, legacy_import
+
+    manifest = copy_x3_fixture(store.root) / "_collection.md"
+    source = manifest.parent / "Training Log.md"
+    source.write_bytes(rewrite(source.read_bytes()))
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+    with legacy.LegacyAuditSpool(stage, deadline=time.monotonic() + 60) as audit:
+        audit.scan(store.root)
+        captured = legacy_import.capture_legacy_collection(store.root, manifest, audit=audit)
+        store.connection.execute("BEGIN")
+        legacy_import.import_legacy_collection(store.connection, captured, audit=audit, context=CONTEXT)
+        store.connection.commit()
+    return source
+
+
+def test_a_published_log_keeps_the_prose_after_its_item_section(store, tmp_path):
+    """Defect: the projector re-renders an imported log without the frame's suffix, which wipes the
+    owner's sections after the log's own (the X3 log's "Current bands" and legend)."""
+    source = imported_log(store, tmp_path)
+    original = source.read_bytes()
+    suffix = original[original.index(b"## Current bands"):]
+    store.append_record(X3_ID, item=SESSION, why="a store-mode session")
+    store.reconcile_views()
+    published = source.read_bytes()
+    assert SESSION_HEADING in published
+    assert published.endswith(suffix)
+
+
+def test_a_published_log_keeps_its_imported_newline_style(store, tmp_path):
+    """Defect: the projector renders the blocks of a CRLF log with LF, so every line the owner's
+    editor saved changes and the file mixes two newline styles."""
+    source = imported_log(store, tmp_path, lambda data: data.replace(b"\n", b"\r\n"))
+    store.append_record(X3_ID, item=SESSION, why="a store-mode session")
+    store.reconcile_views()
+    published = source.read_bytes()
+    assert SESSION_HEADING in published
+    assert b"\n" not in published.replace(b"\r\n", b"")

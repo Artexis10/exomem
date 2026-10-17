@@ -864,6 +864,39 @@ apply that finished its restore and then stopped, for example on a failed
 round-trip proof, leaves the restored store serving. The services may run
 meanwhile, and the next apply migrates that store with the writes it served.
 
+### Summary collections
+
+A summary collection is a NEW Records collection whose rows live in the
+SQLite collection store outside the vault. It holds large preserved exports,
+such as a health export, and answers daily count, sum and average queries
+from rollups. Existing Records and Planning collections stay in their files;
+a summary collection never migrates them. The store requires writer-lease
+coordination (see "Automatic single-writer lease and laptop takeover").
+
+Two things to know before you import:
+
+- Keep the preserved source. Until the collection store's GA release, a later
+  release may change how the store keeps rows. You may then need to import
+  the preserved export again into a NEW collection. Every import answer says
+  so in `reimport_risk`.
+- A summary collection whose derived rows are missing or were built under an
+  earlier layout rebuilds them from its import log at the service's next start.
+  The rebuild gives way to requests between batches.
+
+The owner creates a vault's first summary collection offline, which enrols the
+vault's store with the coordinator: stop the service, then run
+`exomem collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
+with the service's lease environment and `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`
+set. Later summary collections are created through `record_memory` on the
+running service.
+
+To turn summary collections off for one vault, stop the service and run
+`exomem collections rollback --vault <vault>` with the same environment. The
+rollback is one-way: it
+keeps every row, history entry and preserved source, pauses import jobs and
+refuses summary reads with `COLLECTION_STORE_DISABLED`. A later release does
+not turn the vault's summary collections back on.
+
 ### A release that changes the collection store's schema
 
 A release can change the schema of the live collection store. 0.119.0 changed

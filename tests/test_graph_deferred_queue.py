@@ -776,9 +776,13 @@ _DECLARED_GENERATION_RECORDING_SITES = {
     # the deferred scope STARTS as the checkpoint's changed and created paths
     # and only ever widens as the pass learns more; an enqueue that could not
     # admit every path escalates to whole-vault debt rather than reporting a
-    # queue that does not hold the work.
+    # queue that does not hold the work. A behind publication is the one caller
+    # that passes a partial set: its movement, at the acknowledgement the
+    # published sidecar keeps -- sound for the reason the adopted residue below
+    # is.
     "epistemic_graph.py::EpistemicGraphIndex::_queue_graph_repair": (
-        "the deferring write's own checkpoint scope, widened, never narrowed"
+        "the deferring write's own checkpoint scope, widened, never narrowed; or a "
+        "behind publication's movement at the ACKNOWLEDGED generation"
     ),
     # A pass-through seam, not a scope decision: it records whatever generation
     # its caller hands it. Its callers are declared below.

@@ -15,6 +15,8 @@ import io
 import json
 import runpy
 import sqlite3
+import threading
+import time
 import zipfile
 from contextlib import closing
 from pathlib import Path
@@ -39,10 +41,11 @@ from test_collection_store_service import (  # noqa: F401 - the service fixture
     call,
     imported,
     service,
+    titles,
 )
-from test_collection_store_writer import manifest_path
+from test_collection_store_writer import CID, manifest_path
 
-from exomem import archive_members, commands, writer_lease
+from exomem import archive_members, commands, foreground_priority, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     capability,
@@ -232,6 +235,117 @@ def test_a_derived_import_keeps_rows_out_of_the_store_and_rebuilds_them_while_ro
         restarted.stop()
 
 
+def _restart_into_a_slow_rebuild(running, monkeypatch):
+    """Import one member of six batches, drop its rows file and restart the service, which rebuilds them.
+
+    Each replayed batch takes 0.3 s, as a batch does beside CPU-bound requests, and the service's mutation
+    timeout is one second: longer than one batch, shorter than the member's six. Returns the restarted
+    service, the rows the import left and the start of each replayed batch.
+    """
+    root = running.root
+    monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
+    store_path = connection.store_path(root)
+    call(root, "record_memory", action="create", manifest_path=PATH, manifest_text=TEXT, why="derived samples")
+    day = {"samples/2026-11-01.json": samples(("2026-11-01", at("2026-11-01", *(
+        (f"{hour:02d}:00", hour) for hour in range(18)))))}
+    job = imported(root, collection=DERIVED, mode="start", source_ref=_preserve(root, _archive(day))["path"],
+                   format="json-document", members="samples/*", mapping=SAMPLES)
+    _until(lambda: imported(root, collection=DERIVED, mode="status", continuation=job["continuation"])["state"]
+           == "complete", 30)
+    before = _rows_file(derived_rows.path(store_path))
+    running.stop()
+    for suffix in ("", "-wal", "-shm"):
+        derived_rows.path(store_path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+    batches, apply = [], importer._derived_apply
+
+    def slow_batch(*args, **kwargs):
+        batches.append(time.monotonic())
+        time.sleep(0.3)
+        return apply(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "_derived_apply", slow_batch)
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1")
+    return Service(root, writer_lease.start_server_lifecycle()), before, batches
+
+
+def _rebuilt(root):
+    store_path = connection.store_path(root)
+    with closing(connection.open_reader(store_path)) as reader:
+        return derived_rows.rebuild_status(reader, store_path, DERIVED)["state"] == "ready"
+
+
+@pytest.mark.parametrize("awaiting_bulk", [False, True], ids=["alone", "beside-a-request-awaiting-bulk-work"])
+def test_a_writer_that_waits_for_the_boundary_during_a_rebuild_gets_it_after_one_batch(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+    awaiting_bulk,
+):
+    """Defect: a rebuild step kept the vault mutation boundary through every batch of its member while a
+    writer waited, and the next step followed at once. On a service rebuilding a large derived collection,
+    background commits waited out the mutation timeout and failed MUTATION_BUSY for the whole rebuild.
+    A request that awaits bulk work, such as a governed write joining a corpus build, lets every bulk pass
+    run, so a step that asked only about foreground work missed the writer queued on the boundary."""
+    root = service.root
+    restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def joining():
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=joining)
+    try:
+        _until(lambda: batches, 30)
+        if awaiting_bulk:
+            thread.start()
+            assert entered.wait(5)
+        with restarted.manager.mutation_guard(root, operation="media_commit", holder_kind="background"):
+            pass  # MUTATION_BUSY raises here
+        release.set()
+        _until(lambda: _rebuilt(root), 30)
+        assert _rows_file(derived_rows.path(connection.store_path(root))) == before
+        assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(connection.store_path(root)))
+    finally:
+        release.set()
+        restarted.stop()
+
+
+def test_a_request_in_flight_holds_the_rebuild_and_the_store_still_answers_at_once(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+):
+    """Defect: the rebuild stepped on beside every request, which then shared the interpreter with it for its
+    whole run, so requests ran many times slower while a large rebuild ran. The store thread now waits while
+    a request runs, and that wait must not hold a store request, which would time out behind it."""
+    root = service.root
+    restarted, before, batches = _restart_into_a_slow_rebuild(service, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+
+    def request():  # foreground work that never reaches the store, such as an activation
+        with foreground_priority.foreground():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=request)
+    try:
+        _until(lambda: batches, 30)
+        thread.start()
+        assert entered.wait(5)
+        begun = len(batches)
+        time.sleep(0.9)  # three batches' time
+        assert len(batches) - begun <= 1  # at most the one it was starting when the request arrived
+        # Within the store's one-second deadline, or COLLECTION_STORE_BUSY raises.
+        assert titles(root, CID) == ["Canonical"]
+        release.set()
+        thread.join(10)
+        _until(lambda: _rebuilt(root), 30)
+        assert _rows_file(derived_rows.path(connection.store_path(root))) == before
+    finally:
+        release.set()
+        restarted.stop()
+
+
 @pytest.fixture
 def derived(tmp_path, monkeypatch):
     """An in-process derived collection with an invented three-day export preserved for it."""
@@ -387,6 +501,26 @@ def test_guarded_heterogeneous_rows_rebuild_with_exact_types_and_logged_member_d
         assert buckets(handle) == expected_buckets
         assert _rows_file(derived_rows.path(path)) == before
         assert all(rebuilt == logged for rebuilt, logged in _digests_of_rebuilt_rows(path))
+
+
+def test_a_rebuild_leaves_the_vault_commit_generation_where_it_was(derived):
+    """Defect: every rebuild step advanced the vault's commit generation, though it writes only the derived
+    rows file, which the store's import log rebuilds. A governed write compares the generation it read before
+    the boundary with the one inside it, so for the whole rebuild every write missed its validity stamp and
+    repeated its corpus walk inside the boundary."""
+    writer, job = derived("generation")
+    assert finish(writer, job)["state"] == "complete"
+    root, path = writer.root, writer.handle.path
+    writer.handle.close()
+    for suffix in ("", "-wal", "-shm"):
+        derived_rows.path(path).with_name(derived_rows.FILENAME + suffix).unlink(missing_ok=True)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = CollectionWriter(root, handle)
+        generation = writer_lease.read_commit_generation(root)
+        with preview_store(root, handle):
+            outcomes = [derived_rows.step(root, restarted) for _ in range(8)]
+        assert "done" in outcomes
+        assert writer_lease.read_commit_generation(root) == generation
 
 
 def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(derived):

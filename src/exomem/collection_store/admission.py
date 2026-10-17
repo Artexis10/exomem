@@ -880,6 +880,14 @@ def coordination_required(operation):
     reaching a store that no fence protects, or a step that refuses for an unrelated
     reason; a false refusal costs the owner a rerun with the service's lease environment.
     """
+    from .. import cloud_cell
+
+    if cloud_cell.cloud_mode_enabled():
+        # A Cloud cell's environment cannot carry a lease URL (cellctl forbids the prefix),
+        # so the owner-side remedy below would only mislead its tenant.
+        return CollectionStoreError(
+            COORDINATION_REQUIRED, f"{operation} needs writer-lease coordination, which Cloud cells do not "
+            "provide yet; summary collections and the collection store are not available on this cell")
     # It names what this process observes: a CLI run from a shell without the service's
     # EnvironmentFile sees no lease URL even where the service has a coordinator.
     return CollectionStoreError(

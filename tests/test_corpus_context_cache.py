@@ -1309,6 +1309,42 @@ def test_a_warm_owner_view_follows_a_relation_save_without_a_page_edit(vault: Pa
         assert "vault.hosts" in relations()
 
 
+def test_a_warm_supplied_view_follows_the_registry_it_is_handed(vault: Path) -> None:
+    """A supplied relation registry is the meaning of every unbound page.
+
+    Relation review hands the corpus the registry it loaded. A view warmed with
+    one registry must not answer for a caller holding another, even over the
+    same unchanged pages and overlay.
+    """
+    from exomem.governance.principal import library_scope
+
+    (vault / _PAGE_REL).write_text(
+        _page(title="One", body="- vault.hosts [[Knowledge Base/Notes/Insights/two]]\n"),
+        encoding="utf-8",
+    )
+    language = semantic_language_registry.load_registry(vault)
+
+    def relations(registry: relation_registry.RelationRegistry) -> set[str | None]:
+        context = semantic_contract.build_corpus_context_with_census(
+            vault, registry=registry, language_registry=language
+        )[0]
+        return {
+            fact.canonical_relation
+            for fact in context.relation_facts
+            if fact.logical_source_path == _PAGE_REL
+        }
+
+    proposed = relation_registry.load_registry(vault, proposal={
+        "schema_version": 1,
+        "extensions": {"vault.hosts": {
+            "parent": "relates_to", "description": "A venue hosts an event.",
+        }},
+    })
+    with library_scope():
+        assert "vault.hosts" not in relations(relation_registry.load_registry(vault))
+        assert "vault.hosts" in relations(proposed)
+
+
 _MEETING_REL = "Knowledge Base/Notes/Meetings/m1.md"
 
 

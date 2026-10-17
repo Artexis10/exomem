@@ -4580,6 +4580,50 @@ class LeaseManager:
         activation_admission: bool = False,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
+        with self._mutation_boundary(
+            vault_root,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+            attachment_control=attachment_control,
+            attachment_now=attachment_now,
+            session_open_admission=session_open_admission,
+            activation_admission=activation_admission,
+            advance_generation=True,
+        ) as mutation:
+            yield mutation
+
+    @contextmanager
+    def projection_guard(
+        self, vault_root: os.PathLike[str] | str, *, operation: str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Hold the vault mutation boundary, with writer authority, to write a projection file.
+
+        Only for a file that a canonical source rebuilds and no canonical read depends
+        on, such as the collection store's derived rows. The holder is background work,
+        and the commit generation does not move, so every captured validity stamp stays
+        current. A writer of canonical content takes `mutation_guard`.
+        """
+        with self._mutation_boundary(
+            vault_root, operation=operation, holder_kind="background", advance_generation=False
+        ) as mutation:
+            yield mutation
+
+    @contextmanager
+    def _mutation_boundary(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        request_id: str | None = None,
+        operation: str | None = None,
+        holder_kind: str,
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
+        session_open_admission: bool = False,
+        activation_admission: bool = False,
+        advance_generation: bool,
+    ) -> Iterator[VaultMutationCoordinator]:
+        """`mutation_guard`, which advances the commit generation, and `projection_guard`, which does not."""
         direct_boundary: tuple[str, Path] | None = None
         direct_token: Token[tuple[tuple[str, Path], ...]] | None = None
         outer_direct_boundary = False
@@ -4613,10 +4657,11 @@ class LeaseManager:
                 finally:
                     # Bump while the boundary is still held, so the counter is
                     # serialized with the mutations it fingerprints. Every
-                    # governed writer exits through here (wide or narrow), which
-                    # is what lets the validity-stamp comparison skip the
-                    # in-boundary corpus stat-walk.
-                    _bump_commit_generation(self.config.state_dir, vault_root)
+                    # governed writer of canonical content exits through here
+                    # (wide or narrow), which is what lets the validity-stamp
+                    # comparison skip the in-boundary corpus stat-walk.
+                    if advance_generation:
+                        _bump_commit_generation(self.config.state_dir, vault_root)
         finally:
             _ACTIVE_LEASE_MANAGER.reset(manager_token)
             if direct_token is not None:
@@ -5034,6 +5079,8 @@ class LeaseManager:
         def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
             from . import graph_sync
 
+            if isinstance(error, graph_sync.GraphRepairQueued):
+                return graph_sync.committed_graph_queued(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildInProgress):
                 return graph_sync.committed_graph_pending(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildRegistrationError):

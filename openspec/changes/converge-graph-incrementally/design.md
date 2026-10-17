@@ -460,3 +460,63 @@ write, so the no-op also requires the stored fingerprint to equal the resident
 resolver's at the live checkpoint. Otherwise the refresh takes the whole-vault repair
 that the stale fingerprint waits for. With no resident resolver it queues its pages,
 and a caller that cannot report pending still gets the rebuild it always got.
+
+## Addendum: a pass that writes land in publishes behind
+
+A whole-vault pass on a large vault runs for minutes, and governed writes land inside
+it. The pass then re-targeted until its deadline and attempt budget ran out, failed,
+and the drain ran the whole pass again once writes stopped. The registry had recorded
+every change, so the failed pass was never evidence of anything stale. Publishing that
+pass as current is unsound: a page retitled before the pass read it leaves edges
+derived under the old title. Publishing it as current and queueing the recorded paths
+is unsound for the same reason, because the refresh decides whether topology changed
+from the titles the rows store.
+
+The sound version publishes behind. Every row is a function of its page's bytes and
+the resolver the pass derived under, and that resolver was proved against the bytes of
+one recall checkpoint. When the only rows that disagree with the resolver belong to
+pages it never held, dropping those rows makes every topology input equal to what a
+pass at that checkpoint would have derived. The published state is then "the graph at
+that checkpoint, followed by a deferral of everything that moved since", which the
+drain already converges. The graph keeps the live acknowledgement and reports itself
+not current until the drain publishes. The worst case is the existing fail-closed
+whole-vault fallback, never a stale publication.
+
+A retitle or a vanished page that the pass saw breaks the argument. A drain widens a
+queued page by the title and existence that its row stores, so a row that already
+carries the new title, or a missing row, widens to nothing. Those passes re-target as
+before. A page removed before the pass read it needs its own check, because the walk no
+longer admits it and so the row comparison cannot see it.
+
+The ticket cannot bind the exact epoch and projection identity, because those are what
+moved. It binds what makes the sidecar plus the queue equal to the kept lineage. The
+repair is queued under the publication hold and before the replacement, so the sidecar
+never goes live without it. It is recorded at the kept acknowledgement, a partial set,
+for the reason the adopted residue's is: a coverage probe only asks about generations
+above the acknowledgement, and each canonical batch already recorded its own.
+
+Only a caller that can report pending may publish behind: the drain, barrier recovery,
+a registered rebuild and the background rebuild. A registered rebuild that publishes
+behind tells its waiters the repair is queued. A caller whose contract is a converged
+graph keeps re-targeting.
+
+The same classification now decides the resolver proof that runs before any page is
+read. That proof failed whenever a write landed between the walk and the proof, and it
+marked the registry externally pending with no scope. It is now Class C only on a
+difference the registry's history does not explain, and the mark names those paths.
+
+The repair set is queued at one instant, so its receipts share a timestamp and the drain
+takes them in path order, a batch at a time. A batch can therefore hold every page of
+the newest checkpoint while older pages wait behind it. Acknowledging that checkpoint
+and publishing the marker after such a batch served those pages' stale rows as current.
+So a drain publishes and acknowledges only when nothing outside its batch is queued.
+The same gate closes older single-instant deferrals: a cold resolver and an adopted
+residue. The drain that empties the queue publishes. An acknowledgement still behind
+after it is closed by the existing bounded drain of the committed checkpoint. Between
+batches the barrier stands, so barrier recovery waits while the queue makes progress,
+rather than pay the whole-vault pass this design removes.
+
+A pass checks the ticket's run-stable refusals before it prepares a behind build: no
+acknowledgement to keep, an unscoped mark, a moved policy, and registry history that
+no longer reaches its lineage. Found only at the ticket, each started a whole new
+publication attempt. With the check first, the pass re-targets within its own budget.

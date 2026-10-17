@@ -21,6 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
+from .. import foreground_priority
 from . import connection, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
+#: The share of a handoff's remaining time that installing pending views may take. A view
+#: left pending costs only lag; a handoff past its deadline fails, so the replica gets the rest.
+DRAIN_SHARE = 0.5
 #: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
 WATCH_SECONDS = 1.0
 _BUSY_RETRY_SECONDS = 0.05
@@ -628,9 +632,41 @@ class CollectionStoreRuntime:
         head = self.sample_head()
         return CollectionStoreHead(head.store_id, head.instance_id, result.commit_seq, result.head_hash)
 
+    def _drain_views(self, handle, *, deadline, cancelled=None):
+        """Install the views that committed changes left pending, before a handoff or a stop (design §5).
+
+        It publishes what the serving store thread would, under the release that lets that
+        thread publish, through the same reconcile. It takes at most half of the time left
+        before the handoff's deadline and leaves the rest to the replica publication and the
+        coordinator release. A view it cannot install in its share stays pending for the next
+        holder's startup pass, so a slow drain costs a lagging view, never the handoff.
+        """
+        from . import capability
+
+        if not capability.views_published(self.root):
+            return
+        from ..governance import principal
+        from .writer import CollectionWriter
+
+        now = time.monotonic()
+        deadline = now + max(0.0, deadline - now) * DRAIN_SHARE
+        writer, after, passes = CollectionWriter(self.root, handle), None, 0
+        try:
+            with principal.library_scope():
+                # One pass installs each view; the next confirms it current. Each pass is one window.
+                while passes < 2 and time.monotonic() < deadline and not (cancelled is not None and cancelled()):
+                    if handle.connection.execute(
+                            "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
+                        return
+                    after = writer.reconcile_views(limit=VIEW_BATCH_PATHS, after=after, pending_only=True)["next_path"]
+                    passes += after is None
+        except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
+            logger.warning("pending collection views were not installed before the handoff", exc_info=True)
+
     def flush(self, token, *, deadline, cancelled=None):
         """Called only after admission stops, drainage and boundary acquisition."""
         with self._publication_writer(token) as writer:
+            self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
@@ -934,6 +970,7 @@ class StoreServer:
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
+        self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
@@ -959,6 +996,9 @@ class StoreServer:
             if not self._closed:
                 self._requests.append(request)
                 self._condition.notify_all()
+        # Between two rebuild steps this thread waits as a bulk pass while other requests run;
+        # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
+        with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition:
             while not request.taken:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._closed:
@@ -1213,12 +1253,15 @@ class StoreServer:
         each derived collection (``derived_rows``). After that, a plain read of the derived file
         finds the rebuilds still running, so an idle store takes no checkout. A rebuild waiting
         on a missing source retries after ``DERIVED_RETRY_SECONDS``; one that finishes lets the
-        import jobs it held continue at once.
+        import jobs it held continue at once. A rebuild is background work: a step ends after
+        its batch when another request waits or runs, and the next step waits for it.
         """
         from ..governance import principal
         from . import capability, derived_rows
         from .preview import preview_store
 
+        # The running rebuild's pass continues only from a step that advanced; any other return ends it.
+        rebuild, self._derived_pass = self._derived_pass, None
         if self.runtime is None or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
         try:
@@ -1228,27 +1271,46 @@ class StoreServer:
             if self._derived_handle is not None and self._derived_handle is self.runtime._handle \
                     and not derived_rows.rebuilds_pending(self.runtime.path):
                 return IMPORT_IDLE_SECONDS
+            if rebuild is not None:
+                # A rebuild is one bulk pass across its steps: before the next one it waits while
+                # another request runs (``foreground_priority``), holding no boundary and no store
+                # checkout, so a handoff or a publication never waits on it. A store request ends
+                # the wait (``call``), and the step then ends after one batch (``_derived_aside``).
+                with foreground_priority.bulk(budget=rebuild):
+                    foreground_priority.yield_to_foreground()
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                outcome = derived_rows.step(self.root, writer)
+                outcome = derived_rows.step(self.root, writer, aside=self._derived_aside)
                 self._derived_handle = writer.handle
         except Exception:  # noqa: BLE001 - a refused step leaves the rebuild for a later tick
             logger.warning("derived collection rows could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
+        if outcome == "advanced":
+            self._derived_pass = rebuild or foreground_priority.PassBudget()
         if outcome == "done":
             self._ticks["import"] = 0.0
         # A missing source may return any moment; a mismatch waits on a revise or an upgrade.
         return {"advanced": 0.0, "done": 0.0, "stopped": DERIVED_RETRY_SECONDS,
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
+    def _derived_aside(self):
+        """Whether a rebuild step ends after its batch, which only releases the boundary sooner.
+
+        A store request is queued, a writer waits for the boundary, or another request runs. The
+        waiter count is checked on its own: a request that awaits bulk work releases every pass,
+        so ``foreground_elsewhere`` is then false, however many writers wait.
+        """
+        return (bool(self._requests) or self.manager._mutation_coordinator_for(self.root).waiter_count() > 0
+                or foreground_priority.foreground_elsewhere())
+
     def _views_tick(self):
         """Apply settled view edits, then publish pending views; returns the seconds until the next tick.
 
         It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
         unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
-        (``edit_back``) reads every item and manifest view at its first tick and every 60 s
+        (``edit_back``) reads every item, manifest and log view at its first tick and every 60 s
         after, outside the write transaction, and turns each settled edit into a governed
         update or a held correction. Then a committed change's pending views, such as
-        summary pages, publish a window at a time through the store's reconcile path, as
+        summary pages and log views, publish a window at a time through the store's reconcile path, as
         the in-process owner. A window holds at most
         ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
         view installed by one pass is confirmed current by the next, so two passes follow
@@ -1260,11 +1322,9 @@ class StoreServer:
         from . import capability, edit_back
         from .preview import _mutate, preview_store
 
-        if self.runtime is None:
+        if self.runtime is None or not capability.views_published(self.root):
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
-        if not views and not capability.records_summary_enabled(self.root):
-            return IMPORT_IDLE_SECONDS
         if views and self._edit_back is None:
             self._edit_back = edit_back.EditBack()
         # Without edit-back, the publication pass alone sets the next tick, as before it existed.

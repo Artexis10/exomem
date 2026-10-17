@@ -2396,8 +2396,8 @@ def test_a_rebuild_retarget_keeps_the_recall_resolver(
     ):
         calls.append(1)
         if len(calls) == 1:
-            # Class C, first admitted cause: the supplied freshness identity did
-            # not name the resolver bytes.
+            # The resolver cause: the supplied freshness identity did not name
+            # the resolver bytes, so the attempt re-targets.
             return None
         return real(inner_self, resolver, membership, **kwargs)
 
