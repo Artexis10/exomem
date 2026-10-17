@@ -18,14 +18,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .request_latency_contract import LatencyBar, load_contract
+from .request_latency_contract import LatencyBar, LatencyContract, load_contract
 
 log = logging.getLogger("exomem.latency_watch")
 
 
-def _bar(bar_id: str) -> LatencyBar | None:
+def _bar(bar_id: str, contract: LatencyContract | None = None) -> LatencyBar | None:
     try:
-        return load_contract().bar(bar_id)
+        return (contract or load_contract()).bar(bar_id)
     except Exception:  # noqa: BLE001 - malformed contract disables observation only
         return None
 
@@ -149,16 +149,17 @@ def make_sample(
     source: str = "live-ring",
     correlated: bool = False,
     excluded: bool = False,
+    contract: LatencyContract | None = None,
 ) -> Sample:
     # Registry names are trusted metadata; an unknown request name can contain content.
     tool = tool if tool in _registered_operations() else "unknown-operation"
     if bar_id is None:
         try:
-            bar = load_contract().observation_bar(surface=surface or "mcp", tool=tool, deep=deep)
+            bar = (contract or load_contract()).observation_bar(surface=surface or "mcp", tool=tool, deep=deep)
         except Exception:  # noqa: BLE001 - unavailable contract is not a caller failure
             bar = None
     else:
-        bar = _bar(bar_id)
+        bar = _bar(bar_id, contract)
     # Producer aliases are closed codes from the existing ledger and activation log.
     canonical_outcome = (
         {"success": "ok", "served": "ok"}.get(outcome, outcome)
@@ -214,12 +215,13 @@ def summarize(
     window_seconds: float | None = None,
     min_samples: int | None = None,
     coverage: dict[str, Any] | None = None,
+    contract: LatencyContract | None = None,
 ) -> list[dict[str, Any]]:
     """Independent bar populations, with explicit unknown and partial evidence."""
     source_coverage = coverage or getattr(samples, "coverage", {})
     grouped: dict[tuple, list[Sample]] = collections.defaultdict(list)
     for sample in samples:
-        bar = _bar(sample.bar_id) if sample.bar_id else None
+        bar = _bar(sample.bar_id, contract) if sample.bar_id else None
         window = window_seconds or (bar.window_seconds if bar else WINDOW_SECONDS)
         if window is None or not math.isfinite(sample.at) or not now - window <= sample.at <= now:
             continue
@@ -227,7 +229,7 @@ def summarize(
     out = []
     for _group_key, group in sorted(grouped.items(), key=lambda item: str(item[0])):
         sample = group[0]
-        bar = _bar(sample.bar_id) if sample.bar_id else None
+        bar = _bar(sample.bar_id, contract) if sample.bar_id else None
         included = [
             item
             for item in group
@@ -303,7 +305,7 @@ def summarize(
                 "tool": sample.tool,
                 "client": sample.client,
                 "deep": sample.deep,
-                "contract_revision": contract_revision(),
+                "contract_revision": contract.revision if contract else contract_revision(),
                 "bar_id": sample.bar_id,
                 "surface": sample.surface,
                 "boundary": sample.boundary,
