@@ -2,11 +2,12 @@
 
 Three bounds keep the carry's cost off the corpus size: a word's rarity count
 stops one row past the count that can still change a decision, a corroborated
-ranking is checked in rank order and stops once it has its rows, and the
-owner ranks on the maintained catalogue's statistics instead of rebuilding
-them from every page after each write. Each case below proves one of them
-changes no answer, and that a restricted reader still ranks only on the pages
-it may see. Invented, generic vocabulary throughout.
+ranking is checked in rank order and stops once it has its rows, and an owner
+whose configuration can withhold nothing ranks on the maintained catalogue's
+statistics instead of rebuilding them from every page after each write. Each
+case below proves one of them changes no answer, and that any admission that
+can withhold a page ranks only on the pages it admits, whether one is
+withheld or none. Invented, generic vocabulary throughout.
 """
 
 from __future__ import annotations
@@ -200,64 +201,61 @@ def test_a_phrase_ranking_returns_the_first_k_rows_holding_the_phrase(vault: Pat
 
 
 # --------------------------------------------------------------------------- #
-# The owner ranks on the catalogue; a restricted reader on what it may see.
+# Configuration, never the pages, decides which statistics a ranking uses.
 # --------------------------------------------------------------------------- #
 
 PHRASE_TURN = "what did the quorvel tansid survey decide"
 TITLE_TURN = "where is the lantern tide schedule kept"
 PHRASE_PAGE = f"{RESEARCH}/quorvel-tansid-survey.md"
 TITLE_PAGE = f"{RESEARCH}/lantern-tide-schedule.md"
-#: The folder a rule withholds from the external reader: an ordinary one, or
-#: raw material, which the carry never ranks but the catalogue still counts.
+#: The folder that holds the withheld page: an ordinary one, or raw material,
+#: which the carry never ranks but the catalogue still counts.
 PRIVATE, SOURCES = "Notes/Private", "Sources"
+#: Every word both turns rank on, repeated, so counting the page would move
+#: every statistic a score is made of.
+TURN_WORDS = "quorvel tansid survey lantern tide schedule decide kept. " * 6
 
 
 def _withheld(folder: str) -> str:
-    return f"Knowledge Base/{folder}/quorvel-tide-notes.md"
+    return f"Knowledge Base/{_kb_withheld(folder)}"
 
 
-def _quiet_withheld(folder: str) -> str:
-    """Withheld too, and holds none of the turns' words. It stays in both
-    vaults of a twin, so the reader's admission withholds a page in both and
-    the twin compares one ranking with itself."""
-    return f"Knowledge Base/{folder}/archive-ledger.md"
+def _kb_withheld(folder: str) -> str:
+    return f"{folder}/quorvel-tide-notes.md"
 
 
-def _seed_withheld_twin(vault: Path, folder: str = PRIVATE) -> None:
-    from test_governance_egress import _reset_caches, write_rule, write_scope
-
+def _seed_turn_pages(vault: Path) -> None:
     seed_ordinary_notes(vault)
     _research_page(vault, "quorvel-tansid-survey", "The quorvel tansid survey closed early.")
     _research_page(vault, "lantern-tide-schedule", "The lantern tide schedule moved to the pier.")
-    # Holds every word both turns rank on, repeated, so counting it would move
-    # every statistic a score is made of.
+
+
+def _seed_withheld_twin(vault: Path, folder: str = PRIVATE, *, audience: str = "external") -> None:
+    """The turn pages, and one page in `folder` that a rule for `audience`
+    withholds. The scope names that page alone, so it is the vault's only
+    withheld page: the fixture's own raw material stays visible."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    _seed_turn_pages(vault)
     _write(
         vault / _withheld(folder),
-        "---\ntype: note\nstatus: active\n---\n\n# Quorvel tide notes\n\n"
-        + "quorvel tansid survey lantern tide schedule decide kept. " * 6 + "\n",
+        f"---\ntype: note\nstatus: active\n---\n\n# Quorvel tide notes\n\n{TURN_WORDS}\n",
     )
-    _write(
-        vault / _quiet_withheld(folder),
-        "---\ntype: note\nstatus: active\n---\n\n# Archive ledger\n\nOld invoices, filed.\n",
-    )
-    write_scope(vault, paths=f"{folder}/**", name="Private")
-    write_rule(vault, ceiling=0)
+    write_scope(vault, paths=_kb_withheld(folder), name="Private")
+    write_rule(vault, ceiling=0, audience=audience)
     _settle(vault)
     _reset_caches()
 
 
-def _restricted_carry(vault: Path, folder: str) -> tuple:
+def _carry(vault: Path, principal) -> tuple:
+    """Both rungs' answers, scores included, for `principal`: the reader's
+    own view when one exists, else whatever the owner's walk admits."""
     from exomem.governance import egress
-    from exomem.governance.principal import RequestPrincipal, request_scope
+    from exomem.governance.principal import request_scope
 
-    reader = RequestPrincipal(audience_id="external", surface="mcp")
-    with request_scope(reader), state_paths.resolution_scope():
+    with request_scope(principal), state_paths.resolution_scope():
         basis = lifecycle_statuses.Basis(vault)
         visible = egress.reader_view(vault)
-        # A path naming no file withholds nothing, so the view is checked
-        # only while the page exists.
-        assert visible is not None
-        assert not (vault / _withheld(folder)).exists() or not visible(_withheld(folder))
         named = working_set_runtime.carry_named_groups(
             vault, PHRASE_TURN, visible=visible, status_basis=basis
         )
@@ -267,67 +265,212 @@ def _restricted_carry(vault: Path, folder: str) -> tuple:
     return named, listed
 
 
+def _withholds(vault: Path, principal, path: str) -> bool:
+    """Whether `principal`'s admission withholds `path`, asked while it exists:
+    a path naming no file withholds nothing."""
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+
+    assert (vault / path).exists()
+    with request_scope(principal), state_paths.resolution_scope():
+        visible = egress.reader_view(vault)
+        keep = visible if visible is not None else egress.release_walk_filter(vault)
+        return keep is not None and not keep(path)
+
+
+def _delete(vault: Path, path: str) -> None:
+    from test_governance_egress import _reset_caches
+
+    (vault / path).unlink()
+    _settle(vault)
+    _reset_caches()
+
+
+def _assert_turn_pages_carried(carry: tuple) -> None:
+    (groups, groups_state), (listed, listed_state) = carry
+    assert groups_state == listed_state == "available"
+    assert [path for group in groups for path, _score in group] == [PHRASE_PAGE]
+    assert [path for path, _score in listed] == [TITLE_PAGE]
+
+
 @pytest.mark.parametrize("folder", [PRIVATE, SOURCES])
 def test_a_restricted_readers_carry_ranks_as_if_the_withheld_page_were_absent(
     vault: Path, folder: str
 ) -> None:
-    """One reader, one path, asked twice: with the withheld page in the vault
-    and with it deleted. Ranked on the catalogue's statistics, the page would
-    move both rungs' scores and could take a row; ranked on the reader's
-    admitted pages, the answers are identical to the last digit. A second
-    withheld page stays in both vaults, so both rank on admitted pages. Raw
-    material is never a carry row, but the catalogue's statistics count it."""
-    from test_governance_egress import _reset_caches
+    """One reader, one path, asked twice: with the vault's only withheld page
+    present, and deleted, so its admission withholds one page and then none.
+    A reader always ranks on the pages it admits, so both answers are
+    identical to the last digit. Ranked on the catalogue's statistics once
+    nothing is withheld, the second would differ. Raw material is never a
+    carry row, but the catalogue's statistics count it."""
+    from exomem.governance.principal import RequestPrincipal
 
+    reader = RequestPrincipal(audience_id="external", surface="mcp")
     _seed_withheld_twin(vault, folder)
-    present = _restricted_carry(vault, folder)
-    (vault / _withheld(folder)).unlink()
-    _settle(vault)
-    _reset_caches()
-    absent = _restricted_carry(vault, folder)
+    assert _withholds(vault, reader, _withheld(folder))
+    present = _carry(vault, reader)
+    _delete(vault, _withheld(folder))
+    absent = _carry(vault, reader)
 
-    (groups, groups_state), (listed, listed_state) = present
-    assert groups_state == listed_state == "available"
-    assert [path for group in groups for path, _score in group] == [PHRASE_PAGE]
-    assert [path for path, _score in listed] == [TITLE_PAGE]
+    _assert_turn_pages_carried(present)
     assert present == absent
 
 
-def test_after_a_write_only_a_reader_with_withheld_pages_rebuilds_ranking_statistics(
-    vault: Path,
+#: A page the owner's walk withholds under a governance policy that holds no
+#: rule for the owner: frontmatter shaped like a bridge, with no approval.
+UNAPPROVED_BRIDGE = "Knowledge Base/Notes/quorvel-tide-bridge.md"
+
+
+def _seed_unapproved_bridge(vault: Path) -> None:
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    _seed_turn_pages(vault)
+    _write(
+        vault / UNAPPROVED_BRIDGE,
+        "---\ntype: note\nstatus: active\nbridge_scope: tide\n---\n\n"
+        f"# Quorvel tide bridge\n\n{TURN_WORDS}\n",
+    )
+    # A policy for sharing with another audience only.
+    write_scope(vault, paths="Notes/Shared/**", name="Shared")
+    write_rule(vault, ceiling=0)
+    _settle(vault)
+    _reset_caches()
+
+
+@pytest.mark.parametrize("source", ["owner-rule", "unapproved-bridge"])
+def test_the_owners_carry_ranks_as_if_a_page_its_walk_withholds_were_absent(
+    vault: Path, source: str
 ) -> None:
-    """Each catalogue write gives the catalogue a new revision. An owner whose
-    admission withholds nothing ranks on the catalogue's own statistics and
-    never rebuilds any; a reader with withheld pages rebuilds its statistics
-    over the pages it admits once per revision."""
-    from exomem.governance import egress
-    from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+    """The owner's walk withholds a page by an owner-audience rule, or, under
+    a policy with no owner rule, by the page's own content. Either way a
+    governance policy is configured, so the owner ranks on the pages it
+    admits whether that page is present or deleted, and both answers are
+    identical to the last digit."""
+    from exomem.governance.principal import owner_principal
 
     owner = owner_principal()
-    reader = RequestPrincipal(audience_id="external", surface="mcp")
+    if source == "owner-rule":
+        _seed_withheld_twin(vault, audience="owner")
+        withheld = _withheld(PRIVATE)
+    else:
+        _seed_unapproved_bridge(vault)
+        withheld = UNAPPROVED_BRIDGE
+    assert _withholds(vault, owner, withheld)
+    present = _carry(vault, owner)
+    _delete(vault, withheld)
+    absent = _carry(vault, owner)
 
-    def rebuilt(principal) -> int:
-        with (
-            call_spans.meter(call_spans.STATS_REBUILT) as measured,
-            request_scope(principal),
-            state_paths.resolution_scope(),
-        ):
-            visible = egress.reader_view(vault)
-            assert (visible is None) == (principal is owner)
-            groups, state = working_set_runtime.carry_named_groups(
-                vault, PHRASE_TURN, visible=visible
-            )
-        assert state == "available" and groups, (state, groups)
-        return int(measured[call_spans.STATS_REBUILT])
+    _assert_turn_pages_carried(present)
+    assert present == absent
 
-    _seed_withheld_twin(vault)
-    rebuilt(owner), rebuilt(reader)
+
+#: The operator's access policy shape: one folder kept out of the index, one
+#: kept from writes. Neither is a governance policy.
+EXCLUDED, READONLY = "Notes/Private", "Notes/Curated"
+
+
+def _seed_access_policy(vault: Path) -> None:
+    from test_governance_egress import _reset_caches
+
+    _seed_turn_pages(vault)
+    _write(
+        vault / _withheld(EXCLUDED),
+        f"---\ntype: note\nstatus: active\n---\n\n# Quorvel tide notes\n\n{TURN_WORDS}\n",
+    )
+    _write(
+        vault / "Knowledge Base/_access.yaml",
+        f"excluded:\n  - {EXCLUDED}\nreadonly:\n  - {READONLY}\n",
+    )
+    _settle(vault)
+    _reset_caches()
+
+
+def test_an_excluded_page_leaves_the_owners_carry_unmoved(vault: Path) -> None:
+    """An excluded page never enters the catalogue, so the owner's walk has
+    nothing to withhold and the owner ranks on the catalogue's statistics
+    with the page present or deleted."""
+    from exomem.governance.principal import owner_principal
+
+    owner = owner_principal()
+    _seed_access_policy(vault)
+    assert not _withholds(vault, owner, _withheld(EXCLUDED))
+    present = _carry(vault, owner)
+    _delete(vault, _withheld(EXCLUDED))
+    absent = _carry(vault, owner)
+
+    _assert_turn_pages_carried(present)
+    assert present == absent
+
+
+def _statistics_rebuilt(vault: Path, principal) -> int:
+    from exomem.governance import egress
+    from exomem.governance.principal import request_scope
+
+    with (
+        call_spans.meter(call_spans.STATS_REBUILT) as measured,
+        request_scope(principal),
+        state_paths.resolution_scope(),
+    ):
+        groups, state = working_set_runtime.carry_named_groups(
+            vault, PHRASE_TURN, visible=egress.reader_view(vault)
+        )
+    assert state == "available" and groups, (state, groups)
+    return int(measured[call_spans.STATS_REBUILT])
+
+
+def test_after_a_write_an_owner_whose_configuration_cannot_withhold_rebuilds_nothing(
+    vault: Path,
+) -> None:
+    """Each catalogue write gives the catalogue a new revision. With no
+    governance policy, only an access policy, the owner ranks on the
+    catalogue's own statistics and rebuilds none."""
+    from exomem.governance.principal import owner_principal
+
+    owner = owner_principal()
+    _seed_access_policy(vault)
+    _statistics_rebuilt(vault, owner)
     _research_page(vault, "harbour-note", "A harbour note written after the carry warmed.")
     _settle(vault)
 
-    assert rebuilt(owner) == 0
-    assert rebuilt(reader) == 1
-    assert rebuilt(reader) == 0, "a restricted reader rebuilds once per revision, not per turn"
+    assert _statistics_rebuilt(vault, owner) == 0
+
+
+def test_after_a_write_a_reader_rebuilds_its_statistics_once_per_revision(vault: Path) -> None:
+    from exomem.governance.principal import RequestPrincipal
+
+    reader = RequestPrincipal(audience_id="external", surface="mcp")
+    _seed_withheld_twin(vault)
+    _statistics_rebuilt(vault, reader)
+    _research_page(vault, "harbour-note", "A harbour note written after the carry warmed.")
+    _settle(vault)
+
+    assert _statistics_rebuilt(vault, reader) == 1
+    assert _statistics_rebuilt(vault, reader) == 0, "once per revision, not per turn"
+
+
+def test_a_withheld_row_under_catalogue_ranking_ranks_on_admission(
+    vault: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A context that claims catalogue ranking while its predicate withholds
+    a row breaks the contract. The snapshot's check catches it: the request
+    ranks on what it admits and the log names the closed reason."""
+    import logging
+
+    held = _seed_ranked(vault)
+    withheld = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
+    basis = lifecycle_statuses.Basis(vault)
+
+    def ranked(catalogue_ranking: bool) -> list[tuple[str, float]]:
+        context = lexstore.RequestQueryContext(
+            vault, lambda path: path != withheld, basis, catalogue_ranking=catalogue_ranking
+        )
+        return _ranked(vault, 1000, query_context=context)
+
+    with caplog.at_level(logging.WARNING, logger="exomem.lexstore"):
+        claimed = ranked(True)
+    assert lexstore.CATALOGUE_RANKING_CONTRACT_VIOLATION in caplog.text
+    assert withheld not in [path for path, _score in claimed]
+    assert claimed == ranked(False)
 
 
 # --------------------------------------------------------------------------- #

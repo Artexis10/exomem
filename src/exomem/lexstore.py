@@ -2179,6 +2179,9 @@ def _term_units(units) -> list[list[object]]:
 _TERM_FREQUENCY_CACHE_MAX = 50_000
 #: Admitted corpora retained per store: one per distinct admitted page set.
 _ADMITTED_STATISTICS_MAX = 4
+#: The closed reason logged when a request configured for catalogue ranking
+#: finds a withheld page row in its snapshot, and so ranks on admission.
+CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
 
 
 @dataclass
@@ -2187,14 +2190,16 @@ class RequestQueryContext:
 
     It retains no readiness or hits. The reader and lifecycle basis belong
     to this request; the catalogue generation decides whether paths can recur.
-    `complete` is that snapshot's proof that `visible` admits every catalogue
-    page row, so the catalogue's own statistics describe exactly what this
-    request may see.
+    `catalogue_ranking` is the caller's configuration-only finding that this
+    admission can withhold no page, so a ranking may use the catalogue's own
+    statistics; which pages exist never decides it. `complete` is each
+    snapshot's check of that finding.
     """
 
     vault_root: Path
     visible: Callable[[str], bool]
     status_basis: Any
+    catalogue_ranking: bool = False
     generation: tuple | None = None
     admitted_paths: set[str] | None = None
     complete: bool = False
@@ -7564,15 +7569,22 @@ class LexicalStore:
                 for row in conn.execute(f"SELECT p.path FROM pages p WHERE {in_scope}", raw_params)
             ]
             context.admitted_paths = {path for path in candidates if context.visible(path)}
-            # Catalogue statistics count every page row, raw material and pages
-            # outside the scope included, so they describe this reader only
-            # when it may see all of them. Stops at the first withheld row.
-            context.complete = len(context.admitted_paths) == len(candidates) and all(
-                context.visible(str(row[0]))
-                for row in conn.execute(
-                    f"SELECT p.path FROM pages p WHERE NOT ({in_scope})", raw_params
+            # Checked only where configuration allows catalogue ranking: its
+            # statistics count every page row, raw material and pages outside
+            # the scope included. Stops at the first withheld row.
+            context.complete = context.catalogue_ranking and (
+                len(context.admitted_paths) == len(candidates)
+                and all(
+                    context.visible(str(row[0]))
+                    for row in conn.execute(
+                        f"SELECT p.path FROM pages p WHERE NOT ({in_scope})", raw_params
+                    )
                 )
             )
+            if context.catalogue_ranking and not context.complete:
+                # Configuration said nothing can be withheld and this snapshot
+                # found a withheld row: rank on admission and say so, by code.
+                log.warning("carry ranking %s", CATALOGUE_RANKING_CONTRACT_VIOLATION)
             context.generation = generation
         return context.admitted_paths
 
@@ -7621,8 +7633,8 @@ class LexicalStore:
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
         if query_context is not None:
-            # Decided on this snapshot: a request whose admission withholds no
-            # page row ranks on the catalogue, and any other request filters
+            # Configuration decides: a request whose admission can withhold
+            # nothing ranks on the catalogue, and every other request filters
             # and ranks on what it admits, so a withheld page neither takes a
             # row nor moves a score.
             current_paths = self._request_admitted_paths(conn, query_context, scope)

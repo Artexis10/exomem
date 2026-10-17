@@ -1354,12 +1354,15 @@ def request_admission(
     """The request's carry admission: `query_context` when the caller already
     holds one, else a new `lexstore.RequestQueryContext` for `visible`.
 
-    An omitted predicate is not proof of complete admission: the owner's walk
-    can still withhold pages (owner-audience rules, tombstones, unplaced
-    collection-store entries). Ask the existing walk owner; only its `None`
-    proves the unrestricted empty-policy case. Each query snapshot then proves
-    whether this admission withholds any page row
-    (`lexstore.RequestQueryContext.complete`), which decides the ranking.
+    The ranking mode comes from configuration, never from which pages exist.
+    A caller with its own predicate (a restricted reader's view) always ranks
+    on what it admits. Otherwise the walk owner decides: its `None` means no
+    governance policy, collection-store marker, bound writer or lifecycle
+    marker exists and the owner's access is unrestricted, so nothing can be
+    withheld and the catalogue's statistics apply. Any of those configured,
+    an owner rule or not, ranks on admission: under a governance policy the
+    owner's walk also withholds by page content (an unapproved bridge, an
+    unresolved scope membership).
     """
     if query_context is not None:
         return query_context
@@ -1368,7 +1371,10 @@ def request_admission(
 
     admitted = visible if visible is not None else egress.release_walk_filter(vault_root)
     return lexstore.RequestQueryContext(
-        vault_root, admitted if admitted is not None else (lambda _path: True), status_basis
+        vault_root,
+        admitted if admitted is not None else (lambda _path: True),
+        status_basis,
+        catalogue_ranking=admitted is None,
     )
 
 
