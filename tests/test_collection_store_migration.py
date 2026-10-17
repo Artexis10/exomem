@@ -261,6 +261,26 @@ def test_a_failed_proof_leaves_no_store_marker_or_fence_and_names_the_collection
     assert staging_directories(root) == [] and vault_bytes(root) == before
 
 
+def test_text_inside_a_legacy_log_block_blocks_the_migration_and_names_the_block(env, capsys):
+    """Defect: the first render of a migrated log keeps only each block's values, so a line the
+    owner wrote inside a block is lost at the log's first publication, or at an export, which
+    renders the same bytes."""
+    root = legacy_vault(env)
+    log = root / X3.replace("_collection.md", "Training Log.md")
+    log.write_bytes(log.read_bytes().replace(b"- Tricep Press | blue short | 17\n",
+                                             b"- Tricep Press | blue short | 17\nFelt strong today.\n", 1))
+    manifest = collections.load_manifest(root, root / X3)
+    [block] = [record.identity.key for record in record_formats.load_adapter(root, manifest).read().records
+               if record.values["occurred_on"] == "2024-11-19"]
+    before = vault_bytes(root)
+    assert migrate(root, "apply") == 1
+    report = printed(capsys)
+    blocked = {row["path"]: row["blocker"] for row in report["collections"] if row["status"] == "blocked"}
+    assert list(blocked) == [X3] and blocked[X3]["check"] == "b" and block in blocked[X3]["reason"]
+    assert not connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert vault_bytes(root) == before
+
+
 def _apply_and_crash(environment, database, cut, released):
     """`migrate --apply` in a fresh interpreter that dies at ``cut``, as a killed process would."""
     os.environ.clear()

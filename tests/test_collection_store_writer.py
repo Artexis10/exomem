@@ -393,7 +393,10 @@ def log_manifest_text():
 
 def test_a_log_append_records_only_its_pending_basis(store):
     """Defect: every log append renders the whole log inside its transaction, so the acknowledgement
-    costs grow with the log; the asynchronous projector renders it instead."""
+    costs grow with the log; the asynchronous projector renders it instead.
+
+    It pins the stored basis because that basis is what keeps a full render off the acknowledgement path.
+    """
     store.create_collection(manifest_path(), log_manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
     generation = store.connection.execute("SELECT generation FROM collections").fetchone()[0]

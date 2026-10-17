@@ -658,6 +658,94 @@ def test_a_log_blocks_foreign_or_tampered_stamp_is_held(store, stamped):
         assert b"- reps | 10" in path.read_bytes()
 
 
+def held_issues(store):
+    return [issue["code"] for diagnostic in json.loads(
+        store.connection.execute("SELECT diagnostics_json FROM held_candidates").fetchone()[0])
+        for issue in diagnostic.get("issues", ())]
+
+
+def test_a_log_block_edit_that_also_adds_text_is_held_with_the_text(store):
+    """Defect: a block edit that changes a value and adds a line of prose applies the value and
+    drops the prose when the log is rendered again."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    path.write_bytes(path.read_bytes().replace(b"- reps | 10\n", b"- reps | 12\nFelt strong today.\n"))
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert txns(store, "view_edit") == []
+    [(_, code, raw)] = holds(store)
+    assert code == "VIEW_INVALID" and b"- reps | 12\nFelt strong today.\n" in raw
+    assert held_issues(store) == ["VIEW_BLOCK_TEXT"]
+    assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0])["details"] == [
+        {"field": "reps", "value": "10"}]
+
+
+def test_a_log_block_that_names_no_row_is_held_and_appends_nothing(store):
+    """Defect: a block the owner typed into the log, which no record id binds to a row, is dropped
+    by the next render, or becomes a row without a governed append."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    typed = b"### Two\n- reps | 5\n\n"
+    path.write_bytes(path.read_bytes().replace(b"## Entries\n", b"## Entries\n" + typed, 1))
+    before = txns(store)
+    passes(store, 0.0, SETTLED)
+    assert [(code, raw) for _, code, raw in holds(store)] == [("VIEW_UNBOUND", typed)]
+    assert txns(store) == before and b"### Two" not in path.read_bytes()
+
+
+def test_a_held_whole_log_view_is_withheld_from_a_caller_who_cannot_read_every_row(store):
+    """Defect: a hold of the whole log view, whose bytes show every row, is released to a caller
+    from whom one of those rows is withheld."""
+    from test_collection_store_writer import OTHER, log_manifest_text
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem.collection_store import authority
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance.principal import owner_principal, request_scope
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    store.append_record(CID, item={"title": "Open", "details": []}, item_key=KEY, why="capture")
+    receipt = store.append_record(CID, item={"title": "Secret", "details": []}, item_key=OTHER, why="capture")
+    store.reconcile_views()
+    log = receipt["affected_paths"][0]
+    path = store.root / log
+    path.write_bytes(b"A note above the log.\n" + path.read_bytes())  # an edit of the frame holds the whole view
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert [code for _, code, _ in holds(store)] == ["VIEW_INVALID"] and held_issues(store) == ["VIEW_FRAME_CHANGED"]
+    sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    marker = authority.marker_path(store.root)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({
+        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid, "authority_epoch": 1,
+        "collections": [{"collection_id": CID, "manifest_path": manifest_path(), "authority": "store",
+                         "store_id": sid, "semantic_profile": "records", "source_path": log,
+                         "layout": "markdown-log"}],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
+    }))
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")  # withholds one row by its reference
+    write_rule(store.root, ceiling=0)
+
+    [held] = store.connection.execute("SELECT held_id FROM held_candidates").fetchone()
+
+    def attention(who):
+        with preview_store(store.root, store.handle), request_scope(who):
+            findings, unknown = edit_back.attention_findings(store.root)
+        return [finding.meta["held_id"] for finding in findings], unknown
+
+    assert attention(owner_principal()) == ([held], None)
+    assert attention(_external()) == ([], None)
+
+
 X3 = "Knowledge Base/Records/Health/X3/_collection.md"
 X3_LOG = "Knowledge Base/Records/Health/X3/Training Log.md"
 

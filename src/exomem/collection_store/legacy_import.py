@@ -605,6 +605,21 @@ def _prove_round_trip(captured, key, values, body, natural):
         _refuse("b", "render/parse values, body, identity or natural key differ")
 
 
+def _prove_log_block(captured, record, key, values):
+    """Check (b) for a log block: its first render keeps every line of the owner's text.
+
+    The store keeps a block's values only, and the projector and the export render the
+    block from them, so a line the values do not render would be lost at the first render.
+    The line comparison does not depend on the newline style.
+    """
+    data = dict(captured.snapshot.source_bytes)[captured.manifest.storage.source]
+    legacy = data[record.span.start:record.span.end]
+    rendered = log_view.render_block(captured.manifest, {"item_key": key, "values": values}, "\n")
+    if log_view.block_lines(rendered.encode("utf-8")) != log_view.block_lines(legacy):
+        line = data[:record.span.start].count(b"\n") + 1
+        _refuse("b", f"log block {key} at line {line} holds text that its row cannot render")
+
+
 def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash):
     manifest = captured.manifest
     cid = manifest.collection_id
@@ -630,6 +645,8 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
         ):
             _refuse("b", "stored values, body or natural key differ")
         _prove_round_trip(captured, key, values, body, natural)
+        if manifest.storage.strategy == "markdown-log":
+            _prove_log_block(captured, record, key, values)
     count, head, previous = 0, None, None
     checkpoint_seen = False
     ordered = hashlib.sha256(b"legacy-audit-ordered-v1\0")

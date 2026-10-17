@@ -387,15 +387,17 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
     return Classification(None, None, generation, generation, blocks=tuple(found))
 
 
-def _block_lines(data: bytes) -> list[bytes]:
-    """A block's lines without trailing spaces or blank lines: what a formatting-only edit keeps."""
-    return [line.rstrip() for line in data.splitlines() if line.strip()]
-
-
 def _renders_block(manifest, frame, key, values, stamp, block) -> bool:
-    """Whether ``block`` is the store's render of ``values`` under ``stamp``, up to formatting."""
-    rendered = record_formats.render_markdown_log_item(manifest, values, key, frame.newline, view_stamp=stamp)
-    return _block_lines(rendered.encode()) == _block_lines(block)
+    """Whether ``block`` is the store's render of ``values`` under ``stamp``, up to blank lines and spaces."""
+    rendered = log_view.render_block(manifest, {"item_key": key, "values": values}, frame.newline, stamp=stamp)
+    return log_view.block_lines(rendered.encode()) == log_view.block_lines(block)
+
+
+def _shown(manifest, key, values, name) -> bool:
+    """Whether a row's block shows field ``name``: an empty child list or an undrawn field it does not."""
+    rest = {field: value for field, value in values.items() if field != name}
+    return (log_view.render_block(manifest, {"item_key": key, "values": values}, "\n")
+            != log_view.render_block(manifest, {"item_key": key, "values": rest}, "\n"))
 
 
 def _classify_block(writer, manifest, declared, frame, row, record, stamp, block, refused) -> Classification:
@@ -424,16 +426,21 @@ def _classify_block(writer, manifest, declared, frame, row, record, stamp, block
         return found(INVALID)
     try:
         values = collections.normalize_item_values(manifest.schema, record.values)
+        changes, deleted = _changes(row["values"], values)
+        # A field the block does not show is not something the owner removed from it.
+        deleted = [name for name in deleted if _shown(manifest, row["item_key"], row["values"], name)]
+        final = {name: value for name, value in row["values"].items() if name not in deleted}
+        final.update(changes)
+        # The store keeps the values alone, so a block whose text they do not render would lose that text.
+        renders = _renders_block(manifest, frame, row["item_key"], final, stamp, block)
     except collections.CollectionError as error:
         return found(INVALID, issues=_refused(error))
-    if values == row["values"]:
-        return found(SAME) if _renders_block(manifest, frame, row["item_key"], values, stamp, block) \
-            else found(INVALID, issues=(_BLOCK_TEXT,))
+    if not renders:
+        return found(INVALID, issues=(_BLOCK_TEXT,))
+    if not changes and not deleted:
+        return found(SAME)
     if refused:
         return found(INVALID, issues=tuple(refused))
-    changes, deleted = _changes(row["values"], values)
-    final = {name: value for name, value in row["values"].items() if name not in deleted}
-    final.update(changes)
     try:
         # The same validation the leaf runs, with the stored row as its base.
         writer._validate(manifest, declared, row["item_key"], final, before=row["values"], operation="update")

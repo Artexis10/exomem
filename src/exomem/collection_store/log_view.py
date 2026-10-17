@@ -100,6 +100,12 @@ def rows(conn, manifest) -> list[dict]:
     return [{**row, "values": json.loads(row["values_json"])} for row in found]
 
 
+def render_block(manifest, row: Mapping, newline: str, *, stamp=None) -> str:
+    """One row's block: its heading, record id, view stamp when given, and child rows."""
+    return record_formats.render_markdown_log_item(manifest, row["values"], row["item_key"], newline,
+                                                   view_stamp=stamp)
+
+
 def render(manifest, frame: LogFrame, blocks: Iterable[Mapping], *, stamp=None) -> str:
     """The log view: the frame, one block per row in order, then the frame's suffix.
 
@@ -107,7 +113,16 @@ def render(manifest, frame: LogFrame, blocks: Iterable[Mapping], *, stamp=None) 
     because file mode has no store to name.
     """
     return frame.text + "".join(
-        record_formats.render_markdown_log_item(manifest, row["values"], row["item_key"], frame.newline,
-                                                view_stamp=None if stamp is None else stamp(row))
-        for row in blocks
+        render_block(manifest, row, frame.newline, stamp=None if stamp is None else stamp(row)) for row in blocks
     ) + frame.suffix
+
+
+def block_lines(data: bytes) -> list[bytes]:
+    """The lines of a block that carry its text, to compare a block with its render.
+
+    Blank lines, trailing spaces and the record-id and audit marker comments carry none of
+    the owner's text, so a render may change them.
+    """
+    return [line.rstrip() for line in data.splitlines() if line.strip()
+            and not record_formats._MARKER.fullmatch(line.strip())
+            and not records._LOG_AUDIT_MARKER.fullmatch(line.strip())]

@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
+#: The share of a handoff's remaining time that installing pending views may take. A view
+#: left pending costs only lag; a handoff past its deadline fails, so the replica gets the rest.
+DRAIN_SHARE = 0.5
 #: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
 WATCH_SECONDS = 1.0
 _BUSY_RETRY_SECONDS = 0.05
@@ -632,9 +635,10 @@ class CollectionStoreRuntime:
         """Install the views that committed changes left pending, before a handoff or a stop (design §5).
 
         It publishes what the serving store thread would, under the release that lets that
-        thread publish, through the same reconcile. A view it cannot install before the
-        deadline stays pending for the next holder's startup pass, so a failure costs a
-        lagging view, never the handoff.
+        thread publish, through the same reconcile. It takes at most half of the time left
+        before the handoff's deadline and leaves the rest to the replica publication and the
+        coordinator release. A view it cannot install in its share stays pending for the next
+        holder's startup pass, so a slow drain costs a lagging view, never the handoff.
         """
         from . import capability
 
@@ -643,10 +647,12 @@ class CollectionStoreRuntime:
         from ..governance import principal
         from .writer import CollectionWriter
 
+        now = time.monotonic()
+        deadline = now + max(0.0, deadline - now) * DRAIN_SHARE
         writer, after, passes = CollectionWriter(self.root, handle), None, 0
         try:
             with principal.library_scope():
-                # One pass installs each view; the next confirms it current.
+                # One pass installs each view; the next confirms it current. Each pass is one window.
                 while passes < 2 and time.monotonic() < deadline and not (cancelled is not None and cancelled()):
                     if handle.connection.execute(
                             "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
@@ -1277,10 +1283,10 @@ class StoreServer:
 
         It runs while the release enables ``collection-views-v1`` or ``records-summary-v1``,
         unless the vault's rollback disabled it. Under ``collection-views-v1``, edit-back
-        (``edit_back``) reads every item and manifest view at its first tick and every 60 s
+        (``edit_back``) reads every item, manifest and log view at its first tick and every 60 s
         after, outside the write transaction, and turns each settled edit into a governed
         update or a held correction. Then a committed change's pending views, such as
-        summary pages, publish a window at a time through the store's reconcile path, as
+        summary pages and log views, publish a window at a time through the store's reconcile path, as
         the in-process owner. A window holds at most
         ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
         view installed by one pass is confirmed current by the next, so two passes follow
