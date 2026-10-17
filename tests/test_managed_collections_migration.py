@@ -277,9 +277,10 @@ def test_a_release_that_keeps_the_migration_dark_upgrades_as_before(service, tmp
     root = service
     operator_file(tmp_path)
     pre_import(root, monkeypatch)
-    # The standby runs the candidate, whose fence keeps the migration off.
-    monkeypatch.setattr(capability, "RELEASED", frozenset())
-    result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, frozenset()))
+    # The standby runs the candidate, a public release: summary collections on, the migration off.
+    public = frozenset({capability.RECORDS_SUMMARY_V1})
+    monkeypatch.setattr(capability, "RELEASED", public)
+    result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, public))
     assert result["ok"], result
     assert result["handoff"]["migration"] == {"state": "skipped", "reason": "declared_none"}
     assert authority.read_marker(root) is None and not connection.store_path(root).exists()
@@ -616,11 +617,12 @@ def test_a_swap_that_stops_after_it_set_the_live_s1_store_aside_fails_the_handof
     assert not connection.store_path(root).exists()
 
 
-def test_a_failure_after_publication_serves_the_vault_and_the_next_handoff_finishes_it(
+def test_a_failure_after_publication_that_persists_serves_the_vault_and_the_next_handoff_finishes_it(
         service, tmp_path, monkeypatch, capsys):
-    """A failure after the store was published that stops the whole service until an operator resumes,
-    a writer inside the lease that changes the files the published store imported, or a next handoff
-    that admits that store although a file changed outside the lease meanwhile, losing the change."""
+    """A failure after the store was published that a rerun does not clear and that stops the whole
+    service until an operator resumes, a writer inside the lease that changes the files the published
+    store imported, or a next handoff that admits that store although a file changed outside the
+    lease meanwhile, losing the change."""
     root = service
     operator_file(tmp_path)
     # Short, so the lease the failed migrator keeps expires within the test.
@@ -633,7 +635,10 @@ def test_a_failure_after_publication_serves_the_vault_and_the_next_handoff_finis
     result = upgrade(tmp_path, Handoff(tmp_path, root), failing)
     assert result["ok"], result
     assert result["phase"] == "ready"
-    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "pending", "code": "OSError"}
+    # The supervisor's one rerun met the same fault.
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "pending", "code": "OSError",
+        "first_attempt": {"outcome": "pending", "code": "OSError"}}
     assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
     # The migrator that raised keeps its lease until it expires.
     held = lease()
@@ -665,6 +670,42 @@ def test_a_failure_after_publication_serves_the_vault_and_the_next_handoff_finis
     assert {entry["collection_id"] for entry in routed["collections"]} == set(MIGRATED)
     assert (fence().generation, fence().store_id) == (2, routed["store_id"])
     assert stored_body(root, KEY) == "Edited by hand\n"
+
+
+def test_a_failure_after_publication_that_a_rerun_clears_finishes_in_the_same_handoff(service, tmp_path, monkeypatch):
+    """A failure after the store was published that a second attempt would clear, left for the next
+    upgrade, so the vault stays read-only until then although nothing stands in the way."""
+    root = service
+    operator_file(tmp_path)
+    # Short, so the lease the failed migrator keeps expires within the test.
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
+    fired = tmp_path / "fault-fired"
+    transient = candidate(tmp_path, MIGRATE, name="-failed-marker-once", fault=(
+        "import pathlib\n"
+        "from exomem.collection_store import admission\n"
+        "installed = admission._install_marker\n"
+        "def install_marker(*arguments, **options):\n"
+        f"    fired = pathlib.Path({str(fired)!r})\n"
+        "    if not fired.exists():\n"
+        "        fired.touch()\n"
+        "        raise OSError(5, 'an I/O error before the marker was written')\n"
+        "    return installed(*arguments, **options)\n"
+        "admission._install_marker = install_marker\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), transient)
+    assert result["ok"], result
+    assert result["phase"] == "ready"
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "migrated", "first_attempt": {"outcome": "pending", "code": "OSError"}}
+    routed = marker(root)
+    assert {entry["collection_id"]: entry["manifest_path"] for entry in routed["collections"]} == MIGRATED
+    assert (fence().enrolled, fence().generation, fence().store_id) == (True, 1, routed["store_id"])
+    # The replacement writes: the vault is not left read-only behind the cut fence.
+    serving = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=CID, item={"title": "After the rerun"},
+                    why="a write after the handoff")["outcome"] == "committed"
+    finally:
+        serving.stop()
 
 
 def test_a_migrator_the_supervisor_stopped_is_recorded_as_timed_out_with_its_output(

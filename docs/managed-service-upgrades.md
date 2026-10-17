@@ -508,15 +508,16 @@ declares no collections migration.
 - `{"state": "ran", "outcome": "blocked"}`: a collection failed its proof, and
   the migrator published nothing.
 - `{"state": "ran", "outcome": "pending"}`: the migrator published the store
-  but did not finish. The service runs, but it refuses every write until the
-  step finishes. See below.
+  but did not finish, and the supervisor's rerun did not finish it either. The
+  service runs, but it refuses every write until the step finishes. See below.
 - `{"state": "ran", "outcome": "unsafe"}`: the migrator stopped while the live
   store was set aside. The upgrade fails. See below.
 - `{"state": "ran", "outcome": "timed_out"}`: the supervisor stopped the
   migrator at the end of its 15 s. The upgrade fails. See below.
 
 An outcome can carry a `code`, which names the refusal or error that the
-migrator ran into. The migrator's full report goes to the service journal. For
+migrator ran into. After a rerun, `first_attempt` holds the outcome and code of
+the attempt before it. The migrator's full report goes to the service journal. For
 an abandoned migration, `abandoned_because` is `deadline`, `live_store_changed`
 or `refused`. For a blocked one, the report names the collection and the failed
 check.
@@ -540,22 +541,28 @@ fix its files as the report says, then repeat the steps.
 
 #### A pending migration
 
-A `pending` outcome means that the migrator published the store and then
-failed before it installed the marker. The supervisor starts the new release
-anyway. Until the migration finishes, the coordinator's store fence refuses
-every write, so the service answers reads and refuses writes. No write can
-then change what the published store imported.
+When the migrator publishes the store and then fails before it installs the
+marker, the supervisor runs it once more before it starts the new release. The
+migrator that failed keeps its lease for the lease time-to-live,
+`EXOMEM_WRITER_LEASE_TTL`, 30 s by default, so the supervisor waits that long
+first. The rerun adds the time-to-live and up to 15 s to the handoff. When it
+finishes the migration, the outcome is `migrated` and the new release serves
+the store. The supervisor tries only once, because each attempt costs a
+time-to-live of downtime, and a fault that persists does not clear on a second
+try.
 
-The next handoff finishes the migration. To finish it sooner, do the offline
-steps under "An abandoned migration" above. Either way, the migrator first
-compares every collection with the files that it imported. When a file changed
-meanwhile, for example through a sync client, it imports the collections again
-before it installs the marker.
+A `pending` outcome means that the rerun did not finish the migration either.
+The supervisor starts the new release anyway. Until the migration finishes, the
+coordinator's store fence refuses every write, so the service answers reads and
+refuses writes. No write can then change what the published store imported.
 
-A migrator that failed keeps its lease for the lease time-to-live,
-`EXOMEM_WRITER_LEASE_TTL`, 30 s by default. A migration that runs again inside
-that time is refused with `COLLECTION_STORE_SERVICE_ACTIVE` and stays
-`pending`. Wait for the time-to-live before you run it again.
+The next handoff finishes the migration. To finish it sooner, fix the cause
+that `code` names, then do the offline steps under "An abandoned migration"
+above. Either way, the migrator first compares every collection with the files
+that it imported. When a file changed meanwhile, for example through a sync
+client, it imports the collections again before it installs the marker. A
+migration that runs within the time-to-live after a failed one is refused with
+`COLLECTION_STORE_SERVICE_ACTIVE` and stays `pending`.
 
 #### A migrator that timed out or left the store unsafe
 

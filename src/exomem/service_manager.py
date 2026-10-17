@@ -667,6 +667,13 @@ class Supervisor:
                             self._collections_note(handoff)
                     else:
                         self._collections_note(handoff)
+                # Outside the cutover budget: its one rerun first waits out a lease TTL.
+                rerun = getattr(self.runtime, "rerun_pending_collections", None)
+                if rerun is not None and collections:
+                    try:
+                        await rerun(target)
+                    finally:
+                        self._collections_note(handoff)
                 # Nothing is serving from here, and no rollback remains: the only
                 # question left is whether the replacement becomes ready, so it
                 # gets the same window a cold start gets. Ending the wait sooner
@@ -1428,6 +1435,40 @@ class WorkerRuntime:
             raise RuntimeError("offline target preparation failed")
         # A completed migrator is not proof its children have stopped.
         await self.stop(timeout=deadline.remaining(timeout))
+
+    async def rerun_pending_collections(self, target: dict[str, Any]) -> None:
+        """Run the migrator once more when its collections step left a published store pending.
+
+        Read from the store, not from the migrator's report. The migrator that failed keeps
+        its unadmitted lease until the lease expires, so the rerun first waits out the
+        service's lease TTL (`EXOMEM_WRITER_LEASE_TTL`). One rerun and no more: each attempt
+        costs a lease TTL of downtime, and a fault that persists does not clear on a second
+        try. A store still pending after it is served read-only until the next handoff or
+        the owner's apply finishes it, so this never fails the upgrade by itself.
+        """
+        note = self.collections_migration
+        if not isinstance(note, dict) or note.get("state") != "ran":
+            return
+        if not _collections_migration_pending(Path(os.environ["EXOMEM_VAULT_PATH"])):
+            return
+        first = {name: note[name] for name in ("outcome", "code") if name in note}
+        from .writer_lease import LeaseConfig
+
+        try:
+            ttl = LeaseConfig.from_env(self._spawn_environment() or os.environ).ttl_seconds
+        except ValueError:
+            self.collections_migration = {**note, "rerun_skipped": "lease configuration unreadable"}
+            return
+        await asyncio.sleep(ttl)
+        self.collections_migration = {"state": "requested"}
+        try:
+            await self.migrate(target, timeout=MIGRATION_SECONDS)
+        finally:
+            rerun = self.collections_migration or {}
+            if rerun.get("state") == "skipped":
+                self.collections_migration = {**note, "rerun_skipped": rerun.get("reason")}
+            else:
+                self.collections_migration = {**rerun, "first_attempt": first}
 
     def _release_migrator_output(self) -> bytes:
         """Pass the exited migrator's output on to the journal and close it; its bounded tail."""
