@@ -249,6 +249,74 @@ def test_remember_commit_revalidates_when_a_governed_commit_lands_between_prepar
     assert outcomes.get("reused") is None
 
 
+_TARGET_REL = "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization"
+_HOSTS_OVERLAY = (
+    "schema_version: 1\n"
+    "extensions:\n"
+    "  vault.hosts:\n"
+    "    parent: relates_to\n"
+    "    description: A venue hosts an event.\n"
+)
+
+
+def _relation_overlay(vault: Path) -> Path:
+    from exomem import relation_registry
+
+    return relation_registry.extension_registry_path(vault)
+
+
+def _unregister_hosts(vault: Path, _state_dir: Path) -> None:
+    # A hand edit of the overlay moves no commit generation.
+    _relation_overlay(vault).unlink()
+
+
+def _delete_target_in_a_governed_commit(vault: Path, state_dir: Path) -> None:
+    (vault / f"{_TARGET_REL}.md").unlink()
+    writer_lease._bump_commit_generation(state_dir, vault)
+
+
+@pytest.mark.parametrize(
+    "intervening_change", [_unregister_hosts, _delete_target_in_a_governed_commit]
+)
+def test_remember_judges_again_when_its_preflight_verdict_went_stale(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, intervening_change
+) -> None:
+    """The commit reuses the preflight's relation verdict only while its stamp
+    is current. A vocabulary hand edit or a governed commit between the two
+    takes away the only relation that qualified the draft, so the commit must
+    judge the draft again and refuse it instead of writing a stale verdict."""
+    overlay = _relation_overlay(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(_HOSTS_OVERLAY, encoding="utf-8")
+    kwargs = {
+        "content": (
+            "# Hosted retrieval review\n\n"
+            "## Observations\n\n"
+            "- [operating constraint] Keep the fusion stage bounded #reliability\n\n"
+            "## Relations\n\n"
+            f"- vault.hosts [[{_TARGET_REL}]]\n"
+        ),
+        "title": "Hosted retrieval review",
+        "slug": "hosted-retrieval-review",
+        "suggestions": False,
+    }
+    draft = op_remember(vault, validate_only=True, **kwargs)
+    assert draft["relation_disposition"] == "qualifying_relation"
+    manager = _standalone_manager(vault.parent / "state")
+    real_commit = semantic_writes.commit_creation
+
+    def commit_after_the_change(*args, **kw):
+        intervening_change(vault, manager.config.state_dir)
+        return real_commit(*args, **kw)
+
+    monkeypatch.setattr(semantic_writes, "commit_creation", commit_after_the_change)
+
+    with pytest.raises(ValueError, match="RELATION_DISPOSITION_MISSING"):
+        _invoke_remember(vault, manager, **kwargs)
+
+    assert not (vault / "Knowledge Base/Notes/Insights/hosted-retrieval-review.md").exists()
+
+
 def _edit_memory_command():
     return next(c for c in product_commands_for("mcp") if c.name == "edit_memory")
 

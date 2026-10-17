@@ -54,6 +54,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 import managed_recall  # noqa: E402
 
 from exomem import (  # noqa: E402
+    commands,
     deferred_index,
     derived_drain,
     derived_receipts,
@@ -61,11 +62,11 @@ from exomem import (  # noqa: E402
     mode,
     pending_recall,
     readiness,
+    semantic_contract,
     semantic_writes,
     writer_lease,
 )
 from exomem import find as find_module  # noqa: E402
-from exomem import vault as vault_module  # noqa: E402
 
 #: The design's installed-product numbers. Not this script's to tune.
 P50_MS = 3_000.0
@@ -93,6 +94,17 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
+def _identity(index: int) -> str:
+    return str(uuid.UUID(int=index + 1))
+
+
+def _acceptance_path(index: int) -> str:
+    # An entity page belongs under Entities/: the semantic contract pairs a
+    # declared type with its location, and a benchmark that fought that
+    # contract would be measuring the refusal.
+    return f"Knowledge Base/Entities/Concepts/acceptance-{index:04d}.md"
+
+
 def _page(title: str, marker: str, identity: str) -> str:
     return (
         "---\n"
@@ -112,6 +124,22 @@ def _page(title: str, marker: str, identity: str) -> str:
     )
 
 
+def _remember_content(title: str, marker: str, relation_target: str | None) -> str:
+    """A remember body that qualifies through one typed relation, as a real note does.
+
+    Without a target (an empty vault) the first remember is the vault's bootstrap
+    page, which needs no relation.
+    """
+    content = (
+        f"# {title}\n\n"
+        "## Observations\n\n"
+        f"- [config] {marker} #acceptance (live)\n"
+    )
+    if relation_target is not None:
+        content += f"\n## Relations\n\n- supports [[{relation_target}]]\n"
+    return content
+
+
 class _DirectTransport:
     """The in-process server: the real lease manager over the real leaves."""
 
@@ -122,31 +150,68 @@ class _DirectTransport:
         self.manager = writer_lease.LeaseManager(
             writer_lease.LeaseConfig(state_dir=state_dir)
         )
+        self._remember = next(
+            command for command in commands.PRODUCT_COMMANDS if command.name == "remember"
+        )
+        self._relation_target: str | None = None
+        self._relation_target_chosen = False
 
-    def write(self, rel_path: str, source: str) -> float:
-        target = self.vault_root / rel_path
+    def remember(self, index: int, marker: str) -> tuple[float, str]:
+        """The real `remember` command through the lease manager, as a served call runs it.
+
+        It runs the creation preflight, the relation review and the commit. The
+        server chooses the page, so the page's path comes back with the time.
+        """
+        if not self._relation_target_chosen:
+            # Chosen before the clock starts: any page a typed relation may target.
+            eligible = semantic_contract.build_corpus_context(
+                self.vault_root
+            ).eligible_governed_paths
+            self._relation_target = min(eligible).removesuffix(".md") if eligible else None
+            self._relation_target_chosen = True
+        title = f"Acceptance {index:04d}"
+        arguments = {
+            "content": _remember_content(title, marker, self._relation_target),
+            "title": title,
+            "note_type": "insight",
+            "suggestions": False,
+            "response_detail": "compact",
+        }
+        started = time.perf_counter()
+        result = self.manager.invoke(
+            self._remember,
+            (self.vault_root,),
+            arguments,
+            mutation_request_id=str(uuid.uuid4()),
+            implicit_idempotency_scope="session:live-write-acceptance",
+        )
+        elapsed = (time.perf_counter() - started) * 1_000.0
+        rel_path = str(result["path"])
+        rel_path = rel_path if rel_path.endswith(".md") else f"{rel_path}.md"
+        if self._relation_target is None:
+            # An empty vault's first page is the target every later page relates to.
+            self._relation_target = rel_path.removesuffix(".md")
+        return elapsed, rel_path
+
+    def edit(self, _index: int, rel_path: str, before_marker: str, after_marker: str) -> float:
+        """Replace one observation marker on the page `remember` created."""
+        before = (self.vault_root / rel_path).read_text(encoding="utf-8")
+        after = before.replace(before_marker, after_marker)
 
         def leaf(root: Path):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                preflight = semantic_writes.preflight_existing(
-                    root, path=rel_path, after_source=source, operation="observe"
-                )
-                if preflight.contract_result.should_block:
-                    codes = [
-                        item.code
-                        for item in preflight.contract_result.blocking_findings
-                    ]
-                    raise RuntimeError(f"acceptance write was blocked: {codes}")
-                semantic_writes.commit_existing(root, preflight=preflight)
-            else:
-                vault_module.batch_atomic_write(
-                    [vault_module.PlannedWrite(target, source, create_only=True)],
-                    vault_root=root,
-                )
+            preflight = semantic_writes.preflight_existing(
+                root, path=rel_path, after_source=after, operation="observe"
+            )
+            if preflight.contract_result.should_block:
+                codes = [
+                    item.code
+                    for item in preflight.contract_result.blocking_findings
+                ]
+                raise RuntimeError(f"acceptance write was blocked: {codes}")
+            semantic_writes.commit_existing(root, preflight=preflight)
             return {"path": rel_path, "warnings": []}
 
-        command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
+        command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False)
         started = time.perf_counter()
         self.manager.invoke(
             command,
@@ -170,6 +235,13 @@ class _ConnectorTransport:
     def __init__(self, url: str, token: str | None) -> None:
         self.url = url
         self.token = token
+
+    def remember(self, index: int, marker: str) -> tuple[float, str]:
+        rel_path = _acceptance_path(index)
+        return self.write(rel_path, _page(f"Acceptance {index:04d}", marker, _identity(index))), rel_path
+
+    def edit(self, index: int, rel_path: str, _before_marker: str, after_marker: str) -> float:
+        return self.write(rel_path, _page(f"Acceptance {index:04d}", after_marker, _identity(index)))
 
     def write(self, rel_path: str, source: str) -> float:
         payload = json.dumps(
@@ -507,29 +579,13 @@ def measure(
         )
         full_receipts_before = _full_receipt_count(root)
         for index in range(samples_per_operation):
-            identity = str(uuid.UUID(int=index + 1))
-            # An entity page belongs under Entities/: the semantic contract
-            # pairs a declared type with its location, and a benchmark that
-            # fought that contract would be measuring the refusal.
-            rel_path = (
-                f"Knowledge Base/Entities/Concepts/acceptance-{index:04d}.md"
-            )
             create_marker = f"acceptanceremember{index:04d}"
-            durations["remember"].append(
-                client.write(
-                    rel_path,
-                    _page(f"Acceptance {index:04d}", create_marker, identity),
-                )
-            )
+            remember_ms, rel_path = client.remember(index, create_marker)
+            durations["remember"].append(remember_ms)
             outcomes[_read_your_write(root, create_marker, rel_path)] += 1
 
             edit_marker = f"acceptanceedit{index:04d}"
-            durations["edit"].append(
-                client.write(
-                    rel_path,
-                    _page(f"Acceptance {index:04d}", edit_marker, identity),
-                )
-            )
+            durations["edit"].append(client.edit(index, rel_path, create_marker, edit_marker))
             outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
     finally:
         readiness.unmanage_runtime()

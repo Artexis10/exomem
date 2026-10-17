@@ -471,6 +471,9 @@ class _Attempt:
     instead of paying a second stat-walk of the whole vault. ``None`` whenever
     no single walk unambiguously matches ``before_corpus`` — a reused
     pre-validated attempt, or a build the corpus cache could not caption."""
+    binding: tuple = ()
+    """The draft this verdict judged: destination, normalized source, identity,
+    operation and draft-token hash. A later attempt reuses it only for the same draft."""
 
     @property
     def prevalidated_outcome(self) -> str:
@@ -486,10 +489,13 @@ class _Attempt:
 @dataclass(frozen=True, slots=True)
 class _PrevalidatedAttempt:
     """A pre-boundary ``_attempt`` result, reusable by a later ``_attempt``
-    call only while ``census_token`` still matches a freshly computed one."""
+    call only for the same draft (``binding``) and only while ``census_token``
+    is still current (``semantic_contract.validity_stamp_current``)."""
 
     census_token: tuple | None
+    binding: tuple
     before_corpus: semantic_contract.SemanticCorpusContext
+    after_corpus: semantic_contract.SemanticCorpusContext
     candidate: semantic_contract.SemanticPageState
     contracts: memory_schema.ResolvedMemoryContracts
     language_registry: semantic_language_registry.SemanticLanguageRegistry
@@ -3118,7 +3124,11 @@ def _attempt(
             raise RelationReviewError(
                 "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
             )
-    if reuse is not None:
+    # Commit-only inputs (auxiliaries, disposition, reason, predecessor) are
+    # read only by the exact-destination branch below, which runs on every
+    # attempt, reused or not; everything else the verdict read is named here.
+    binding = (destination, normalized, identity, operation, draft_token_hash)
+    if reuse is not None and reuse.binding == binding:
         from .writer_lease import read_commit_generation
 
         stamp_current = semantic_contract.validity_stamp_current(
@@ -3174,7 +3184,8 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
         )
-    after = before.with_candidate(candidate)
+    # `with_candidate` is a pure function of the two inputs a reuse carries.
+    after = reused.after_corpus if reused is not None else before.with_candidate(candidate)
     if reused is not None:
         contracts = reused.contracts
         result = reused.result
@@ -3288,6 +3299,32 @@ def _attempt(
         language,
         reused is not None,
         before_census,
+        binding,
+    )
+
+
+def prevalidated_attempt(
+    attempt: _Attempt, census_token: tuple | None
+) -> _PrevalidatedAttempt | None:
+    """Offer ``attempt``'s verdict to a later attempt on the same draft.
+
+    ``census_token`` is a validity stamp whose commit generation was read before
+    ``attempt`` read the corpus and which names every status and vocabulary
+    input it used. The later attempt re-admits it with ``validity_stamp_current``
+    and runs in full when it is stale. ``None`` when no stamp exists.
+    """
+    if census_token is None:
+        return None
+    return _PrevalidatedAttempt(
+        census_token,
+        attempt.binding,
+        attempt.before_corpus,
+        attempt.after_corpus,
+        attempt.candidate,
+        attempt.contracts,
+        attempt.language_registry,
+        attempt.result,
+        attempt.validation,
     )
 
 
@@ -3357,6 +3394,33 @@ def revalidate_prepared_creation_draft(
     this seam only lets deterministic writer preparation proceed far enough to
     reconstruct that exact ordered batch.
     """
+    return revalidate_prepared_creation_attempt(
+        vault_root,
+        path=path,
+        source=source,
+        draft_id=draft_id,
+        operation=operation,
+        draft_token=draft_token,
+        requested_disposition=requested_disposition,
+        predecessor_path=predecessor_path,
+        predecessor_content_hash=predecessor_content_hash,
+    ).validation
+
+
+def revalidate_prepared_creation_attempt(
+    vault_root: Path,
+    *,
+    path: str,
+    source: str,
+    draft_id: str,
+    operation: str,
+    draft_token: str,
+    requested_disposition: str | None = None,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> _Attempt:
+    """``revalidate_prepared_creation_draft``, returning the whole attempt so a
+    caller can offer it to the commit through ``prevalidated_attempt``."""
     try:
         requested_disposition = normalize_relation_disposition(requested_disposition)
         if requested_disposition not in {None, "reviewed_none"}:
@@ -3378,7 +3442,7 @@ def revalidate_prepared_creation_draft(
         )
         record = attempt.artifact
         if record is None:
-            return attempt.validation
+            return attempt
         validation = attempt.validation
         expected_kind = (
             "qualifying"
@@ -3405,7 +3469,7 @@ def revalidate_prepared_creation_draft(
         )
         if not matches:
             raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
-        return validation
+        return attempt
     except RelationReviewError:
         raise
     except Exception as error:
@@ -3688,6 +3752,7 @@ def prepare_commit_creation_draft(
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    prevalidated: _PrevalidatedAttempt | None = None,
 ) -> _PreparedCreationDraft:
     """Pre-boundary validation for ``commit_creation_draft``.
 
@@ -3695,6 +3760,10 @@ def prepare_commit_creation_draft(
     ``_attempt`` + ``_commit_plan`` pass — the same work ``commit_creation_draft``
     always did before acquiring ``vault_creation_lock``. Every error raised
     here happens before any lock or mutation-boundary exists to acquire.
+
+    ``prevalidated`` is the creation preflight's own attempt on this draft. The
+    preliminary attempt reuses it under the same admission as the in-lock one
+    (same draft, current validity stamp) and otherwise runs in full.
     """
     root = Path(vault_root).absolute()
     # Entry read: a governed commit landing during this preliminary pass
@@ -3773,6 +3842,7 @@ def prepare_commit_creation_draft(
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            reuse=prevalidated,
         )
         preliminary_commit_result, _preliminary_record = _commit_plan(
             preliminary,
@@ -3786,39 +3856,37 @@ def prepare_commit_creation_draft(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        # Thread the census straight from the corpus context this preliminary
-        # attempt just built, so the validity token never re-walks the vault.
-        # `cached_corpus_census` remains the fallback for the cases that walk
-        # produced no captionable census (or an eviction landed since), which
-        # is all it could ever offer on its own.
-        sc_token = (
-            semantic_contract.corpus_validity_token(
-                root,
-                status_dependencies=preliminary.after_corpus.status_dependencies,
-                definitions=semantic_contract.page_definitions_witnesses(preliminary.candidate),
-                corpus_census=(
-                    preliminary.before_corpus_census
-                    if preliminary.before_corpus_census is not None
-                    else semantic_contract.cached_corpus_census(root)
-                ),
+        if preliminary.reused:
+            # The preflight's stamp was current at this entry, so its captured
+            # generation equals `entry_generation`; it guards the in-lock
+            # attempt exactly as a freshly captured stamp would.
+            reuse = prevalidated
+        else:
+            # Thread the census straight from the corpus context this
+            # preliminary attempt just built, so the validity token never
+            # re-walks the vault. `cached_corpus_census` remains the fallback
+            # for the cases that walk produced no captionable census (or an
+            # eviction landed since), which is all it could ever offer on its own.
+            sc_token = (
+                semantic_contract.corpus_validity_token(
+                    root,
+                    status_dependencies=preliminary.after_corpus.status_dependencies,
+                    definitions=semantic_contract.page_definitions_witnesses(
+                        preliminary.candidate
+                    ),
+                    corpus_census=(
+                        preliminary.before_corpus_census
+                        if preliminary.before_corpus_census is not None
+                        else semantic_contract.cached_corpus_census(root)
+                    ),
+                )
+                if entry_generation is not None
+                else None
             )
-            if entry_generation is not None
-            else None
-        )
-        census_token = (sc_token, entry_generation) if sc_token is not None else None
-        reuse = (
-            _PrevalidatedAttempt(
-                census_token,
-                preliminary.before_corpus,
-                preliminary.candidate,
-                preliminary.contracts,
-                preliminary.language_registry,
-                preliminary.result,
-                preliminary.validation,
+            reuse = prevalidated_attempt(
+                preliminary,
+                (sc_token, entry_generation) if sc_token is not None else None,
             )
-            if census_token is not None
-            else None
-        )
         return _PreparedCreationDraft(
             identity,
             destination,

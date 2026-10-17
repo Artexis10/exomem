@@ -344,6 +344,8 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "preflight.validity_token",
         # A page creation's own stages, and the blocks every write attaches
         # after its commit, recorded directly rather than by the collector.
+        "writer.resolver_snapshot",
+        "preflight.creation",
         "commit.source_closure",
         "commit.relation_review_prepare",
         "commit.catalog_prepare",

@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -924,6 +924,11 @@ class CreationPreflight:
     vocabulary_binding: Any | None = None
     vocabulary_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
+    #: The relation-review verdict this preflight computed, offered to the
+    #: commit's own preliminary attempt; see `relation_review.prevalidated_attempt`.
+    relation_attempt: relation_review._PrevalidatedAttempt | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def draft_hash(self) -> str | None:
@@ -4304,6 +4309,44 @@ def preflight_creation(
     vocabulary_binding: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
 ) -> CreationPreflight:
+    # A fixed phase label. Its fields split out the two corpus-sized parts as
+    # whole milliseconds: `structural_ms` and `relation_review_ms`.
+    with call_spans.span("preflight.creation", {}) as measured:
+        return _preflight_creation(
+            vault_root,
+            measured,
+            path=path,
+            source=source,
+            operation=operation,
+            writer=writer,
+            draft_id=draft_id,
+            draft_token=draft_token,
+            registrations=registrations,
+            relation_disposition=relation_disposition,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
+            vocabulary_binding=vocabulary_binding,
+            status_basis=status_basis,
+        )
+
+
+def _preflight_creation(
+    vault_root: Path,
+    measured: dict[str, int],
+    *,
+    path: str,
+    source: str,
+    operation: str,
+    writer: str,
+    draft_id: str | None,
+    draft_token: str,
+    registrations: tuple[DraftRegistration, ...],
+    relation_disposition: str | None,
+    predecessor_path: str | None,
+    predecessor_content_hash: str | None,
+    vocabulary_binding: Any | None,
+    status_basis: lifecycle_statuses.Basis | None,
+) -> CreationPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
     origin_inputs = _prepare_origin_inputs(root, path, source)
@@ -4337,32 +4380,47 @@ def preflight_creation(
             details=closure_plan.inspection.public_details(),
         )
     entry_generation = _entry_commit_generation(root)
-    result, state, corpus_census, before_corpus, source = _evaluate_structural(
-        root, destination=path, source=source, operation=operation, status_basis=status_basis
-    )
+    started = time.perf_counter()
+    try:
+        result, state, corpus_census, before_corpus, source = _evaluate_structural(
+            root, destination=path, source=source, operation=operation, status_basis=status_basis
+        )
+    finally:
+        measured["structural_ms"] = round((time.perf_counter() - started) * 1000.0)
     origin_inputs = _prepare_origin_inputs(root, path, source)
     if semantic_contract.requires_semantic_unit(state):
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
-        validation = relation_review.revalidate_prepared_creation_draft(
-            root,
-            path=path,
-            source=source,
-            draft_id=draft_id,
-            operation=operation,
-            draft_token=draft_token,
-            requested_disposition=relation_disposition,
-            predecessor_path=predecessor_path,
-            predecessor_content_hash=predecessor_content_hash,
-        )
+        started = time.perf_counter()
+        try:
+            attempt = relation_review.revalidate_prepared_creation_attempt(
+                root,
+                path=path,
+                source=source,
+                draft_id=draft_id,
+                operation=operation,
+                draft_token=draft_token,
+                requested_disposition=relation_disposition,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
+            )
+        finally:
+            measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
+        validation = attempt.validation
+        # One stamp guards both verdicts: the generation read before either
+        # one, and every status and vocabulary input that either one read.
         census_token = _capture_validity_stamp(
             root,
             entry_generation,
             corpus_census=corpus_census,
             status_dependencies=tuple(
-                sorted(set(before_corpus.status_dependencies) | {state.status_dependency})
+                sorted(
+                    set(before_corpus.status_dependencies)
+                    | set(attempt.after_corpus.status_dependencies)
+                    | {state.status_dependency}
+                )
             ),
-            definitions=semantic_contract.page_definitions_witnesses(state),
+            definitions=semantic_contract.page_definitions_witnesses(state, attempt.candidate),
         )
         return CreationPreflight(
             "full",
@@ -4383,6 +4441,7 @@ def preflight_creation(
                 vocabulary_binding.parent_guard,
             ) if vocabulary_binding is not None else (),
             origin_inputs,
+            relation_review.prevalidated_attempt(attempt, census_token),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4675,6 +4734,7 @@ def _commit_creation(
                 draft_token=preflight.draft_token,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                prevalidated=preflight.relation_attempt,
             )
     with call_spans.span("commit.embedding_prewarm"):
         _prewarm_embeddings()

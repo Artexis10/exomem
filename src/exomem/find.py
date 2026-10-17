@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    call_spans,
     cli_ops,
     find_candidates,
     find_corpus,
@@ -6270,20 +6271,25 @@ def writer_resolver_snapshot(
     from .vault import WikilinkResolver
 
     root = Path(vault_root)
-    current_freshness = (
-        freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
-    )
-    with _RESOLVER_LOCK:
-        cached = _RESOLVER_CACHE.get(root)
-        if cached and cached[0] == current_freshness:
-            return cached[1].fork()
-    entries = semantic_contract.current_writer_resolver_entries(
-        root,
-        freshness_key=current_freshness,
-    )
-    if entries is not None:
-        return WikilinkResolver.from_entries(root, entries)
-    return WikilinkResolver(root)
+    # A fixed phase label; its one field names the route taken, a count.
+    with call_spans.span("writer.resolver_snapshot", {}) as measured:
+        current_freshness = (
+            freshness_key if freshness_key is not None else FreshnessSnapshot(root).vault()
+        )
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached and cached[0] == current_freshness:
+                measured["forked"] = 1
+                return cached[1].fork()
+        entries = semantic_contract.current_writer_resolver_entries(
+            root,
+            freshness_key=current_freshness,
+        )
+        if entries is not None:
+            measured["corpus_entries"] = 1
+            return WikilinkResolver.from_entries(root, entries)
+        measured["disk"] = 1
+        return WikilinkResolver(root)
 
 
 def _patch_broad_resolver(
