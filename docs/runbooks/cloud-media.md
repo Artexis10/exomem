@@ -11,6 +11,22 @@ Media extraction makes uploaded files searchable. The Cloud image carries two en
 
 Plain text, email and calendar files need no engine and are always read. Image vectors (CLIP) and speech are not in the Cloud image.
 
+## Check disk space before backfill
+
+Enabling an engine can process the existing media backlog. Memory brakes do not reserve disk space.
+A full volume can stop catalogue publication and leave the cell unready, even when the media child stays within its memory budget.
+
+1. Record the selected cell's capacity with `df -B1 "$EXOMEM_VAULT_PATH"`. Expect dated capacity and available-byte readings.
+2. Record the media backlog from resource status. Expect separate pending, blocked and failed counts.
+3. Record retained restore copies and current index sizes. Expect both in the used-space baseline.
+4. Compare available bytes with measured backfill growth, extraction scratch and catalogue replacement space. Expect a source for each estimate.
+5. If an estimate is unknown, record that gap in isolated qualification. Expect no estimate from upload size alone.
+6. Record disk usage during qualification and after backfill. Expect separate temporary peak use and retained growth.
+
+Model downloads and caches also use space when the selected engine needs them. Include those bytes in its qualification.
+Use the existing rollout procedure to select one cell first. Reuse its storage evidence only while its engine, backlog and volume conditions match.
+Removing a retained restore copy is a separate operator action under the restore runbook. A preflight does not authorize deletion or a volume change.
+
 ## Switch an engine on for a cell
 
 Every engine is off in a Cloud cell unless the platform values switch it on, for one cell or for the fleet. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`exomem status --resources`) and `exomem doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
