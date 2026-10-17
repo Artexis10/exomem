@@ -103,13 +103,9 @@ _DEGRADATION_COUNTS: dict[str, int] = {}
 # answer without a new envelope field.
 _RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
 
-# Pending-derived-work disclosure. A request answered while exact durable
-# receipts still cover part of the corpus is exact for direct, stable-ref,
-# keyword and hybrid recall, but the vector and graph lanes may legitimately
-# omit the pending generation (they contribute only proven-current ones). That
-# limitation rides the same `warming.components` envelope, so the caller can
-# tell a fully converged answer from one whose slower projections are behind
-# without a new envelope field.
+# Pending-derived-work disclosure. Custody suppresses old indexed content and
+# offers only proven current pages. Missing pending bodies and slower vector
+# or graph publications ride the existing `warming.components` envelope.
 _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 
 
@@ -688,7 +684,7 @@ class FreshnessSnapshot:
             for rel_path in pending.current_paths()
             if recall_policy.is_recall_candidate(self._root, self._root / rel_path)
         }
-        return (projected | admitted) - pending.tombstoned_paths()
+        return frozenset(pending.shadow(projected)) | admitted
 
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
@@ -831,6 +827,7 @@ class _EmptyPendingCoverage:
     """
 
     ready = True
+    servable = True
     empty = True
     rows: dict[str, Any] = {}
 
@@ -1319,11 +1316,9 @@ def find(
     from . import lexstore, readiness
 
     managed_runtime = readiness.runtime_managed()
-    # Exact pending coverage is proven before anything reads a persistent
-    # catalogue. Outstanding durable custody that cannot be hydrated within its
-    # bound means MANAGED recall cannot answer exactly, and the last published
-    # catalogue must not be served as though no committed mutation were
-    # outstanding. An offline/CLI caller is a different contract: it keeps its
+    # Trustworthy pending suppression precedes every persistent catalogue read.
+    # Incomplete bodies reduce coverage; unknown custody refuses managed recall.
+    # An offline/CLI caller keeps its
     # existing exact source-walk fallback, which reads canonical Markdown
     # directly and never consults this custody, so refusing it would deny an
     # answer that is already exact.
@@ -1331,7 +1326,7 @@ def find(
     # alternative to proving custody by reading the corpus.
     with _span(timings, "pending_visibility", source=find_types.SOURCE_INDEX):
         pending = freshness.recall_pending_coverage(vault_root)
-        if not pending.ready:
+        if not pending.servable:
             if managed_runtime:
                 _set_recall_projection_timing_outcome(timings, "pending_unavailable")
                 _mark_source(timings, "pending_visibility", find_types.SOURCE_DECLINED)
@@ -1548,11 +1543,10 @@ def find(
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
-    pending_active = not pending.empty
+    pending_active = not pending.empty or not pending.ready
     if pending_active:
-        # Disclosed, never silent: the answer is exact for direct, stable-ref,
-        # keyword and hybrid recall, while the vector and graph lanes contribute
-        # only proven-current generations. Appending to `degraded` also keeps
+        # Disclose pending omissions through the existing envelope. Appending
+        # to `degraded` also keeps
         # the result out of the hot cache, which must not outlive retirement.
         degraded.append(_PENDING_VISIBILITY_COMPONENT)
     if effective_result_level == "unit":
@@ -3767,7 +3761,7 @@ def _managed_eligible_filter_paths(
         # Reconsider stable children when a pending parent newly matches or
         # disappears, even when its previous catalogue metadata did not match.
         children = lexstore.parent_children_result(
-            vault_root, set(pending.rows), scope=scope, freshness=snapshot.for_scope(scope),
+            vault_root, set(pending.paths), scope=scope, freshness=snapshot.for_scope(scope),
         )
         if not children.readiness.complete:
             _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
@@ -5643,6 +5637,12 @@ def _keyword_match_paths(
     # lane would have kept. Without this, a burst of pending writes silently
     # shortens the settled half of a bounded lane.
     persistent_k = k if k is None else max(0, int(k)) + len(admitted_pending)
+    if merge_pending:
+        # Restrict before the catalogue's top-k cap, including unhydrated paths.
+        if allowed_paths is None:
+            persistent_k = None
+        else:
+            allowed_paths = set(pending.shadow(allowed_paths))
 
     def _merged(paths: list[str]) -> list[str]:
         if not merge_pending:

@@ -360,6 +360,7 @@ class PendingVisibilitySnapshot:
     snapshot_generation: int
     batches: tuple[PendingVisibilityBatch, ...]
     failure_code: str | None = None
+    paths: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.outcome not in _PENDING_SNAPSHOT_OUTCOMES:
@@ -373,6 +374,14 @@ class PendingVisibilitySnapshot:
             expected = f"pending_visibility_{self.outcome}"
             if self.failure_code != expected or self.batches:
                 raise ValueError("incomplete pending snapshot must fail closed")
+        if self.outcome == "unprovable" and self.paths:
+            raise ValueError("unprovable custody cannot carry a footprint")
+        if self.batches:
+            object.__setattr__(self, "paths", self.paths | {
+                row.rel_path for batch in self.batches for row in batch.rows
+            })
+        for path in self.paths:
+            _safe_rel_path(path, label="pending visibility rel_path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,7 +628,7 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
             "'pending_visibility_generation_delete', "
             "'derived_paths_sequence_fill', 'derived_paths_sequence', "
             "'derived_paths_after_sequence', 'derived_paths_missing_sequence', "
-            "'derived_batches_state')"
+            "'derived_batches_state', 'pending_recall_active')"
         )
     }
     return (
@@ -627,7 +636,7 @@ def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
         and "target_rel_path" in advisory
         and "batch_seq" in paths
         and "proven_at" in batches
-        and len(present) == 9
+        and len(present) == 10
         and connection.execute(
             "SELECT 1 FROM derived_batch_paths "
             "INDEXED BY derived_paths_missing_sequence "
@@ -1725,15 +1734,29 @@ def snapshot_pending_visibility(
     vault_root: Path,
     *,
     limit: int,
+    footprint_only: bool = False,
+    batch_ids: Collection[str] | None = None,
+    rel_paths: Collection[str] | None = None,
 ) -> PendingVisibilitySnapshot:
-    """Return all non-retired pending custody or one closed failure outcome."""
+    """Read validated custody paths and bounded receipts in one transaction.
+
+    Overflow limits receipt hydration, never path suppression. Targeted worker
+    reads include every active row of each selected batch for exact retirement.
+    """
     if limit <= 0:
         raise ValueError("pending visibility snapshot limit must be positive")
-    if not deferred_index.store_path(vault_root).exists():
+    try:
+        deferred_index.store_path(vault_root).stat()
+    except FileNotFoundError:
         return PendingVisibilitySnapshot(
             outcome="complete",
             snapshot_generation=0,
             batches=(),
+        )
+    except OSError:
+        return PendingVisibilitySnapshot(
+            outcome="unprovable", snapshot_generation=0, batches=(),
+            failure_code="pending_visibility_unprovable",
         )
     connection: sqlite3.Connection | None = None
     generation = 0
@@ -1741,27 +1764,57 @@ def snapshot_pending_visibility(
         connection = _connect_receipt_read(vault_root)
         connection.execute("BEGIN")
         generation = _pending_visibility_generation(connection)
-        rows = connection.execute(
-            "SELECT batch_id, rel_path, component_revision, canonical_generation, "
-            "state FROM pending_recall_rows WHERE state != 'retired' "
-            "ORDER BY batch_id, rel_path LIMIT ?",
-            (int(limit) + 1,),
-        ).fetchall()
-        if len(rows) > limit:
-            connection.rollback()
-            return PendingVisibilitySnapshot(
-                outcome="overflow",
-                snapshot_generation=generation,
-                batches=(),
-                failure_code="pending_visibility_overflow",
-            )
+        selected = None if batch_ids is None else set(batch_ids)
+        if rel_paths is not None:
+            named = set(rel_paths)
+            selected = {
+                str(batch_id)
+                for batch_id, rel in connection.execute(
+                    "SELECT batch_id, rel_path FROM pending_recall_rows "
+                    "WHERE state != 'retired'"
+                )
+                if rel in named
+            }
+        # LEFT JOIN preserves orphan custody as an explicit invalid row. Both
+        # lineage lookups use their primary keys, including above the body cap.
+        query = (
+            "SELECT r.batch_id, r.rel_path, r.component_revision, "
+            "r.canonical_generation, r.state, b.canonical_generation, "
+            "p.rel_path, p.before_hash, p.after_hash, p.stable_memory_ref, "
+            "EXISTS (SELECT 1 FROM derived_batch_components AS c "
+            "WHERE c.batch_id = r.batch_id AND c.revision = r.component_revision), "
+            "b.schema_version, b.mutation_attempt_digest, b.checkpoint_id, b.state, b.created_at, "
+            "(SELECT count(*) FROM derived_batch_components AS c WHERE c.batch_id = r.batch_id) "
+            "FROM pending_recall_rows AS r "
+            "LEFT JOIN derived_batches AS b ON b.batch_id = r.batch_id "
+            "LEFT JOIN derived_batch_paths AS p "
+            "ON p.batch_id = r.batch_id AND p.rel_path = r.rel_path "
+            "WHERE r.state != 'retired' "
+        )
+        parameters: tuple[object, ...] = ()
+        if selected is not None:
+            if not selected:
+                connection.commit()
+                return PendingVisibilitySnapshot("complete", generation, ())
+            query += "AND r.batch_id IN (" + ",".join("?" for _ in selected) + ") "
+            parameters = tuple(sorted(selected))
+        rows = connection.execute(query + "ORDER BY r.batch_id, r.rel_path", parameters).fetchall()
         grouped: dict[str, list[PendingVisibilityRow]] = {}
-        for batch_id_value, rel_path, revision, canonical_generation, state in rows:
+        for (batch_id_value, rel_path, revision, canonical_generation, state,
+             receipt_generation, receipt_path, before_hash, after_hash, stable_ref,
+             revision_exists, schema_version, attempt_digest, checkpoint, batch_state,
+             prepared_at, components) in rows:
             batch_id = _bounded(
                 batch_id_value,
                 label="batch_id",
                 maximum=_MAX_BATCH_ID,
             )
+            if batch_id not in grouped:
+                if schema_version != SCHEMA_VERSION or batch_state not in _BATCH_STATES or components != len(DerivedComponent):
+                    raise ValueError("pending visibility receipt is invalid")
+                _digest(attempt_digest, label="mutation_attempt_digest")
+                _bounded(checkpoint, label="checkpoint_id", maximum=_MAX_IDENTITY)
+                _timestamp(float(prepared_at))
             grouped.setdefault(batch_id, []).append(
                 PendingVisibilityRow(
                     rel_path=str(rel_path),
@@ -1769,6 +1822,25 @@ def snapshot_pending_visibility(
                     canonical_generation=str(canonical_generation),
                     state=str(state),
                 )
+            )
+            if receipt_generation != canonical_generation or not revision_exists:
+                raise ValueError("pending visibility lineage is inconsistent")
+            if receipt_path != rel_path:
+                raise ValueError("pending visibility path is not bound to its receipt")
+            DerivedBatchPath(
+                rel_path=receipt_path, before_hash=before_hash, after_hash=after_hash,
+                stable_memory_ref=stable_ref,
+            )
+        paths = frozenset(row.rel_path for values in grouped.values() for row in values)
+        if len(rows) > limit or footprint_only:
+            connection.commit()
+            overflow = len(rows) > limit
+            return PendingVisibilitySnapshot(
+                outcome="overflow" if overflow else "complete",
+                snapshot_generation=generation,
+                batches=(),
+                failure_code="pending_visibility_overflow" if overflow else None,
+                paths=paths,
             )
         batches: list[PendingVisibilityBatch] = []
         for batch_id in sorted(grouped):
@@ -1787,6 +1859,7 @@ def snapshot_pending_visibility(
             outcome="complete",
             snapshot_generation=generation,
             batches=tuple(batches),
+            paths=paths,
         )
     except (KeyError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
         if connection is not None:
@@ -1809,8 +1882,12 @@ def pending_visibility_snapshot_is_current(
     """Fence one complete hydration snapshot against every pending-row mutation."""
     if not isinstance(snapshot_generation, int) or snapshot_generation < 0:
         return False
-    if not deferred_index.store_path(vault_root).exists():
+    try:
+        deferred_index.store_path(vault_root).stat()
+    except FileNotFoundError:
         return snapshot_generation == 0
+    except OSError:
+        return False
     try:
         connection = _connect_receipt_read(vault_root)
         try:
@@ -2237,7 +2314,7 @@ def _record_recovery_failure(
             row = connection.execute(
                 "SELECT MAX(attempt_count) FROM derived_batch_components "
                 "WHERE batch_id = ? AND state IN "
-                "('prepared', 'ready', 'reconcile_required')",
+                "('prepared', 'ready', 'retryable', 'reconcile_required')",
                 (batch_id,),
             ).fetchone()
             attempts = (0 if row is None or row[0] is None else int(row[0])) + 1
@@ -2247,7 +2324,7 @@ def _record_recovery_failure(
                 "attempt_count = attempt_count + 1, "
                 "next_attempt_at = MAX(next_attempt_at, ?), updated_at = ?, "
                 "failure_code = ? WHERE batch_id = ? AND state IN "
-                "('prepared', 'ready', 'reconcile_required')",
+                "('prepared', 'ready', 'retryable', 'reconcile_required')",
                 (failed_at + delay, failed_at, failure_code, batch_id),
             )
             connection.execute(
@@ -2271,6 +2348,7 @@ def recover_prepared_batches(
     visibility_publisher: Callable[[Path, DerivedBatchReceipt], bool] | None,
     limit: int,
     now: float | None = None,
+    converge_current: Callable[[Path, Sequence[str], Sequence[str]], bool] | None = None,
 ) -> int:
     """Boundedly prove crash-cut custody from an independent live observation."""
     if (
@@ -2289,10 +2367,10 @@ def recover_prepared_batches(
                 "(b.state IN ('prepared', 'reconcile_required') OR ("
                 "b.state = 'ready' AND EXISTS ("
                 "SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))) "
+                "WHERE p.batch_id = b.batch_id AND p.state != 'retired'))) "
                 "AND EXISTS (SELECT 1 FROM derived_batch_components AS c "
                 "WHERE c.batch_id = b.batch_id AND c.state IN "
-                "('prepared', 'ready', 'reconcile_required') "
+                "('prepared', 'ready', 'retryable', 'reconcile_required') "
                 "AND c.next_attempt_at <= ?) "
                 "ORDER BY b.updated_at, b.created_at, b.batch_id LIMIT ?",
                 (observed_at, int(limit)),
@@ -2326,6 +2404,27 @@ def recover_prepared_batches(
                     label="current_generation",
                     maximum=_MAX_IDENTITY,
                 )
+                current = _load_receipt(vault_root, batch_id)
+                connection = _connect_receipt_read(vault_root)
+                try:
+                    visibility_complete = _pending_visibility_complete(connection, batch_id)
+                finally:
+                    connection.close()
+                if current.state == "ready" and visibility_complete:
+                    states, _guards = _observe_canonical_paths(vault_root, current.paths)
+                    if all(state == "after" for state in states):
+                        # Healthy live custody needs component work, not another
+                        # activation that would reset its dependency eligibility.
+                        connection = deferred_index._connect(vault_root, create=True)
+                        try:
+                            connection.execute(
+                                "UPDATE derived_batches SET updated_at = ? WHERE batch_id = ?",
+                                (observed_at, batch_id),
+                            )
+                            connection.commit()
+                        finally:
+                            connection.close()
+                        continue
                 proof = _prove_committed_guarded(
                     vault_root,
                     batch_id,
@@ -2334,6 +2433,29 @@ def recover_prepared_batches(
                     observed_at=observed_at,
                 )
                 if proof.outcome != "ready":
+                    if proof.outcome == "reconcile_required":
+                        connection = _connect_receipt_read(vault_root)
+                        try:
+                            proven = connection.execute(
+                                "SELECT proven_at IS NOT NULL FROM derived_batches WHERE batch_id = ?",
+                                (batch_id,),
+                            ).fetchone()[0]
+                        finally:
+                            connection.close()
+                        if proven and converge_current is not None:
+                            repair = reconcile_stranded_batches(
+                                vault_root, converge=converge_current,
+                                batch_ids=(batch_id,), limit=1, now=observed_at,
+                            )
+                            if repair["retired"]:
+                                recovered += 1
+                                continue
+                        # A failed proof is due work too. Rotate it behind later
+                        # batches and delay it just like a callback exception.
+                        _record_recovery_failure(
+                            vault_root, batch_id, failure_code="generation_changed",
+                            failed_at=observed_at,
+                        )
                     continue
                 current = _load_receipt(vault_root, batch_id)
                 visibility_connection = deferred_index._connect(
@@ -2372,11 +2494,14 @@ def recover_prepared_batches(
 
 
 _RECOVERING_BATCHES_SQL: Final = (
-    "SELECT count(*) FROM derived_batches AS b WHERE "
+    "SELECT (SELECT count(*) FROM derived_batches AS b WHERE "
     "b.state = 'prepared' OR ("
     "b.state = 'ready' AND EXISTS ("
     "SELECT 1 FROM pending_recall_rows AS p "
-    "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
+    "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))) + "
+    "(SELECT count(DISTINCT p.batch_id) FROM pending_recall_rows AS p "
+    "INDEXED BY pending_recall_active CROSS JOIN derived_batches AS b "
+    "ON b.batch_id = p.batch_id WHERE p.state != 'retired' AND b.state = 'completed')"
 )
 _STRANDED_BATCHES_SQL: Final = (
     "SELECT count(*) FROM derived_batches WHERE state = 'reconcile_required'"
@@ -2389,10 +2514,9 @@ STRANDED_RECONCILE_LIMIT: Final = 256
 def recoverable_batch_count(vault_root: Path) -> int:
     """Crash-cut custody a drain pass will prove and publish on its own.
 
-    A committed batch whose writer never proved it, or whose pending rows were
-    never published. A stranded (`reconcile_required`) batch is not counted:
-    no pass finishes it until newer custody or the recall lanes cover what
-    moved, so it is reported apart by :func:`stranded_batch_count`.
+    Includes lost proof, publication and completion callbacks. Stranded
+    (`reconcile_required`) batches are reported separately, including those
+    whose earlier committed proof permits receipt-scoped current-byte repair.
     """
     if not deferred_index.store_path(vault_root).exists():
         return 0
@@ -2410,6 +2534,32 @@ def stranded_batch_count(vault_root: Path) -> int:
     connection = _connect_receipt_read(vault_root)
     try:
         return int(connection.execute(_STRANDED_BATCHES_SQL).fetchone()[0])
+    finally:
+        connection.close()
+
+
+def completed_visibility_batches(vault_root: Path, *, limit: int, now: float) -> tuple[str, ...]:
+    """Select a bounded retirement turn even after a lost completion callback."""
+    if limit <= 0 or not deferred_index.store_path(vault_root).exists():
+        return ()
+    connection = deferred_index._connect(vault_root, create=True)
+    try:
+        batches = tuple(str(row[0]) for row in connection.execute(
+            "SELECT DISTINCT b.batch_id, b.updated_at, b.created_at "
+            "FROM pending_recall_rows AS p INDEXED BY pending_recall_active "
+            "CROSS JOIN derived_batches AS b ON b.batch_id = p.batch_id "
+            "WHERE p.state != 'retired' AND b.state = 'completed' "
+            "ORDER BY b.updated_at, b.created_at, b.batch_id LIMIT ?",
+            (int(limit),),
+        ))
+        # Rotate failed retirement proofs; an unrecoverable prefix cannot keep
+        # completed later batches from their next bounded service turn.
+        connection.executemany(
+            "UPDATE derived_batches SET updated_at = ? WHERE batch_id = ?",
+            [(now, batch_id) for batch_id in batches],
+        )
+        connection.commit()
+        return batches
     finally:
         connection.close()
 
@@ -2485,6 +2635,7 @@ def reconcile_stranded_batches(
     dry_run: bool = False,
     limit: int = STRANDED_RECONCILE_LIMIT,
     now: float | None = None,
+    batch_ids: Collection[str] | None = None,
 ) -> dict[str, int]:
     """Operator repair (owner ruling R3): converge stranded batches from current bytes.
 
@@ -2499,16 +2650,18 @@ def reconcile_stranded_batches(
     counts only.
     """
     stranded = _probe_stranded_count(vault_root)
-    if dry_run or not stranded or limit <= 0:
+    if dry_run or not stranded or limit <= 0 or batch_ids is not None and not batch_ids:
         return {"stranded": stranded, "retired": 0, "remaining": stranded}
     connection = _connect_receipt_read(vault_root)
     try:
+        selected = None if batch_ids is None else set(batch_ids)
         batch_ids = tuple(
             str(row[0])
             for row in connection.execute(
                 "SELECT batch_id FROM derived_batches WHERE state = 'reconcile_required' "
-                "ORDER BY rowid LIMIT ?",
-                (int(limit),),
+                + ("AND batch_id IN (" + ",".join("?" for _ in selected) + ") " if selected else "")
+                + "ORDER BY updated_at, rowid LIMIT ?",
+                (*sorted(selected or ()), int(limit)),
             )
         )
     finally:
@@ -2519,18 +2672,14 @@ def reconcile_stranded_batches(
 
     for batch_id in batch_ids:
         receipt = _load_receipt(vault_root, batch_id)
-        present = [
-            path.rel_path
-            for path in receipt.paths
-            if vault_root.joinpath(*path.rel_path.split("/")).is_file()
-        ]
+        paths = [path.rel_path for path in receipt.paths]
         created = [
             path.rel_path
             for path in receipt.paths
-            if path.before_hash is None and path.rel_path in present
+            if path.before_hash is None and vault_root.joinpath(*path.rel_path.split("/")).is_file()
         ]
         try:
-            if not converge(vault_root, present, created):
+            if not converge(vault_root, paths, created):
                 continue
         except Exception:  # noqa: BLE001 - one batch's fan-out cannot stop the rest
             continue

@@ -240,12 +240,15 @@ def drain_once(
         return 0
     started_at = time.time() if now is None else float(now)
     claim_owner = owner or f"derived-{secrets.token_hex(12)}"
+    from . import index_sync
+
     derived_receipts.recover_prepared_batches(
         vault_root,
         observe_current_generation=observe_current_generation,
         visibility_publisher=visibility_publisher,
         limit=int(limit),
         now=started_at,
+        converge_current=index_sync.converge_paths_from_current_bytes,
     )
     claims = derived_receipts.claim_ready_components(
         vault_root,
@@ -288,9 +291,13 @@ def drain_once(
             lease_seconds=CLAIM_LEASE_SECONDS,
             now=started_at,
         )
-    if completed_batches and retire_visibility is not None:
+    retirement_batches = tuple(dict.fromkeys((
+        *completed_batches,
+        *derived_receipts.completed_visibility_batches(vault_root, limit=int(limit), now=started_at),
+    )))
+    if retirement_batches and retire_visibility is not None:
         try:
-            retire_visibility(vault_root, tuple(dict.fromkeys(completed_batches)))
+            retire_visibility(vault_root, retirement_batches)
         except Exception:  # noqa: BLE001 - read-side re-derivation; custody is unchanged
             log.warning("pending visibility retirement re-check failed", exc_info=True)
     if completed_batches:

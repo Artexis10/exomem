@@ -100,12 +100,9 @@ def _pending_reference_projection(vault_root: Path):
     None when no committed mutation is still awaiting derived convergence, so
     the settled path stays exactly as it was.
     """
-    try:
-        from . import pending_recall
+    from . import pending_recall
 
-        return pending_recall.reference_projection(Path(vault_root))
-    except Exception:  # noqa: BLE001 - identity resolution must not depend on it
-        return None
+    return pending_recall.reference_projection(Path(vault_root))
 
 
 def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
@@ -813,7 +810,7 @@ class ReferenceIndex:
 
 
 def _apply_pending_identity(
-    vault_root: Path, exomem_id: str, rows: list[str]
+    vault_root: Path, exomem_id: str, rows: list[str], *, projection=None,
 ) -> list[str]:
     """Resolve one identity against pending custody before the persistent rows.
 
@@ -822,10 +819,17 @@ def _apply_pending_identity(
     back a path the canonical tree no longer has. Both are exact: the projection
     only holds generations whose after state was proven.
     """
-    projection = _pending_reference_projection(vault_root)
+    projection = projection if projection is not None else _pending_reference_projection(vault_root)
     if projection is None or projection.empty:
         return rows
-    surviving = [path for path in rows if path not in projection.absent_paths]
+    if projection.blocked_paths:
+        # Unknown pending identities can conceal a duplicate of any identifier.
+        # Refusing exact resolution costs a retry; claiming uniqueness can send
+        # a governed mutation to the wrong page. Path-based recall stays usable.
+        from .find import RetrievalIndexWarming
+
+        raise RetrievalIndexWarming(site="pending_visibility_incomplete", status="temporarily_unavailable")
+    surviving = [path for path in rows if path not in projection.refs_by_path]
     pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
     for path in pending_paths:
         if path not in surviving:
@@ -930,6 +934,12 @@ def paths_for_ids_read_only(
                 measured["pages"] = len(pages)
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    projection = _pending_reference_projection(root)
+    if projection is not None:
+        resolved = {
+            identifier: tuple(_apply_pending_identity(root, identifier, list(paths), projection=projection))
+            for identifier, paths in resolved.items()
+        }
     return resolved
 
 

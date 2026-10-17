@@ -2135,11 +2135,11 @@ _DERIVED_OPTIONAL_COMPONENTS: Final[frozenset[str]] = frozenset(
 #: replayed from a memo.
 _DERIVED_FANOUT_MEMO_LIMIT: Final = 64
 _DERIVED_FANOUT_MEMO_TTL_SECONDS: Final = 300.0
-_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, IndexSyncReport]] = {}
+_derived_fanout_memo: dict[tuple[str, str, str], tuple[float, tuple[IndexSyncReport, ...]]] = {}
 _derived_fanout_lock = threading.Lock()
 
 
-def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
+def _derived_memo_get(key: tuple[str, str, str]) -> tuple[IndexSyncReport, ...] | None:
     now = time.time()
     with _derived_fanout_lock:
         stale = [
@@ -2153,12 +2153,12 @@ def _derived_memo_get(key: tuple[str, str, str]) -> IndexSyncReport | None:
     return None if entry is None else entry[1]
 
 
-def _derived_memo_put(key: tuple[str, str, str], report: IndexSyncReport) -> None:
+def _derived_memo_put(key: tuple[str, str, str], reports: tuple[IndexSyncReport, ...]) -> None:
     with _derived_fanout_lock:
         if len(_derived_fanout_memo) >= _DERIVED_FANOUT_MEMO_LIMIT:
             oldest = min(_derived_fanout_memo, key=lambda item: _derived_fanout_memo[item][0])
             _derived_fanout_memo.pop(oldest, None)
-        _derived_fanout_memo[key] = (time.time(), report)
+        _derived_fanout_memo[key] = (time.time(), reports)
 
 
 def reset_derived_fanout_memo() -> None:
@@ -2180,20 +2180,22 @@ def converge_paths_from_current_bytes(
     proved itself (no reconcile-required component).
     """
     root = Path(vault_root)
-    written = [root.joinpath(*rel.split("/")) for rel in rel_paths]
-    if not written:
-        return True
+    written = [root.joinpath(*rel.split("/")) for rel in rel_paths if root.joinpath(*rel.split("/")).is_file()]
+    removed = [rel for rel in rel_paths if not os.path.lexists(root.joinpath(*rel.split("/")))]
+    if len(written) + len(removed) != len(rel_paths) or any(path.is_symlink() for path in written):
+        return False
     created = [root.joinpath(*rel.split("/")) for rel in created_rel_paths]
     from . import graph_sync
 
     with graph_sync.standalone_join_waived():
-        report = upsert_after_write(
-            root,
-            written,
-            created_paths=created,
-            publish_corpus_change=True,
-        )
-    return not report.reconcile_required
+        reports = []
+        if removed:
+            reports.append(delete_after_remove(root, removed))
+        if written:
+            reports.append(upsert_after_write(
+                root, written, created_paths=created, publish_corpus_change=True,
+            ))
+    return all(not report.reconcile_required for report in reports)
 
 
 def converge_derived_component(
@@ -2221,68 +2223,74 @@ def converge_derived_component(
     from . import claims, mode, recall_policy, semantic_drain
 
     service = mode.service_profile_enabled()
+    # Tombstones must reach the removal owner before any component can finish,
+    # including semantic components whose service path normally only queues work.
+    has_removals = any(path.after_hash is None for path in receipt.paths)
+    semantic_outcome: bool | Literal["pending"] | None = None
     if service:
         paths = [root / path.rel_path for path in receipt.paths if path.after_hash is not None]
         if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             semantic_drain.request(root, paths, edited=False, claims_required=key == DerivedComponent.CLAIMS.value and claims.claim_level_enabled())
         if key in {DerivedComponent.EMBEDDINGS.value, DerivedComponent.CLAIMS.value}:
-            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-                return True
-            if key == DerivedComponent.CLAIMS.value and not claims.claim_level_enabled():
-                return True
-            for path in receipt.paths:
+            semantic_outcome = True
+            enabled = not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
+                key != DerivedComponent.CLAIMS.value or claims.claim_level_enabled()
+            )
+            for path in receipt.paths if enabled else ():
                 if path.after_hash is None or not recall_policy.is_recall_candidate(root, root / path.rel_path):
                     continue
                 if not semantic_drain.publication_ready(root, path.rel_path, expected_hash=path.after_hash, claims_required=key == DerivedComponent.CLAIMS.value):
-                    return "pending"
-            return True
+                    semantic_outcome = "pending"
+                    break
+            if not has_removals:
+                return semantic_outcome
     memo_key = (
         str(root),
         str(receipt.batch_id),
         str(receipt.canonical_generation),
     )
-    report = _derived_memo_get(memo_key)
-    if report is None:
+    reports = _derived_memo_get(memo_key)
+    if reports is None:
         written: list[Path] = []
         created: list[Path] = []
+        removed: list[str] = []
         for path in receipt.paths:
             if path.after_hash is None:
-                # A tombstone is a removal, and removal has its own fan-out.
+                removed.append(path.rel_path)
                 continue
             target = root.joinpath(*path.rel_path.split("/"))
             written.append(target)
             if path.before_hash is None:
                 created.append(target)
-        if not written:
-            # Nothing this fan-out can publish: a tombstone-only batch is
-            # converged by the removal path the deleting writer already ran.
-            return True
         from . import graph_sync
 
         # A registered graph rebuild still starts; this fan-out just does not
         # wait on it before the embedding step that follows the graph.
         with graph_sync.standalone_join_waived():
-            report = upsert_after_write(
-                root,
-                written,
-                created_paths=created,
-                publish_corpus_change=True,
-                semantic_edited=not service,
-            )
-        if report.reconcile_required:
+            publications = []
+            if removed:
+                publications.append(delete_after_remove(root, removed))
+            if written:
+                publications.append(upsert_after_write(
+                    root, written, created_paths=created,
+                    publish_corpus_change=True, semantic_edited=not service,
+                ))
+        reports = tuple(publications)
+        if any(item.reconcile_required for item in reports):
             return False
-        _derived_memo_put(memo_key, report)
+        _derived_memo_put(memo_key, reports)
+    if semantic_outcome is not None:
+        return semantic_outcome
     report_key = _DERIVED_COMPONENT_REPORT_KEY[key]
     if report_key is None:
         # Freshness is proven by the corpus-change publication the fan-out
         # performs, not by a sidecar row, so a non-degraded report is its proof.
         return True
-    outcome = next(
-        (item for item in report.components if item.component == report_key), None
-    )
-    if outcome is None:
-        # A required component the fan-out never reached is a real absence of
-        # proof. An optional one is simply switched off, and its absence is the
-        # configuration, not a gap.
-        return key in _DERIVED_OPTIONAL_COMPONENTS
-    return outcome.outcome in _DERIVED_CONVERGENT_OUTCOMES
+    for report in reports:
+        outcome = next((item for item in report.components if item.component == report_key), None)
+        if outcome is None:
+            if key not in _DERIVED_OPTIONAL_COMPONENTS:
+                return False
+        elif outcome.outcome not in _DERIVED_CONVERGENT_OUTCOMES:
+            return False
+    return True
