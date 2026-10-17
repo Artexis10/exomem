@@ -220,10 +220,10 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS pending_recall_visibility "
         "ON pending_recall_rows(state, canonical_generation)"
     )
-    # Readers visit only active custody; retired history must not set recall cost.
+    # Readers scan active custody; publication callbacks seek only named paths.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS pending_recall_active "
-        "ON pending_recall_rows(batch_id, rel_path, component_revision, "
+        "ON pending_recall_rows(rel_path, batch_id, component_revision, "
         "canonical_generation, state) WHERE state != 'retired'"
     )
     conn.execute(

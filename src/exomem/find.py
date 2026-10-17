@@ -5616,7 +5616,8 @@ def _keyword_match_paths(
     is by construction the newest committed generation of its identity, and the
     catalogue's own `updated` values are not available here without a parse per
     row. The merged bound is `k` plus the number of admitted pending rows,
-    and the persistent side is over-fetched by the same count: leading rows
+    and the persistent side is over-fetched by that count and any custody paths
+    that cannot be excluded before its cap: leading rows
     that displaced settled ones would shorten the catalogue half of a
     bounded lane, so each side keeps its own budget instead of competing
     for one. Callers apply their own `limit` after re-sorting.
@@ -5640,7 +5641,8 @@ def _keyword_match_paths(
     if merge_pending:
         # Restrict before the catalogue's top-k cap, including unhydrated paths.
         if allowed_paths is None:
-            persistent_k = None
+            if persistent_k is not None:
+                persistent_k += len(pending.paths)
         else:
             allowed_paths = set(pending.shadow(allowed_paths))
 

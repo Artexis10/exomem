@@ -25,6 +25,7 @@ reference sidecar, which a canonical byte census would not notice.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from typing import Any
 from . import find_corpus, memory_refs, planning, record_governance
 from . import structured_collections as collections
 from .collection_store.preview import canonical_read
+from .governance import egress
 from .structured_collections import CollectionError
 
 MODE = "plan-progress"
@@ -474,8 +476,13 @@ def _supersession(root: Path, identifiers: Sequence[str]) -> dict[str, bool]:
     """
     if not identifiers:
         return {}
-    resolved = memory_refs.paths_for_ids_read_only(root, identifiers)
     authorized = record_governance.full_release_filter(root)
+    resolved = memory_refs.paths_for_ids_read_only(
+        root, identifiers,
+        admit_pending_paths=functools.partial(
+            egress.pending_identity_candidates, root, minimum_level=egress.LEVEL_FULL,
+        ),
+    )
     states: dict[str, bool] = {}
     for identifier, paths in resolved.items():
         # Authorization precedes uniqueness, and the order is a disclosure

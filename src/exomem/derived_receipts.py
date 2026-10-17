@@ -1766,14 +1766,14 @@ def snapshot_pending_visibility(
         generation = _pending_visibility_generation(connection)
         selected = None if batch_ids is None else set(batch_ids)
         if rel_paths is not None:
-            named = set(rel_paths)
             selected = {
-                str(batch_id)
-                for batch_id, rel in connection.execute(
-                    "SELECT batch_id, rel_path FROM pending_recall_rows "
-                    "WHERE state != 'retired'"
+                str(row[0])
+                for rel in set(rel_paths)
+                for row in connection.execute(
+                    "SELECT batch_id FROM pending_recall_rows "
+                    "WHERE state != 'retired' AND rel_path = ?",
+                    (rel,),
                 )
-                if rel in named
             }
         # LEFT JOIN preserves orphan custody as an explicit invalid row. Both
         # lineage lookups use their primary keys, including above the body cap.
@@ -1798,7 +1798,8 @@ def snapshot_pending_visibility(
                 return PendingVisibilitySnapshot("complete", generation, ())
             query += "AND r.batch_id IN (" + ",".join("?" for _ in selected) + ") "
             parameters = tuple(sorted(selected))
-        rows = connection.execute(query + "ORDER BY r.batch_id, r.rel_path", parameters).fetchall()
+        order = "r.rel_path, r.batch_id" if selected is None else "r.batch_id, r.rel_path"
+        rows = connection.execute(query + "ORDER BY " + order, parameters).fetchall()
         grouped: dict[str, list[PendingVisibilityRow]] = {}
         for (batch_id_value, rel_path, revision, canonical_generation, state,
              receipt_generation, receipt_path, before_hash, after_hash, stable_ref,
@@ -2384,6 +2385,7 @@ def recover_prepared_batches(
 
     for batch_id in batch_ids:
         try:
+            repair_eligible = False
             with active_manager().consistency_guard(
                 vault_root,
                 operation="derived_receipt_restart_proof",
@@ -2432,51 +2434,52 @@ def recover_prepared_batches(
                     known_uncommitted=False,
                     observed_at=observed_at,
                 )
-                if proof.outcome != "ready":
-                    if proof.outcome == "reconcile_required":
-                        connection = _connect_receipt_read(vault_root)
-                        try:
-                            proven = connection.execute(
-                                "SELECT proven_at IS NOT NULL FROM derived_batches WHERE batch_id = ?",
-                                (batch_id,),
-                            ).fetchone()[0]
-                        finally:
-                            connection.close()
-                        if proven and converge_current is not None:
-                            repair = reconcile_stranded_batches(
-                                vault_root, converge=converge_current,
-                                batch_ids=(batch_id,), limit=1, now=observed_at,
-                            )
-                            if repair["retired"]:
-                                recovered += 1
-                                continue
-                        # A failed proof is due work too. Rotate it behind later
-                        # batches and delay it just like a callback exception.
-                        _record_recovery_failure(
-                            vault_root, batch_id, failure_code="generation_changed",
-                            failed_at=observed_at,
-                        )
-                    continue
-                current = _load_receipt(vault_root, batch_id)
-                visibility_connection = deferred_index._connect(
-                    vault_root,
-                    create=False,
-                )
-                try:
-                    visibility_complete = _pending_visibility_complete(
-                        visibility_connection,
-                        batch_id,
-                    )
-                finally:
-                    visibility_connection.close()
-                if not visibility_complete:
-                    publish_pending_visibility(
+                if proof.outcome == "reconcile_required":
+                    connection = _connect_receipt_read(vault_root)
+                    try:
+                        repair_eligible = bool(connection.execute(
+                            "SELECT proven_at IS NOT NULL FROM derived_batches WHERE batch_id = ?",
+                            (batch_id,),
+                        ).fetchone()[0]) and converge_current is not None
+                    finally:
+                        connection.close()
+                elif proof.outcome == "ready":
+                    current = _load_receipt(vault_root, batch_id)
+                    visibility_connection = deferred_index._connect(
                         vault_root,
-                        current,
-                        publisher=visibility_publisher,
-                        now=observed_at,
+                        create=False,
                     )
-                recovered += 1
+                    try:
+                        visibility_complete = _pending_visibility_complete(
+                            visibility_connection,
+                            batch_id,
+                        )
+                    finally:
+                        visibility_connection.close()
+                    if not visibility_complete:
+                        publish_pending_visibility(
+                            vault_root,
+                            current,
+                            publisher=visibility_publisher,
+                            now=observed_at,
+                        )
+                    recovered += 1
+            if proof.outcome == "reconcile_required":
+                if repair_eligible:
+                    # Index fan-out must not hold the canonical mutation boundary.
+                    # Reconciliation rechecks current bytes under its final guard.
+                    repair = reconcile_stranded_batches(
+                        vault_root, converge=converge_current,
+                        batch_ids=(batch_id,), limit=1, now=observed_at,
+                    )
+                    if repair["retired"]:
+                        recovered += 1
+                        continue
+                # Failed proof rotates behind later batches with bounded backoff.
+                _record_recovery_failure(
+                    vault_root, batch_id, failure_code="generation_changed",
+                    failed_at=observed_at,
+                )
         except Exception:  # noqa: BLE001 - callback failure stays durable and bounded
             try:
                 _record_recovery_failure(

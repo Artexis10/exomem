@@ -54,6 +54,7 @@ class MembershipOutcome:
     scope_ids: frozenset[str]
     reason: Literal[
         "companion_required",
+        "metadata_required",
         "artifact_unsafe",
         "companion_unsafe",
         "descriptor_missing",
@@ -233,7 +234,10 @@ def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) 
 
 
 def evaluate_path_only(
-    vault_root: Path, rel_path: str, policy: Policy, *, proposed_companion: companions.BoundCompanion | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None
+    vault_root: Path, rel_path: str, policy: Policy, *,
+    proposed_companion: companions.BoundCompanion | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    resolve_bytes: bool = True,
 ) -> MembershipOutcome:
     """Classify a non-Markdown item's path/ref membership without reading it.
 
@@ -250,6 +254,9 @@ def evaluate_path_only(
     membership. A still-undecided semantic selector is evaluated only from the
     closed, byte-bound companion registry. Missing, stale, ambiguous, or unsafe
     companion state remains unresolved instead of becoming an empty scope set.
+
+    `resolve_bytes=False` proves only metadata-free selectors. Unknown identity
+    or semantic selectors, including exclusions, retain explicit uncertainty.
     """
     if policy.empty or not policy.scopes:
         return MembershipOutcome("classified", frozenset())
@@ -264,6 +271,26 @@ def evaluate_path_only(
     undecided: list[tuple[str, Scope]] = []
     for scope_id, scope in policy.scopes.items():
         if _path_ref_excludes(scope, rel_path):
+            continue
+        if not resolve_bytes:
+            if scope_id in matched:
+                continue
+            positive = _path_ref_matches(scope, rel_path)
+            identity_positive = any(
+                memory_refs.parse_memory_ref(ref) is not None for ref in scope.refs
+            )
+            if not (positive or _needs_frontmatter(scope) or identity_positive):
+                continue
+            semantic_exclusion = bool(
+                scope.exclude_projects or scope.exclude_tags or scope.exclude_types
+                or scope.exclude_classes
+                or any(
+                    memory_refs.parse_memory_ref(ref) is not None for ref in scope.exclude_refs
+                )
+            )
+            if not positive or semantic_exclusion:
+                return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
+            matched.add(scope_id)
             continue
         if _path_ref_matches(scope, rel_path):
             matched.add(scope_id)

@@ -10,8 +10,8 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -838,7 +838,8 @@ def _apply_pending_identity(
 
 
 def paths_for_ids_read_only(
-    vault_root: Path, ids: Iterable[Any]
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Resolve many memory ids to every page holding each, writing nothing.
 
@@ -855,6 +856,10 @@ def paths_for_ids_read_only(
     message states in how many pages the id appears, and a caller may hold no
     release decision over those pages, so a caller forbidden to disclose the
     count cannot afford to catch the exception and must see the shape instead.
+
+    Governed callers may exclude pending paths their release policy proves
+    hidden through `admit_pending_paths`. They must retain unresolved pages;
+    those pages can still hold an unknown visible duplicate.
 
     The answer comes from one of two sources, and the choice is made from
     vault-wide state alone, before any id is looked up: the server's current
@@ -936,6 +941,13 @@ def paths_for_ids_read_only(
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
     projection = _pending_reference_projection(root)
     if projection is not None:
+        if admit_pending_paths is not None and projection.blocked_paths:
+            # Hidden pages cannot affect governed uniqueness. Keep every
+            # footprint withdrawal, and exclude only proven hidden uncertainty.
+            projection = replace(
+                projection,
+                blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+            )
         resolved = {
             identifier: tuple(_apply_pending_identity(root, identifier, list(paths), projection=projection))
             for identifier, paths in resolved.items()
