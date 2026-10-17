@@ -386,8 +386,14 @@ def _plan_representation_audit(
     return tuple(events), final_hashes
 
 
-def _build_plan(root: Path, collection: str | Path) -> _Plan:
-    manifest = record_governance.resolve_collection(root, collection)
+def _build_plan(root: Path, collection: str | Path, *, mutation: bool = False) -> _Plan:
+    # Apply moves item files and rewrites the manifest, so it resolves as every file writer does.
+    resolve = (
+        record_governance.resolve_collection_for_mutation
+        if mutation
+        else record_governance.resolve_collection
+    )
+    manifest = resolve(root, collection)
     if manifest.semantic_profile not in {"planning", "records"}:
         raise collections.CollectionError(
             "UNSUPPORTED_COLLECTION_PROFILE",
@@ -830,7 +836,7 @@ def apply(
         replay = _load_receipt(root, plan_id, source_snapshot)
         if replay is not None:
             return replay
-        plan = _build_plan(root, collection)
+        plan = _build_plan(root, collection, mutation=True)
         if plan.public["plan_id"] != plan_id or plan.public["source_snapshot"] != source_snapshot:
             raise collections.CollectionError(
                 "STALE_STRUCTURED_FILE_PLAN", "migration preview is stale"
