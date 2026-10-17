@@ -139,8 +139,8 @@ def outside_resolution_scope() -> Iterator[None]:
     """Run a request's release decision without the request's memo.
 
     A request boundary re-reads host configuration (`request_memo`) live before it
-    releases a result, as `resolution_scope` promises. A request that runs its own
-    boundary inside the scope, as a store-routed one does, steps out of it here.
+    releases a result, as `resolution_scope` promises. The terminal egress filter
+    does so with this, because a store-routed read runs it inside the scope.
     Without an open scope this does nothing.
     """
     token = _RESOLUTION_MEMO.set(None)

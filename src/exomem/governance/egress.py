@@ -48,7 +48,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from .. import activation_result, call_spans, find_corpus, memory_refs, reserved_paths, vault
+from .. import activation_result, call_spans, find_corpus, memory_refs, reserved_paths, state_paths, vault
 from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
@@ -5213,6 +5213,23 @@ def _current_read_parent_binding(vault_root: Path, parent: Mapping[str, Any]) ->
     return reference, path
 
 
+def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a terminal filter outside any request's memo, so it reads host configuration live.
+
+    `state_paths.resolution_scope` promises that a request boundary re-reads the connector
+    ceiling before it releases a result. Doing that here, once, means no caller can forget it:
+    a store-routed read runs its whole dispatch, this filter included, inside a scope.
+    """
+
+    @functools.wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with state_paths.outside_resolution_scope():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+@_at_release_boundary
 def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """The terminal egress filter: always-on scrubber + withheld cross-check.
 
@@ -5385,6 +5402,7 @@ def _caller_supplied_references(kwargs: Mapping[str, Any] | None) -> frozenset[s
     return frozenset(out)
 
 
+@_at_release_boundary
 def postfilter_error(
     command_name: str,
     error: BaseException,

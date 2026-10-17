@@ -7053,7 +7053,6 @@ def invoke_command(
         postfilter,
         postfilter_error,
     )
-    from .state_paths import outside_resolution_scope
 
     selector_error: SelectorCoverageError | None = None
     try:
@@ -7150,10 +7149,10 @@ def invoke_command(
             # The same fixed phase labels as the read-only path below.
             with call_spans.span("command.body"):
                 result = _invoke()
-            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
+            with call_spans.span("command.terminal_filter"):
                 return postfilter(command.name, result, injected[0])
         except BaseException as error:
-            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
+            with call_spans.span("command.terminal_filter"):
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
@@ -7166,10 +7165,10 @@ def invoke_command(
             # Fixed phase labels carry timing only, never caller or vault data.
             with call_spans.span("command.body"):
                 result = _invoke()
-            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
+            with call_spans.span("command.terminal_filter"):
                 result = postfilter(command.name, result, injected[0])
         except BaseException as error:
-            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
+            with call_spans.span("command.terminal_filter"):
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)
