@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.123.0](https://github.com/Artexis10/exomem/compare/v0.122.0...v0.123.0) (2026-10-17)
+
+
+### Features
+
+* **collections:** migrate file collections into the store at a managed handoff ([#1821](https://github.com/Artexis10/exomem/issues/1821)) ([f838bc3](https://github.com/Artexis10/exomem/commit/f838bc37f64848891fc8ba44ef3bdce7519f754e))
+
+
+### Performance
+
+* **activation:** bound the retrieval carry by the turn and the rarity cap ([#1820](https://github.com/Artexis10/exomem/issues/1820)) ([5fade3a](https://github.com/Artexis10/exomem/commit/5fade3a57bf340c0908d010b2776d834d4cd60a1))
+
 ## [0.122.0](https://github.com/Artexis10/exomem/compare/v0.121.0...v0.122.0) (2026-10-17)
 
 
