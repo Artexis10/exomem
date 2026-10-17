@@ -100,8 +100,8 @@ and bounded ordinary lookup cost.
 #### Scenario: A path reverted by hand to its before-bytes stays owed
 
 - **WHEN** a path an older proven batch wrote is returned by a hand edit to that batch's before-bytes, and no newer proven batch recorded those bytes as its after-state
-- **THEN** the older batch is held in `reconcile_required`, even when a newer batch carries the path or both recall lanes hold the reverted bytes
-- **AND** `doctor` fails its custody check until `maintain --reconcile` converges the batch from current bytes
+- **THEN** the older batch retains its demand until bounded service recovery converges the current bytes through existing owners
+- **AND** `doctor` fails its custody check while the batch remains stranded; explicit reconciliation remains available
 
 #### Scenario: A coverer not yet proven heals on the next pass
 
@@ -264,6 +264,12 @@ content-free line, whether fast acknowledgement is active, the due component
 count and its oldest age, the stranded and recovering batch counts, and the
 pending-visibility outcome with its closed failure code. `doctor` SHALL fail
 while any batch is stranded and SHALL NOT mutate custody to compute the line.
+The existing bounded service worker SHALL recover previously proven committed
+stranded batches from current bytes, with retry backoff and unrelated work preserved.
+It SHALL NOT promote an unproven mixed canonical state to committed proof.
+Ready live rows SHALL receive exact per-path supersession proof without resetting
+healthy component retry backoff. Completed live custody SHALL retire after restart
+without requiring another foreground read or publication callback.
 Operator reconciliation (`maintain --reconcile`) SHALL converge each stranded
 batch's paths from their current canonical bytes through the ordinary writer
 fan-out and SHALL retire the batch as `superseded`, with its pending rows,
@@ -274,6 +280,12 @@ as published, and only an advisory result that never ran SHALL be settled -- as
 `failed` with code `advisory_unavailable` when its target page is unchanged, or
 `superseded` when the target moved. The reconcile report SHALL carry counts
 only.
+
+#### Scenario: The service repairs committed stranded custody
+
+- **WHEN** a previously proven committed batch becomes stranded
+- **THEN** the existing service worker converges its receipt-covered paths from current bytes with bounded retries
+- **AND** exact publication proof retires custody while existing advisory results retain their state
 
 #### Scenario: Doctor names stranded custody
 
@@ -318,4 +330,4 @@ default-write p50 at or below 3.0 seconds and p90 at or below 5.0 seconds.
 
 - **WHEN** the graph needs recovery or vector/advisory receipts are pending during a measured default write
 - **THEN** the canonical-commit to response interval stays within the shared post-canonical bound
-- **AND** the immediate read returns the committed generation or an explicit fail-closed warming outcome, never stale content
+- **AND** the immediate read returns proven current content, disclosed incomplete coverage, or explicit unavailability for unknown custody, never stale content
