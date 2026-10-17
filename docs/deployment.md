@@ -880,8 +880,16 @@ Two things to know before you import:
   earlier layout rebuilds them from its import log at the service's next start.
   The rebuild gives way to requests between batches.
 
+The owner creates a vault's first summary collection offline, which enrols the
+vault's store with the coordinator: stop the service, then run
+`exomem collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
+with the service's lease environment and `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`
+set. Later summary collections are created through `record_memory` on the
+running service.
+
 To turn summary collections off for one vault, stop the service and run
-`exomem collections rollback --vault <vault>`. The rollback is one-way: it
+`exomem collections rollback --vault <vault>` with the same environment. The
+rollback is one-way: it
 keeps every row, history entry and preserved source, pauses import jobs and
 refuses summary reads with `COLLECTION_STORE_DISABLED`. A later release does
 not turn the vault's summary collections back on.
