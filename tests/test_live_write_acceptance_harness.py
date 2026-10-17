@@ -83,6 +83,7 @@ DRAIN_KEYS = {
     "passes",
     "completed",
     "due",
+    "pending",
     "claimed",
     "retrying",
     "failed",
@@ -103,6 +104,7 @@ def _drain(**overrides: Any) -> dict[str, Any]:
         "passes": 1,
         "completed": 0,
         "due": 0,
+        "pending": 0,
         "claimed": 0,
         "retrying": 0,
         "failed": 0,
@@ -136,6 +138,7 @@ def _report(
         "samples_per_operation": 30,
         "fast_durable_ack": "active",
         "condition": "warm",
+        "preparation": {"converged": True, "due_projection_present": True},
         "operations": {
             name: {
                 "samples": 30,
@@ -241,6 +244,10 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
     assert report["recall_admission"] == "ready"
     # The proof itself, not merely a window that closed.
     assert module.readiness.is_ready("retrieval_catalog")
+    assert module.readiness.is_ready("semantic_corpus")
+    assert report["preparation"]["startup"] == "product-warm-all"
+    assert report["preparation"]["converged"] is True
+    assert report["preparation"]["due_projection_present"] is True
     # An admitted catalogue is what makes the read after a write exact. Warming
     # stays a truthful answer under the contract; it is not a truthful answer
     # for a harness that never had a catalogue to answer from.
@@ -501,6 +508,7 @@ def test_converge_does_not_abort_on_an_ordinary_retry(
         "_drain_observation",
         lambda root: {
             "due": 30,
+            "pending": 30,
             "claimed": 0,
             "retrying": 1,
             "stuck": 0,
@@ -656,64 +664,33 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
         assert token not in rendered, (token, rendered)
 
 
-def test_convergence_is_not_declared_over_stuck_or_claimed_work(
+def test_convergence_waits_for_retirement_backoff_and_claims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`due == 0` is not convergence while work is stuck or parked.
-
-    A final pass in which every remaining component fails transiently leaves
-    `due` at zero for the length of the backoff, and a row held under a live
-    lease is invisible to `due` at all. Either one used to satisfy the verdict,
-    so the acceptance could report converged over work that had not drained.
-    """
+    """Zero completions can retire custody or wait for a transient retry."""
     module = _acceptance()
-    observations = iter(
-        [
-            {
-                "due": 0,
-                "claimed": 0,
-                "retrying": 0,
-                "stuck": 2,
-                "failed": 2,
-                "max_attempt_count": 4,
-            },
-            {
-                "due": 0,
-                "claimed": 1,
-                "retrying": 0,
-                "stuck": 0,
-                "failed": 0,
-                "max_attempt_count": 0,
-            },
-            {
-                "due": 0,
-                "claimed": 0,
-                "retrying": 0,
-                "stuck": 0,
-                "failed": 0,
-                "max_attempt_count": 0,
-            },
-        ]
-    )
+    observations = iter([
+        _drain(pending=5, due=5),
+        _drain(pending=4, due=4),  # Retiring an obsolete receipt is progress.
+        _drain(pending=2, due=0, stuck=2, failed=2, max_attempt_count=4),
+        _drain(pending=1, due=0, failed=1, max_attempt_count=1),
+        _drain(pending=1, due=0, claimed=1),
+        _drain(),
+    ])
     monkeypatch.setattr(module, "_drain_observation", lambda _root: next(observations))
-    monkeypatch.setattr(module.derived_drain, "drain_once", lambda *a, **k: 1)
-    monkeypatch.setattr(module.derived_drain, "progress_limit", lambda: 16)
-    monkeypatch.setattr(
-        module.derived_drain, "last_pass_observation", lambda _root: {}
-    )
-    monkeypatch.setattr(
-        module.derived_drain, "component_dispatcher", lambda *a, **k: None
-    )
+    monkeypatch.setattr(module.derived_drain, "drain_once", lambda *a, **k: 0)
+    monkeypatch.setattr(module.derived_drain, "last_pass_observation", lambda _root: {})
+    monkeypatch.setattr(module.derived_drain, "component_dispatcher", lambda *a, **k: None)
     monkeypatch.setattr(
         module.derived_drain, "canonical_generation_observer", lambda *a, **k: None
     )
 
     _elapsed, converged, drain = module._converge(tmp_path, bound_seconds=30.0)
 
-    # The stuck pass stops the loop; it never reaches the clean third reading.
-    assert converged is False
-    assert drain["stuck"] == 2
-    assert drain["passes"] == 1
+    assert converged is True
+    assert drain["pending"] == 0
+    assert drain["completed"] == 0
+    assert drain["passes"] == 5
 
 
 @pytest.mark.parametrize("operation", ("remember", "edit_memory", "record_memory", "plan_memory"))

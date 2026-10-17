@@ -68,6 +68,7 @@ from exomem import (  # noqa: E402
     deferred_index,
     derived_drain,
     derived_receipts,
+    due_state,
     mode,
     pending_recall,
     readiness,
@@ -352,6 +353,7 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
         due = -1
 
     unreadable = {
+        "pending": -1,
         "due": due,
         "claimed": -1,
         "retrying": -1,
@@ -369,7 +371,7 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
                 rows = connection.execute(
                     "SELECT c.state, c.attempt_count, c.claim_expires_at, "
                     "c.failure_code, "
-                    "(CASE WHEN (c.state = 'ready' OR "
+                    "(CASE WHEN b.state = 'ready' AND (c.state = 'ready' OR "
                     "(c.state = 'retryable' AND c.next_attempt_at <= :now) OR "
                     "(c.state = 'claimed' AND c.claim_expires_at <= :now)) "
                     "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
@@ -377,8 +379,8 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
                     "THEN 1 ELSE 0 END) AS is_due "
                     "FROM derived_batch_components AS c "
                     "JOIN derived_batches AS b ON b.batch_id = c.batch_id "
-                    "WHERE b.state = 'ready' "
-                    "AND c.state IN ('ready', 'claimed', 'retryable')",
+                    "WHERE b.state IN ('prepared', 'ready', 'reconcile_required') "
+                    "AND c.state NOT IN ('completed', 'not_required', 'aborted', 'superseded')",
                     {"now": time.time()},
                 ).fetchall()
             finally:
@@ -408,6 +410,7 @@ def _drain_observation(vault_root: Path) -> dict[str, int]:
         if failure_code is not None:
             failed += 1
     return {
+        "pending": len(rows),
         "due": due,
         "claimed": claimed,
         "retrying": retrying,
@@ -447,8 +450,8 @@ def _converge(
     "did not converge" cannot distinguish the two outcomes an operator acts on
     differently -- a deep backlog that is draining and wants a longer window,
     and a drain that is stuck and wants a person. It stops early only on the
-    second of those: `stuck` (not due and several attempts deep) or two
-    consecutive passes that completed nothing. An ordinary retry is neither.
+    second of those: an unreadable observation. Retired receipts and retry
+    backoff can produce zero completions while the queue still makes progress.
     """
     dispatch = derived_drain.component_dispatcher()
     observe = derived_drain.canonical_generation_observer()
@@ -459,6 +462,7 @@ def _converge(
     passes = 0
     completed = 0
     stalled_passes = 0
+    previous = _drain_observation(vault_root)
     while True:
         passes += 1
         moved = derived_drain.drain_once(
@@ -469,8 +473,13 @@ def _converge(
             limit=limit,
         )
         completed += int(moved)
-        stalled_passes = 0 if moved else stalled_passes + 1
         observation = _drain_observation(vault_root)
+        retired = (
+            previous["pending"] >= 0
+            and 0 <= observation["pending"] < previous["pending"]
+        )
+        stalled_passes = 0 if moved or retired else stalled_passes + 1
+        previous = observation
         try:
             last_pass = derived_drain.last_pass_observation(vault_root)
         except Exception:  # noqa: BLE001 - a report is worth more than a crash
@@ -485,6 +494,7 @@ def _converge(
             "passes": passes,
             "completed": completed,
             "due": due,
+            "pending": observation["pending"],
             "claimed": observation["claimed"],
             "retrying": observation["retrying"],
             "failed": observation["failed"],
@@ -510,16 +520,11 @@ def _converge(
         # live lease is invisible to `due` entirely. Reporting "converged" over
         # either is the exact outcome these counters exist to prevent, so they
         # gate the verdict rather than only appearing in the report.
-        if due == 0 and observation["stuck"] == 0 and observation["claimed"] == 0:
+        if observation["pending"] == 0 and due == 0 and observation["claimed"] == 0:
             return round(elapsed, 3), True, drain
-        # Stopping early is for the two states more waiting cannot fix: work
-        # that is neither due nor shallow, and passes that move nothing. A row
-        # backing off after one failed attempt is not either of them -- it is
-        # what a drain doing its job looks like. An unreadable count (-1) stops
-        # too, because a counter that cannot be read has proved nothing.
-        if observation["stuck"] > 0 or observation["stuck"] < 0:
-            return round(elapsed, 3), False, drain
-        if stalled_passes >= 2:
+        # Retry backoff can resolve within the remaining window. Only an
+        # unreadable observation prevents further measurement from being useful.
+        if any(observation[key] < 0 for key in ("pending", "due", "stuck", "claimed")):
             return round(elapsed, 3), False, drain
         if time.monotonic() >= deadline:
             return round(elapsed, 3), False, drain
@@ -614,7 +619,15 @@ def measure(
 
     try:
         example, planning_path = _prepare_collections(client)
-        recall_admission = str(managed_recall.enter_managed_recall(root).get("state", "unknown"))
+        recall_admission = str(
+            managed_recall.enter_managed_recall(root, full_startup=True).get("state", "unknown")
+        )
+        preparation_seconds, preparation_converged, preparation_drain = _converge(
+            root, bound_seconds=convergence_bound_seconds
+        )
+        due_state.reconcile(root)
+        projection = due_state.load(root)
+        due_items = len(due_state.served_entries(root, recover=False))
         eligible = semantic_contract.build_corpus_context(root).eligible_governed_paths
         relation_target = min(eligible).removesuffix(".md") if eligible else None
         full_receipts_before = _full_receipt_count(root)
@@ -675,7 +688,15 @@ def measure(
         "contract": {"revision": contract.revision, "sha256": contract_hash},
         "connector_environment": "caller-verified-disposable" if transport == "connector" else None,
         "connector_runtime_provenance": "caller-verified" if transport == "connector" else None,
-        "cold_definition": "first-public-call-per-operation-after-catalog-admission",
+        "cold_definition": "first-public-call-per-operation-after-product-startup",
+        "preparation": {
+            "startup": "product-warm-all",
+            "convergence_seconds": preparation_seconds,
+            "converged": preparation_converged,
+            "drain": preparation_drain,
+            "due_projection_present": projection is not None,
+            "due_items": due_items,
+        },
         "samples_per_operation": samples_per_operation, "cases": cases,
         "fast_durable_ack": "active" if writer_lease.fast_durable_ack_active() else "inactive",
         "operations": {
@@ -761,6 +782,11 @@ def check(
 ) -> None:
     """Fail the acceptance on any breach, naming it without naming content."""
     failures: list[str] = []
+    preparation = report.get("preparation")
+    if not isinstance(preparation, dict) or not preparation.get("converged"):
+        failures.append("fixture custody did not converge before measurement")
+    if not isinstance(preparation, dict) or not preparation.get("due_projection_present"):
+        failures.append("due projection was not prepared before measurement")
     warm_bar = (contract or request_latency_contract.load_contract()).bar("ordinary-write-warm")
     for name in OPERATIONS:
         measured = report["operations"][name]
