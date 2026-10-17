@@ -34,6 +34,12 @@ COLLECTION_VIEWS_V1 = "collection-views-v1"
 #: The release capabilities this release enables. S1.8 adds RECORDS_SUMMARY_V1; P3.6 adds
 #: COLLECTIONS_MIGRATE_V1; P2.8 adds COLLECTION_VIEWS_V1.
 RELEASED: frozenset[str] = frozenset()
+#: What every store import answer tells the owner until the GA gate (P3.6 of
+#: move-structured-collections-to-sqlite), which deletes it: a pre-GA format change may
+#: need the preserved export imported again into a NEW collection (design O2).
+PRE_GA_REIMPORT = ("pre-GA: a later release may change how the collection store keeps these rows; the owner "
+                   "may then need to import the preserved export again into a NEW collection that they "
+                   "authorize, so keep the preserved source")
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
 DISABLED = "COLLECTION_STORE_DISABLED"
