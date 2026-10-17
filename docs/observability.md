@@ -263,6 +263,14 @@ call was slow and locate nothing between them — a live `edit_memory` once
 recorded `total_ms=24,394` with `boundary_hold_ms=3,348` and no account of the
 other 21 seconds.
 
+A timed phase also carries `fields.thread_cpu_ms`: the CPU time the thread
+spent inside it. A phase whose `thread_cpu_ms` is close to its `ms` was
+working; one far below was waiting, on the interpreter lock, a database lock
+or the disk. Work handed to another thread is not counted, so a low value
+on such a phase means the work ran elsewhere, not that the phase was idle.
+Phases measured as an interval between two points rather than one block
+carry no CPU reading.
+
 The names are stable and are the vocabulary a latency diagnosis uses:
 
 | Span | What it covers |
@@ -278,7 +286,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
 | `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
 | `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
-| `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. |
+| `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. A `disk` build becomes the shared resolver, so later writes in the process fork it. When the corpus route declines, one `declined_<reason>` field says why: `external_pending`, `events_not_live`, `freshness_differs`, `corpus_absent`, `corpus_behind`, `proof_failed`, `identity_changed`, `changed_during_proof` or `unkeyable`. |
 | `preflight.creation` | A page creation's preflight, before the commit. `structural_ms` is its structural evaluation and `relation_review_ms` its relation review when the page needs one, both in whole milliseconds; the commit reuses that relation review while its validity stamp stays current. |
 | `commit.source_closure`, `commit.relation_review_prepare`, `commit.catalog_prepare`, `commit.relation_review`, `commit.relation_review_attempt` | A page creation's commit stages, recorded directly. Before the guard: the source closure, the relation-review preparation and the model warm-up (`commit.embedding_prewarm`). Inside it: the catalog preparation and the relation-review commit. `commit.relation_review_attempt` is the commit's in-lock revalidation, with one field for its outcome: `reused`, `revalidated` or `unavailable`. `commit.relation_review_prepare` carries the same field for the preliminary attempt before the guard, which is offered the preflight's relation review: `reused` means the commit did not repeat it. |
 | `post_commit.structure_suggestion`, `post_commit.records_routing`, `post_commit.observation_delta`, `post_commit.records_delivery`, `post_commit.due_state`, `post_commit.capture_sweep`, `post_commit.entity_candidate` | The advisory blocks a write attaches after its commit, one span each, for a page creation and an existing-page commit alike. |

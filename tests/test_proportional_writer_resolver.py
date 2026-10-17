@@ -170,3 +170,31 @@ def test_resolver_entries_decline_when_configuration_changes_during_capture(
     monkeypatch.setattr(semantic_contract, "_config_census", changing_census)
 
     assert semantic_contract.current_writer_resolver_entries(warm_corpus) is None
+
+
+def test_cold_writer_snapshot_reads_the_vault_once_and_keeps_pending_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no current corpus, one write pays the disk build and the next forks it."""
+    notes = tmp_path / "Knowledge Base" / "Notes" / "Insights"
+    notes.mkdir(parents=True)
+    (notes / "alpha.md").write_text(_page("Alpha", "[[Beta]]"), encoding="utf-8")
+    (notes / "beta.md").write_text(_page("Beta"), encoding="utf-8")
+    original_build = WikilinkResolver._build
+    builds: list[None] = []
+
+    def count_build(self: WikilinkResolver) -> None:
+        builds.append(None)
+        original_build(self)
+
+    monkeypatch.setattr(WikilinkResolver, "_build", count_build)
+
+    first = find.writer_resolver_snapshot(tmp_path)
+    first.add_pending("Knowledge Base/Notes/Insights/pending", title="Pending")
+    second = find.writer_resolver_snapshot(tmp_path)
+
+    assert builds == [None]
+    assert "Knowledge Base/Notes/Insights/pending" in first.full_paths
+    assert "Knowledge Base/Notes/Insights/pending" not in second.full_paths
+    assert "Knowledge Base/Notes/Insights/pending" not in find.shared_resolver(tmp_path).full_paths
+    assert second.full_paths == WikilinkResolver(tmp_path).full_paths

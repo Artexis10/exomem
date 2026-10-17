@@ -6267,11 +6267,14 @@ def writer_resolver_snapshot(
     *,
     freshness_key: tuple[int, int, str] | None = None,
 ):
-    """Return a detached resolver snapshot without warming the shared cache.
+    """Return a detached resolver snapshot; the caller's pending stays local.
 
-    A fresh matching cached resolver is forked.  A cold/stale cache remains
-    untouched and preparation gets a one-off resolver built from disk. Callers
-    that already measured direct disk freshness may supply that key to bypass
+    A fresh matching cached resolver is forked. Otherwise exactly current
+    corpus metadata builds a one-off resolver and leaves the shared cache
+    untouched. Only when neither proves current does preparation read the
+    disk, and that build becomes the shared resolver (as a reader's would), so
+    one write per process pays it rather than every write. Callers that
+    already measured direct disk freshness may supply that key to bypass
     potentially stale event-registry state.
     """
     from . import semantic_contract
@@ -6291,12 +6294,17 @@ def writer_resolver_snapshot(
         entries = semantic_contract.current_writer_resolver_entries(
             root,
             freshness_key=current_freshness,
+            declined=measured,
         )
         if entries is not None:
             measured["corpus_entries"] = 1
             return WikilinkResolver.from_entries(root, entries)
         measured["disk"] = 1
-        return WikilinkResolver(root)
+        # Keep the disk build as the shared resolver and hand out a fork: the
+        # watcher patches the shared one from here on, so the next write forks
+        # it instead of re-reading the whole vault, and pending destinations
+        # still land only on this call's copy.
+        return _get_query_resolver(root, current_freshness).fork()
 
 
 def _patch_broad_resolver(

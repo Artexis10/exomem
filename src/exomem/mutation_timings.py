@@ -37,15 +37,20 @@ class MutationTimings:
         # only once it can be sourced from the lease manager; an always-zero
         # counter reads as "never retried", which would be a lie.
         self.boundary: dict[str, Any] = {"waited_ms": None}
+        # Thread CPU per stage, for the operator's ledger only: `as_dict` is
+        # the caller-visible envelope and does not grow a key for it.
+        self._thread_cpu_ms: dict[str, int] = {}
 
     @contextmanager
     def span(self, name: str):
         t0 = time.perf_counter()
+        cpu0 = time.thread_time()
         try:
             yield
         finally:
             entry = self.stages.setdefault(name, {})
             entry["ms"] = round((time.perf_counter() - t0) * 1000.0, 3)
+            self._thread_cpu_ms[name] = round((time.thread_time() - cpu0) * 1000.0)
 
     def skipped(self, name: str) -> None:
         self.stages.setdefault(name, {})["skipped"] = True
@@ -80,8 +85,13 @@ class MutationTimings:
             elapsed = entry.get("ms")
             if elapsed is None:
                 continue
+            cpu = self._thread_cpu_ms.get(name)
             try:
-                call_spans.record_span(str(name), float(elapsed))
+                call_spans.record_span(
+                    str(name),
+                    float(elapsed),
+                    {"thread_cpu_ms": cpu} if cpu is not None else None,
+                )
             except (TypeError, ValueError):
                 continue
 
