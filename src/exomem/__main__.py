@@ -2305,7 +2305,8 @@ def _collections_main(argv: list[str]) -> int:
             print(json.dumps(result, sort_keys=True))
             # Unlike create, an apply short of an installed marker exits nonzero, so a script that
             # starts the service after it never serves a half-migrated vault; a vault with nothing
-            # to migrate (none left, or none at all) exits 0, so the script stays idempotent.
+            # to migrate (none left, or none at all) exits 0 under a configured lease, so the script
+            # stays idempotent; without one, prepare and apply refuse first (COORDINATION_REQUIRED).
             if result.get("verdict") == "blocked" or (args.apply and result.get("status") != "marker_admitted"
                                                       and result.get("verdict") != "nothing_to_migrate"):
                 return 1

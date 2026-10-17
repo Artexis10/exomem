@@ -871,9 +871,12 @@ def coordination_required(operation):
     reaching a store that no fence protects, or a step that refuses for an unrelated
     reason; a false refusal costs the owner the coordinator setup it names.
     """
+    # It names what this process observes: a CLI run from a shell without the service's
+    # EnvironmentFile sees no lease URL even where the service has a coordinator.
     return CollectionStoreError(
-        COORDINATION_REQUIRED, f"{operation} needs writer-lease coordination, which this install does not "
-        f"configure; {COORDINATION_SETUP}")
+        COORDINATION_REQUIRED, f"{operation} needs writer-lease coordination, and EXOMEM_WRITER_LEASE_URL is not "
+        "set in this process's environment; run it with the service's lease environment, or, where no "
+        f"coordinator exists, {COORDINATION_SETUP}")
 
 
 def enrollment_required():

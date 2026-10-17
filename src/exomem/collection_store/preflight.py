@@ -94,7 +94,8 @@ def preflight(vault_root) -> dict:
     counts, statuses, codes and paths, never row values. A dataset is skipped, because it
     keeps file authority. Collections the vault's marker routes to the store are counted, not
     listed: their paths are store-owned. The vault is ``migratable`` only when no file
-    collection is blocked.
+    collection is blocked and a writer-lease coordinator is configured; without one the
+    verdict is ``blocked`` with a vault-level ``blocker`` and an empty ``blocked`` list.
     """
     admission.require_owner(vault_root, "the collections-store preflight")
     root = Path(vault_root).resolve()
