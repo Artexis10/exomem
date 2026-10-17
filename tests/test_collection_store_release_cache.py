@@ -380,6 +380,45 @@ def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
     assert store.inspect_collection(CID) == current
 
 
+def test_audience_churn_keeps_fitting_inspection_contributions_incremental(store, monkeypatch):
+    """A narrower audience must not strand a fitting collection on the full-scan path."""
+    from test_collection_store_bulk import _evidence, bulk
+
+    from exomem import record_formats
+
+    _create_filename_collection(store)
+    _evidence(store.root)
+    for start in (0, 300):
+        bulk(store, [{"item": {"title": f"Row {index}", "count": index}}
+                     for index in range(start, start + 300)])
+    hidden = [row[0] for row in store.connection.execute("SELECT item_key FROM items ORDER BY row_id LIMIT 100")]
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + "refs: " + json.dumps([collections.record_ref(CID, key) for key in hidden]) + "\n")
+    write_rule(store.root, ceiling=0)
+    complete = store.inspect_collection(CID)
+    cache = store.handle.release_cache.inspections
+    # Fit the initial collection closely, independent of this interpreter's container sizes.
+    cache.maximum_bytes = cache._bytes + 1024
+    with request_scope(_external()):
+        partial = store.inspect_collection(CID)
+    assert partial["coverage"]["committed"] == 500
+
+    decoded = []
+    contribution = record_formats.inspection_contribution
+
+    def counted(manifest, record, *args, **kwargs):
+        decoded.append(record.identity.key)
+        return contribution(manifest, record, *args, **kwargs)
+
+    monkeypatch.setattr(record_formats, "inspection_contribution", counted)
+    assert store.inspect_collection(CID) == complete
+    assert set(decoded) == set(hidden) and len(decoded) == len(hidden)
+    decoded.clear()
+    assert store.inspect_collection(CID) == complete
+    assert decoded == []
+
+
 def test_grant_only_release_change_refreshes_a_warm_filename_group(store, monkeypatch):
     """Revoking one row changes an unchanged, still-granted sibling's collision suffix."""
     from test_collection_store_governance import inspection_token, redeem, session
