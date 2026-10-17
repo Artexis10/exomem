@@ -5867,7 +5867,9 @@ class LexicalStore:
             # Warm-up runs off the request path, so it can wait out a start-up
             # watcher batch rather than leave the first write to the repair.
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
-                conn = self._connect()
+                # Older atomic replacements leave an otherwise-current database
+                # in DELETE mode. Restore concurrent reads before serving it.
+                conn = self._connect_setup()
                 try:
                     if not self._schema_is_current(conn):
                         return ()
@@ -6467,30 +6469,38 @@ class LexicalStore:
         The caller holds the publication barrier and has already decided the
         temp may replace what is live. On any decline the live set is untouched.
         """
-        # The live main + `-wal` + `-shm` are one disposable set. A missing main
-        # with orphan sidecars, or a proven-fatal main+WAL that can never
-        # checkpoint itself, must move aside as a set.
-        if self._live_set_disposition() == "quarantine":
-            published = self._publish_over_quarantined_set(temp_path)
-            if not published:
-                self._last_rebuild_result = "publish_conflict"
-            return published
-        # Fold the healthy LIVE WAL before replacing its main file.
-        if not self._quiesce_live_wal():
-            log.info("lexical atomic publish declined: live WAL not safely foldable")
-            return self._decline_rebuild("wal_busy")
         with reserved_paths._subsystem_authority_scope("lexstore"):
-            reserved_paths._move_owner_file(
+            # Readers also take this identity scope. Keep replacement and WAL
+            # setup together so none opens the new main between those steps.
+            with reserved_paths._identity_coordination_scope(
                 self.vault_root,
-                temp_path,
-                "lexical-rebuild",
-                self.path,
-                "lexical-store",
-                replace=True,
-            )
-        self._term_frequency_cache = None
-        self._filtered_term_frequency_cache = None
-        # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
+                descriptor_ids=("lexical-store", "lexical-rebuild", "lexical-quarantine"),
+            ):
+                # A missing or fatal main with sidecars must move as one set.
+                if self._live_set_disposition() == "quarantine":
+                    if not self._publish_over_quarantined_set(temp_path):
+                        return self._decline_rebuild("publish_conflict")
+                else:
+                    if not self._quiesce_live_wal():
+                        log.info("lexical atomic publish declined: live WAL not safely foldable")
+                        return self._decline_rebuild("wal_busy")
+                    reserved_paths._move_owner_file(
+                        self.vault_root,
+                        temp_path,
+                        "lexical-rebuild",
+                        self.path,
+                        "lexical-store",
+                        replace=True,
+                    )
+                self._term_frequency_cache = None
+                self._filtered_term_frequency_cache = None
+                try:
+                    # The installed main is self-contained. WAL now lets reads
+                    # use committed rows while the next index write is pending.
+                    self._connect_setup().close()
+                except sqlite3.Error as error:
+                    # Installation already succeeded; journal support is optional.
+                    log.info("published lexical catalog journal setup deferred (%s)", error)
         return True
 
     def live_catalog_compatible(self) -> bool:
