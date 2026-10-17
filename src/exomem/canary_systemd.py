@@ -96,6 +96,7 @@ def _run(arguments, *, timeout=10):
 
 
 def _properties(unit: str, interface: str) -> dict:
+    # LoadUnit reads the definition without starting it; installed inactive units may be uncached.
     path = json.loads(
         _run(
             [
@@ -106,7 +107,7 @@ def _properties(unit: str, interface: str) -> dict:
                 BUS,
                 MANAGER,
                 BUS + ".Manager",
-                "GetUnit",
+                "LoadUnit",
                 "s",
                 unit,
             ]
@@ -168,7 +169,11 @@ def _latest(path: Path) -> dict:
 
 def status(*, unit_dir: Path | None = None, now: float | None = None) -> dict:
     directory = unit_dir or unit_directory()
-    base = {"state": "unavailable", "delivery_reach": "local-unit-journal-doctor-only"}
+    base = {
+        "state": "unavailable",
+        "delivery_reach": "local-unit-journal-doctor-only",
+        "report_age_seconds": None,
+    }
     if not any((directory / name).exists() for name in (SERVICE, TIMER)):
         return {**base, "state": "absent"}
     try:
@@ -200,6 +205,9 @@ def status(*, unit_dir: Path | None = None, now: float | None = None) -> dict:
         ended = report["ended_at"]
         if type(ended) not in (float, int) or not math.isfinite(ended):
             raise ValueError("unknown report window")
+        age = (time.time() if now is None else now) - ended
+        if math.isfinite(age) and age >= 0:
+            base["report_age_seconds"] = age
         started = service["ExecMainStartTimestamp"] / 1_000_000
         invocation = bytes(unit["InvocationID"]).hex()
         current = (
@@ -232,8 +240,7 @@ def status(*, unit_dir: Path | None = None, now: float | None = None) -> dict:
             if row[0] == "OnUnitInactiveUSec"
         ]
         bound = max(intervals) + service["TimeoutStartUSec"] / 1_000_000
-        age = (time.time() if now is None else now) - ended
-        if age < 0 or age > bound:
+        if base["report_age_seconds"] is None or age > bound:
             return {**base, "state": "stale"}
         return {
             **base,
@@ -302,6 +309,7 @@ def enable() -> dict:
     observer, environment, args = _configuration(_properties(SERVICE, "Service"))
     # systemd reads its own EnvironmentFile grammar. The child returns presence only,
     # so missing credentials leave monitoring unconfigured without copying a secret.
+    # This property is one raw argv value; systemd-run must receive no unit-file quoting.
     try:
         _run(
             [
@@ -314,7 +322,7 @@ def enable() -> dict:
                 "--expand-environment=no",
                 "--property=Type=oneshot",
                 "--property=TimeoutStartSec=10s",
-                "--property=EnvironmentFile=" + json.dumps(str(environment), ensure_ascii=False),
+                "--property=EnvironmentFile=" + str(environment),
                 str(observer),
                 "-I",
                 "-c",

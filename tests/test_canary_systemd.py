@@ -146,6 +146,8 @@ def test_offline_status_distinguishes_execution_from_latest_report(installed, st
     now = 600 if state == "stale" else 110
     observed = monitor.status(unit_dir=installed.units, now=now)
     assert observed["state"] == state
+    if state == "old-success-after-failed-execution":
+        assert observed["report_age_seconds"] == 10
     assert "private" not in json.dumps(observed)
     assert "latest with spaces" not in json.dumps(observed)
 
@@ -159,10 +161,17 @@ def test_absent_units_and_unavailable_manager_have_distinct_states(tmp_path, mon
     assert monitor.status(unit_dir=tmp_path)["state"] == "unavailable"
 
 
-def test_typed_busctl_json_keeps_environment_paths_with_spaces(monkeypatch):
+def test_native_configuration_load_inspects_a_never_started_unit(monkeypatch):
+    loaded = False
+
     def run(arguments):
+        nonlocal loaded
         if "GetUnit" in arguments:
+            raise subprocess.CalledProcessError(1, arguments, stderr="unit is not loaded")
+        if "LoadUnit" in arguments:
+            loaded = True
             return SimpleNamespace(stdout=json.dumps({"type": "o", "data": ["/unit/path"]}))
+        assert "GetAll" in arguments and loaded
         return SimpleNamespace(
             stdout=json.dumps(
                 {
@@ -206,7 +215,18 @@ def test_enable_checks_loaded_credential_and_keeps_target_failures_scheduled(
     installed, monkeypatch
 ):
     commands = []
-    monkeypatch.setattr(monitor, "_run", lambda command, **kwargs: commands.append(command))
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "systemd-run":
+            field = next(
+                value for value in command if value.startswith("--property=EnvironmentFile=")
+            )
+            path = field.removeprefix("--property=EnvironmentFile=")
+            with open(path) as environment:
+                assert environment.read() == "TEST_TOKEN=hidden\n"
+
+    monkeypatch.setattr(monitor, "_run", run)
     installed.properties[(monitor.SERVICE, "Service")]["Result"] = "exit-code"
     assert monitor.enable()["state"] == "scheduled"
     assert any(command[0] == "systemd-run" and "TEST_TOKEN" in command for command in commands)
