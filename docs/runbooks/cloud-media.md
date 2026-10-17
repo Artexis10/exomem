@@ -16,12 +16,15 @@ Plain text, email and calendar files need no engine and are always read. Image v
 Enabling an engine can process the existing media backlog. Memory brakes do not reserve disk space.
 A full volume can stop catalogue publication and leave the cell unready, even when the media child stays within its memory budget.
 
-1. Record the selected cell's capacity with `df -B1 "$EXOMEM_VAULT_PATH"`. Expect dated capacity and available-byte readings.
-2. Record the media backlog from resource status. Expect separate pending, blocked and failed counts.
-3. Record retained restore copies and current index sizes. Expect both in the used-space baseline.
-4. Compare available bytes with measured backfill growth, extraction scratch and catalogue replacement space. Expect a source for each estimate.
-5. If an estimate is unknown, record that gap in isolated qualification. Expect no estimate from upload size alone.
-6. Record disk usage during qualification and after backfill. Expect separate temporary peak use and retained growth.
+The cell stores `/data` on its PVC and `/tmp` on a separate `emptyDir`. A free PVC does not prove scratch capacity.
+
+1. Resolve the vault, state, scratch and writable cache paths from runtime configuration. Expect each path's owning filesystem.
+2. Record each filesystem with `df -B1` and its resolved paths. Expect dated capacity and available-byte readings.
+3. Record the media backlog from resource status. Expect separate pending, blocked and failed counts.
+4. Record retained restore copies and current index sizes. Expect both in their filesystem's used-space baseline.
+5. Compare each filesystem's free bytes with its measured backfill, scratch, cache and catalogue replacement needs. Expect sourced estimates.
+6. If an estimate is unknown, record that gap in isolated qualification. Expect no estimate from upload size alone.
+7. Record disk usage during qualification and after backfill. Expect separate temporary peak use and retained growth.
 
 Model downloads and caches also use space when the selected engine needs them. Include those bytes in its qualification.
 Use the existing rollout procedure to select one cell first. Reuse its storage evidence only while its engine, backlog and volume conditions match.
