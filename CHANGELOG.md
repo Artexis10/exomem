@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.122.0](https://github.com/Artexis10/exomem/compare/v0.121.0...v0.122.0) (2026-10-17)
+
+
+### Features
+
+* **collections:** enable summary collections (records-summary-v1) ([#1818](https://github.com/Artexis10/exomem/issues/1818)) ([e28abd4](https://github.com/Artexis10/exomem/commit/e28abd4a481804792ee356424e9c3ad2415aa1b8))
+* **collections:** publish store log views and apply edited log blocks ([#1815](https://github.com/Artexis10/exomem/issues/1815)) ([a0a51e0](https://github.com/Artexis10/exomem/commit/a0a51e05dddfb0f07581f30f6585816984fc858d))
+
+
+### Bug Fixes
+
+* **collections:** let a derived-rows rebuild give way to requests and stop advancing the commit generation ([#1817](https://github.com/Artexis10/exomem/issues/1817)) ([8330e63](https://github.com/Artexis10/exomem/commit/8330e63883856fdf639c4b6de82af31dcfa62231))
+* **collections:** refuse file-mode writes to store collections off the store thread ([#1811](https://github.com/Artexis10/exomem/issues/1811)) ([ed4a6c0](https://github.com/Artexis10/exomem/commit/ed4a6c0b74c6c45481b8c6e2c8b244c0f54686ac))
+* **collections:** refuse store steps without lease coordination, and disclose the pre-GA re-import risk ([#1814](https://github.com/Artexis10/exomem/issues/1814)) ([d87980c](https://github.com/Artexis10/exomem/commit/d87980c8eaa12def8bde1c7a4bd8f942ac465b9e))
+* **graph:** publish a whole-vault pass behind when writes land during it ([#1816](https://github.com/Artexis10/exomem/issues/1816)) ([3c7c291](https://github.com/Artexis10/exomem/commit/3c7c291f7993fb0f14584f2dad6d3407d942866b))
+* **operator:** stop doctor's false stale state and admit local-version wheels ([#1813](https://github.com/Artexis10/exomem/issues/1813)) ([19fe3a0](https://github.com/Artexis10/exomem/commit/19fe3a0900591a6df583754fad8db06a50b5e836))
+
+
+### Performance
+
+* **remember:** reuse the preflight relation review and enrich the corpus incrementally ([#1819](https://github.com/Artexis10/exomem/issues/1819)) ([58f0042](https://github.com/Artexis10/exomem/commit/58f004223f26b4237de1739ce3e57c94b1a691fb))
+
 ## [0.121.0](https://github.com/Artexis10/exomem/compare/v0.120.0...v0.121.0) (2026-10-16)
 
 
