@@ -371,7 +371,7 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
                                         issues=(_UNSTAMPED,)))
             continue
         rendered.append([row["row_id"], min(stamp["v"], row["row_version"])])
-        found.append(_classify_block(writer, manifest, declared, frame, row, record, stamp, block,
+        found.append(_classify_block(writer, manifest, declared, row, record, stamp, block,
                                      refusals.get(row["view_path"])))
     # The newest row version a block of this buffer was rendered at: the buffer is at least that recent.
     newest = conn.execute(
@@ -387,12 +387,6 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
     return Classification(None, None, generation, generation, blocks=tuple(found))
 
 
-def _renders_block(manifest, frame, key, values, stamp, block) -> bool:
-    """Whether ``block`` is the store's render of ``values`` under ``stamp``, up to blank lines and spaces."""
-    rendered = log_view.render_block(manifest, {"item_key": key, "values": values}, frame.newline, stamp=stamp)
-    return log_view.block_lines(rendered.encode()) == log_view.block_lines(block)
-
-
 def _shown(manifest, key, values, name) -> bool:
     """Whether a row's block shows field ``name``: an empty child list or an undrawn field it does not."""
     rest = {field: value for field, value in values.items() if field != name}
@@ -400,11 +394,21 @@ def _shown(manifest, key, values, name) -> bool:
             != log_view.render_block(manifest, {"item_key": key, "values": rest}, "\n"))
 
 
-def _classify_block(writer, manifest, declared, frame, row, record, stamp, block, refused) -> Classification:
-    """One log block bound to a stored row, by the A2 stamp rules, then as one item (§6)."""
+def _edit(manifest, key, old, values) -> tuple[dict, list]:
+    """What a block's ``values`` set and delete relative to ``old``; a field the block does not show stays."""
+    changes, deleted = _changes(old, values)
+    return changes, [name for name in deleted if _shown(manifest, key, old, name)]
+
+
+def _classify_block(writer, manifest, declared, row, record, stamp, block, refused) -> Classification:
+    """One log block bound to a stored row, by the A2 stamp rules, then as one item (§6).
+
+    A block is compared with its row by values, not by spacing; a line that no value holds
+    holds the block (``log_view.stray_lines``).
+    """
     from . import typed_storage
 
-    conn, path, current = writer.connection, row["view_path"], row["row_version"]
+    conn, path, current, key = writer.connection, row["view_path"], row["row_version"], row["item_key"]
 
     def found(code, **fields):
         return Classification(code, stamp, stamp["v"], current, path=path, raw=block, **fields)
@@ -416,29 +420,31 @@ def _classify_block(writer, manifest, declared, frame, row, record, stamp, block
             return found(SAME)
         payload = conn.execute("SELECT payload_hash FROM item_versions WHERE row_id=? AND row_version=?",
                                (row["row_id"], stamp["v"])).fetchone()
-        if payload is not None and payload[0][:12] == stamp["h"] and _renders_block(
-                manifest, frame, row["item_key"], typed_storage.version_values(conn, row["row_id"], stamp["v"])[0],
-                stamp, block):
-            return found(SAME)
+        if payload is not None and payload[0][:12] == stamp["h"] and not log_view.stray_lines(block, record):
+            try:
+                older = typed_storage.version_values(conn, row["row_id"], stamp["v"])[0]
+                untouched = _edit(manifest, key, older,
+                                  collections.normalize_item_values(manifest.schema, record.values)) == ({}, [])
+            except collections.CollectionError:
+                untouched = False
+            if untouched:
+                return found(SAME)
         return found(CONFLICT)
     if stamp["v"] != current or stamp["h"] != row["payload_hash"][:12]:
         # A stamp that was tampered with or copied never names the current base.
         return found(INVALID)
+    if log_view.stray_lines(block, record):
+        # The store keeps the values alone, so applying them would lose the block's other text.
+        return found(INVALID, issues=(_BLOCK_TEXT,))
     try:
-        values = collections.normalize_item_values(manifest.schema, record.values)
-        changes, deleted = _changes(row["values"], values)
-        # A field the block does not show is not something the owner removed from it.
-        deleted = [name for name in deleted if _shown(manifest, row["item_key"], row["values"], name)]
-        final = {name: value for name, value in row["values"].items() if name not in deleted}
-        final.update(changes)
-        # The store keeps the values alone, so a block whose text they do not render would lose that text.
-        renders = _renders_block(manifest, frame, row["item_key"], final, stamp, block)
+        changes, deleted = _edit(manifest, key, row["values"],
+                                 collections.normalize_item_values(manifest.schema, record.values))
     except collections.CollectionError as error:
         return found(INVALID, issues=_refused(error))
-    if not renders:
-        return found(INVALID, issues=(_BLOCK_TEXT,))
     if not changes and not deleted:
         return found(SAME)
+    final = {name: value for name, value in row["values"].items() if name not in deleted}
+    final.update(changes)
     if refused:
         return found(INVALID, issues=tuple(refused))
     try:

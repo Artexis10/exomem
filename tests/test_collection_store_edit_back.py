@@ -684,6 +684,23 @@ def test_a_log_block_edit_that_also_adds_text_is_held_with_the_text(store):
         {"field": "reps", "value": "10"}]
 
 
+def test_a_spacing_only_edit_of_a_log_block_is_rendered_again_without_a_hold(store):
+    """Defect: re-spacing a child row of a log view, which parses to the same values, is held as
+    text the store cannot keep, or commits an update."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    path.write_bytes(rendered.replace(b"- reps | 10\n", b"  - reps|10\n"))
+    before = txns(store)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert holds(store) == [] and txns(store) == before and path.read_bytes() == rendered
+
+
 def test_a_log_block_that_names_no_row_is_held_and_appends_nothing(store):
     """Defect: a block the owner typed into the log, which no record id binds to a row, is dropped
     by the next render, or becomes a row without a governed append."""

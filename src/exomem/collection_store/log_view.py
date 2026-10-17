@@ -117,12 +117,20 @@ def render(manifest, frame: LogFrame, blocks: Iterable[Mapping], *, stamp=None) 
     ) + frame.suffix
 
 
-def block_lines(data: bytes) -> list[bytes]:
-    """The lines of a block that carry its text, to compare a block with its render.
+def stray_lines(block: bytes, record) -> list[bytes]:
+    """The lines of a log block that none of its row's values holds, so that a render would lose them.
 
-    Blank lines, trailing spaces and the record-id and audit marker comments carry none of
-    the owner's text, so a render may change them.
+    ``record`` is the adapter's record of ``block``. Every other line is the block's heading, a
+    child row the adapter parsed into the row, a record-id, audit or view-stamp comment, or a
+    blank line. The row's values hold those, whatever their spacing, so a render keeps them.
     """
-    return [line.rstrip() for line in data.splitlines() if line.strip()
-            and not record_formats._MARKER.fullmatch(line.strip())
-            and not records._LOG_AUDIT_MARKER.fullmatch(line.strip())]
+    rows = {child.span.start - record.span.start for child in record.children}
+    stray, offset = [], 0
+    for line in block.splitlines(keepends=True):
+        text = line.strip()
+        if offset and offset not in rows and text and not (
+                record_formats._MARKER.fullmatch(text) or records._LOG_AUDIT_MARKER.fullmatch(text)
+                or record_formats._LOG_STAMP.fullmatch(text)):
+            stray.append(text)
+        offset += len(line)
+    return stray

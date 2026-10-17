@@ -194,8 +194,11 @@ October 4 private runtime/create foundation: independent review approves current
   Debt before P2.8 adds `collection-views-v1` to the release:
   - a frame edit is held (`VIEW_FRAME_CHANGED`) until `view_frame_edit` exists;
   - a session the owner inserts from a template has no record id, so it is held `VIEW_UNBOUND` until an unbound block can be resumed as an append;
-  - a formatting-only change inside a child row, such as the spacing around its delimiter, is held `VIEW_BLOCK_TEXT`.
   Older debt: `get_page` answers a log view path as absent for every caller, because `governance.projection_decision` proves no log render; it fails closed.
+  Residues:
+  - a string value written through the API with leading or trailing spaces renders with them, and the adapter strips them, so an untouched block of that row reads as a change;
+  - `runtime.RuntimeAdapter._drain_views` checks its deadline only between windows, so one window of `VIEW_BATCH_PATHS` paths can overrun its share.
+  A block is compared with its row by values, not spacing (`log_view.stray_lines`): `tests/test_collection_store_edit_back.py::test_a_spacing_only_edit_of_a_log_block_is_rendered_again_without_a_hold` and `tests/test_collection_store_legacy_import.py::test_a_legacy_log_whose_child_rows_are_spaced_by_hand_imports`, both red on the line comparison they replace, and `::test_a_line_in_a_legacy_log_block_that_no_value_holds_refuses_the_import` (a line shaped like a child row, a comment, a row with four cells).
 - [ ] P2.6 `file_watcher` hook for paths `projection_state` owns: lease holder only, settle windows (2 s apply, 10 s hold), the same leaf functions as MCP, REST and CLI.
 - [x] P2.7 Held view corrections in `inspect` (the Records `projection` summary and the Planning diagnostics codes with the exact Planning key set unchanged) and in the attention queue.
   Evidence: `tests/test_collection_store_edit_back.py::test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held` (the Records summary, diagnostics and the `collection_view_corrections` attention category, then discard), `::test_a_planning_hierarchy_violation_is_held_not_applied` (the Planning diagnostics code with the key set unchanged) and `::test_attention_for_a_withheld_view_correction_equals_attention_without_it`, shown red when the category ignores the caller's release.
