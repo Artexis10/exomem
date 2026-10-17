@@ -1477,9 +1477,13 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
 def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     """Read the bounded canonical epoch used by a private publication ticket.
 
-    This deliberately consults only the floor and checkpoint artifacts.  The
-    sidecar acknowledgement is derived state and must never be opened from the
-    short canonical publication hold.
+    This deliberately consults only the floor and checkpoint artifacts, so it
+    never opens the sidecar. The acknowledgement is derived state: a caller
+    that must bind it under the short canonical publication hold reads it
+    separately through `acknowledgement_state`, whose read is bounded by
+    `_ACK_READ_BUSY_TIMEOUT_SECONDS` and reports contention as `busy`. A behind
+    publication's ticket does this, once, because the acknowledgement it keeps
+    is what its publication must not move.
     """
     floor_status, floor = floor_state(vault_root)
     checkpoint_status, checkpoint = checkpoint_state(vault_root)
@@ -2019,6 +2023,25 @@ class GraphRebuildInProgress(GraphRebuildRegistrationError):
         super().__init__(
             "GRAPH_SYNC_REBUILD_IN_PROGRESS",
             "Retry after the active graph rebuild owner publishes or releases its claim.",
+        )
+
+
+class GraphRepairQueued(GraphRebuildInProgress):
+    """A whole-vault pass published behind, and the drain owns the rest of its repair.
+
+    A subclass because it means what `GraphRebuildInProgress` means to every
+    caller: the graph converges without this caller, so the outcome is pending
+    rather than failed, it may not mark the registry, and no newer pass is owed
+    for it. Its code tells an operator that nothing is rebuilding: the published
+    graph reports itself not current while the queued paths drain.
+    """
+
+    def __init__(self) -> None:
+        GraphRebuildRegistrationError.__init__(
+            self,
+            "GRAPH_SYNC_REPAIR_QUEUED",
+            "Repair of the changed pages is queued for the background index owner; "
+            "retry a graph-dependent query only if it reports warming.",
         )
 
 
@@ -2803,8 +2826,10 @@ class GraphRebuildCoordinator:
                     continue
                 if isinstance(error, GraphRebuildInProgress):
                     logger.info(
-                        "graph rebuild coalesced with active external owner "
-                        "checkpoint_sha256=%s generation=%s",
+                        "graph rebuild %s checkpoint_sha256=%s generation=%s",
+                        "published behind; its repair is queued"
+                        if isinstance(error, GraphRepairQueued)
+                        else "coalesced with active external owner",
                         required.checkpoint_sha256,
                         required.generation,
                     )

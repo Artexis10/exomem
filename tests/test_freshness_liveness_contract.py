@@ -699,11 +699,19 @@ def test_class_c_marking_is_narrowed_to_a_moved_projection(
     index = epistemic_graph.EpistemicGraphIndex(root)
 
     # A projection that provably moved under the in-flight proof: the supplied
-    # freshness identity does not name the resolver bytes.
+    # freshness identity does not name the resolver bytes, and the registry
+    # cannot explain the difference. The patched proof leaves nothing
+    # unexplained on disk, so the classifier is told the evidence exists; the
+    # classifier itself is pinned in `test_graph_behind_publication.py`.
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "_resolver_source_versions",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_classify_movement",
+        lambda *_args, **_kwargs: ("unrecorded", None),
     )
     with pytest.raises(epistemic_graph.GraphProjectionMoved, match="did not stabilize"):
         index._rebuild_all_locked()

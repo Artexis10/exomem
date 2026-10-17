@@ -1382,20 +1382,71 @@ def graph_full_rebuild_pending(vault_root: Path) -> int | None:
     try:
         conn = _connect_readonly(vault_root)
         try:
-            row = conn.execute(
-                "SELECT value FROM maintenance_state WHERE key = ?",
-                (_GRAPH_FULL_REBUILD_KEY,),
-            ).fetchone()
+            return _graph_full_rebuild_generation_locked(conn)
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
         return None
+
+
+def _graph_full_rebuild_generation_locked(conn: sqlite3.Connection) -> int | None:
+    """The whole-vault rebuild marker's generation, on a connection the caller holds."""
+    row = conn.execute(
+        "SELECT value FROM maintenance_state WHERE key = ?",
+        (_GRAPH_FULL_REBUILD_KEY,),
+    ).fetchone()
     if row is None:
         return None
     try:
         return int(row[0])
     except (TypeError, ValueError):
         return None
+
+
+def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> bool:
+    """Whether graph repair is owed beyond `rel_paths`.
+
+    True for a queued receipt for any other path, a whole-vault rebuild marker,
+    or a store that cannot be read: a caller that publishes the graph as current
+    on False never publishes over work it could not see. An absent store owes
+    nothing. One connection, and receipts are counted rather than listed, so the
+    cost follows `rel_paths`, not the queue.
+    """
+    if not store_path(vault_root).exists():
+        return False
+    wanted = sorted(
+        {rel for raw in rel_paths if (rel := _safe_markdown_rel_path(raw)) is not None}
+    )
+    try:
+        conn = _connect_readonly(vault_root)
+        try:
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if (
+                "maintenance_state" in tables
+                and _graph_full_rebuild_generation_locked(conn) is not None
+            ):
+                return True
+            if "graph_upserts" not in tables:
+                return False
+            queued = int(conn.execute("SELECT count(*) FROM graph_upserts").fetchone()[0])
+            inside = 0
+            for start in range(0, len(wanted), 900):
+                chunk = wanted[start : start + 900]
+                inside += int(
+                    conn.execute(
+                        "SELECT count(*) FROM graph_upserts WHERE rel_path IN "
+                        f"({','.join('?' for _ in chunk)})",
+                        chunk,
+                    ).fetchone()[0]
+                )
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return True
+    return queued > inside
 
 
 def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None) -> bool:

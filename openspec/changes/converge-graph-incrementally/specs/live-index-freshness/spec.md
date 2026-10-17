@@ -49,7 +49,8 @@ A graph proof MAY mark the event registry externally pending only on positive ev
 that the registry is behind the disk (Class C, #508 §1 as amended here):
 
 1. the freshness identity supplied to a whole-vault pass does not name the resolver
-   bytes the pass reads; or
+   bytes the pass reads, and the comparison in (2) finds a path that is not
+   accounted for; or
 2. the recall projection moved across an in-flight whole-vault pass, and at the pass's
    end the registry's recall map differs from the direct-disk stat map on a path that
    neither the registry's complete history since its checkpoint nor a standing
@@ -86,11 +87,19 @@ NFD name on a byte-exact file system -- is in the resolver, and is never evidenc
 
 #### Scenario: Governed writes during every attempt of a whole-vault pass
 
-- **WHEN** governed writes commit during every attempt of a whole-vault pass until its
-  re-target budget is spent
+- **WHEN** governed writes commit during every attempt of a whole-vault pass that may
+  not publish behind, until its re-target budget is spent
 - **THEN** the pass fails as a publication failure
 - **AND** no external-pending epoch is allocated, recall stays live and the corpus cache
   stays warm
+
+#### Scenario: A governed write during the resolver proof is not evidence
+
+- **WHEN** a governed write lands after a whole-vault pass built its resolver and
+  before the pass proved the resolver against the bytes
+- **THEN** the attempt is a publication failure and re-targets
+- **AND** no external-pending epoch is allocated; an unrecorded edit there instead
+  marks exactly its own page
 
 #### Scenario: An unrecorded edit marks exactly its paths
 
