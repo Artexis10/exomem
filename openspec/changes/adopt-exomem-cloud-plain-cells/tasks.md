@@ -14,6 +14,9 @@
   - no `.env` file is read.
 - [x] 2.2 Add `CloudCellTokenVerifier` to `server_auth.py`, and add the cloud branch of `build_server` in `server.py` on the standalone path (D1)
 - [x] 2.3 Add `CLOUD_SURFACE_EXCLUSIONS` (`transfer_artifact`, `adopt_vault`, `process_media`, `read_media`, each with a reason and a lifting condition) and remove its members from the served surface. Test the listed surface.
+- [ ] 2.3a Reconcile the `process_media` exclusion after documents and OCR shipped in [#1661](https://github.com/Artexis10/exomem/pull/1661).
+  Its claim that the image has no media dependencies is stale. Decide the manual-processing contract before amending or lifting the exclusion.
+  Verify the resulting reason, lifting condition and served tool surface together. Automatic ingestion does not prove manual retry or reprocessing.
 - [x] 2.4 Content-free logging in cloud mode:
   - extend `content_private_logging_enabled` to cloud mode and install the redaction hook;
   - use the content-free call trace;
@@ -115,7 +118,7 @@
   The exact-source fast suite above passed. Task 3.10 records disposable-cluster deletion acceptance.
 - [x] 3.8 Implement capacity publication (D9), with `cell_slots` = limit − headroom − non-cell attachments
   Evidence (#1368): `capacity.py`; `tests/test_capacity.py` (`test_cell_slots_subtracts_headroom_and_non_cell_attachments`, `test_fallback_limit_is_used_when_the_node_has_no_allocatable_count`), `tests/test_db.py::test_write_capacity_inserts_then_updates`, `tests/test_reconcile.py::test_a_vanished_node_gets_zero_slots_and_a_rejoining_node_its_count_back`.
-- [ ] 3.9 Add platform chart entries:
+- [x] 3.9 Add platform chart entries:
   - cellctl, single replica, `Recreate`, with the RBAC in D4 and the `ValidatingAdmissionPolicy` on its ServiceAccount (cell namespaces only, restricted labels, digest-pinned images from the cell repository);
   - the gateway Deployment and Service consuming the Substrate gateway image digest, rendering exactly the gateway's environment contract (C3), with a chart test pinning that set;
   - the certificate hostname resolving through public DNS in the gateway and cellctl pods, with the database's public `/32` in their egress; preserve tenant admission, and verify both image clients' TLS hostname and trust checks before sealing role DSNs;
@@ -127,6 +130,9 @@
   - SOPS-sourced Secrets.
   - retire legacy Hosted workloads and hooks; the Cloud lifecycle scheduler stays active while either Cloud control workload is enabled and suspends when both are disabled;
   - Extend the existing SOPS handoff, ciphertext validation and apply path to accept complete, exact-key-set Cloud platform Secret bundles while retaining scalar destinations; test bundle rotation shapes and reject incomplete, malformed or plaintext artifacts before publication or apply.
+  Evidence: `infra/helm/platform/templates/`, `infra/cellctl/Dockerfile`, `infra/cellctl/tests/test_platform_chart_headers.py` and `tests/test_cloud_secret_bundle_k3s.py` implement these boundaries.
+  The [disposable K3s run](https://github.com/Artexis10/exomem/actions/runs/38480038320/job/115581227399) passed 15 cases without skips on the source that merged as #1746.
+  Recorded platform deployment receipts establish the applied chart and signed Secret set. This closes chart delivery, not later rollout or client acceptance.
 - [x] 3.9a Classify every hosted scheduler job explicitly in chart values and render `exomem-reconcile` unsuspended whenever either Cloud control workload is enabled, while legacy-only jobs remain suspended; cover Cloud-on, legacy-pause-only and all-off renders.
 - [x] 3.9b Before deploying the lifecycle scheduler chart change, gate Substrate's legacy hosted lifecycle lane inside `/api/cron/exomem-reconcile` when Cloud is enabled, while retaining the Paddle and Cloud lanes. Substrate #190 is deployed; the authenticated production sweep returned zero legacy operations and a successful Cloud reconciliation on 2026-09-30.
 - [x] 3.9c Deploy the scheduler chart after the Substrate gate and verify a successful scheduled Cloud sweep while every legacy-only job remains suspended. Exomem #1490 (`9cdcea434`) deployed as platform revision 71 on 2026-09-30; the actual manifest matched the reviewed server dry-run, changing only reconcile `suspend: true` to `false`. The first scheduled job completed successfully at 19:50:15 UTC, and the scheduler ledger recorded a fresh success with zero consecutive failures.
@@ -241,10 +247,17 @@
   - resolve published image digests from the final reviewed release and render the complete platform change against captured live values;
   - prepare original DNS/tunnel snapshots, Terraform ownership reconciliation and phase-specific rollback;
   - retain the preparation-only boundary until the owner agrees a deployment/cutover window.
+  Reconciliation: the migration packet supported the recorded signed platform deployment and original image rollout.
+  The complete personal-client acceptance inventory is not reconciled here, so this box remains open. Reuse that packet; do not repeat completed migration stages.
 - [ ] 6.1 At the start of the agreed deployment window, scale the old platform's in-cluster gateway, provisioner and workers to zero (Substrate D8 step 1). Then apply the control server and run the database cutover under the Substrate runbook, which sets Neon read-only, lists every consumer, restores with `--no-owner --no-acl`, and runs the grants script. Then verify Endstate and Exomem. If the database cutover has already completed, verify its closure evidence and current live state rather than repeating it.
   - Role apply on the control server starts every unit; `systemctl is-active` for postgresql, pgbouncer, the certbot and pgbackrest timers.
   - A pgbackrest full backup to B2 completes and the restore-verify timer's script passes against B2 before the Neon cutover.
-- [ ] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
+  Reconciliation: the database cutover and Neon project deletion are already closed.
+  This task retains the unreconciled service, timer and pre-cutover backup evidence; it does not request another cutover or provider deletion.
+- [x] 6.2 Deploy cellctl and the gateway beside the old platform, and set `cell_image`
+  Recorded platform receipts reach revision 92 on 2026-10-17, with the gateway and cellctl Ready.
+  The fleet default and the three existing cells follow published [0.124.0](https://github.com/Artexis10/exomem/releases/tag/v0.124.0), without per-cell pins.
+  These are dated deployment receipts, not a fresh production inspection.
 - [ ] 6.3 Owner acceptance on the real node:
   1. invite and connect the claude.ai custom connector;
   2. capture;
@@ -253,6 +266,8 @@
   5. image upgrade and recall;
   6. backup present in B2;
   7. token refresh after 15 minutes.
+  Recorded capture, recall, upgrades and backups cover those individual checks. The existing ChatGPT connection also passed refresh and unchanged recall on 2026-10-14.
+  Claude-specific acceptance remains distinct and unverified here, so this box stays open. Later attachment ingestion does not prove that client's refresh.
 - [x] 6.4 Operator export runbook: restore into a scratch namespace and produce the tenant vault archive; needed before P5 friends.
   Evidence: [#1409](https://github.com/Artexis10/exomem/pull/1409) delivered [the export procedure](../../../docs/runbooks/cloud-operator-export.md); #1418 added break-glass access.
   The procedure binds the tenant, snapshot and recipient set, streams only the vault to age, and verifies recipient decryption before scratch cleanup.
@@ -261,31 +276,27 @@
 
 ### Launch and resilience roadmap
 
-Current evidence separates healthy service from recovery and launch acceptance.
-On 2026-10-13, isolated qualification accepted the published 0.116 Cloud and cellctl images by original digest, source and provenance.
-That qualification alone does not prove a production rollout, OAuth refresh or owner-sized admission.
+The original 0.116 qualification and image-only deployment remain historical evidence.
+They establish no current latency percentile, worst warm peak or full-fleet admission qualification.
+Recorded deployment receipts from 2026-10-17 place the three existing cells and fleet default on published 0.124.0.
+The rollout left no per-cell pins and did not change the existing resource profile.
+Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 6.11 retains memory and CPU qualification.
 
-On 2026-10-13, the operator applied the signed platform Secret set and deployed Helm revision 84.
-All 71 retired objects were absent, the retained capacity receipt remained present, and the controller and gateway were Ready.
-On 2026-10-14, the remaining rollout received window approval, and the owner cell became Ready on qualified 0.116.
-Fresh runtime verification confirmed owner-only roots, UID/GID 10001, zero container restarts and zero OOM events.
-Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`.
+Documents and OCR, plus artifact-broker access for every cell, are enabled in the recorded deployment.
+PDF, English OCR and Japanese OCR ingestion and keyword recall passed through the Cloud MCP connector.
+That proof covers the accepted connector route, not claude.ai's own attachment-link format or access rules.
+Image search and speech remain unfinished scope in `add-cloud-multimodal-processing`.
+Its documents/OCR delivery does not close that entire change or its broader performance gates.
 
-Authenticated capture, exact and paraphrased recall, and the content-free log canary now pass after connector reconnection.
-Owner performance and memory headroom acceptance remain open.
-The existing ChatGPT connection refreshed over 15 minutes after sign-in and read back the unchanged canary on 2026-10-14.
-Rotation metadata binds the consumed refresh token, its replacement and the new access-token expiry.
-This closes that client's refresh check; Claude-specific acceptance, node latency and owner-sized admission remain unproved.
-QA and reviewer cells also became Ready on qualified 0.116; owner-only custody and authenticated MCP reads passed with unchanged resources.
-The fleet default retains its previous image, and the two stopped cells remain stopped and unpinned.
-Capacity qualification still holds fleet-default promotion and friend admission.
-Shared selection remains off. Warm-peak qualification remains open; current capacity charges scheduler requests rather than measured peaks.
+The 0.124.0 source includes the large-page graph-read fix, cell-health alerts and a configurable upgrade readiness deadline.
+[Source delivery](https://github.com/Artexis10/exomem/releases/tag/v0.124.0) does not prove the graph fix's production outcome.
+Alert-delivery receipts cover `cell-unavailable` and `cell-disk-low`; they do not establish functional-health job activation.
+That activation remains separate work in `add-hosted-functional-health-jobs`.
 
-A deployed-image B2 backup and scratch restore matched both vault and host state, with scratch cleanup verified.
-That proof does not close in-place restore, historical rollback, connector sign-in or token refresh.
-Existing per-cell pins do not prove that the fleet default selects the qualified release.
-The Neon cutover and project deletion are closed; do not repeat them.
-Tasks 6.0–6.3 stay unchecked until their exact closure evidence is reconciled.
+A deployed-image B2 scratch restore matched vault and host state, with custody, authentication and cleanup verified.
+It does not close in-place failure recovery or historical rollback. Preserve those boundaries in tasks 6.6–6.9.
+The recipient-encrypted export in 6.12 used 0.116; it is not a fresh acceptance run on every later release.
+Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repeating completed deployment or database-cutover stages.
 
 - [x] 6.5 Resilience 1: make B2 restore verification repeatable through `infra/scripts/cloud_restore.sh drill` and its existing renderer.
   Evidence from 2026-10-09: scratch restores matched 45/45 and 9,324/9,324 vault files.
@@ -345,8 +356,13 @@ Tasks 6.0–6.3 stay unchecked until their exact closure evidence is reconciled.
   The inline checkout accepts no typed discount code; the friend price comes from the invitation through the configured friend discount, and the paid step is a real friend checkout. A complimentary ("Covered") invitation exercises the same invite, provisioning and connector steps without a payment.
   Verify save, cited recall, token refresh, a restorable backup, recipient export and ordered deletion without operator repair.
   Select the friend discount through the product configuration; do not encode a historical price.
-  After capacity qualification, set and verify the fleet default `cellImage` through the existing release API.
-  Existing per-cell pins alone do not qualify a new friend's image. Keep invitations pending until the required journey and resilience evidence passes.
+  The recorded 2026-10-17 rollout already set the fleet default to 0.124.0 and cleared the existing pins.
+  Verify that the new cell selects the then-current published default through the existing release API; do not repeat a default change merely for this task.
+  A production-shaped Sandbox checkout already proved payment and signed webhooks with a stand-in controller. Production acceptance uses one paid onboarding journey.
+  That Sandbox proof does not establish a fresh production cell, connector sign-in or this full journey.
+  Public admission stays on the waitlist; operator invitations admit directly when capacity is available.
+  Resilience drills 6.6–6.9 are deferred until after launch; their unchecked boxes remain evidence limits, not newly imposed invitation gates.
+  Keep refresh, restorable backup, recipient export and ordered deletion acceptance explicit. Do not delete a paying tenant merely to complete a checklist.
 
 ## 7. Retirement (R)
 
@@ -367,7 +383,8 @@ Tasks 6.0–6.3 stay unchecked until their exact closure evidence is reconciled.
   Generic V1/V2 archive, protected restore, collection replica, history, and schema contracts remain in `hosted-vault-portability` under `vault_portability.py`.
   Hosted delivery, lifecycle, release, deletion, fingerprint, and restore-candidate bindings are retired.
   Mixed changes retain their open local and Cloud tasks. Task 7.2 remains open until their active deltas are reconciled.
-- [ ] 7.3 After seven clean days, delete the Neon project, and retire merged worktrees and branches
+- [ ] 7.3 After seven clean days, retire merged worktrees and branches whose ownership and clean, pushed state permit retirement.
+  The Neon project deletion is already closed; do not repeat it. Other sessions' worktrees and running processes remain outside this task.
 
 - [ ] 7.4 Complete the [Hosted retirement disposal inventory](../../../docs/runbooks/cloud-hosted-retirement.md).
   Repository deletion leaves provider credentials, manually managed Secrets and retained data intact.
