@@ -2705,7 +2705,7 @@ def served_entries(
         return _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )[0]
-    projection_token = _file_token(state_path(vault_root))
+    projection_token = _served_content_token(vault_root)
     if projection_token is None:
         rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
@@ -2787,9 +2787,45 @@ def served_entries(
     return rows
 
 
+def _served_content_token(vault_root: Path) -> str | None:
+    """Identity of what a served build reads from the projection, or None when absent.
+
+    A build reads only the projection's `categories` and `role_state`. Every
+    governed write rewrites the file to tick its emission ledger, so keying the
+    served cache on the file would rebuild the served list -- a release decision
+    per due item -- on every write, even one that changes no due item.
+    """
+    token = _file_token(state_path(vault_root))
+    if token is None:
+        return None
+    key = (str(vault_root), token)
+    with _SERVE_LOCK:
+        known = _CONTENT_TOKENS.get(key)
+    if known is not None:
+        return known
+    payload = _load_shared(vault_root)
+    if payload is None:
+        return None
+    digest = hashlib.sha256(
+        json.dumps(
+            {"categories": payload.get("categories"), "role_state": payload.get("role_state")},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    with _SERVE_LOCK:
+        if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
+            _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
+        _CONTENT_TOKENS[key] = digest
+    return digest
+
+
 #: One served build per (vault, audience, session, purpose, day, projection
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+#: Served-content identity per projection file version; see `_served_content_token`.
+_CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
@@ -2799,6 +2835,7 @@ def reset_serve_cache() -> None:
     """Drop every memoised served build: tests, and anything editing state files by hand."""
     with _SERVE_LOCK:
         _SERVE_CACHE.clear()
+        _CONTENT_TOKENS.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
     with _SHARED_LOCK:
