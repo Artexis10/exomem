@@ -1197,10 +1197,13 @@ def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, 
     if rel is None or not path.exists():
         return None
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    fm, _, _ = vault_module.parse_frontmatter(raw)
+    # Parse what text mode reads (universal newlines) but hash the bytes as
+    # stored: recall custody proves a page by the digest of its bytes, so a
+    # CRLF page hashed after newline translation could never be proven.
+    fm, _, _ = vault_module.parse_frontmatter(raw.replace("\r\n", "\n").replace("\r", "\n"))
     value = fm.get(ID_FIELD)
     raw_id = "" if value is None else str(value)
     normalized = normalize_id(value)

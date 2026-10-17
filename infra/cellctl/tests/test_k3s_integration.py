@@ -126,7 +126,7 @@ MINIO_SECRET_KEY = "cellctltestsecret1"
 BUCKET_NAME = "exomem-cloud-backups"
 
 # Short but real deadlines so the live test exercises the actual D6/D8 timeout
-# branches without waiting on the 10/15-minute production defaults.
+# branches without waiting on the 30/15-minute readiness and backup production defaults.
 LIVE_CONFIG = ReconcileConfig(
     init_deadline=timedelta(seconds=90),
     # The StatefulSet's terminationGracePeriodSeconds is 30s, and the real

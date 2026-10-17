@@ -162,7 +162,7 @@ cellctl SHALL change at most one cell's image at a time, lowest `rollout_priorit
 1. stop the cell;
 2. take a backup, within a bounded deadline;
 3. start the target image;
-4. wait up to 10 minutes for readiness.
+4. wait for readiness up to the configured upgrade readiness deadline (30 minutes by default).
 
 If the backup misses its deadline, cellctl SHALL restart the cell on its current image, record `BACKUP_FAILED`, and retry later. It MUST NOT leave the cell stopped on an object-storage failure.
 
@@ -185,7 +185,7 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 #### Scenario: Canary fails readiness after migrating state
 
-- **WHEN** the canary's new image migrates state and then fails to become ready within 10 minutes
+- **WHEN** the canary's new image migrates state and then fails to become ready within the configured upgrade readiness deadline
 - **THEN** cellctl restores the pre-attempt backup, starts the previous image, and pauses the rollout, recording the error and the held cell
 - **AND** no other cell changes, and the canary serves its pre-attempt content
 

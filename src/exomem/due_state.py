@@ -2680,9 +2680,9 @@ def served_entries(
     answer rebuilds, so a revocation stays immediate; the artifact-role
     findings are served again and compared, so advice whose source changed
     out of band is omitted until reconcile exactly as before; a page deleted
-    out of band is dropped from the hit the way the build drops it. Every
-    write replaces the projection file, so the next read after a write
-    rebuilds once. A projection that could not be persisted is never cached,
+    out of band is dropped from the hit the way the build drops it. A write
+    that changes the projection beyond its emission ledger rebuilds once on the
+    next read (`_served_content_token`). A projection that could not be persisted is never cached,
     because a write then updates it in memory with no file to notice.
     """
     from .governance import egress as egress_module
@@ -2705,7 +2705,7 @@ def served_entries(
         return _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )[0]
-    projection_token = _file_token(state_path(vault_root))
+    projection_token = _served_content_token(vault_root)
     if projection_token is None:
         rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
@@ -2787,9 +2787,45 @@ def served_entries(
     return rows
 
 
+def _served_content_token(vault_root: Path) -> str | None:
+    """Identity of the projection without its emission ledger, or None when absent.
+
+    Every governed write rewrites the file to tick the emission ledger, which no
+    served build reads, so keying the served cache on the file would rebuild the
+    served list -- a release decision per due item -- on every write. Everything
+    else is hashed, so a key a build starts reading invalidates by default.
+    """
+    token = _file_token(state_path(vault_root))
+    if token is None:
+        return None
+    key = (str(vault_root), token)
+    with _SERVE_LOCK:
+        known = _CONTENT_TOKENS.get(key)
+    if known is not None:
+        return known
+    payload = _load_shared(vault_root)
+    if payload is None:
+        return None
+    digest = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "emission"},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    with _SERVE_LOCK:
+        if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
+            _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
+        _CONTENT_TOKENS[key] = digest
+    return digest
+
+
 #: One served build per (vault, audience, session, purpose, day, projection
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+#: Served-content identity per projection file version; see `_served_content_token`.
+_CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
@@ -2799,6 +2835,7 @@ def reset_serve_cache() -> None:
     """Drop every memoised served build: tests, and anything editing state files by hand."""
     with _SERVE_LOCK:
         _SERVE_CACHE.clear()
+        _CONTENT_TOKENS.clear()
     with _FINGERPRINTS_LOCK:
         _FINGERPRINTS.clear()
     with _SHARED_LOCK:

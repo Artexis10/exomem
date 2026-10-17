@@ -187,6 +187,12 @@ cellctl:
   # D3 default; not pinned exactly by the design, kept configurable per the
   # design owner's ruling rather than hardcoded.
   initDeadlineMinutes: 10
+  # How long cellctl waits for an upgraded cell to become ready before it restores the
+  # pre-upgrade snapshot and pauses the rollout. A release that changes the retrieval
+  # catalogue's identity rebuilds it on the first start: about 8 minutes on one production
+  # cell, longer on a larger vault. A broken image keeps the canary cell down for the
+  # whole deadline. The schema allows 5 to 120.
+  upgradeReadyDeadlineMinutes: 30
   databaseDsnSecretName: exomem-cellctl-database-dsn
   databaseDsnSecretKey: dsn
   cellTokenKeySecretName: exomem-cloud-cell-token-key

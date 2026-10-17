@@ -10,6 +10,7 @@ down at the end of the test session.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -25,6 +26,9 @@ import pytest
 from cellctl.control_test_contract import control_test_sql, import_test_sql
 
 FIXTURES = Path(__file__).parent / "fixtures"
+CONTRACT_ALERTS = json.loads(
+    (Path(__file__).resolve().parents[3] / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
+)["alerts"]
 
 # Migration 0056 references exomem_tenants(id), which an earlier Substrate
 # migration owns. The fixtures carry only the Cloud files, so the suite
@@ -226,3 +230,13 @@ def cell_db(postgres_server: PostgresServer) -> Iterator[CellDatabase]:
         yield CellDatabase(server=postgres_server, name=name)
     finally:
         asyncio.run(_drop_cell_db(postgres_server, name))
+
+
+@pytest.fixture(autouse=True)
+def alert_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cellctl refuses to start without the thresholds the chart renders from
+    the observability contract (main.build_alert_thresholds), so a test that
+    builds a config gets the contract's own values."""
+
+    monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", str(CONTRACT_ALERTS["pending_operation_warn_seconds"]))
+    monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", str(CONTRACT_ALERTS["pvc_reserved_free_bytes"]))

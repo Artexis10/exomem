@@ -15,9 +15,10 @@ from datetime import timedelta
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
+from .alerts import AlertThresholds
 from .backup_window import parse_backup_window
 from .capacity import CapacityConfig, SharedWorkerPolicy
-from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
+from .decide import ReconcileConfig
 from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
@@ -69,10 +70,16 @@ def build_secrets_config() -> SecretsConfig:
 
 
 def build_reconcile_config() -> ReconcileConfig:
-    # D3/D6: the init/upgrade-readiness deadline stays a 10-minute default
-    # (not pinned exactly by the design), but is configurable per the
-    # coordinator's ruling rather than hardcoded.
-    kwargs: dict[str, object] = {}
+    # D6 step 4: the upgrade-readiness deadline is required configuration, rendered by the
+    # chart (cellctl.upgradeReadyDeadlineMinutes). A first start that rebuilds a large
+    # vault's catalogue can answer "warming" for many minutes, and a deadline missed
+    # restores the cell and pauses the rollout, so a guessed value would do harm. The
+    # chart owns the number and its bounds; cellctl refuses to start without it.
+    kwargs: dict[str, object] = {
+        "upgrade_ready_deadline": timedelta(minutes=_positive_integer_env("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"))
+    }
+    # D3: the init deadline stays a 10-minute default (not pinned exactly by the
+    # design), but is configurable per the coordinator's ruling rather than hardcoded.
     minutes_raw = os.environ.get("CELLCTL_INIT_DEADLINE_MINUTES")
     if minutes_raw is not None:
         kwargs["init_deadline"] = timedelta(minutes=int(minutes_raw))
@@ -92,8 +99,6 @@ def build_reconcile_config() -> ReconcileConfig:
             if minutes <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(minutes=minutes)
-    if not kwargs:
-        return DEFAULT_RECONCILE_CONFIG
     return ReconcileConfig(**kwargs)
 
 
@@ -121,6 +126,28 @@ def build_alert_delivery_secret() -> tuple[str, str, str] | None:
     if len(parts) != 3 or not all(parts):
         raise ValueError("the alert delivery secret must be namespace/name/key")
     return parts
+
+
+def _positive_integer_env(name: str) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        raise ValueError(f"{name} is required: the chart renders it")
+    # Digits only: Helm prints a large number from JSON as 1.073741824e+09, which must not pass as a guess.
+    if not (raw.isascii() and raw.isdecimal()) or int(raw) <= 0:
+        raise ValueError(f"{name} must be a positive whole number, not {raw!r}")
+    return int(raw)
+
+
+def build_alert_thresholds() -> AlertThresholds:
+    """The cell alerts' thresholds, which the chart renders from the observability
+    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`).
+    A missing or invalid value fails cellctl at startup: with no default in code, the
+    contract is the only place either number lives, and a guessed one would alert wrongly."""
+
+    return AlertThresholds(
+        unavailable_after=timedelta(seconds=_positive_integer_env("CELLCTL_PENDING_OPERATION_WARN_SECONDS")),
+        disk_free_floor_bytes=_positive_integer_env("CELLCTL_PVC_RESERVED_FREE_BYTES"),
+    )
 
 
 def build_cluster_config() -> ClusterConfig:
@@ -178,6 +205,7 @@ def build_cluster_config() -> ClusterConfig:
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),
+        alert_thresholds=build_alert_thresholds(),
         capacity=CapacityConfig(
             csi_driver=os.environ.get("CELLCTL_CSI_DRIVER", "csi.hetzner.cloud"),
             headroom=int(os.environ.get("CELLCTL_ATTACHMENTS_HEADROOM", "5")),

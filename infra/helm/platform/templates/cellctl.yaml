@@ -1,5 +1,11 @@
 {{- if .Values.cellctl.enabled }}
 {{- $shared := .Values.cellctl.sharedWorker }}
+{{- /*
+The cell alerts' thresholds come from the observability contract the chart already
+ships (observability.yaml checks its SHA-256), so cellctl holds no second copy.
+int64 keeps Helm from printing a large JSON number as 1.073741824e+09.
+*/ -}}
+{{- $contractAlerts := (.Files.Get "files/observability-v1.json" | fromJson).alerts }}
 {{- $storage := include "exomem.cellStorage" . | fromJson }}
 {{- $local := .Values.cellStorage.local.enabled }}
 {{- $cellClasses := list (printf "'%s'" .Values.cloudStorage.className) }}
@@ -223,6 +229,8 @@ spec:
             {{- end }}
             - name: CELLCTL_INIT_DEADLINE_MINUTES
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
+            - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
+              value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
             # D8: nightly backup window and stagger.
             - name: CELLCTL_BACKUP_WINDOW
               value: {{ .Values.cells.backupWindow | quote }}
@@ -232,6 +240,12 @@ spec:
             # alert receiver; the Role below lets cellctl read this one Secret.
             - name: CELLCTL_ALERT_DELIVERY_SECRET
               value: {{ printf "%s/%s/%s" .Release.Namespace .Values.observability.alertDeliverySecretName .Values.observability.alertDeliverySecretKey | quote }}
+            # The cell-unavailable and cell-disk-low alerts' thresholds, from
+            # alerts.* in the observability contract (above).
+            - name: CELLCTL_PENDING_OPERATION_WARN_SECONDS
+              value: {{ int64 (required "observability contract alerts.pending_operation_warn_seconds is required" $contractAlerts.pending_operation_warn_seconds) | quote }}
+            - name: CELLCTL_PVC_RESERVED_FREE_BYTES
+              value: {{ int64 (required "observability contract alerts.pvc_reserved_free_bytes is required" $contractAlerts.pvc_reserved_free_bytes) | quote }}
             {{- if $local }}
             # move-cloud-cells-to-local-storage: the classes a cell volume may
             # be on and the one new claims take (_cell-storage.tpl).

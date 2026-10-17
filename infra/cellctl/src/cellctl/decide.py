@@ -53,14 +53,17 @@ GROWTH_THRESHOLD_PERCENT = 80
 
 @dataclass(frozen=True)
 class ReconcileConfig:
-    # D3 does not pin an exact first-boot init deadline; 10 minutes matches
-    # the D6 upgrade-readiness deadline as the most defensible default.
+    # D3 does not pin an exact first-boot init deadline; 10 minutes is the
+    # most defensible default.
     init_deadline: timedelta = timedelta(minutes=10)
     import_deadline: timedelta = timedelta(hours=2)
     import_cleanup_deadline: timedelta = timedelta(minutes=2)
     import_cleanup_retry: timedelta = timedelta(hours=1)
     backup_deadline: timedelta = timedelta(minutes=15)
-    upgrade_ready_deadline: timedelta = timedelta(minutes=10)
+    # D6 step 4. Production reads it from the chart (cellctl.upgradeReadyDeadlineMinutes,
+    # via main.build_reconcile_config) and never uses this value; it is the default of
+    # the tests that build a ReconcileConfig() directly.
+    upgrade_ready_deadline: timedelta = timedelta(minutes=30)
     # D6 step 5: an attempt whose target was never applied within this long
     # of the hold starting ends the same way as a refused target.
     upgrade_stall_bound: timedelta = timedelta(minutes=30)
