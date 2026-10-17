@@ -17,7 +17,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -533,6 +533,11 @@ class Supervisor:
         if note is not None:
             handoff["migration"]["collections"] = dict(note)
 
+    def _collections_requested(self) -> bool:
+        """Whether the runtime decided this handoff's migrator runs the collections step."""
+        note = getattr(self.runtime, "collections_migration", None)
+        return isinstance(note, dict) and note.get("state") == "requested"
+
     def _migration_declared(self, target: dict[str, Any]) -> tuple[bool, str]:
         """Whether the staged target declares a state migration."""
         declared = getattr(self.runtime, "migration_required", None)
@@ -644,12 +649,15 @@ class Supervisor:
                     stopped_at = time.monotonic()
                     # The migrator is the only writer between the two workers,
                     # and it runs only when the target declares a state
-                    # migration. A skipped step is recorded, never silent.
+                    # migration or a collections step. A skipped step is
+                    # recorded, never silent.
+                    collections = self._collections_requested()
                     handoff["migration"] = {
-                        "state": "ran" if migrate else "skipped",
-                        "reason": reason,
+                        "state": "ran" if migrate or collections else "skipped",
+                        "reason": reason if migrate or not collections
+                        else "collections step requested",
                     }
-                    if migrate:
+                    if migrate or collections:
                         self.records.phase("migrating", worker_pid=0)
                         try:
                             await self.runtime.migrate(
@@ -671,6 +679,11 @@ class Supervisor:
                 replacement_budget = self._replacement_budget()
                 if standby is not None:
                     self.records.phase("promoting", worker_pid=0)
+                    # Only a state migration makes promotion re-run the whole
+                    # source proof. The collections step writes the store, its
+                    # marker and replica, the state manifest's descriptor and
+                    # the coordinator's fence, none of which a graph snapshot
+                    # proves, so it keeps the cheap checkpoint comparison.
                     client, promotion = await self.runtime.promote_standby(
                         migrated=migrate, timeout=replacement_budget
                     )
@@ -779,11 +792,12 @@ def _pass_through(output: Any) -> bytes:
     return tail
 
 
-def _migrator_outcome(output: bytes) -> str:
-    """The collections outcome the migrator child reported, in the shape a record may carry.
+def _migrator_outcome(output: bytes) -> dict[str, str]:
+    """The collections outcome the migrator child reported, and its refusal code, as a record carries them.
 
-    The child runs the target release, so its word is clamped here as a readiness
-    reason is, never trusted or repeated in another shape.
+    The child runs the target release, so its words are clamped here as a readiness
+    reason is, never trusted or repeated in another shape. The code names what a
+    step that raised ran into, such as a dead migrator's lease that has not expired.
     """
     for line in reversed(output.decode("utf-8", errors="replace").splitlines()):
         try:
@@ -791,11 +805,17 @@ def _migrator_outcome(output: bytes) -> str:
         except ValueError:
             continue
         try:
-            outcome = report["data"]["collections"]["outcome"]
+            step = report["data"]["collections"]
+            outcome = step["outcome"]
         except (KeyError, TypeError):
-            return UNRECOGNIZED_REASON
-        return _recognized_reason(outcome) if isinstance(outcome, str) else UNRECOGNIZED_REASON
-    return UNRECOGNIZED_REASON
+            return {"outcome": UNRECOGNIZED_REASON}
+        if not isinstance(outcome, str):
+            return {"outcome": UNRECOGNIZED_REASON}
+        recorded = {"outcome": _recognized_reason(outcome)}
+        if isinstance(step.get("code"), str):
+            recorded["code"] = _recognized_reason(step["code"])
+        return recorded
+    return {"outcome": UNRECOGNIZED_REASON}
 
 
 def verify_systemd_identity(
@@ -895,10 +915,13 @@ LOCAL_PORT_ENV = "EXOMEM_LOCAL_PORT"
 #: How long the supervisor waits for the migrator child once the old worker has stopped
 #: (`move-structured-collections-to-sqlite` D3). Nothing serves meanwhile.
 MIGRATION_SECONDS = 15.0
-#: What the migrator child leaves of that wait after its own deadline: its interpreter's
-#: start, and the steps of a collections cutover that has published its store, which
-#: finish once begun. The child abandons a migration it has not published by then.
-MIGRATION_FINISH_SECONDS = 3.0
+#: What the migrator child leaves of that wait after its own deadline, which is absolute,
+#: so its interpreter's start counts against its budget instead: the steps of a collections
+#: cutover from its seal on, which finish once begun, its exit and this supervisor's proof
+#: of that exit. On a test vault with about 3,900 items these took 3.0 to 3.3 s; this is
+#: twice that, because replica publication grows with the store. The child abandons a
+#: migration it has not sealed by then.
+MIGRATION_FINISH_SECONDS = 6.0
 #: The protected operator file, beside the unit's first service environment file (D1).
 #: It is never an `EnvironmentFile=`, so neither systemd nor a worker ever loads it.
 OPERATOR_ENV_FILE = "operator.env"
@@ -907,6 +930,12 @@ OPERATOR_TOKEN_ENV = "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
 _OPERATOR_FILE_MAX_BYTES = 16384
 #: The bounded tail of the migrator's output the supervisor reads for its outcome.
 _MIGRATOR_OUTPUT_MAX_BYTES = 65536
+#: Set to "1" in the standby's environment only when this handoff can run the collections
+#: step (the target declares it and the operator file is usable), so that a standby that
+#: cannot be finished never pays for a pre-import. It carries no credential.
+STANDBY_COLLECTIONS_ENV = "EXOMEM_STANDBY_COLLECTIONS_STEP"
+#: The collections outcome recorded when this supervisor's wait for the migrator ran out.
+MIGRATOR_TIMED_OUT = "timed_out"
 
 
 def local_port_setting(
@@ -952,6 +981,24 @@ def remove_stale_socket(path: Path) -> None:
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
         raise ValueError("managed socket path contains an unexpected file")
     path.unlink()
+
+
+def _collections_migration_pending(vault: Path) -> bool:
+    """Whether the live store carries a published migration that a handoff's collections step finishes.
+
+    A store that cannot be read requests nothing: the replacement meets it as any release would.
+    """
+    from .collection_store import authority, connection
+
+    store = connection.store_path(vault)
+    if not store.exists():
+        return False
+    try:
+        with closing(connection.open_head_reader(store)) as reader:
+            intent = authority.pending_create(reader)
+    except Exception:  # noqa: BLE001 - see the docstring
+        return False
+    return intent is not None and intent["kind"] == authority.MIGRATE
 
 
 def _require_store_schema(vault: Path, ceiling: int | None) -> None:
@@ -1017,6 +1064,8 @@ class WorkerRuntime:
         #: The collections step decided for this handoff, then what the migrator reported.
         #: Content-free: a state, a fixed reason or the migrator's clamped outcome token.
         self.collections_migration: dict[str, Any] | None = None
+        #: A collections migrator's output, kept open until its exit is proven.
+        self._migrator_output: Any = None
         self.standby_waiting: str | None = None
         #: What the replacement last reported waiting on after the old worker
         #: stopped. Recorded for the handoff; it gates nothing.
@@ -1102,14 +1151,17 @@ class WorkerRuntime:
             return None, "no service environment file"
         path = self.environment_files[0].parent / OPERATOR_ENV_FILE
         try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            # O_NONBLOCK: a FIFO at this path must not hang the supervisor; fstat refuses it.
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
         except FileNotFoundError:
             return None, "operator credential file missing"
         except OSError:
             return None, "operator credential file unreadable"
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            if not stat.S_ISREG(info.st_mode):
+                return None, "operator credential file is not a regular file"
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 return None, "operator credential file is not private to its owner"
             raw = handle.read(_OPERATOR_FILE_MAX_BYTES + 1)
         if len(raw) > _OPERATOR_FILE_MAX_BYTES:
@@ -1239,17 +1291,18 @@ class WorkerRuntime:
         store_schema = actual.get("store_schema")
         if store_schema is not None and (type(store_schema) is not int or store_schema < 0):
             raise ValueError("target did not declare its collection store schema")
+        # None: the target's probe of its own declaration raised (recorded, not refused).
         migrations = actual.get("offline_migrations", [])
-        if not isinstance(migrations, list) or not all(
+        if migrations is not None and (not isinstance(migrations, list) or not all(
             isinstance(entry, str) and entry for entry in migrations
-        ):
+        )):
             raise ValueError("target did not declare its offline migrations")
         self.standby_capable = actual.get("standby") is True
         self._verified_state_compatibility = (
             (interpreter, version, tuple(descriptors)),
             frozenset(compatibility),
             store_schema,
-            frozenset(migrations),
+            None if migrations is None else frozenset(migrations),
         )
         return {
             "python": interpreter,
@@ -1309,6 +1362,7 @@ class WorkerRuntime:
                 self.child, timeout=timeout, include_adopted=True, ignore_sessions=ignore
             )
             self.child = None
+            self._release_migrator_output()
         elif _descendants(ignore_sessions=ignore):
             raise RuntimeError("untracked owned children require a service-manager cleanup")
         if self.client is not None:
@@ -1338,33 +1392,50 @@ class WorkerRuntime:
         if collections:
             # Read again now: the file may have changed since the declaration was checked.
             token, problem = self._operator_credential()
-            budget = timeout - MIGRATION_FINISH_SECONDS
-            if problem is None and budget <= 0:
+            # Absolute, on CLOCK_MONOTONIC, which Linux shares between processes: the
+            # child's interpreter start counts against it instead of the finishing reserve.
+            publish_by = time.monotonic() + timeout - MIGRATION_FINISH_SECONDS
+            if problem is None and publish_by <= time.monotonic():
                 problem = "no migration budget left"
             if problem is not None:
                 self.collections_migration = {"state": "skipped", "reason": problem}
                 collections = False
             else:
-                # The child abandons what it has not published by its own deadline, so this
-                # wait never ends in a killed migrator that left a migration half done.
-                command += ["--migrate-collections", "--deadline-seconds", f"{budget:.3f}"]
+                # The child abandons what it has not sealed by then, so this wait never
+                # ends in a killed migrator that left a migration half done.
+                command += ["--migrate-collections", "--deadline-monotonic", f"{publish_by:.3f}"]
                 environment = {OPERATOR_TOKEN_ENV: token}
         # A private unlinked file, not a pipe: a pipe could fill before the child exits, and a
-        # descendant holding it open would keep its end from ever arriving.
-        output = tempfile.TemporaryFile() if collections else None
+        # descendant holding it open would keep its end from ever arriving. It is read only
+        # once the child is gone, here or by the stop that follows a timed-out wait, so the
+        # journal keeps what a migrator wrote until it was stopped.
+        self._migrator_output = tempfile.TemporaryFile() if collections else None
         try:
-            await self._spawn(command, environment=environment, stdout=output)
+            await self._spawn(command, environment=environment, stdout=self._migrator_output)
             await asyncio.wait_for(self.child.wait(), deadline.remaining(timeout))
-        finally:
-            if output is not None:
-                with output:
-                    self.collections_migration = {
-                        "state": "ran", "outcome": _migrator_outcome(_pass_through(output)),
-                    }
+        except TimeoutError:
+            if collections:
+                self.collections_migration = {"state": "ran", "outcome": MIGRATOR_TIMED_OUT}
+            raise
+        except BaseException:
+            self._release_migrator_output()
+            raise
+        if collections:
+            self.collections_migration = {
+                "state": "ran", **_migrator_outcome(self._release_migrator_output()),
+            }
         if self.child.returncode != 0:
             raise RuntimeError("offline target preparation failed")
         # A completed migrator is not proof its children have stopped.
         await self.stop(timeout=deadline.remaining(timeout))
+
+    def _release_migrator_output(self) -> bytes:
+        """Pass the exited migrator's output on to the journal and close it; its bounded tail."""
+        output, self._migrator_output = getattr(self, "_migrator_output", None), None
+        if output is None:
+            return b""
+        with output:
+            return _pass_through(output)
 
     async def start(self, target: dict[str, Any], timeout: float):
         import httpx
@@ -1464,35 +1535,53 @@ class WorkerRuntime:
         from the one the manifest was published with. Nothing here runs the
         migrator to find out (`seamless-managed-worker-handoff` D8).
 
-        A target whose own migrator declares the collections migration also needs
+        A target whose own migrator declares the collections migration also runs
         the migrator while this vault holds the standby's pre-import, if the
         protected operator file is usable (`move-structured-collections-to-sqlite`
         §10, D1). That decision is kept in ``collections_migration`` for the
-        migrator and the handoff record. A target that declares no such migration
-        gets exactly the answer it got before the migration existed.
+        migrator and the handoff record, apart from this answer: promotion re-runs
+        the whole source proof only after a state migration. A target that
+        declares no such migration gets exactly the record it got before.
         """
         migrate, reason = self._state_migration_required(target)
         self.collections_migration = None
+        declared = self._collections_declared(target)
+        if declared == "probe_failed":
+            # The target's own probe raised, which is not the same fact as declaring nothing.
+            self.collections_migration = {"state": "skipped", "reason": "target migration probe failed"}
+        elif declared == "declared":
+            from .collection_store import connection
+
+            vault = Path(os.environ["EXOMEM_VAULT_PATH"])
+            _, problem = self._operator_credential()
+            if problem is None and not (
+                connection.migration_staging_directories(vault) or _collections_migration_pending(vault)
+            ):
+                problem = "nothing staged"
+            self.collections_migration = (
+                {"state": "requested"} if problem is None else {"state": "skipped", "reason": problem}
+            )
+        return migrate, reason
+
+    def _collections_declared(self, target: dict[str, Any]) -> str:
+        """"declared", "none" or "probe_failed": what the verified target says of the collections step."""
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         verified = self._verified_for(target)
-        from .collection_store import capability, connection
+        if verified is None or not vault or not Path(vault).is_absolute():
+            return "none"
+        if verified[3] is None:
+            return "probe_failed"
+        from .collection_store import capability
 
-        if (
-            verified is None
-            or capability.COLLECTIONS_MIGRATE_V1 not in verified[3]
-            or not vault
-            or not Path(vault).is_absolute()
-        ):
-            return migrate, reason
-        if not connection.migration_staging_directories(Path(vault)):
-            self.collections_migration = {"state": "skipped", "reason": "nothing staged"}
-            return migrate, reason
-        _, problem = self._operator_credential()
-        if problem is not None:
-            self.collections_migration = {"state": "skipped", "reason": problem}
-            return migrate, reason
-        self.collections_migration = {"state": "requested"}
-        return True, reason if migrate else "collections migration staged"
+        return "declared" if capability.COLLECTIONS_MIGRATE_V1 in verified[3] else "none"
+
+    def standby_environment(self, target: dict[str, Any]) -> dict[str, str]:
+        """What the standby's environment adds: whether this handoff could run the collections step.
+
+        Set either way, so an inherited value never decides it. It carries no credential.
+        """
+        possible = self._collections_declared(target) == "declared" and self._operator_credential()[1] is None
+        return {STANDBY_COLLECTIONS_ENV: "1" if possible else "0"}
 
     def _state_migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
         """`migration_required` for the vault's machine-local state families alone."""
@@ -1545,7 +1634,9 @@ class WorkerRuntime:
         self.standby_waiting = "unreachable"
         remove_stale_socket(self.standby_socket)
         await self._spawn(
-            self._worker_command(target, self.standby_socket, standby=True), standby=True
+            self._worker_command(target, self.standby_socket, standby=True),
+            standby=True,
+            environment=self.standby_environment(target),
         )
         self.standby_client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=str(self.standby_socket), retries=0),

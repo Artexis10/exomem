@@ -25,7 +25,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from .. import state_paths
+from .. import held_fs, state_paths
 from . import (
     admission,
     authority,
@@ -186,18 +186,20 @@ def _stage(root, *, base=True, deadline=None):
     for old in _staging_directories(root):
         _discard(old)
     rows, pending, store_ids = preflight.candidates(root)
+    if not pending:
+        # Nothing left to import, as on a vault that has migrated: no copy, no staging.
+        return preflight.report(rows, store_ids), None
     directory = _new_directory(root)
     try:
         live = (_live_snapshot(root, directory, deadline)
                 if base and connection.store_path(root).exists() else None)
-        if pending:
-            with connection.staging_store(directory / _STAGING) as staging:
-                staging.execute("BEGIN IMMEDIATE")
-                _write_basis(staging, {"version": 1, "live": live, "collections": {}})
-                staging.execute("COMMIT")
-                rows.extend(preflight.prove_into(root, pending, staging, _scratch(root),
-                                                 preflight.import_context(_ACTOR), record=_recorder(staging),
-                                                 deadline=deadline))
+        with connection.staging_store(directory / _STAGING) as staging:
+            staging.execute("BEGIN IMMEDIATE")
+            _write_basis(staging, {"version": 1, "live": live, "collections": {}})
+            staging.execute("COMMIT")
+            rows.extend(preflight.prove_into(root, pending, staging, _scratch(root),
+                                             preflight.import_context(_ACTOR), record=_recorder(staging),
+                                             deadline=deadline))
         report = preflight.report(rows, store_ids)
     except BaseException:
         _discard(directory)
@@ -300,6 +302,21 @@ def prepare(vault_root, *, deadline=None) -> dict:
     report, directory = _stage(root, deadline=deadline)
     return {**report, "step": "prepare", "coordinator": coordinator,
             "staging": "retained" if directory is not None else "none"}
+
+
+def discard_staging(vault_root) -> int:
+    """Remove retained staging that no unfinished cutover holds; how many directories went.
+
+    A managed standby calls it when its handoff cannot run the collections step. Staging
+    beside a pending cutover stays, for that cutover's apply step to judge.
+    """
+    root = Path(vault_root).resolve()
+    if _require_stageable(root) is not None:
+        return 0
+    directories = _staging_directories(root)
+    for directory in directories:
+        _discard(directory)
+    return len(directories)
 
 
 def _require_current_coordinator(runtime, fence_client, marker, staging, supersedes=None):
@@ -407,9 +424,12 @@ RESTORED = "restored"
 _RESTORE_WHY = "the files of a migration changed after it published its store, so the store it superseded continues"
 
 
-def _changed_since_publication(root, intent):
-    """The paths of the intent's collections whose files no longer match the basis they were imported from."""
-    with preflight.scanned(root, _scratch(root), []) as (audit, _blocked):
+def _changed_since_publication(root, intent, deadline=None):
+    """The paths of the intent's collections whose files no longer match the basis they were imported from.
+
+    A collection not checked by ``deadline`` counts as changed.
+    """
+    with preflight.scanned(root, _scratch(root), [], deadline=deadline) as (audit, _blocked):
         if audit is None:
             return sorted(entry["manifest_path"] for entry in intent["collections"])
         changed = []
@@ -660,16 +680,20 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             # Until its marker is installed the files stay canonical, so every collection is
             # compared with the basis it was imported from: first without the lease, so a
             # refusal holds none, then again under it before any fence step or marker.
-            changed = [] if admitted else _changed_since_publication(root, pending)
+            changed = [] if admitted else _changed_since_publication(root, pending, deadline)
             if not changed:
                 token = _hold_lease(session, manager, root, fenced=_fenced(session, fence_client))
-                changed = [] if admitted else _changed_since_publication(root, pending)
+                changed = [] if admitted else _changed_since_publication(root, pending, deadline)
                 if not changed:
                     result = admission._resume_locked(session, fence_client, preparation_token=token)
                     for leftover in _staging_directories(root):
                         _discard(leftover)
                     return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
                             "staging": "resumed", **result}
+            if _expired(deadline):
+                # A comparison the budget cut short proves no change: the store stays pending for
+                # the next handoff or the owner's apply, which compare again.
+                return _abandoned(coordinator, DEADLINE, changed)
             # Once a fence binds the published store, writers inside the writer lease are fenced
             # from these files, so only a writer outside it changed them. Admitting would lose
             # that change, so the unadmitted store gives way to fresh staging that imports it.
@@ -701,7 +725,7 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             # Nothing fences or routes the published store yet: fresh staging supersedes it.
             report, reason, directory = None, BASIS_CHANGED, None
         else:
-            report, reason, changed = _carried(root, directories[0]) if len(directories) == 1 else (
+            report, reason, changed = _carried(root, directories[0], deadline=deadline) if len(directories) == 1 else (
                 None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
             directory = directories[0] if report is not None else None
         if report is None:
@@ -757,21 +781,52 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
 #: What a managed handoff's collections step ended in, as the supervisor records it: closed
 #: outcomes of this module, beside ``ABANDONED``, ``RESTORED`` and the report verdicts.
 #: ``pending``: a published store still carries its intent; ``unfinished``: an apply that
-#: reported none of these, which published nothing either.
-MIGRATED, PENDING, UNFINISHED = "migrated", "pending", "unfinished"
+#: reported none of these, which published nothing either; ``unsafe``: this host's live
+#: store is missing beside the marker that routes it while a swap's superseded store
+#: remains, or the store or marker this step left cannot be read.
+MIGRATED, PENDING, UNFINISHED, UNSAFE = "migrated", "pending", "unfinished", "unsafe"
+#: `_left`'s reading of a store or marker that could not be read.
+_UNREADABLE = "unreadable"
 
 
-def _intent_pending(root):
-    """Whether the live store carries a migration intent; None when it cannot be read."""
+def _left(root):
+    """The durable state a migration leaves on this host: (marker, live store).
+
+    The marker is its bytes, None or ``_UNREADABLE``. The store is "absent", "aside" (absent
+    beside a marker while a superseded store remains: a swap stopped between its renames),
+    ``_UNREADABLE``, ``PENDING`` (it carries a migration intent) or "settled".
+    """
+    try:
+        marker = authority.read_marker(root)
+    except (CollectionStoreError, held_fs.HeldFsError, OSError):
+        marker = _UNREADABLE
     path = connection.store_path(root)
     if not path.exists():
-        return False
+        aside = marker is not None and any(path.parent.glob(path.name + takeover.SUPERSEDED + "*"))
+        return marker, "aside" if aside else "absent"
     try:
         with closing(connection.open_head_reader(path)) as reader:
             intent = authority.pending_create(reader)
     except (CollectionStoreError, sqlite3.DatabaseError, ValueError):
-        return None
-    return intent is not None and intent["kind"] == authority.MIGRATE
+        return marker, _UNREADABLE
+    return marker, PENDING if intent is not None and intent["kind"] == authority.MIGRATE else "settled"
+
+
+def _published(before, after):
+    """What a route that raised left published, from durable state alone; None for nothing.
+
+    Only the cutover's admission writes the marker, so a marker that changed under the route
+    was this migration's, installed. A store set aside, or left unreadable when it was not
+    before, is never read as nothing published: serving it in file mode could fork it.
+    """
+    (marker_before, store_before), (marker, store) = before, after
+    if store == "aside" or (_UNREADABLE in (marker, store) and _UNREADABLE not in (marker_before, store_before)):
+        return UNSAFE
+    if store == PENDING:
+        return PENDING
+    if marker != marker_before and _UNREADABLE not in (marker_before, store_before):
+        return MIGRATED
+    return None
 
 
 def settle_handoff(vault_root, *, deadline) -> dict:
@@ -781,25 +836,33 @@ def settle_handoff(vault_root, *, deadline) -> dict:
     child alone, under the self-imposed ``deadline`` (absolute monotonic). A migration it
     cannot finish in time, or whose live S1 store moved, is abandoned before anything is
     published, so the release completes in file mode and the next handoff retries it. A
-    refusal or a fault before publication settles the same way, because nothing changed and
-    failing the upgrade would only stop the service. One after publication is raised: the
-    store carries the intent, and the handoff's resume finishes it. ``outcome`` is the
-    report's closed outcome; ``pending`` (a published store that still carries its intent)
-    is the one that fails the handoff.
+    refusal or a fault settles by what it left durable, never by where it raised: before
+    publication it is abandoned; after admission the store is migrated; a published store
+    that still carries its intent is ``pending``: the replacement serves the vault's reads,
+    and the cut fence refuses its writes, until the next handoff or the owner's apply
+    finishes it, rechecking every file first.
+    ``unsafe`` is the one outcome that fails the handoff.
     """
     root = Path(vault_root).resolve()
+    before = _left(root)
     try:
         result = admission.migrate_route(root, step="handoff", deadline=deadline)
-    except Exception as error:  # noqa: BLE001 - classified by the store's own durable intent, below
-        if _intent_pending(root) is not False:
-            raise
-        logger.warning("the managed collections migration was abandoned", exc_info=True)
-        # A deadline a copy or scan ran into is this handoff's budget, as in `cutover`.
-        result = _abandoned(None, DEADLINE if isinstance(error, TimeoutError) else REFUSED)
-        result["code"] = getattr(error, "code", None) or type(error).__name__
+    except Exception as error:  # noqa: BLE001 - classified by the durable state it left, below
+        logger.warning("the managed collections migration raised", exc_info=True)
+        code = getattr(error, "code", None) or type(error).__name__
+        published = _published(before, _left(root))
+        if published is None:
+            # A deadline a copy or scan ran into is this handoff's budget, as in `cutover`.
+            result = _abandoned(None, DEADLINE if isinstance(error, TimeoutError) else REFUSED)
+            return {**result, "code": code, "outcome": ABANDONED}
+        return {"mode": "collections-store", "step": "apply", "status": "raised", "code": code,
+                "outcome": published}
+    published = _published(before, _left(root))
     if result.get("status") == "marker_admitted":
         outcome = MIGRATED
-    elif _intent_pending(root) is not False:
+    elif published == UNSAFE:
+        outcome = UNSAFE
+    elif published == PENDING:
         outcome = PENDING
     elif result.get("status") in (ABANDONED, RESTORED):
         outcome = result["status"]

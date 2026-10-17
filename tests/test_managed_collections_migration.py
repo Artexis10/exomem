@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
+import shutil
 import socket
 import sqlite3
 import sys
@@ -27,21 +29,31 @@ from test_collection_store_migration import (
     MIGRATED,
     OPERATOR,
     WORK,
+    edit_by_hand,
     legacy_vault,
     marker,
     rows,
-    start_service,
     staging_directories,
+    start_service,
     stop_writer,
+    stored_body,
     vault_bytes,
 )
-from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, call
-from test_collection_store_writer import KEY, OTHER
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service, call
+from test_collection_store_writer import CID, KEY, OTHER
 from test_service_manager import _Ingress, _release_of
 
 from exomem import __main__ as cli
-from exomem import record_formats, records, service_manager, service_standby, state_migration, writer_lease
+from exomem import (
+    record_formats,
+    records,
+    service_manager,
+    service_standby,
+    state_migration,
+    writer_lease,
+)
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.collection_store import authority, capability, chain, connection, custody
 from exomem.governance.principal import library_scope
 from exomem.lease_coordinator import create_app
@@ -113,15 +125,17 @@ def operator_file(tmp_path, mode=0o600):
     return path
 
 
-def candidate(tmp_path, released):
+def candidate(tmp_path, released, fault="", name=""):
     """This interpreter, posing as a release whose fence enables ``released``.
 
     The launcher runs the candidate with ``-I``, so the release rides in a wrapper, not on PYTHONPATH.
+    ``fault`` is code the candidate runs first, in every child: the probe and the migrator.
     """
     prelude = (
         "import runpy, sys\n"
         "import exomem.collection_store.capability as capability\n"
         f"capability.RELEASED = frozenset({sorted(released)!r})\n"
+        + fault +
         "arguments = [value for value in sys.argv[1:] if value != '-I']\n"
         "if arguments[0] == '-c':\n"
         "    sys.argv = ['-c', *arguments[2:]]\n"
@@ -130,7 +144,7 @@ def candidate(tmp_path, released):
         "    sys.argv = [arguments[1], *arguments[2:]]\n"
         "    runpy.run_module(arguments[1], run_name='__main__', alter_sys=True)\n"
     )
-    wrapper = tmp_path / f"python-{'-'.join(sorted(released)) or 'dark'}"
+    wrapper = tmp_path / f"python-{'-'.join(sorted(released)) or 'dark'}{name}"
     wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(prelude)} "$@"\n')
     wrapper.chmod(0o755)
     return str(wrapper)
@@ -174,8 +188,12 @@ class Handoff(Launcher):
         await super().stop(timeout)
 
     async def start_standby(self, target, timeout):
-        # What the standby process runs as the last step of its warm, beside the serving worker.
-        service_standby.prepare_collections_migration(self.root)
+        # What the standby process runs as the last step of its warm, beside the serving worker,
+        # in the environment the launcher gives it.
+        with pytest.MonkeyPatch.context() as standby:
+            for name, value in self.standby_environment(target).items():
+                standby.setenv(name, value)
+            service_standby.prepare_collections_migration(self.root)
         if self.served is not None:
             self.served()
         return "standby"
@@ -194,6 +212,13 @@ def upgrade(tmp_path, runtime, python):
         initial_target={"python": sys.executable, "version": _release_of(sys.executable)},
         ingress=_Ingress(), runtime=runtime, identity={"unit": "sample.service"}, transition_timeout=600)
     return asyncio.run(supervisor.upgrade({"python": python, "version": _release_of(python)}))
+
+
+def pre_import(root, monkeypatch):
+    """The standby's pre-import, in a warm whose launcher says the handoff can run the collections step."""
+    monkeypatch.setenv(service_manager.STANDBY_COLLECTIONS_ENV, "1")
+    service_standby.prepare_collections_migration(root)
+    monkeypatch.delenv(service_manager.STANDBY_COLLECTIONS_ENV)
 
 
 def migrator_report(capsys):
@@ -215,6 +240,10 @@ def fence():
     return writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).collection_store_fence()
 
 
+def lease():
+    return writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).status()
+
+
 def test_a_managed_upgrade_routes_every_file_collection_to_the_store(service, tmp_path):
     """A managed upgrade to a release with the migration that leaves the vault in files, or routes it
     without the coordinator's fence, the compatibility descriptor or the rows its files hold."""
@@ -225,7 +254,9 @@ def test_a_managed_upgrade_routes_every_file_collection_to_the_store(service, tm
     result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, MIGRATE))
     assert result["ok"], result
     assert result["handoff"]["migration"] == {
-        "state": "ran", "reason": "collections migration staged", "collections": {"state": "ran", "outcome": "migrated"}}
+        "state": "ran", "reason": "collections step requested", "collections": {"state": "ran", "outcome": "migrated"}}
+    # The step rewrote no source a graph snapshot proves, so promotion does not re-run that proof.
+    assert result["handoff"]["promotion"] == {"migrated": False}
     routed = marker(root)
     assert {entry["collection_id"]: entry["manifest_path"] for entry in routed["collections"]} == MIGRATED
     found = fence()
@@ -240,11 +271,14 @@ def test_a_managed_upgrade_routes_every_file_collection_to_the_store(service, tm
         serving.stop()
 
 
-def test_a_release_that_keeps_the_migration_dark_upgrades_as_before(service, tmp_path):
+def test_a_release_that_keeps_the_migration_dark_upgrades_as_before(service, tmp_path, monkeypatch):
     """A public release, whose fence keeps the migration off, migrating a vault at an ordinary
     upgrade because a staging directory and the operator credential happen to be there."""
     root = service
     operator_file(tmp_path)
+    pre_import(root, monkeypatch)
+    # The standby runs the candidate, whose fence keeps the migration off.
+    monkeypatch.setattr(capability, "RELEASED", frozenset())
     result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, frozenset()))
     assert result["ok"], result
     assert result["handoff"]["migration"] == {"state": "skipped", "reason": "declared_none"}
@@ -252,26 +286,32 @@ def test_a_release_that_keeps_the_migration_dark_upgrades_as_before(service, tmp
     assert len(staging_directories(root)) == 1
 
 
-@pytest.mark.parametrize("credential", ["missing", "readable-by-group"])
+@pytest.mark.parametrize("credential", ["missing", "readable-by-group", "a-fifo"])
 def test_without_a_usable_operator_credential_the_upgrade_completes_in_files(service, tmp_path, credential):
-    """An upgrade that fails, or migrates with a credential another local user could read or replace,
-    when the operator file is absent or not private to its owner."""
+    """An upgrade that fails, hangs, or migrates with a credential another local user could read or
+    replace, when the operator file is absent, not private to its owner, or a FIFO no one writes."""
     root = service
     if credential == "readable-by-group":
         operator_file(tmp_path, mode=0o640)
+    elif credential == "a-fifo":
+        os.mkfifo(tmp_path / "config" / service_manager.OPERATOR_ENV_FILE, 0o600)
     result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, MIGRATE))
     assert result["ok"], result
     reason = {"missing": "operator credential file missing",
-              "readable-by-group": "operator credential file is not private to its owner"}[credential]
+              "readable-by-group": "operator credential file is not private to its owner",
+              "a-fifo": "operator credential file is not a regular file"}[credential]
     assert result["handoff"]["migration"] == {
         "state": "skipped", "reason": "declared_none", "collections": {"state": "skipped", "reason": reason}}
     assert authority.read_marker(root) is None and not connection.store_path(root).exists()
     assert (fence().enrolled, fence().generation) == (False, 0)
+    # A standby that no handoff could finish pre-imports nothing.
+    assert staging_directories(root) == []
 
 
-def test_the_standby_warm_pre_imports_the_collections_it_reports(service):
+def test_the_standby_warm_pre_imports_the_collections_it_reports(service, monkeypatch):
     """A standby warm that never pre-imports, so no handoff ever has staging to migrate, or that
     reports its collections component ready before the pre-import ran."""
+    monkeypatch.setenv(service_manager.STANDBY_COLLECTIONS_ENV, "1")
     service_standby.reset_for_tests()
     try:
         service_standby.enter_standby()
@@ -289,6 +329,7 @@ def test_a_standby_whose_pre_import_failed_still_reaches_cutover_readiness(servi
     service_standby.reset_for_tests()
     try:
         assert service_standby.cutover_components()["collections_migration"] == "waiting"
+        monkeypatch.setenv(service_manager.STANDBY_COLLECTIONS_ENV, "1")
         # Nothing listens there: the coordinator is down while the standby warms.
         monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:9")
         service_standby.prepare_collections_migration(service)
@@ -332,7 +373,8 @@ def test_a_migration_that_cannot_finish_in_its_budget_abandons_and_the_release_c
     result = upgrade(tmp_path, runtime, candidate(tmp_path, MIGRATE))
     assert result["ok"], result
     assert result["phase"] == "ready"
-    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "abandoned"}
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "abandoned", "code": "TimeoutError"}
     assert migrator_report(capsys)["status"] == "abandoned"
     assert authority.read_marker(root) is None and not connection.store_path(root).exists()
     assert (fence().enrolled, fence().generation) == (False, 0)
@@ -422,7 +464,7 @@ def test_a_live_s1_head_that_moved_after_the_copy_abandons_the_handoff(s1, tmp_p
         serving.stop()
 
 
-def test_the_operator_credential_reaches_only_the_migrator(service, tmp_path):
+def test_the_operator_credential_reaches_only_the_migrator(service, tmp_path, monkeypatch):
     """The serving worker or the standby holding the operator credential, which lets any of its
     code paths cut or retire the coordinator's store fence; only the migrator child may hold it."""
     root = service
@@ -440,7 +482,7 @@ def test_the_operator_credential_reaches_only_the_migrator(service, tmp_path):
         'if [ "$kind" = worker ]; then exec sleep 60; fi\n'
         'exit 0\n')
     stub.chmod(0o755)
-    service_standby.prepare_collections_migration(root)
+    pre_import(root, monkeypatch)
     runtime = Launcher(tmp_path)
 
     async def scenario():
@@ -451,7 +493,8 @@ def test_the_operator_credential_reaches_only_the_migrator(service, tmp_path):
             await runtime.start_standby(target, timeout=10)
         await runtime.discard_standby()
         await runtime.stop(timeout=10)
-        assert runtime.migration_required(target) == (True, "collections migration staged")
+        assert runtime.migration_required(target) == (False, "declared_none")
+        assert runtime.collections_migration == {"state": "requested"}
         await runtime.migrate(target, timeout=30)
 
     asyncio.run(scenario())
@@ -460,5 +503,190 @@ def test_the_operator_credential_reaches_only_the_migrator(service, tmp_path):
     assert f"{OPERATOR}={OPERATOR_SECRET}" in seen["migrator"].splitlines()[1:]
     for kind in ("worker", "standby"):
         assert OPERATOR not in seen[kind]
+    # The standby learns only that this handoff could run the collections step.
+    assert f"{service_manager.STANDBY_COLLECTIONS_ENV}=1" in seen["standby"].splitlines()[1:]
     # Never on a command line, which any local user can read.
     assert all(OPERATOR_SECRET not in text.splitlines()[0] for text in seen.values())
+
+
+def test_a_standby_whose_handoff_cannot_run_the_step_removes_the_staging_it_would_leave(service, monkeypatch):
+    """A standby that pre-imports, a whole live-store copy and import per warm, for a handoff that cannot
+    run the collections step, or leaves an earlier warm's staging for a later handoff to migrate."""
+    root = service
+    pre_import(root, monkeypatch)
+    assert len(staging_directories(root)) == 1
+    monkeypatch.setenv(service_manager.STANDBY_COLLECTIONS_ENV, "0")
+    service_standby.reset_for_tests()
+    try:
+        service_standby.prepare_collections_migration(root)
+        assert service_standby.cutover_components()["collections_migration"] == "ready"
+    finally:
+        service_standby.reset_for_tests()
+    assert staging_directories(root) == []
+
+
+def test_a_target_whose_migration_probe_raises_is_recorded_apart_from_one_that_declares_none(service, tmp_path):
+    """A target whose own declaration raised recorded exactly as a release without the migration,
+    which hides a broken candidate from the operator reading the handoff record."""
+    root = service
+    operator_file(tmp_path)
+    broken = candidate(tmp_path, MIGRATE, name="-broken-probe", fault=(
+        "def offline_migrations():\n"
+        "    raise RuntimeError('a broken declaration')\n"
+        "capability.offline_migrations = offline_migrations\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), broken)
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "skipped", "reason": "target migration probe failed"}
+    assert authority.read_marker(root) is None
+
+
+def test_a_slow_comparison_with_the_staging_abandons_inside_the_budget(service, tmp_path, monkeypatch, capsys):
+    """A migrator whose first comparison with the staging runs past its own deadline, so the
+    supervisor's wait ends first and the upgrade fails into recovery with nothing published."""
+    root = service
+    operator_file(tmp_path)
+    monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 12.0)
+    monkeypatch.setattr(service_manager, "MIGRATION_FINISH_SECONDS", 6.0)
+    # Every capture takes 3.5 s and checks its deadline as a real one does, before and after.
+    slow = candidate(tmp_path, MIGRATE, name="-slow-capture", fault=(
+        "import time\n"
+        "from exomem.collection_store import legacy_import\n"
+        "captured = legacy_import.capture_legacy_collection\n"
+        "def capture(root, path, *, audit, **options):\n"
+        "    audit._check()\n"
+        "    time.sleep(3.5)\n"
+        "    audit._check()\n"
+        "    return captured(root, path, audit=audit, **options)\n"
+        "legacy_import.capture_legacy_collection = capture\n"))
+    capsys.readouterr()
+    result = upgrade(tmp_path, Handoff(tmp_path, root), slow)
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "abandoned", "code": "TimeoutError"}
+    assert migrator_report(capsys)["abandoned_because"] == "deadline"
+    assert authority.read_marker(root) is None and not connection.store_path(root).exists()
+    assert (fence().enrolled, fence().generation) == (False, 0)
+
+
+def test_a_lease_handback_that_raises_after_admission_reports_the_migration(service, tmp_path):
+    """A migrator that reports a vault the marker now routes to the store as abandoned, because the
+    lease handback raised after the marker was admitted; the record then misstates what serves."""
+    root = service
+    operator_file(tmp_path)
+    handback = candidate(tmp_path, MIGRATE, name="-failed-handback", fault=(
+        "from exomem import writer_lease\n"
+        "from exomem.cli_ops import OpError\n"
+        "closed = writer_lease.LeaseManager.close\n"
+        "def close(self):\n"
+        "    closed(self)\n"
+        "    raise OpError('WRITER_LEASE_UNAVAILABLE', 'the coordinator did not answer the handback')\n"
+        "writer_lease.LeaseManager.close = close\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), handback)
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {
+        "state": "ran", "outcome": "migrated", "code": "WRITER_LEASE_UNAVAILABLE"}
+    routed = marker(root)
+    assert {entry["collection_id"]: entry["manifest_path"] for entry in routed["collections"]} == MIGRATED
+    assert (fence().enrolled, fence().generation) == (True, 1)
+
+
+def test_a_swap_that_stops_after_it_set_the_live_s1_store_aside_fails_the_handoff(s1, tmp_path):
+    """A migrator that reports a vault whose marker routes a store that is no longer in place as
+    abandoned, so the replacement serves a vault whose store is set aside under another name."""
+    root = s1
+    operator_file(tmp_path)
+    swap = candidate(tmp_path, S1_RELEASED, name="-failed-swap", fault=(
+        "import os, types\n"
+        "from exomem.collection_store import takeover\n"
+        "replaced = takeover.replace_live\n"
+        "def failing(descriptor):\n"
+        "    raise OSError(5, 'an I/O error after the live store was set aside')\n"
+        "def replace_live(*arguments, **options):\n"
+        "    takeover.os = types.SimpleNamespace(**{**vars(os), 'fsync': failing})\n"
+        "    try:\n"
+        "        return replaced(*arguments, **options)\n"
+        "    finally:\n"
+        "        takeover.os = os\n"
+        "takeover.replace_live = replace_live\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), swap)
+    assert not result["ok"]
+    assert result["error"] == "upgrade failed after shutdown; worker is stopped; resume required"
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "unsafe", "code": "OSError"}
+    assert not connection.store_path(root).exists()
+
+
+def test_a_failure_after_publication_serves_the_vault_and_the_next_handoff_finishes_it(
+        service, tmp_path, monkeypatch, capsys):
+    """A failure after the store was published that stops the whole service until an operator resumes,
+    a writer inside the lease that changes the files the published store imported, or a next handoff
+    that admits that store although a file changed outside the lease meanwhile, losing the change."""
+    root = service
+    operator_file(tmp_path)
+    # Short, so the lease the failed migrator keeps expires within the test.
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
+    failing = candidate(tmp_path, MIGRATE, name="-failed-marker", fault=(
+        "from exomem.collection_store import admission\n"
+        "def install_marker(*arguments, **options):\n"
+        "    raise OSError(5, 'an I/O error before the marker was written')\n"
+        "admission._install_marker = install_marker\n"))
+    result = upgrade(tmp_path, Handoff(tmp_path, root), failing)
+    assert result["ok"], result
+    assert result["phase"] == "ready"
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "pending", "code": "OSError"}
+    assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
+    # The migrator that raised keeps its lease until it expires.
+    held = lease()
+    assert held.holder.endswith(writer_lease.OFFLINE_OWNER_SUFFIX) and held.expires_at > time.time()
+    while (lease().expires_at or 0) > time.time():
+        time.sleep(0.2)
+    # Then the cut fence refuses every writer inside the lease: the vault reads, and no write
+    # can change the files the published store imported.
+    serving = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        with pytest.raises(OpError) as refused:
+            call(root, "record_memory", action="append", collection=CID, item={"title": "While pending"},
+                 why="a write while the store is pending")
+        assert refused.value.code == "WRITER_LEASE_REQUIRED"
+        assert KEY in rows(root, WORK)
+    finally:
+        serving.stop()
+    edit_by_hand(root)
+    # The published store, not whatever staging its cutover left behind, asks the next handoff to finish it.
+    for directory in staging_directories(root):
+        shutil.rmtree(directory)
+    capsys.readouterr()
+    result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, MIGRATE))
+    assert result["ok"], result
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "migrated"}
+    report = migrator_report(capsys)
+    assert (report["rebuilt_because"], report["changed"]) == ("basis_changed", [WORK])
+    routed = marker(root)
+    assert {entry["collection_id"] for entry in routed["collections"]} == set(MIGRATED)
+    assert (fence().generation, fence().store_id) == (2, routed["store_id"])
+    assert stored_body(root, KEY) == "Edited by hand\n"
+
+
+def test_a_migrator_the_supervisor_stopped_is_recorded_as_timed_out_with_its_output(
+        service, tmp_path, monkeypatch, capsys):
+    """A timed-out migrator recorded as an unrecognized outcome, or whose last output never reaches
+    the service journal because the supervisor closed its output before the migrator stopped."""
+    root = service
+    operator_file(tmp_path)
+    monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 4.0)
+    monkeypatch.setattr(service_manager, "MIGRATION_FINISH_SECONDS", 1.0)
+    hung = candidate(tmp_path, MIGRATE, name="-hung", fault=(
+        "import signal, time\n"
+        "from exomem.collection_store import migration\n"
+        "def stopped(number, frame):\n"
+        "    print('the migrator stopped mid-step', flush=True)\n"
+        "    raise SystemExit(1)\n"
+        "def settle_handoff(vault_root, *, deadline):\n"
+        "    signal.signal(signal.SIGTERM, stopped)\n"
+        "    time.sleep(60)\n"
+        "migration.settle_handoff = settle_handoff\n"))
+    capsys.readouterr()
+    result = upgrade(tmp_path, Handoff(tmp_path, root), hung)
+    assert not result["ok"]
+    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "timed_out"}
+    assert "the migrator stopped mid-step" in capsys.readouterr().out

@@ -158,13 +158,24 @@ def prepare_collections_migration(vault_root: Path, *, deadline: float | None = 
     ``deadline`` (absolute monotonic) bounds it inside the warm budget. Never raises: a
     pre-import that fails, runs out of time or finds nothing to migrate leaves no staging,
     and the handoff then runs no collections step.
+
+    It runs only when the supervisor says this handoff could run the step. Otherwise it
+    removes staging an earlier warm left, which no handoff would use and which would make
+    a later one run a step this warm never prepared. A wrong removal costs the owner one
+    ``collections migrate --prepare`` before an offline apply.
     """
     global _collections_settled
     try:
         if _collections_migration_released():
             from .collection_store import migration
             from .governance.principal import library_scope
+            from .service_manager import STANDBY_COLLECTIONS_ENV
 
+            if os.environ.get(STANDBY_COLLECTIONS_ENV) != "1":
+                with library_scope():
+                    removed = migration.discard_staging(Path(vault_root))
+                log.info("standby collections pre-import: skipped, no collections step; removed=%d", removed)
+                return
             with library_scope():
                 report = migration.prepare(Path(vault_root), deadline=deadline)
             log.info(
