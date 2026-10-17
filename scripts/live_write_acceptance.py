@@ -209,9 +209,10 @@ class _DirectTransport:
             self.thread_cpu_ms = (time.thread_time() - cpu_started) * 1_000.0
             spans = call_spans.pop_call_spans(token)
             call_spans.MCP_CALL_TOKEN.reset(context)
-            self.phase_cpu = [
-                {"name": span["name"], "thread_cpu_us": span["fields"]["thread_cpu_us"]}
-                for span in spans if "thread_cpu_us" in span.get("fields", {})
+            self.phase_attribution = [
+                {"name": span["name"], "elapsed_ms": span["ms"],
+                 "thread_cpu_us": span.get("fields", {}).get("thread_cpu_us")}
+                for span in spans
             ]
         return elapsed, result
 
@@ -586,7 +587,7 @@ def measure(
         cases.append({
             "case": index, "operation": name, "condition": "cold" if index == 0 else condition,
             "elapsed_ms": None, "terminal_outcome": "skipped", "thread_cpu_ms": None,
-            "thread_cpu_source": "unavailable", "phase_cpu": [],
+            "thread_cpu_source": "unavailable", "phase_attribution": [],
             "error_class": type(error).__name__ if error else None,
         })
 
@@ -596,7 +597,7 @@ def measure(
         terminal = "ok"
         started = time.perf_counter()
         client.thread_cpu_ms = None
-        client.phase_cpu = []
+        client.phase_attribution = []
         try:
             elapsed, result = client.call(name, arguments)
             # These are structured terminal fields, not inferred prose.
@@ -612,7 +613,7 @@ def measure(
             "elapsed_ms": elapsed, "terminal_outcome": terminal,
             "thread_cpu_ms": cpu_ms,
             "thread_cpu_source": "public-boundary-thread" if cpu_ms is not None else "unavailable",
-            "phase_cpu": client.phase_cpu,
+            "phase_attribution": client.phase_attribution,
             "error_class": error_class,
         })
         if index > 0:
