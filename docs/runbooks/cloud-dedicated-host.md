@@ -392,6 +392,51 @@ reads TopoLVM's `topolvm_thinpool_data_percent` and
 Expected result: `lvs` shows both percentages below 80 for `pool0`, and a
 `RESOLVED: thin-pool-high` email follows within a few minutes.
 
+## Cell unavailable
+
+cellctl emails `cell-unavailable` while any serving cell has been unready for
+`alerts.pending_operation_warn_seconds` in `infra/contracts/observability-v1.json`.
+A serving cell is wanted `running` or `read_only` and is under no hold: no upgrade,
+backup, restore or move. The alert covers every such cell, on a dedicated host or
+not. A full volume, a crash loop and a lost node all raise it. cellctl counts from
+the first pass that sees the cell unready, so a cellctl restart delays the email
+by up to that threshold. The email names no cell.
+
+1. List the cells that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-unavailable`.
+2. Set `CELL_ID` to a listed cell, then read the pod's IP and node: `kubectl -n "exo-cell-$CELL_ID" get pod cell-0 --output wide`.
+3. If the pod has no IP, read why: `kubectl -n "exo-cell-$CELL_ID" describe pod cell-0`.
+4. On that node, read the readiness reasons: `curl --silent --max-time 10 "http://<pod IP>:8765/health/ready"`.
+   The `reasons` array names what blocks readiness, such as `retrieval_unavailable`.
+5. If a reason points at the vault or its indexes, read the volume's free space on the node:
+   `sudo df -h "/var/lib/kubelet/pods/<pod uid>/volumes/kubernetes.io~csi/<pv name>/mount"`.
+   The pod UID is `kubectl -n "exo-cell-$CELL_ID" get pod cell-0 --output jsonpath='{.metadata.uid}'`.
+   The PV name is `kubectl -n "exo-cell-$CELL_ID" get pvc cell-data --output jsonpath='{.spec.volumeName}'`.
+6. If the volume is full, follow [Cell disk low](#cell-disk-low). Otherwise fix the reason that step 4 shows.
+
+Expected result: the cell answers `200` on `/health/ready`, and a
+`RESOLVED: cell-unavailable` email follows within a few minutes.
+
+## Cell disk low
+
+cellctl emails `cell-disk-low` while any serving cell had less than
+`alerts.pvc_reserved_free_bytes` free at its last backup report. The key is in
+`infra/contracts/observability-v1.json`. The report is the backup Job's own
+reading of the cell's volume. It comes hourly for a cell on local storage and
+nightly for every other cell, so the email can follow a full disk by up to a day.
+A cell that is unready takes no backup, so `cell-unavailable` is the alert that
+catches it. cellctl keeps the reading in memory only. After a restart, the alert
+cannot resolve until each cell has a new report. The email names no cell.
+
+1. List the cells that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-disk-low`.
+2. For each listed cell, raise `storage_gib` as in step 2 of [cloud-operator-import.md](cloud-operator-import.md#2-size-the-cell).
+   The volume cannot shrink, so size for the vault's growth and not only for today's use.
+3. Confirm that the claim grew: `kubectl -n "exo-cell-$CELL_ID" get pvc cell-data --output jsonpath='{.status.capacity.storage}'`.
+4. On local storage, cellctl already grows a cell past 80% use. A cell that still fires is at its cap, or its node has no room.
+   `storage-growth-blocked` fires with it.
+
+Expected result: the claim shows the new size, and a `RESOLVED: cell-disk-low`
+email follows the cell's next backup report.
+
 ## Move a cell to a new claim
 
 A planned move takes a serving cell off its volume without losing a write.

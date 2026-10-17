@@ -264,6 +264,15 @@ class LoopMemory:
     alert_delivered: dict[str, bool] = field(default_factory=dict)
     alert_retry_at: dict[str, datetime] = field(default_factory=dict)
     stale_backups: list[str] = field(default_factory=list)
+    # The cell-unavailable alert's clock: when this process first saw each
+    # serving cell, with no hold, not ready. A restart forgets every clock; the
+    # cost is a later alert, never a false one (alerts.cells_unavailable).
+    unready_since: dict[str, datetime] = field(default_factory=dict)
+    # The cell-disk-low alert's readings: each cell's free bytes (total minus
+    # used) from its latest backup report, and the cells last logged for each alert.
+    free_bytes: dict[str, int] = field(default_factory=dict)
+    unavailable_cells: list[str] = field(default_factory=list)
+    low_disk_cells: list[str] = field(default_factory=list)
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
@@ -416,6 +425,10 @@ class ClusterConfig:
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
     # Secret. None leaves the backup-age alert to the log.
     alert_delivery_secret: tuple[str, str, str] | None = None
+    # The observability contract's thresholds for the cell-unavailable and
+    # cell-disk-low alerts. main.py always sets them (it refuses to start
+    # without); None, for a caller that builds a config by hand, evaluates neither.
+    alert_thresholds: alerts.AlertThresholds | None = None
 
     def __post_init__(self) -> None:
         cell_ids = self.dedicated_cell_ids
@@ -1144,6 +1157,7 @@ async def reconcile_once(
     observations = _with_lost_nodes(observations, memory, now)
     await _backup_age_alert(cluster, cluster_config, rows, observations, now, memory)
     await _growth_alert(cluster, cluster_config, rows, observations, now, memory)
+    await _cell_health_alerts(cluster, cluster_config, rows, observations, now, memory)
     await _host_alerts(cluster, cluster_config, now, memory)
     storage_room = _storage_room(cluster, cluster_config.storage, observations, committed_sizes)
     fleet_unobserved = bool(unobserved_rows)
@@ -1472,8 +1486,88 @@ async def _backup_age_alert(
     await _deliver_alert(cluster, cluster_config, memory, alerts.BACKUP_ALERT, bool(stale), now)
 
 
+async def _cell_health_alerts(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    now: datetime,
+    memory: LoopMemory,
+) -> None:
+    """Two platform alerts with the observability contract's thresholds: a
+    serving cell that stayed unready for pending_operation_warn_seconds
+    (cell-unavailable), and one whose volume has less than
+    pvc_reserved_free_bytes free (cell-disk-low). The cells go to the log, by
+    id, because the email names none."""
+
+    thresholds = cluster_config.alert_thresholds
+    if thresholds is None:
+        return
+    _note_cell_health(memory, rows, observations, now)
+
+    unavailable = alerts.unavailable_cells(memory.unready_since, now, after=thresholds.unavailable_after)
+    seconds = int(thresholds.unavailable_after.total_seconds())
+    if unavailable != memory.unavailable_cells:
+        if unavailable:
+            logger.warning("cellctl: %d serving cell(s) have been unready for %d seconds or more: %s",
+                           len(unavailable), seconds, ", ".join(unavailable))
+        else:
+            logger.info("cellctl: no serving cell has been unready for %d seconds", seconds)
+        memory.unavailable_cells = unavailable
+    firing = alerts.cells_unavailable(rows, observations, memory.unready_since, now, after=thresholds.unavailable_after)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.UNAVAILABLE_ALERT, firing, now)
+
+    floor = thresholds.disk_free_floor_bytes
+    low = alerts.low_disk_cells(rows, memory.free_bytes, floor=floor)
+    if low != memory.low_disk_cells:
+        if low:
+            logger.warning("cellctl: %d serving cell(s) had less than %d bytes free at their last backup: %s",
+                           len(low), floor, ", ".join(low))
+        else:
+            logger.info("cellctl: every measured serving cell has at least %d bytes free", floor)
+        memory.low_disk_cells = low
+    firing = alerts.disk_low(rows, memory.free_bytes, floor=floor)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.DISK_LOW_ALERT, firing, now)
+
+
+def _note_cell_health(
+    memory: LoopMemory, rows: list[CellRow], observations: dict[str, ClusterObservation], now: datetime
+) -> None:
+    """Updates the unready clock and the free-bytes reading of each serving
+    cell from this pass. A cell that could not be observed keeps both as they
+    were: it neither starts nor stops its clock."""
+
+    serving = {row.cell_id: row for row in rows if row.desired_state in alerts.SERVING_STATES}
+    # A cell that stops, or is deleted, forgets both: started again, it is measured afresh.
+    memory.unready_since = {cell: since for cell, since in memory.unready_since.items() if cell in serving}
+    memory.free_bytes = {cell: free for cell, free in memory.free_bytes.items() if cell in serving}
+    for cell_id, row in serving.items():
+        observation = observations.get(cell_id)
+        if observation is None:
+            continue
+        # A hold is an upgrade, backup, restore or move that cellctl runs on purpose: the cell is
+        # down for it, not broken. _in_transition would also count a cell that is merely unready
+        # as in transition, because its row reads dirty, and so would hide the outage itself.
+        if observation.pod_ready or _held(row, observation):
+            memory.unready_since.pop(cell_id, None)
+        else:
+            memory.unready_since.setdefault(cell_id, now)
+        # The backup Job's filesystem report is the one free-space reading cellctl has: hourly on
+        # local storage, nightly otherwise, so it can be a day old. Node or kubelet stats would
+        # need RBAC cellctl does not hold.
+        used, total = observation.backup_job_used_bytes, observation.backup_job_total_bytes
+        if used is not None and total:
+            memory.free_bytes[cell_id] = total - used
+
+
+def _held(row: CellRow, observation: ClusterObservation) -> bool:
+    return _active_hold(row, observation) is not None or row.hold_kind is not None
+
+
 def _in_transition(row: CellRow, observation: ClusterObservation, refusal_parked: bool) -> bool:
-    if _active_hold(row, observation) is not None or row.hold_kind is not None:
+    if _held(row, observation):
         return True
     if row.observed_state == "failed" and row.generation == row.observed_generation:
         return False

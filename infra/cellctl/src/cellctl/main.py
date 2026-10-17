@@ -15,6 +15,7 @@ from datetime import timedelta
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
+from .alerts import AlertThresholds
 from .backup_window import parse_backup_window
 from .capacity import CapacityConfig, SharedWorkerPolicy
 from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig
@@ -123,6 +124,28 @@ def build_alert_delivery_secret() -> tuple[str, str, str] | None:
     return parts
 
 
+def _positive_integer_env(name: str) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        raise ValueError(f"{name} is required: the chart renders it from the observability contract")
+    # Digits only: Helm prints a large number from JSON as 1.073741824e+09, which must not pass as a guess.
+    if not (raw.isascii() and raw.isdecimal()) or int(raw) <= 0:
+        raise ValueError(f"{name} must be a positive whole number, not {raw!r}")
+    return int(raw)
+
+
+def build_alert_thresholds() -> AlertThresholds:
+    """The cell alerts' thresholds, which the chart renders from the observability
+    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`).
+    A missing or invalid value fails cellctl at startup: with no default in code, the
+    contract is the only place either number lives, and a guessed one would alert wrongly."""
+
+    return AlertThresholds(
+        unavailable_after=timedelta(seconds=_positive_integer_env("CELLCTL_PENDING_OPERATION_WARN_SECONDS")),
+        disk_free_floor_bytes=_positive_integer_env("CELLCTL_PVC_RESERVED_FREE_BYTES"),
+    )
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -178,6 +201,7 @@ def build_cluster_config() -> ClusterConfig:
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),
+        alert_thresholds=build_alert_thresholds(),
         capacity=CapacityConfig(
             csi_driver=os.environ.get("CELLCTL_CSI_DRIVER", "csi.hetzner.cloud"),
             headroom=int(os.environ.get("CELLCTL_ATTACHMENTS_HEADROOM", "5")),
