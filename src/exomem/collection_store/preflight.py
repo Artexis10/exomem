@@ -94,7 +94,8 @@ def preflight(vault_root) -> dict:
     counts, statuses, codes and paths, never row values. A dataset is skipped, because it
     keeps file authority. Collections the vault's marker routes to the store are counted, not
     listed: their paths are store-owned. The vault is ``migratable`` only when no file
-    collection is blocked.
+    collection is blocked and a writer-lease coordinator is configured; without one, a vault
+    with something left to migrate is ``blocked`` with a vault-level ``blocker``.
     """
     admission.require_owner(vault_root, "the collections-store preflight")
     root = Path(vault_root).resolve()
@@ -106,7 +107,12 @@ def preflight(vault_root) -> dict:
     rows, pending, store_ids = candidates(root)
     if pending:
         rows.extend(_prove_all(root, pending))
-    return {**report(rows, store_ids), "dry_run": True, "coordinator": coordinator}
+    found = report(rows, store_ids)
+    if coordinator["status"] == "not_configured" and found["verdict"] != "nothing_to_migrate":
+        # The apply would refuse, so the vault is not migratable here, whatever its collections prove.
+        refusal = admission.coordination_required("the collections-store migration")
+        found = {**found, "verdict": "blocked", "blocker": {"code": refusal.code, "reason": refusal.reason}}
+    return {**found, "dry_run": True, "coordinator": coordinator}
 
 
 def candidates(root):

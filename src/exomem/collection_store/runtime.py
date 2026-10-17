@@ -733,7 +733,7 @@ def route(command, vault_root, arguments):
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
     from ..cli_ops import OpError
-    from .preview import bound_writer
+    from .preview import UNSERVED, bound_writer
 
     root = Path(vault_root).resolve()
     if command not in _STORE_COMMANDS or bound_writer(root) is not None:
@@ -763,9 +763,7 @@ def route(command, vault_root, arguments):
     server = _server(root)
     if server is None:
         raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE",
-            "this collection lives in the collection store, which only the running Exomem service serves",
-            "Send the request to the service that serves this vault.",
+            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
         )
     return server
 
@@ -1062,8 +1060,7 @@ class StoreServer:
             # The writer credential reads the coordinator's fence; moving it is the operator's.
             fence_client = self.manager.client
             if fence_client is None:
-                raise connection.CollectionStoreError(
-                    "COLLECTION_STORE_LEASE_REQUIRED", "serving the collection store needs the configured writer lease")
+                raise admission.coordination_required("serving the collection store")
             fence = fence_client.collection_store_fence()
             if not fence.enrolled:
                 # A copied vault, or a replaced coordinator, that never enrolled this store: the

@@ -1195,14 +1195,10 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     except state_migration.StateMigrationManifestError as error:
         manifest = None
         manifest_error = error
-    if manifest is None:
-        migration_status = "invalid" if manifest_error is not None else "absent"
-    elif manifest["state"] != "complete":
-        migration_status = "in-progress"
-    elif tuple(manifest["descriptors"]) != state_migration._descriptor_ids():
-        migration_status = "stale"
+    if manifest_error is not None:
+        migration_status = "invalid"
     else:
-        migration_status = "complete"
+        migration_status = state_migration.manifest_status(manifest)
     completed = migration_status == "complete"
     details = {
         "state_root": str(state_dir),
@@ -1234,6 +1230,16 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "A governance rollback or adoption marker is present; ordinary relocated startup is fenced.",
             "Resume the offline governance rollback or explicitly adopt `governance-store=vault`; "
             "do not delete either governance database.",
+            details=details,
+        )
+    # Startup and the migrator refuse an unsupported requirement before they look at leftovers.
+    if migration_status == "unsupported":
+        return _check(
+            "state.placement",
+            "fail",
+            "The state records a compatibility requirement this release cannot use; "
+            "ordinary startup refuses it.",
+            "Run the release that wrote this state, and export from it before downgrading.",
             details=details,
         )
     if leftovers:

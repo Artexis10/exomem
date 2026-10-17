@@ -29,6 +29,7 @@ from .collection_store.preview import (
     bound_writer,
     canonical_read,
     production_bound,
+    require_file_collection,
     selected_writer,
 )
 from .governance import egress
@@ -1289,8 +1290,14 @@ def resolve_collection(
 def resolve_collection_for_mutation(
     vault_root: Path, selector: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
-    """Resolve a mutable collection without disclosing provisional decisions."""
-    return _resolve_released_collection(Path(vault_root), selector, receipt=False)
+    """Resolve a mutable collection without disclosing provisional decisions.
+
+    Every file-mode writer resolves here, before its mutation boundary and again inside
+    it, so a collection that the vault's marker routes to the store refuses both times.
+    """
+    root = Path(vault_root)
+    require_file_collection(root, selector, authorize_path=lambda relative: _authorize(root, relative))
+    return _resolve_released_collection(root, selector, receipt=False)
 
 
 def _resolve_released_collection(

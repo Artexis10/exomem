@@ -104,7 +104,7 @@ def _reconcile_held(
             receipt
             for receipt in reconstructed["receipts"]
             if receipt["operation_id"] == operation
-            and receipt["outcome"] in {"committed", "recovered-committed"}
+            and receipt["outcome"] in curation.COMMITTED_OUTCOMES
         ]
         if len(receipts) != 1:
             raise _uncertain("one verified committed receipt is required")

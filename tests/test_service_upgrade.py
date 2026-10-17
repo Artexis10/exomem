@@ -643,6 +643,44 @@ def test_wheel_staging_snapshots_provenance_before_handoff(
         asyncio.run(runtime.inspect(target))
 
 
+def test_a_local_version_wheel_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """uv records a local version's '+' raw in direct_url.json; Path.as_uri() writes %2B.
+
+    The byte comparison of the two URLs refused every locally built candidate
+    (`9.9.9+local.1`) after its full install, with a misleading "did not record
+    its wheel source".
+    """
+    from exomem import service_upgrade
+
+    wheel = _wheel(tmp_path / "exomem-9.9.9+local.1-py3-none-any.whl", version="9.9.9+local.1")
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+
+    target = service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "", wheel, "a" * 40)
+
+    assert target["version"] == "9.9.9+local.1"
+    provenance = json.loads((Path(target["python"]).parents[2] / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["artifact_sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+
+def test_wheel_install_refuses_a_different_recorded_wheel_path(tmp_path: Path) -> None:
+    from exomem import service_upgrade
+
+    wheel = _wheel(tmp_path / "exomem-9.9.9-py3-none-any.whl")
+    digest = service_upgrade._sha256_file(wheel)
+    identity = {
+        "version": "9.9.9",
+        "name": "exomem",
+        "direct_url": {
+            "url": f"{(tmp_path / 'other' / wheel.name).as_uri()}#sha256={digest}",
+            "archive_info": {},
+        },
+        "record_hashes": service_upgrade._wheel_record_hashes(wheel),
+    }
+
+    with pytest.raises(RuntimeError, match="did not record its wheel source"):
+        service_upgrade._verify_wheel_install(identity, wheel, digest, "9.9.9")
+
+
 def test_wheel_snapshot_mutation_after_install_refuses_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
