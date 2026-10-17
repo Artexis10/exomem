@@ -1238,3 +1238,39 @@ def test_unreadable_marker_ownership_never_admits_a_physical_projection(service,
         else:
             target.unlink()
             outside.rename(target)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "body_memoised"),
+    [
+        ({"action": "query", "collection": CID}, True),
+        ({"action": "append", "collection": CID, "item": {"title": "Scoped"}, "why": "scope"}, False),
+    ],
+    ids=["read", "write"],
+)
+def test_a_store_routed_request_re_reads_host_configuration_at_its_release(service, monkeypatch, arguments, body_memoised):
+    """Defect: a store-routed request releases its result under the connector ceiling it first read,
+    so a ceiling the host tightened during the request is not applied to what it returns. A read
+    memoises placement and host configuration for its body only, and its release re-reads them; a
+    write, which can wait for the mutation boundary, memoises nothing."""
+    from dataclasses import replace
+
+    from exomem import state_paths
+
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    in_scope = {}
+
+    def watched_leaf(*args, **kwargs):
+        in_scope["body"] = state_paths.request_memo_scope() is not None
+        return command.leaf(*args, **kwargs)
+
+    postfilter = egress.postfilter
+
+    def watched_postfilter(*args, **kwargs):
+        in_scope["release"] = state_paths.request_memo_scope() is not None
+        return postfilter(*args, **kwargs)
+
+    monkeypatch.setattr(egress, "postfilter", watched_postfilter)
+    with request_scope(OWNER):
+        writer_lease.invoke_command(replace(command, leaf=watched_leaf), service.root, **arguments)
+    assert in_scope == {"body": body_memoised, "release": False}

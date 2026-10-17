@@ -6954,6 +6954,18 @@ def _request_prominence_context(func):
     return wrapped
 
 
+def _store_request_is_read_only(command, kwargs):
+    """Whether a store-routed request changes nothing, as `invoke_command` will classify it."""
+    from .commands import invocation_is_read_only
+    from .governance.egress import SelectorCoverageError
+
+    try:
+        return invocation_is_read_only(command, kwargs)
+    except SelectorCoverageError:
+        # `invoke_command` sends this selector down the writer path and refuses it there.
+        return False
+
+
 def _collection_store_thread(func):
     """Run a store-routed collection request on the store thread of the service serving its
     vault, in the caller's context (``collection_store.runtime.route``)."""
@@ -6969,7 +6981,11 @@ def _collection_store_thread(func):
                 # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
                 import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
                                  and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
-                return server.call(lambda: func(command, *injected, **kwargs), wake_maintenance=not import_status)
+                return server.call(
+                    lambda: func(command, *injected, **kwargs),
+                    wake_maintenance=not import_status,
+                    read_only=_store_request_is_read_only(command, kwargs),
+                )
         return func(command, *injected, **kwargs)
 
     return wrapped
@@ -7037,6 +7053,7 @@ def invoke_command(
         postfilter,
         postfilter_error,
     )
+    from .state_paths import outside_resolution_scope
 
     selector_error: SelectorCoverageError | None = None
     try:
@@ -7133,10 +7150,10 @@ def invoke_command(
             # The same fixed phase labels as the read-only path below.
             with call_spans.span("command.body"):
                 result = _invoke()
-            with call_spans.span("command.terminal_filter"):
+            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
                 return postfilter(command.name, result, injected[0])
         except BaseException as error:
-            with call_spans.span("command.terminal_filter"):
+            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
@@ -7149,10 +7166,10 @@ def invoke_command(
             # Fixed phase labels carry timing only, never caller or vault data.
             with call_spans.span("command.body"):
                 result = _invoke()
-            with call_spans.span("command.terminal_filter"):
+            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
                 result = postfilter(command.name, result, injected[0])
         except BaseException as error:
-            with call_spans.span("command.terminal_filter"):
+            with call_spans.span("command.terminal_filter"), outside_resolution_scope():
                 postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)

@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 
-from .. import foreground_priority
+from .. import foreground_priority, state_paths
 from . import connection, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -933,12 +933,13 @@ def _server(root):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False):
         import contextvars
 
         self.context = contextvars.copy_context()
         self.work = work
         self.wake_maintenance = wake_maintenance
+        self.read_only = read_only
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -983,15 +984,18 @@ class StoreServer:
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True):
-        """Run ``work`` on the store thread and return its result or raise its error."""
+    def call(self, work, *, wake_maintenance=True, read_only=False):
+        """Run ``work`` on the store thread and return its result or raise its error.
+
+        ``read_only`` says the work changes nothing, so it runs under one view of path
+        placement, host configuration and governance policy (``_serve``)."""
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
         entry = time.monotonic()
         completion_deadline = acknowledgement_budget_deadline(entry)
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
-        request = _Call(work, wake_maintenance=wake_maintenance)
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only)
         with self._condition:
             if not self._closed:
                 self._requests.append(request)
@@ -1093,10 +1097,19 @@ class StoreServer:
 
     def _serve(self, request):
         from ..cli_ops import OpError
+        from ..governance import policy
         from .preview import preview_store
 
         def bound():
             with ExitStack() as scope:
+                if request.read_only:
+                    # Opened here, inside the work, so each view lives exactly as long as the work
+                    # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
+                    # still runs. Only a read opens them: a write can wait for the mutation boundary
+                    # and must then decide on the policy and connector ceiling it finds, not on the
+                    # ones it read before the wait.
+                    scope.enter_context(state_paths.resolution_scope())
+                    scope.enter_context(policy.request_policy_snapshot())
                 scope.enter_context(preview_store(self.root, self.runtime))
                 self._scope = scope
                 try:
