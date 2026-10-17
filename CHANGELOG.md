@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.124.0](https://github.com/Artexis10/exomem/compare/v0.123.0...v0.124.0) (2026-10-17)
+
+
+### Features
+
+* **cloud:** make cellctl's upgrade readiness deadline configurable, 30 minutes by default ([#1829](https://github.com/Artexis10/exomem/issues/1829)) ([0f50fca](https://github.com/Artexis10/exomem/commit/0f50fca19fdf6046b0b53e5a33f4d1f7ef570700))
+
+
+### Bug Fixes
+
+* **cloud:** alert when a cell stays unready or runs low on disk ([#1826](https://github.com/Artexis10/exomem/issues/1826)) ([aebed06](https://github.com/Artexis10/exomem/commit/aebed062a920bff029a37b292e082cc02fc75745))
+* **graph:** read node rows under a row-sized bound so large pages stop failing graph reads and reconcile ([#1828](https://github.com/Artexis10/exomem/issues/1828)) ([13aa8ae](https://github.com/Artexis10/exomem/commit/13aa8ae896cad0a30ec65183114b0bc68cf3fd43))
+
+
+### Performance
+
+* **collections:** resolve paths and load policy once per store-routed read ([#1823](https://github.com/Artexis10/exomem/issues/1823)) ([4af9bb9](https://github.com/Artexis10/exomem/commit/4af9bb9a8eec3fb652df1386680ed6946758c308))
+* **writes:** stop rebuilding the served due list on every write ([#1825](https://github.com/Artexis10/exomem/issues/1825)) ([2bf39c4](https://github.com/Artexis10/exomem/commit/2bf39c4b135963458d9a06864ab41436274a8840))
+
 ## [0.123.0](https://github.com/Artexis10/exomem/compare/v0.122.0...v0.123.0) (2026-10-17)
 
 
