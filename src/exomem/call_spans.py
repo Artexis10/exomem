@@ -63,6 +63,8 @@ NAME_MAX_CHARS = 64
 #: calls, exactly as `ms` and `count` are, so an aggregated span still reports
 #: one honest total.
 MAX_FIELDS_PER_SPAN = 4
+# CPU is one fixed metadata field, separate from the four caller measurements.
+THREAD_CPU_US = "thread_cpu_us"
 #: A field key is a measurement name, never a value. Structural rather than a
 #: declared list, so a new count needs no registry edit, but a key carrying
 #: content cannot pass: no slashes, dots, spaces, digits or capitals, which is
@@ -185,7 +187,9 @@ def _merge_fields_locked(
         if not FIELD_KEY_PATTERN.match(clean_key):
             _warn_rejected_field_key(clean_key)
             continue
-        if clean_key not in totals and len(totals) >= MAX_FIELDS_PER_SPAN:
+        measurements = len(totals) - int(THREAD_CPU_US in totals)
+        if (clean_key != THREAD_CPU_US and clean_key not in totals
+                and measurements >= MAX_FIELDS_PER_SPAN):
             continue
         try:
             totals[clean_key] = totals.get(clean_key, 0) + int(value)
@@ -227,7 +231,7 @@ def span(name: str, fields: dict[str, Any] | None = None):
         yield fields
     finally:
         measured = (
-            {"thread_cpu_us": (time.thread_time_ns() - cpu_started) // 1000, **(fields or {})}
+            {**(fields or {}), THREAD_CPU_US: (time.thread_time_ns() - cpu_started) // 1000}
             if cpu_started is not None else fields
         )
         record_span(name, (time.perf_counter() - started) * 1000.0, measured)

@@ -90,6 +90,27 @@ def test_mcp_canary_proves_material_over_parsed_public_calls(tmp_path):
         assert secret not in rendered
 
 
+def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str, deep: bool) -> dict:
+        assert deep
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+    case = _canary_case()
+    case["arguments"]["deep"] = True
+    report = _run_canary(tmp_path, server, [case])
+    assert report["availability"] == "passed"
+    assert report["verdict"] == "incomplete"
+    [row] = report["cases"][0]["latency"]
+    assert row["deep"] is True
+    assert row["verdict"] == "unavailable"
+    assert row["breach"] is False
+
+
 def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
     from fastmcp import FastMCP
 

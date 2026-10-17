@@ -21,7 +21,7 @@ Four things have to hold together, and each can fail the run on its own:
   leaving recall warm indefinitely.
 
 Reports contain synthetic case timings, closed outcomes, counts and ages.
-Package provenance includes its import location, version and source revision;
+Package provenance includes its hashed origin, version and source revision;
 vault paths, titles, excerpts and exception text stay out of the report.
 
 It runs against a disposable vault it is handed and nothing else. Resolving a
@@ -38,7 +38,6 @@ import importlib.resources
 import json
 import os
 import statistics
-import subprocess
 import sys
 import tempfile
 import time
@@ -63,7 +62,6 @@ import managed_recall  # noqa: E402
 import records_live_acceptance  # noqa: E402
 import yaml  # noqa: E402
 
-import exomem  # noqa: E402
 from exomem import (  # noqa: E402
     call_spans,
     commands,
@@ -135,30 +133,14 @@ def _load_contract(path: Path | None = None) -> tuple[request_latency_contract.L
 
 
 def _package_identity(package_mode: str) -> dict[str, Any]:
-    origin = Path(exomem.__file__).resolve()
-    distribution = importlib.metadata.distribution("exomem")
-    installed_origin = Path(distribution.locate_file("exomem/__init__.py")).resolve()
-    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
-    editable = bool(direct_url.get("dir_info", {}).get("editable"))
-    installed = origin == installed_origin and not editable
-    if package_mode == "installed" and not installed:
-        raise SystemExit("installed acceptance requires a non-editable installed exomem package")
-    revision = direct_url.get("vcs_info", {}).get("commit_id")
-    if package_mode == "source":
-        result = subprocess.run(
-            ["git", "-C", str(origin.parent), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=False,
-        )
-        revision = result.stdout.strip() if result.returncode == 0 else None
-    return {
-        "mode": package_mode,
-        "version": exomem.__version__,
-        "distribution_version": distribution.version,
-        "import_location": str(origin),
-        "installed_origin_matches": installed,
-        "source_revision": revision,
-        "role": "observer-and-direct-runtime",
-    }
+    from installed_package_identity import package_identity
+
+    try:
+        return package_identity(package_mode, role="observer-and-direct-runtime")
+    except ValueError as error:
+        raise SystemExit(
+            "installed acceptance requires a non-editable installed exomem package"
+        ) from error
 
 
 def _require_disposable_environment(vault_root: Path, state_dir: Path) -> None:

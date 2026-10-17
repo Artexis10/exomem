@@ -102,6 +102,19 @@ def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> 
     assert row["ms"] >= 10
 
 
+def test_cpu_attribution_preserves_the_carry_rebuild_sentinel(token) -> None:
+    from exomem import working_set
+
+    with call_spans.meter(*working_set.CARRY_SPAN_FIELDS) as measured:
+        with call_spans.span("recall.working_set.carry.phrase", measured):
+            call_spans.measure(call_spans.STATS_REBUILT, 1)
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert row["fields"][call_spans.STATS_REBUILT] == 1
+    assert set(working_set.CARRY_SPAN_FIELDS) <= row["fields"].keys()
+    assert row["fields"][call_spans.THREAD_CPU_US] >= 0
+
+
 def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, token) -> None:
     """A fast page timer must not hide preparation, filtering or receipt cost."""
     from exomem import commands, writer_lease

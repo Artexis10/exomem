@@ -254,6 +254,7 @@ def summarize(
             and sample.profile == bar.profile
             and sample.population == bar.population
             and sample.reference == bar.reference
+            and sample.deep == bar.deep
             and (sample.tool in bar.operations or "*" in bar.operations)
         )
         ceiling = bar.threshold_ms if bar else None

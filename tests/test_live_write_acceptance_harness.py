@@ -246,6 +246,9 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
     # for a harness that never had a catalogue to answer from.
     assert report["read_your_write"] == {"exact": 8, "warming": 0, "stale": 0, "unknown": 0}
     assert report["package"]["mode"] == "source"
+    rendered = json.dumps(report)
+    for private_value in (str(vault), "Knowledge Base", "acceptanceremember"):
+        assert private_value not in rendered
     assert set(report["operations"]) == set(module.OPERATIONS)
     for operation in module.OPERATIONS:
         cases = [case for case in report["cases"] if case["operation"] == operation]
@@ -648,9 +651,7 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
             continue
         assert value is None or isinstance(value, (int, float)), (key, value)
         assert not isinstance(value, str), (key, value)
-    # Package import provenance intentionally names the installed/source file;
-    # the measurement payload must still contain no vault content or paths.
-    rendered = json.dumps({key: value for key, value in report.items() if key != "package"}, sort_keys=True, default=str)
+    rendered = json.dumps(report, sort_keys=True, default=str)
     for token in ("Knowledge Base", str(vault), "acceptance-", ".md"):
         assert token not in rendered, (token, rendered)
 
@@ -731,13 +732,18 @@ def test_warm_p95_enforces_the_shared_strict_bar(operation: str) -> None:
 
 
 def test_installed_proof_refuses_the_source_import() -> None:
+    import exomem
+
     module = _acceptance()
     with pytest.raises(SystemExit, match="non-editable installed"):
         module._package_identity("installed")
     identity = module._package_identity("source")
     assert identity["mode"] == "source"
-    assert identity["version"] == module.exomem.__version__
-    assert Path(identity["import_location"]) == Path(module.exomem.__file__).resolve()
+    assert identity["version"] == exomem.__version__
+    import hashlib
+
+    origin_hash = hashlib.sha256(str(Path(exomem.__file__).resolve()).encode()).hexdigest()
+    assert identity["origin_sha256"] == origin_hash
     assert identity["source_revision"]
 
 
@@ -859,3 +865,55 @@ def test_failed_remember_skips_only_its_edit_and_preserves_independent_timings(
     assert "sensitive diagnostic" not in json.dumps(report)
     with pytest.raises(SystemExit, match="failed or skipped"):
         module.check(report)
+
+
+def test_a_healthy_write_report_passes_acceptance() -> None:
+    _acceptance().check(_report())
+
+
+@pytest.mark.parametrize("visibility", ["stale", "unknown"])
+def test_failed_visibility_prevents_write_acceptance(visibility: str) -> None:
+    report = _report()
+    report["read_your_write"][visibility] = 1
+    with pytest.raises(SystemExit, match="read"):
+        _acceptance().check(report)
+
+
+@pytest.mark.parametrize("receipts", [1, -1])
+def test_uncovered_or_unknown_custody_prevents_write_acceptance(receipts: int) -> None:
+    report = _report()
+    report["uncovered_full_receipts"] = receipts
+    with pytest.raises(SystemExit, match="uncovered full receipt"):
+        _acceptance().check(report)
+
+
+def test_reconciliation_demand_prevents_write_acceptance() -> None:
+    report = _report()
+    report["reconciliation_demanded"] = 1
+    with pytest.raises(SystemExit, match="reconciliation demand"):
+        _acceptance().check(report)
+
+
+def test_missing_samples_prevent_write_acceptance() -> None:
+    report = _report()
+    report["operations"]["remember"]["samples"] = 29
+    with pytest.raises(SystemExit, match="samples"):
+        _acceptance().check(report)
+
+
+def test_a_fast_refusal_prevents_write_acceptance() -> None:
+    report = _report()
+    report["cases"] = [{"terminal_outcome": "refused", "elapsed_ms": 1.0}]
+    with pytest.raises(SystemExit, match="failed or skipped"):
+        _acceptance().check(report)
+
+
+def test_write_acceptance_requires_an_explicit_vault() -> None:
+    with pytest.raises(SystemExit, match="requires an explicit --vault"):
+        _acceptance().main(["--transport", "direct"])
+
+
+def test_connector_acceptance_requires_its_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_CONNECTOR_URL", raising=False)
+    with pytest.raises(SystemExit, match="connector transport requires"):
+        _acceptance().main(["--transport", "connector", "--vault", str(tmp_path)])

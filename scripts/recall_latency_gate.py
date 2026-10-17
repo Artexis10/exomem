@@ -841,23 +841,9 @@ def _digest(value: str | bytes) -> str:
 
 
 def _observer_identity(package_mode: str) -> dict[str, Any]:
-    import exomem
+    from installed_package_identity import package_identity
 
-    origin = Path(exomem.__file__).resolve()
-    distribution = importlib.metadata.distribution("exomem")
-    installed_origin = Path(distribution.locate_file("exomem/__init__.py")).resolve()
-    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
-    installed = origin == installed_origin and not direct_url.get("dir_info", {}).get("editable")
-    if package_mode == "installed" and not installed:
-        raise ValueError("observer-package-mismatch")
-    return {
-        "mode": package_mode,
-        "version": exomem.__version__,
-        "distribution_version": distribution.version,
-        "origin": "non-editable-distribution" if installed else "source-tree",
-        "origin_sha256": _digest(str(origin)),
-        "role": "observer-only",
-    }
+    return package_identity(package_mode, role="observer-only")
 
 
 def _canary_cases(raw: bytes):
@@ -1104,7 +1090,7 @@ async def run_mcp_canary(
                                 at=time.time(),
                                 tool=case.tool,
                                 client="live-canary",
-                                deep=False,
+                                deep=latency_watch.deep_flag(case.arguments),
                                 total_ms=elapsed,
                                 spans=None,
                                 bar_id=bar.id,
