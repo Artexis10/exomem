@@ -884,6 +884,45 @@ def test_wal_mode_main_without_sidecars_is_persistently_switched_to_delete(
     assert not wal.exists() and not shm.exists()
 
 
+@pytest.mark.skipif(not lexstore.fts5_available(), reason="SQLite lacks FTS5")
+def test_rebuilt_catalog_serves_committed_hits_during_an_index_write(tmp_path: Path) -> None:
+    """Publishing a rebuilt catalogue must not restore reader-blocking journals."""
+    page = _kb_file(tmp_path, "a.md", "searchable committed payload")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    assert store.rebuild_atomic()
+
+    writer = store._connect()
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO meta(key, value) VALUES('pending-write', 'uncommitted')")
+        result = lexstore.search_bm25_result(tmp_path, "searchable", 5, allow_delta=False)
+        assert result.readiness.complete, result.readiness
+        assert result.value and result.value[0][0] == "Knowledge Base/a.md"
+    finally:
+        writer.rollback()
+        writer.close()
+
+    # The next replacement must still fold the live WAL safely.
+    assert store.rebuild_atomic()
+    _assert_standalone_valid_db(store.path)
+
+
+def test_inherited_catalog_warm_restores_concurrent_read_journaling(tmp_path: Path) -> None:
+    """An already-current inherited DELETE catalogue also needs off-request setup."""
+    page = _kb_file(tmp_path, "a.md")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    assert store._quiesce_live_wal()
+
+    store.rebase_inherited_checkpoints()
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
 def test_foreground_delta_after_temp_target_rebases_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
