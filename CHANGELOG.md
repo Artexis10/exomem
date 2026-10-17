@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.125.0](https://github.com/Artexis10/exomem/compare/v0.124.0...v0.125.0) (2026-10-17)
+
+
+### Features
+
+* **curation:** run Records steps through the collection-store writer ([#1831](https://github.com/Artexis10/exomem/issues/1831)) ([815cfe8](https://github.com/Artexis10/exomem/commit/815cfe8c1bde03202b589d846ae676a7270ca9c6))
+
+
+### Bug Fixes
+
+* **recall:** preserve concurrent reads after catalogue replacement ([#1833](https://github.com/Artexis10/exomem/issues/1833)) ([cf93d7c](https://github.com/Artexis10/exomem/commit/cf93d7c5f34e3621980af8657ed171b92f39d3db))
+
 ## [0.124.0](https://github.com/Artexis10/exomem/compare/v0.123.0...v0.124.0) (2026-10-17)
 
 
