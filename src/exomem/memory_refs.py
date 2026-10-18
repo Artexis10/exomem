@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import unquote
 
 from . import call_spans, reserved_paths
@@ -842,10 +842,27 @@ def _apply_pending_identity(
     return sorted(surviving)
 
 
+@overload
 def paths_for_ids_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
-) -> dict[str, tuple[str, ...]]:
+    _optional: Literal[False] = False,
+) -> dict[str, tuple[str, ...]]: ...
+
+
+@overload
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
+    _optional: bool,
+) -> dict[str, tuple[str, ...]] | None: ...
+
+
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
+    _optional: bool = False,
+) -> dict[str, tuple[str, ...]] | None:
     """Resolve many memory ids to every page holding each, writing nothing.
 
     The reverse direction of `refs_for_paths`, and read-only in the strict
@@ -866,6 +883,10 @@ def paths_for_ids_read_only(
     hidden through `admit_pending_paths`. They must retain unresolved pages;
     those pages can still hold an unknown visible duplicate.
 
+    The internal optional mode reports incomplete current coverage as None,
+    including empty batches, so optional origins cannot cancel admitted material.
+    Exact callers retain the strict default and its empty-batch fast path.
+
     The answer comes from one of two sources, and the choice is made from
     vault-wide state alone, before any id is looked up: the server's current
     in-process identity projection when one exists and is still current
@@ -879,9 +900,12 @@ def paths_for_ids_read_only(
     (`trash/`) always takes the scan, so its answers stay the scan's.
     """
     view = _reference_owner_view_read_only(
-        vault_root, ids, admit_pending_paths=admit_pending_paths,
+        vault_root, ids, admit_pending_paths=admit_pending_paths, _optional=_optional,
     )
-    return view.current_paths(Path(vault_root))
+    return (
+        view.optional_current_paths(Path(vault_root)) if _optional
+        else view.current_paths(Path(vault_root))
+    )
 
 
 def paths_for_optional_references_read_only(
@@ -898,9 +922,8 @@ def paths_for_optional_references_read_only(
     view = _reference_owner_view_read_only(
         vault_root, ids, admit_pending_paths=admit_pending_paths,
     )
-    if view.projection is None:
-        return dict(view.owners)
-    if view.projection.blocked_paths:
+    current = view.optional_current_paths(Path(vault_root))
+    if current is None:
         # Optional citation loss costs less than cancelling admitted material.
         # Apply the same omission to every id, independent of membership.
         return dict.fromkeys(view.owners)
@@ -909,7 +932,7 @@ def paths_for_optional_references_read_only(
             *paths,
             *(path for path in view.owners[identifier] if path in view.unprovable_paths),
         }))
-        for identifier, paths in view.current_paths(Path(vault_root)).items()
+        for identifier, paths in current.items()
     }
 
 
@@ -918,6 +941,11 @@ class _ReferenceOwnerView:
     owners: Mapping[str, tuple[str, ...]]
     projection: ReferenceProjection | None
     unprovable_paths: frozenset[str]
+
+    def optional_current_paths(self, root: Path) -> dict[str, tuple[str, ...]] | None:
+        if self.projection is not None and self.projection.blocked_paths:
+            return None
+        return self.current_paths(root)
 
     def current_paths(self, root: Path) -> dict[str, tuple[str, ...]]:
         if self.projection is None:
@@ -933,6 +961,7 @@ class _ReferenceOwnerView:
 def _reference_owner_view_read_only(
     vault_root: Path, ids: Iterable[Any], *,
     admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None,
+    _optional: bool = False,
 ) -> _ReferenceOwnerView:
     """Acquire the existing identity source once, before pending withdrawal."""
     wanted: list[str] = []
@@ -942,7 +971,7 @@ def _reference_owner_view_read_only(
         if normalized is not None and normalized not in seen:
             seen.add(normalized)
             wanted.append(normalized)
-    if not wanted:
+    if not wanted and not _optional:
         return _ReferenceOwnerView({}, None, frozenset())
 
     # Lazy: `semantic_contract` imports this module.
@@ -976,9 +1005,9 @@ def _reference_owner_view_read_only(
     # is one more vault-wide fact, and the scan keeps those refs resolving.
     with call_spans.span("memory_refs.identity_census", {}) as measured:
         started = time.thread_time_ns()
-        resolved: dict[str, tuple[str, ...]] | None = None
+        resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
         snapshot = None
-        if not semantic_contract.identity_census_omits_scanned_pages(root):
+        if wanted and not semantic_contract.identity_census_omits_scanned_pages(root):
             snapshot = semantic_contract.current_reference_identity_snapshot(root)
         if snapshot is not None:
             owners = snapshot.reference_owners
@@ -986,7 +1015,7 @@ def _reference_owner_view_read_only(
             if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
                 resolved = answered
         if measured is not None:
-            measured["snapshot"] = int(resolved is not None)
+            measured["snapshot"] = int(bool(wanted) and resolved is not None)
         if resolved is None:
             pages = _scan_pages(root)
             scanned: dict[str, set[str]] = {}

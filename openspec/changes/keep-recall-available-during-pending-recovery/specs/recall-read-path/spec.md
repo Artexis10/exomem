@@ -80,11 +80,13 @@ Pending content hydration SHALL remain bounded. A legitimate pending burst beyon
 
 ### Requirement: Optional reference projection preserves admitted material
 
-Optional free-text projection SHALL preserve admitted material when trustworthy pending suppression exists but current reference identity remains incomplete. It SHALL omit uncertain well-formed stable references uniformly rather than establish uniqueness or cancel the whole response. Unknown authoritative custody SHALL remain unavailable.
+Optional reference projection SHALL preserve admitted material when trustworthy pending suppression exists but current reference identity remains incomplete. Free-text projection SHALL omit uncertain well-formed stable references uniformly rather than establish uniqueness or cancel the whole response. Structured pointer projection SHALL omit whole entries whose stable origins remain uncertain. Unknown authoritative custody SHALL remain unavailable.
 
 The redactor SHALL retain raw canonical-owner evidence separately from current mappings after pending withdrawal. It MAY use that evidence only for redaction, with current disclosure checks. It MUST NOT use it to resolve an identifier, revive a suppressed mapping, admit content, or claim current uniqueness. Source selection SHALL retain the existing vault-wide projection-or-scan rule and current-snapshot recheck.
 
 The redactor SHALL apply maintained body-free authority before excluding hidden pending uncertainty. It SHALL retain every custody withdrawal and every unresolved membership or possible widening grant. Equal canonical bytes and authority SHALL produce the same protected-reference redaction when only hidden pending custody changes. Public diagnostics SHALL expose no protected identifiers, paths, counts, or new per-reference state.
+
+Structured pointer origins SHALL use current reference mappings and their existing unique-visible-owner proof when coverage is complete. Raw redaction evidence SHALL NOT admit an origin. When origin admission applies during incomplete caller-filtered coverage, a non-abstained guarded packet SHALL report one generic `missing` entry with `role: pointers` and `reason: identity_incomplete`. That entry SHALL depend on coverage alone, including an empty origin batch, and SHALL NOT assert that any pointer exists. Independently hidden uncertainty SHALL change neither the entry nor the packet. Pointer omission SHALL preserve admitted anchors and units and refund the existing pointer charge.
 
 #### Scenario: Optional identity is unprovable but coverage is servable
 
@@ -97,6 +99,22 @@ The redactor SHALL apply maintained body-free authority before excluding hidden 
 - **WHEN** canonical bytes and authority remain equal while a known hidden owner enters unprovable pending custody
 - **THEN** raw ownership preserves its existing redaction without reviving its withdrawn current mapping
 - **AND** an unrelated absent reference remains unchanged
+
+#### Scenario: A budget pointer has an uncertain optional origin
+
+- **WHEN** activation compiles admitted anchors and units with a stable-origin budget pointer while caller-filtered identity coverage is incomplete
+- **THEN** the guarded packet retains admitted anchors and units, omits the whole pointer, refunds its charge, and reports incomplete origin coverage
+- **AND** exact reference operations retain strict uniqueness proof
+
+#### Scenario: A packet has no visible origin pointers
+
+- **WHEN** caller-filtered identity coverage is incomplete and a non-abstained guarded packet has an empty or wholly hidden origin batch
+- **THEN** both packets report the same generic incomplete origin coverage without revealing pointer membership
+
+#### Scenario: Only hidden custody changes for a pointer origin
+
+- **WHEN** canonical bytes and authority remain equal while an independently hidden owner enters unprovable pending custody
+- **THEN** the structured pointer projection remains unchanged and adds no incomplete origin coverage marker
 
 #### Scenario: New hidden uncertainty accompanies an absent reference
 

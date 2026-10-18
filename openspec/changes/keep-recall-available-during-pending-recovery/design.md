@@ -67,7 +67,21 @@ Known, absent, and hidden-only identifiers share that uncertainty condition; do 
 Keep existing canonical-owner redaction when only pending custody changes, including a previously hidden owner withdrawn from current resolution.
 Unknown authoritative custody remains unavailable; do not convert that failure into optional citation omission.
 Preserve caller-supplied error-reference exemptions and every current content-release check.
-Reuse existing coverage warnings without protected identifiers, paths, counts, or new public diagnostics.
+Expose no protected identifiers, paths, counts, or per-reference diagnostic state.
+
+Structured pointer origins use the same owner view through one internal optional lookup mode.
+Keep strict lookup as the default for exact operations and every other caller.
+Complete identity coverage still requires one currently visible owner; raw redaction hints cannot admit an origin.
+When caller-filtered identity coverage is incomplete, omit whole stable-origin pointer entries and refund their existing prose charges.
+Preserve admitted anchors, units, and independently governed targets.
+
+Use the existing `missing` envelope with `role: pointers` and the technical reason `identity_incomplete`.
+That reason reports incomplete optional origin coverage, never pointer existence or known withholding.
+Check caller-filtered coverage even when a non-abstained packet has no stable-origin pointers, without an identity census for an empty batch.
+The marker must not depend on identifier membership or removal counts.
+Independently hidden uncertainty changes neither the marker nor the packet.
+Preserve strict empty-batch behavior, current lexical evidence, and fresh terminal release checks.
+Preserve the existing ungoverned packet fast path.
 
 Conservative omission can remove a citation that would later prove valid.
 That cost replaces loss of the admitted recall answer, while current identity resolution remains strict.
