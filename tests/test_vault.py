@@ -628,6 +628,54 @@ def test_read_guarded_text_preserves_crlf_bytes_on_windows(tmp_path: Path) -> No
     guard.recheck(tmp_path)
 
 
+@pytest.mark.parametrize("resolved_target", [False, True], ids=["lexical", "resolved"])
+def test_guarded_reader_accepts_a_configured_root_alias(
+    tmp_path: Path, resolved_target: bool
+) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = root / "guarded.md"
+    target.write_bytes(b"first\r\nsecond\r\n")
+    alias = tmp_path / "vault-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    text, guard = vault.read_guarded_text(alias, target if resolved_target else alias / target.name)
+
+    assert text.encode("utf-8") == target.read_bytes()
+    guard.recheck(root)
+
+
+@pytest.mark.parametrize("alias_kind", ["directory", "file", "hardlink"])
+def test_configured_root_alias_does_not_authorize_an_inner_alias(
+    tmp_path: Path, alias_kind: str
+) -> None:
+    root = tmp_path / "vault"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "private.md").write_text("private material", encoding="utf-8")
+    alias = tmp_path / "vault-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+        if alias_kind == "directory":
+            (root / "inner-alias").symlink_to(outside, target_is_directory=True)
+            target = alias / "inner-alias" / "private.md"
+        elif alias_kind == "file":
+            (root / "private.md").symlink_to(outside / "private.md")
+            target = alias / "private.md"
+        else:
+            os.link(outside / "private.md", root / "private.md")
+            target = alias / "private.md"
+    except OSError:
+        pytest.skip("required filesystem links are unavailable")
+
+    with pytest.raises(vault.PathGuardError):
+        vault.read_guarded_text(alias, target)
+
+
 def test_read_guarded_text_refuses_multiply_linked_private_alias(tmp_path: Path) -> None:
     governance = tmp_path / "Knowledge Base" / "_Governance"
     notes = tmp_path / "Knowledge Base" / "Notes"

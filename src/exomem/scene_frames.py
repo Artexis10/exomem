@@ -312,7 +312,6 @@ def write_scene_frames(
             root,
             root / parent_sidecar_rel,
         )
-        parent_source = parent_source.replace("\r\n", "\n").replace("\r", "\n")
         clip_replacements = (
             catalog_publication.ClipMeasurementReplacement(
                 item_identity=parent_sidecar_rel,

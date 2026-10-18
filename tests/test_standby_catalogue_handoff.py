@@ -374,6 +374,45 @@ def _stub_graph_and_models(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_a_waiting_standby_recovers_after_the_serving_worker_repairs_its_catalogue(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+    import threading
+
+    root = older_catalogue
+    lexstore.ensure_fresh(root)
+    path = root / next(iter(NOTES))
+    path.write_text(path.read_text(encoding="utf-8") + "\nA newer observation.\n", encoding="utf-8")
+    _stub_graph_and_models(monkeypatch)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+    assert lexstore.live_catalog_compatible(root)
+    assert service_standby.cutover_components()["lexical"] == "waiting"
+
+    path.write_text(path.read_text(encoding="utf-8") + "\nAnother owner write.\n", encoding="utf-8")
+    subprocess.run(
+        [sys.executable, "-c", "import sys; from pathlib import Path; "
+         "from exomem import lexstore; lexstore.ensure_fresh(Path(sys.argv[1]))", str(root)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=30,
+    )
+    before = lexstore.lexical_path(root).read_bytes()
+    observer = threading.Thread(
+        target=service_standby.reprove_until_promoted,
+        args=(root,), kwargs={"poll_seconds": 0.01},
+    )
+    observer.start()
+    try:
+        assert readiness.wait("lexical", timeout=5)
+        assert service_standby.cutover_components()["lexical"] == "ready"
+        assert lexstore.lexical_path(root).read_bytes() == before
+    finally:
+        service_standby.discard()
+        observer.join(timeout=5)
+    assert not observer.is_alive()
+
+
 def test_a_discarded_standby_removes_its_detached_catalogue(
     older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

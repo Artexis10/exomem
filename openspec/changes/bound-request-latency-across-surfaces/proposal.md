@@ -25,11 +25,16 @@ Existing latency checks measure different boundaries, populations and percentile
 ### Modified Capabilities
 
 - `agent-bootstrap-contract`: Keep compact and session latency advisories within existing budgets while full and diagnostics profiles retain spans and coverage.
+- `attention-queue`: Scope write advice to affected pages while preserving global bootstrap and review counts.
 
 Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
+
+Ordinary warm public writes additionally target p95 below 1,000 ms, with cold and contended populations reported separately. Existing acknowledgement custody requirements remain in force.
 
 ## Impact
 
 Implementation will extend `src/exomem/latency_watch.py`, MCP middleware in `server.py`, the REST command facade in `server_rest.py`, and activation observations in `commands.py` and `query_log.py`. A packaged `src/exomem/request_latency_contract.json` will hold the bars. Existing gate and runtime paths remain the implementation homes; `accelerate-governed-recall` task 6.1 remains the recall acceptance slice.
 
-The contract adds no tool, model role, paid evaluation, CPU quota increase or live flag switch. Observation remains advisory and cannot block requests or third-party-controlled releases. Existing release and installation ownership applies to product delivery.
+The contract adds no MCP tool, model role, paid evaluation, CPU quota increase or live flag switch. Observation remains advisory and cannot block requests or third-party-controlled releases. Existing release and installation ownership applies to product delivery.
+
+The installed observer replaces a checkout dependency. A standard systemd user timer provides scheduling; local status does not establish delivered notifications.

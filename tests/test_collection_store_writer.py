@@ -190,6 +190,29 @@ def test_revise_is_guarded_and_keeps_manifest_history(store, profile):
         )
 
 
+def test_store_manifest_changes_refresh_the_shared_claims_projection(store):
+    from exomem import due_state
+
+    due_state.reconcile(store.root)
+    made = create(store)
+    first = due_state.load(store.root)["claims"][manifest_path()]
+    assert first["title"] == "Work"
+    proposed = manifest_text().replace("title: Work", "title: Revised")
+
+    receipt = store.revise_collection(
+        CID,
+        manifest_text=proposed,
+        expected_manifest_hash=tokens.manifest_hash(manifest_text()),
+        expected_container_hash=made["after_container_hash"],
+        why="clarify collection title",
+    )
+
+    revised = due_state.load(store.root)["claims"][manifest_path()]
+    assert receipt["outcome"] == "committed"
+    assert revised["title"] == "Revised"
+    assert revised["manifest_hash"] != first["manifest_hash"]
+
+
 def test_held_resume_discard_do_not_advance_generation_or_audit(store):
     made = create(store)
     with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE") as error:

@@ -23,7 +23,6 @@ from .vault import (
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
-    content_hash,
     document_newline,
     excluded_frontmatter_reason,
     governed_frontmatter_reason,
@@ -162,7 +161,7 @@ def set_frontmatter_field(
         )
 
     try:
-        text, _ = read_guarded_text(vault_root, abs_path)
+        text, guard = read_guarded_text(vault_root, abs_path)
     except (OSError, UnicodeError) as error:
         raise SetFrontmatterError(
             code="UNREADABLE", reason=f"could not safely read {rel_path}"
@@ -217,7 +216,7 @@ def set_frontmatter_field(
             path=rel_path,
             after_source=new_text,
             operation="edit",
-            expected_before_hash=expected_hash or content_hash(text),
+            expected_before_hash=expected_hash or guard.expected_content_hash,
             transition_token=semantic_transition_token,
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,

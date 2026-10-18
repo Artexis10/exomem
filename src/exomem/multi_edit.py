@@ -34,7 +34,6 @@ from .edit import (
     load_editable,
     render_editable,
 )
-from .vault import content_hash
 
 _INVALID_EDIT_ITEM = "__exomem_invalid_edit_item__"
 
@@ -209,7 +208,7 @@ def multi_edit(
                     path=editable.rel_path,
                     after_source=proposed,
                     operation="edit",
-                    expected_before_hash=content_hash(editable.original_text),
+                    expected_before_hash=editable.raw_hash,
                     transition_token=semantic_transition_token,
                     relation_disposition=relation_disposition,
                     relation_review_hash=relation_review_hash,
@@ -257,7 +256,7 @@ def multi_edit(
         changed=[f"body ({len(edits)} surgical edits)"],
         op="multi_edit",
         extra_warnings=warnings,
-        expected_before_hash=content_hash(editable.original_text),
+        expected_before_hash=editable.raw_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,

@@ -40,7 +40,7 @@ from .derived_receipts import (
 from .governance import decisions, egress, membership, scrubber
 from .governance import policy as policy_module
 from .governance.principal import effective_principal
-from .vault import content_hash
+from .vault import content_hash, read_guarded_text
 
 if TYPE_CHECKING:
     from . import embeddings
@@ -163,7 +163,8 @@ def _observe_fingerprint(vault_root: Path, rel_path: str) -> str | None:
     try:
         if target.is_symlink() or not target.is_file():
             return None
-        return content_hash(target.read_text(encoding="utf-8"))
+        text, _guard = read_guarded_text(vault_root, target)
+        return content_hash(text)
     except (OSError, UnicodeDecodeError, ValueError):
         return None
 

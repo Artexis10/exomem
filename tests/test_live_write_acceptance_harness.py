@@ -83,6 +83,7 @@ DRAIN_KEYS = {
     "passes",
     "completed",
     "due",
+    "pending",
     "claimed",
     "retrying",
     "failed",
@@ -103,6 +104,7 @@ def _drain(**overrides: Any) -> dict[str, Any]:
         "passes": 1,
         "completed": 0,
         "due": 0,
+        "pending": 0,
         "claimed": 0,
         "retrying": 0,
         "failed": 0,
@@ -135,14 +137,17 @@ def _report(
         "transport": "direct",
         "samples_per_operation": 30,
         "fast_durable_ack": "active",
+        "condition": "warm",
+        "preparation": {"converged": True, "due_projection_present": True},
         "operations": {
             name: {
                 "samples": 30,
                 "p50_ms": 900.0,
-                "p90_ms": 1_800.0,
+                "p90_ms": 950.0,
+                "p95_ms": 975.0,
                 "max_ms": 1_900.0,
             }
-            for name in ("remember", "edit")
+            for name in ("remember", "edit_memory", "record_memory", "plan_memory")
         },
         "recall_admission": "ready",
         "read_your_write": {"exact": 60, "warming": 0, "stale": 0},
@@ -230,6 +235,7 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
             transport="direct",
             samples_per_operation=1,
             state_dir=tmp_path / "acceptance-state",
+            package_mode="source",
             convergence_bound_seconds=60.0,
         )
     finally:
@@ -238,10 +244,27 @@ def test_acceptance_warm_up_publishes_the_catalogue_proof(
     assert report["recall_admission"] == "ready"
     # The proof itself, not merely a window that closed.
     assert module.readiness.is_ready("retrieval_catalog")
+    assert module.readiness.is_ready("semantic_corpus")
+    assert report["preparation"]["startup"] == "product-warm-all"
+    assert report["preparation"]["converged"] is True
+    assert report["preparation"]["due_projection_present"] is True
     # An admitted catalogue is what makes the read after a write exact. Warming
     # stays a truthful answer under the contract; it is not a truthful answer
     # for a harness that never had a catalogue to answer from.
-    assert report["read_your_write"] == {"exact": 2, "warming": 0, "stale": 0}
+    assert report["read_your_write"] == {"exact": 8, "warming": 0, "stale": 0, "unknown": 0}
+    assert report["package"]["mode"] == "source"
+    rendered = json.dumps(report)
+    for private_value in (str(vault), "Knowledge Base", "acceptanceremember"):
+        assert private_value not in rendered
+    assert set(report["operations"]) == set(module.OPERATIONS)
+    for operation in module.OPERATIONS:
+        cases = [case for case in report["cases"] if case["operation"] == operation]
+        assert [case["condition"] for case in cases] == ["cold", "warm"]
+        assert all(case["terminal_outcome"] == "ok" for case in cases)
+        assert all(case["thread_cpu_ms"] >= 0 for case in cases)
+        measured = report["operations"][operation]
+        assert measured["samples"] == 1
+        assert measured["p95_ms"] == cases[1]["elapsed_ms"]
 
 
 def test_a_warm_up_that_cannot_admit_fails_the_measure(
@@ -273,7 +296,8 @@ def test_a_warm_up_that_cannot_admit_fails_the_measure(
                 transport="direct",
                 samples_per_operation=1,
                 state_dir=tmp_path / "acceptance-state",
-                convergence_bound_seconds=5.0,
+                package_mode="source",
+            convergence_bound_seconds=5.0,
             )
         # A warm-up that raises after managing the runtime would otherwise
         # leave this process managed for good.
@@ -484,6 +508,7 @@ def test_converge_does_not_abort_on_an_ordinary_retry(
         "_drain_observation",
         lambda root: {
             "due": 30,
+            "pending": 30,
             "claimed": 0,
             "retrying": 1,
             "stuck": 0,
@@ -614,6 +639,7 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
             transport="direct",
             samples_per_operation=1,
             state_dir=tmp_path / "acceptance-state",
+            package_mode="source",
             convergence_bound_seconds=60.0,
         )
     finally:
@@ -638,61 +664,536 @@ def test_the_drain_block_is_content_free(vault: Path, tmp_path: Path) -> None:
         assert token not in rendered, (token, rendered)
 
 
-def test_convergence_is_not_declared_over_stuck_or_claimed_work(
+def test_convergence_waits_for_retirement_backoff_and_claims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`due == 0` is not convergence while work is stuck or parked.
-
-    A final pass in which every remaining component fails transiently leaves
-    `due` at zero for the length of the backoff, and a row held under a live
-    lease is invisible to `due` at all. Either one used to satisfy the verdict,
-    so the acceptance could report converged over work that had not drained.
-    """
+    """Zero completions can retire custody or wait for a transient retry."""
     module = _acceptance()
-    observations = iter(
-        [
-            {
-                "due": 0,
-                "claimed": 0,
-                "retrying": 0,
-                "stuck": 2,
-                "failed": 2,
-                "max_attempt_count": 4,
-            },
-            {
-                "due": 0,
-                "claimed": 1,
-                "retrying": 0,
-                "stuck": 0,
-                "failed": 0,
-                "max_attempt_count": 0,
-            },
-            {
-                "due": 0,
-                "claimed": 0,
-                "retrying": 0,
-                "stuck": 0,
-                "failed": 0,
-                "max_attempt_count": 0,
-            },
-        ]
-    )
+    observations = iter([
+        _drain(pending=5, due=5),
+        _drain(pending=4, due=4),  # Retiring an obsolete receipt is progress.
+        _drain(pending=2, due=0, stuck=2, failed=2, max_attempt_count=4),
+        _drain(pending=1, due=0, failed=1, max_attempt_count=1),
+        _drain(pending=1, due=0, claimed=1),
+        _drain(),
+    ])
     monkeypatch.setattr(module, "_drain_observation", lambda _root: next(observations))
-    monkeypatch.setattr(module.derived_drain, "drain_once", lambda *a, **k: 1)
-    monkeypatch.setattr(module.derived_drain, "progress_limit", lambda: 16)
-    monkeypatch.setattr(
-        module.derived_drain, "last_pass_observation", lambda _root: {}
-    )
-    monkeypatch.setattr(
-        module.derived_drain, "component_dispatcher", lambda *a, **k: None
-    )
+    monkeypatch.setattr(module.derived_drain, "drain_once", lambda *a, **k: 0)
+    monkeypatch.setattr(module.derived_drain, "last_pass_observation", lambda _root: {})
+    monkeypatch.setattr(module.derived_drain, "component_dispatcher", lambda *a, **k: None)
     monkeypatch.setattr(
         module.derived_drain, "canonical_generation_observer", lambda *a, **k: None
     )
 
     _elapsed, converged, drain = module._converge(tmp_path, bound_seconds=30.0)
 
-    # The stuck pass stops the loop; it never reaches the clean third reading.
+    assert converged is True
+    assert drain["pending"] == 0
+    assert drain["completed"] == 0
+    assert drain["passes"] == 5
+
+
+@pytest.mark.parametrize("operation", ("remember", "edit_memory", "record_memory", "plan_memory"))
+def test_warm_p95_enforces_the_shared_strict_bar(operation: str) -> None:
+    module = _acceptance()
+    bar = module.request_latency_contract.load_contract().bar("ordinary-write-warm")
+    report = _report()
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms
+    with pytest.raises(SystemExit, match=f"{operation} warm p95=.*ordinary-write-warm"):
+        module.check(report)
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms - 0.01
+    module.check(report)
+    report["condition"] = "contended"
+    report["operations"][operation]["p95_ms"] = bar.threshold_ms * 2
+    module.check(report)
+
+
+def test_installed_proof_refuses_the_source_import() -> None:
+    import exomem
+
+    module = _acceptance()
+    with pytest.raises(SystemExit, match="non-editable installed"):
+        module._package_identity("installed")
+    identity = module._package_identity("source")
+    assert identity["mode"] == "source"
+    assert identity["version"] == exomem.__version__
+    import hashlib
+
+    origin_hash = hashlib.sha256(str(Path(exomem.__file__).resolve()).encode()).hexdigest()
+    assert identity["origin_sha256"] == origin_hash
+    assert identity["source_revision"]
+
+
+def test_disposable_measurement_refuses_conflicting_ambient_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path / "other-vault"))
+    with pytest.raises(SystemExit, match="conflicting ambient vault"):
+        module.measure(
+            tmp_path / "vault", transport="direct", samples_per_operation=1,
+            state_dir=tmp_path / "state", package_mode="source",
+        )
+
+
+def test_disposable_measurement_keeps_implicit_writer_state_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    for name in ("EXOMEM_VAULT_PATH", "EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    state = tmp_path / "state"
+
+    module._require_disposable_environment(tmp_path / "vault", state)
+    manager = module.writer_lease.get_manager()
+
+    assert manager.idempotency.path.is_relative_to(state)
+
+
+@pytest.mark.parametrize("tool_error", (False, True))
+def test_connector_measures_the_requested_public_command_and_rejects_tool_errors(
+    monkeypatch: pytest.MonkeyPatch, tool_error: bool,
+) -> None:
+    from email.message import Message
+
+    module = _acceptance()
+    sent = []
+    correlation_ids = []
+    authorization_headers = []
+
+    class Response:
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            request = sent[-1]
+            return json.dumps({
+                "jsonrpc": "2.0", "id": request["id"],
+                "result": {"isError": tool_error, "structuredContent": {"outcome": "committed"}},
+            }).encode()
+
+    def respond(request, **_kwargs):
+        sent.append(json.loads(request.data))
+        correlation_ids.append(request.get_header("X-exomem-request-id"))
+        authorization_headers.append(request.get_header("Authorization"))
+        return Response()
+
+    monkeypatch.setattr(module, "urlopen", respond)
+    client = module._ConnectorTransport("http://127.0.0.1:8765/mcp", "synthetic-session")
+    arguments = {"path": "Knowledge Base/Entities/Concepts/example.md", "operation": {"kind": "replace_string", "old_string": "before", "new_string": "after"}, "why": "correct observation"}
+    if tool_error:
+        with pytest.raises(SystemExit, match="tool returned an error"):
+            client.call("edit_memory", arguments)
+    else:
+        elapsed, result = client.call("edit_memory", arguments)
+        assert elapsed >= 0 and result["outcome"] == "committed"
+    assert sent[0]["params"] == {"name": "edit_memory", "arguments": arguments}
+    assert authorization_headers == ["Bearer synthetic-session"]
+    import uuid
+
+    assert str(uuid.UUID(correlation_ids[0])) == client.request_id == sent[0]["id"]
+
+
+@pytest.fixture
+def isolated_connector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The external process and HTTP boundaries of a disposable service."""
+    from email.message import Message
+
+    module = _acceptance()
+    root, state = tmp_path / "vault", tmp_path / "state"
+    for key in ("EXOMEM_VAULT_PATH", "EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    environment = {
+        "EXOMEM_VAULT_PATH": str(root), "EXOMEM_STATE_ROOT": str(state / "product"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(state), "EXOMEM_INSTANCE_ID": "disposable-test",
+    }
+    namespaces = {"/proc/self/ns/net": "net:[2]", "/proc/4321/ns/net": "net:[2]"}
+    health = {"status": "ready", "instance_id": "disposable-test", "release": "test-release",
+              "mcp_tool_surface_sha256": "a" * 64, "retrieval": {"state": "ready", "admitted": True}}
+    read_bytes = Path.read_bytes
+    readlink = module.os.readlink
+
+    def process_environment(path):
+        if str(path) == "/proc/4321/environ":
+            return b"\0".join(f"{key}={value}".encode() for key, value in environment.items())
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", process_environment)
+    monkeypatch.setattr(module.os, "readlink", lambda path, **kw: namespaces[str(path)] if str(path) in namespaces else readlink(path, **kw))
+    monkeypatch.setattr(module.socket, "if_nameindex", lambda: [(1, "lo")])
+
+    class Response:
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps(health).encode()
+
+    monkeypatch.setattr(module, "urlopen", lambda *_args, **_kw: Response())
+    return module, root, state, environment, namespaces, health
+
+
+@pytest.mark.parametrize("missing", [
+    "pid", "host-namespace", "url", "host-network", "other-network", "host-interface", "EXOMEM_VAULT_PATH",
+    "EXOMEM_STATE_ROOT", "EXOMEM_WRITER_LEASE_STATE_DIR", "EXOMEM_INSTANCE_ID", "health-instance",
+])
+def test_connector_refuses_unproven_service_before_any_fixture_write(isolated_connector, monkeypatch, missing):
+    module, root, state, environment, namespaces, health = isolated_connector
+    pid, host_namespace, url = 4321, "net:[1]", "http://127.0.0.1:8765/mcp"
+    if missing == "pid":
+        pid = None
+    elif missing == "host-namespace":
+        host_namespace = None
+    elif missing == "url":
+        url = "https://example.invalid/mcp"
+    elif missing == "host-network":
+        host_namespace = "net:[2]"
+    elif missing == "other-network":
+        namespaces["/proc/4321/ns/net"] = "net:[3]"
+    elif missing == "host-interface":
+        monkeypatch.setattr(module.socket, "if_nameindex", lambda: [(1, "lo"), (2, "eth0")])
+    elif missing == "health-instance":
+        health["instance_id"] = "another-service"
+    else:
+        environment.pop(missing)
+
+    def fixture_write(_client):
+        pytest.fail("unproven connector reached a fixture write")
+
+    monkeypatch.setattr(module, "_prepare_collections", fixture_write)
+    with pytest.raises(SystemExit, match="connector"):
+        module.measure(root, transport="connector", connector_url=url, connector_pid=pid,
+                       host_network_namespace=host_namespace,
+                       connector_token="synthetic-session",
+                       state_dir=state, samples_per_operation=1, package_mode="source")
+
+
+@pytest.mark.parametrize("projection_state, expected_entries", [("present", 3), ("missing", None), ("unreadable", None)])
+def test_connector_observes_service_without_local_runtime_writes(isolated_connector, monkeypatch, projection_state, expected_entries):
+    module, root, state, _environment, _namespaces, health = isolated_connector
+    calls, notes, rows = [], {}, {}
+    projection_path = root.parent / "due-state.json"
+    if projection_state == "present":
+        projection_path.write_text(json.dumps({
+            "version": module.due_state.SCHEMA_VERSION,
+            "categories": {
+                "category-one": {"Notes/first.md": {
+                    "open": [{"ref": "review:first", "due_since": "2026-01-01"}],
+                    "pending": [{"ref": "review:second", "due_on": "2027-01-01"}],
+                }},
+                "category-two": {"Notes/second.md": {
+                    "open": [{"ref": "review:third", "due_since": "2026-01-02"}], "pending": [],
+                }},
+            },
+        }))
+    elif projection_state == "unreadable":
+        projection_path.write_text("unreadable projection")
+    monkeypatch.setattr(module.due_state, "state_path", lambda _root: projection_path)
+
+    def local_runtime(*_args, **_kwargs):
+        pytest.fail("HTTP observer entered the local runtime")
+
+    for owner, name in (
+        (module.managed_recall, "enter_managed_recall"), (module.derived_drain, "drain_once"),
+        (module.due_state, "reconcile"), (module.due_state, "served_entries"),
+        (module.writer_lease, "LeaseManager"), (module.semantic_contract, "build_corpus_context"),
+        (module.find_module, "find"), (module.pending_recall, "status"),
+        (module.readiness, "unmanage_runtime"),
+    ):
+        monkeypatch.setattr(owner, name, local_runtime)
+    monkeypatch.setattr(module, "_drain_observation", lambda _root, **_kw: {"pending": 0, "due": 0, "claimed": 0, "retrying": 0, "failed": 0, "stuck": 0, "max_attempt_count": 0})
+    monkeypatch.setattr(module, "_full_receipt_count", lambda _root, **_kw: 0)
+    monkeypatch.setattr(module, "_reconciliation_demanded", lambda _root, **_kw: 0)
+
+    def public_call(client, name, arguments):
+        import uuid
+
+        assert client.token == "synthetic-session"
+        client.request_id = str(uuid.uuid4())
+        calls.append((name, arguments, client.request_id))
+        if name == "record_memory" and arguments["action"] == "describe":
+            result = {"examples": {"minimal": {"manifest_path": "Knowledge Base/Records/Acceptance/_collection.md", "manifest_text": "---\ntitle: Acceptance\n---\n", "append_item": {}}}}
+        elif name in ("record_memory", "plan_memory"):
+            action = arguments["action"]
+            if action == "inspect":
+                result = {"snapshot": "snapshot"}
+            elif action == "query":
+                result = {"rows": rows[name]}
+            else:
+                rows[name] = [arguments.get("item", {})]
+                result = {"outcome": "committed"}
+        elif name == "remember":
+            path = f"Knowledge Base/Notes/Insights/accepted-{len(notes)}.md"
+            notes[path] = arguments["content"]
+            result = {"path": path, "ref": f"memory:{len(notes)}"}
+        elif name == "edit_memory":
+            path = arguments["path"]
+            operation = arguments["operation"]
+            notes[path] = notes[path].replace(operation["old_string"], operation["new_string"])
+            result = {"path": path}
+        elif name == "ask_memory":
+            result = {"hits": [{"path": path, "ref": f"memory:{index}"} for index, (path, body) in enumerate(notes.items(), 1) if arguments["query"] in body]}
+            if not arguments["query"]:
+                result = {"hits": [{"path": "Knowledge Base/Notes/Insights/existing.md"}]}
+        elif name == "read_memory":
+            index = int(arguments["path"].split(":")[1]) - 1
+            path = list(notes)[index]
+            result = {"path": path, "body": notes[path]}
+        else:
+            pytest.fail(f"unexpected public command {name}")
+        return 1.0, result
+
+    monkeypatch.setattr(module._ConnectorTransport, "call", public_call)
+    report = module.measure(root, transport="connector", connector_url="http://127.0.0.1:8765/mcp", connector_pid=4321,
+                            host_network_namespace="net:[1]",
+                            connector_token="synthetic-session",
+                            state_dir=state, samples_per_operation=1, package_mode="source")
+
+    assert report["read_your_write"] == {"exact": 8, "warming": 0, "unavailable": 0, "stale": 0, "unknown": 0}
+    assert report["package"]["role"] == "observer-only"
+    assert report["connector_runtime_provenance"]["release"] == health["release"]
+    assert report["preparation"]["startup"] == "service-owned"
+    assert report["preparation"]["runtime_readiness"] == "externally-unverified"
+    assert report["preparation"]["due_projection_entries"] == expected_entries
+    assert report["preparation"]["due_items"] is None
+    assert all(case["thread_cpu_ms"] is None for case in report["cases"])
+    public_writes = {request_id for name, arguments, request_id in calls if name in module.OPERATIONS and arguments.get("action") not in ("describe", "create", "inspect", "query")}
+    assert {case["request_id"] for case in report["cases"]} == public_writes
+    assert report["drain"]["owner"] == "service"
+
+
+@pytest.mark.parametrize("response, body, expected", [
+    ({"hits": []}, "independent-marker", "stale"),
+    ({"success": False, "error": {"code": "NOT_FOUND"}}, "independent-marker", "unknown"),
+    ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "warming", "complete": False}}, "independent-marker", "warming"),
+    ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "temporarily_unavailable", "complete": False}}, "independent-marker", "unavailable"),
+    ({"hits": [{"path": "different.md"}]}, "independent-marker", "stale"),
+    ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "old-marker", "stale"),
+    ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "independent-marker", "exact"),
+])
+def test_connector_readback_uses_public_marker_and_returned_reference(response, body, expected):
+    module = _acceptance()
+    calls = []
+
+    class Client:
+        def call(self, name, arguments):
+            calls.append((name, arguments))
+            return 1.0, response if name == "ask_memory" else {"path": "accepted.md", "body": body}
+
+    assert module._connector_read_your_write(Client(), "independent-marker", "accepted.md") == expected
+    assert calls[0][1]["query"] == "independent-marker"
+    if expected == "exact":
+        assert calls[1] == ("read_memory", {"path": "memory:1"})
+
+
+@pytest.mark.parametrize("state", ["retryable", "claimed"])
+def test_connector_convergence_observes_backoff_and_claims_without_draining(vault, monkeypatch, state):
+    module = _acceptance()
+    _seeded_store(vault, [("graph", state, 1, time.time() + 60.0, None)])
+
+    def drain(*_args, **_kwargs):
+        pytest.fail("observer drained the service queue")
+
+    monkeypatch.setattr(module.derived_drain, "drain_once", drain)
+    acknowledged = time.monotonic() - 0.1
+    elapsed, converged, observation = module._observe_convergence(vault, bound_seconds=0.05, started=acknowledged)
+    assert elapsed >= 0.1
     assert converged is False
-    assert drain["stuck"] == 2
-    assert drain["passes"] == 1
+    assert observation["pending"] == 1
+    assert observation["due"] == 0
+
+
+def test_connector_waits_for_service_owned_queue_settlement(vault, monkeypatch):
+    module = _acceptance()
+    store = _seeded_store(vault, [("graph", "retryable", 1, time.time() + 60.0, None)])
+    observed = threading.Event()
+    observe = module._drain_observation
+
+    def service_worker():
+        if observed.wait(timeout=2.0):
+            with sqlite3.connect(store) as connection:
+                connection.execute("UPDATE derived_batch_components SET state = 'completed'")
+
+    def observation(root, **kwargs):
+        result = observe(root, **kwargs)
+        observed.set()
+        return result
+
+    monkeypatch.setattr(module, "_drain_observation", observation)
+    worker = threading.Thread(target=service_worker)
+    worker.start()
+    try:
+        elapsed, converged, report = module._observe_convergence(vault, bound_seconds=2.0)
+    finally:
+        worker.join(timeout=2.0)
+
+    assert converged is True
+    assert report["observations"] >= 2
+    assert report["pending"] == report["due"] == report["claimed"] == 0
+    assert elapsed < 2.0
+
+
+@pytest.mark.parametrize("store_state", ["current", "old-schema", "missing"])
+def test_connector_receipt_counts_never_repair_or_create_the_observed_store(vault, tmp_path, monkeypatch, store_state):
+    module = _acceptance()
+    store = _seeded_store(vault, [("graph", "retryable", 1, time.time() + 60.0, None)])
+    with sqlite3.connect(store) as connection:
+        connection.execute("INSERT INTO full_upserts VALUES ('../outside.md', 1, 1, 1)")
+        connection.execute("UPDATE derived_batches SET state = 'reconcile_required'")
+        if store_state == "old-schema":
+            connection.execute("DROP TABLE write_advisory_result_candidates")
+
+    def snapshot():
+        with sqlite3.connect(store) as connection:
+            return {
+                "schema": connection.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").fetchall(),
+                "full": connection.execute("SELECT * FROM full_upserts").fetchall(),
+                "batches": connection.execute("SELECT * FROM derived_batches").fetchall(),
+                "components": connection.execute("SELECT * FROM derived_batch_components").fetchall(),
+            }
+
+    before = snapshot()
+
+    def product_reader(*_args, **_kwargs):
+        pytest.fail("connector accounting used a product reader that can repair state")
+
+    for owner, name in (
+        (module.deferred_index, "_connect"), (module.deferred_index, "_connect_readonly"),
+        (module.deferred_index, "list_full_paths"), (module.derived_receipts, "_connect_receipt_read"),
+        (module.derived_receipts, "stranded_batch_count"), (module.derived_receipts, "due_component_count"),
+    ):
+        monkeypatch.setattr(owner, name, product_reader)
+    missing = tmp_path / "missing.sqlite"
+    if store_state == "missing":
+        monkeypatch.setattr(module.deferred_index, "store_path", lambda _root: missing)
+
+    full = module._full_receipt_count(vault, read_only=True)
+    stranded = module._reconciliation_demanded(vault, read_only=True)
+    queue = module._drain_observation(vault, read_only=True)
+
+    if store_state == "current":
+        assert full == 1
+        assert stranded == 1
+        assert queue["due"] == 0
+        assert queue["pending"] == 1
+    else:
+        assert full == stranded == queue["pending"] == queue["due"] == -1
+    assert snapshot() == before
+    assert not missing.exists()
+
+
+
+def test_external_contract_uses_the_shared_validator_and_reports_its_bytes(tmp_path: Path) -> None:
+    import hashlib
+
+    module = _acceptance()
+    original, _ = module._load_contract()
+    document = original.model_dump(mode="json")
+    document["revision"] += "-matched-trial"
+    contract_file = tmp_path / "contract.json"
+    source = json.dumps(document).encode()
+    contract_file.write_bytes(source)
+    contract, digest = module._load_contract(contract_file)
+    assert contract.revision == document["revision"]
+    assert digest == hashlib.sha256(source).hexdigest()
+    assert contract.bar("ordinary-write-warm") == original.bar("ordinary-write-warm")
+    module.check(_report(), contract=contract)
+
+
+def test_failed_remember_skips_only_its_edit_and_preserves_independent_timings(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _acceptance()
+    real_call = module._DirectTransport.call
+
+    def fail_remember(self, name, arguments):
+        if name == "remember":
+            raise ValueError("sensitive diagnostic must stay private")
+        return real_call(self, name, arguments)
+
+    monkeypatch.setattr(module._DirectTransport, "call", fail_remember)
+    report = module.measure(
+        vault, transport="direct", samples_per_operation=1,
+        state_dir=tmp_path / "acceptance-state", package_mode="source",
+        convergence_bound_seconds=60,
+    )
+    assert report["operations"]["remember"]["samples"] == 1
+    assert report["operations"]["edit_memory"]["samples"] == 0
+    assert report["operations"]["edit_memory"]["p95_ms"] is None
+    for operation in ("record_memory", "plan_memory"):
+        assert report["operations"][operation]["samples"] == 1
+    for case in report["cases"]:
+        if case["operation"] == "remember":
+            assert case["terminal_outcome"] == "error"
+            assert case["elapsed_ms"] >= 0
+        if case["operation"] == "edit_memory":
+            assert case["terminal_outcome"] == "skipped"
+            assert case["elapsed_ms"] is None
+    assert "sensitive diagnostic" not in json.dumps(report)
+    with pytest.raises(SystemExit, match="failed or skipped"):
+        module.check(report)
+
+
+def test_a_healthy_write_report_passes_acceptance() -> None:
+    _acceptance().check(_report())
+
+
+@pytest.mark.parametrize("visibility", ["stale", "unknown"])
+def test_failed_visibility_prevents_write_acceptance(visibility: str) -> None:
+    report = _report()
+    report["read_your_write"][visibility] = 1
+    with pytest.raises(SystemExit, match="read"):
+        _acceptance().check(report)
+
+
+@pytest.mark.parametrize("receipts", [1, -1])
+def test_uncovered_or_unknown_custody_prevents_write_acceptance(receipts: int) -> None:
+    report = _report()
+    report["uncovered_full_receipts"] = receipts
+    with pytest.raises(SystemExit, match="uncovered full receipt"):
+        _acceptance().check(report)
+
+
+def test_reconciliation_demand_prevents_write_acceptance() -> None:
+    report = _report()
+    report["reconciliation_demanded"] = 1
+    with pytest.raises(SystemExit, match="reconciliation demand"):
+        _acceptance().check(report)
+
+
+def test_missing_samples_prevent_write_acceptance() -> None:
+    report = _report()
+    report["operations"]["remember"]["samples"] = 29
+    with pytest.raises(SystemExit, match="samples"):
+        _acceptance().check(report)
+
+
+def test_a_fast_refusal_prevents_write_acceptance() -> None:
+    report = _report()
+    report["cases"] = [{"terminal_outcome": "refused", "elapsed_ms": 1.0}]
+    with pytest.raises(SystemExit, match="failed or skipped"):
+        _acceptance().check(report)
+
+
+def test_write_acceptance_requires_an_explicit_vault() -> None:
+    with pytest.raises(SystemExit, match="requires an explicit --vault"):
+        _acceptance().main(["--transport", "direct"])
+
+
+def test_connector_acceptance_requires_its_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_CONNECTOR_URL", raising=False)
+    with pytest.raises(SystemExit, match="connector transport requires"):
+        _acceptance().main(["--transport", "connector", "--vault", str(tmp_path)])

@@ -4432,8 +4432,9 @@ def _fast_ack_derived_batch(
     return manager, command, root, target, calls
 
 
+@pytest.mark.parametrize("command_name", ["remember", "governed_batch"])
 def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_name: str
 ) -> None:
     """A committed batch whose derived acknowledgement fails stays a success.
 
@@ -4447,6 +4448,7 @@ def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
         tmp_path,
         monkeypatch,
         seam_failure=("publish_pending_visibility", RuntimeError("registration failed")),
+        command_name=command_name,
     )
 
     first = manager.invoke(

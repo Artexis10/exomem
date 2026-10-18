@@ -404,6 +404,7 @@ def _drain_derived_custody(vault_root: Path, *, passes: int = 64) -> None:
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
+            retire_visibility=derived_drain.pending_visibility_retirer(),
             limit=32,
             now=now,
         )

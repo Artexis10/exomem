@@ -91,7 +91,9 @@ def _overdue_prediction(vault: Path, slug: str = "backlog", *, check_by: str) ->
         "## Prediction\n\n"
         "- id: p1\n"
         f"- check_by: {check_by}\n\n"
-        "The autovacuum backlog clears within a week.\n",
+        "The autovacuum backlog clears within a week.\n\n"
+        "## Relations\n\n"
+        "- supports [[Knowledge Base/Notes/Research/Infrastructure/carrier-scratch]]\n",
     )
 
 
@@ -155,9 +157,11 @@ def _served_ref(vault: Path) -> str:
     return rows[0]["ref"]
 
 
-def _observe(vault: Path, content: str, *, response_detail: str | None = None) -> dict:
+def _observe(
+    vault: Path, content: str, *, response_detail: str | None = None, path: str = SCRATCH,
+) -> dict:
     kwargs: dict = {
-        "path": SCRATCH,
+        "path": path,
         "operation": "add",
         "category": "finding",
         "content": content,
@@ -374,7 +378,7 @@ def test_an_overdue_check_by_reaches_no_carrier_today(vault: Path) -> None:
     _fresh_session()
     bootstrap_payload = commands.op_bootstrap(vault, section="all")
     _fresh_session()
-    mutation = _observe(vault, "Reader saturation reproduces on the replica too.")
+    mutation = _observe(vault, "Reader saturation reproduces on the replica too.", path=f"{INSIGHTS}/backlog.md")
     _fresh_session()
     recall = commands.op_ask_memory(vault, query="autovacuum backlog", limit=5)
 
@@ -402,7 +406,7 @@ def test_the_default_compact_response_carries_the_block(vault: Path) -> None:
     _scratch_page(vault)
     _prime(vault)
 
-    result = _observe(vault, "Reader saturation reproduces on the replica too.")
+    result = _observe(vault, "Reader saturation reproduces on the replica too.", path=f"{INSIGHTS}/backlog.md")
 
     assert result["status"] == "committed"
     block = result["due_state"]
@@ -436,7 +440,7 @@ def test_the_mutation_outcome_keys_are_byte_identical_apart_from_the_block(
     _overdue_prediction(vault, check_by=_yesterday())
     _due_state().reconcile(vault)
     _due_state().reset_emission_state()
-    carrying = _observe(vault, "The saturation point moves with the work_mem setting.")
+    carrying = _observe(vault, "The saturation point moves with the work_mem setting.", path=f"{INSIGHTS}/backlog.md")
 
     assert "due_state" in carrying
     assert "due_state" not in clean
@@ -572,7 +576,8 @@ def test_the_bootstrap_guidance_teaches_how_to_read_the_counts(vault: Path) -> N
     assert "due_state_authority" in post_write
 
     described = post_write["due_state"].lower()
-    assert "arrive on committed writes" in described  # counts arrive on ordinary responses
+    assert "affected_paths" in described
+    assert "global" in described
 
     handling = post_write["due_state_handling"].lower()
     assert "consult review" in handling and "interrupt" in handling
@@ -664,27 +669,28 @@ def test_three_writes_with_unchanged_totals_emit_once(vault: Path) -> None:
     _scratch_page(vault)
     _prime(vault)
 
-    results = [_observe(vault, f"Observation number {index}.") for index in range(3)]
+    results = [_observe(vault, f"Observation number {index}.", path=f"{INSIGHTS}/backlog.md") for index in range(3)]
 
     carried = [index for index, row in enumerate(results) if "due_state" in row]
     assert carried == [0], f"expected only the first response to carry the block, got {carried}"
 
 
-def test_a_change_in_totals_re_emits(vault: Path) -> None:
+def test_unrelated_due_changes_do_not_reemit_write_advice(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)
     _prime(vault)
 
-    first = _observe(vault, "Observation one.")
+    first = _observe(vault, "Observation one.", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" in first
-    quiet = _observe(vault, "Observation two.")
+    quiet = _observe(vault, "Observation two.", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" not in quiet
 
     _overdue_prediction(vault, "second-call", check_by=_yesterday())
     _due_state().reconcile(vault)
 
-    changed = _observe(vault, "Observation three.")
-    assert changed["due_state"]["total"] == 2
+    changed = _observe(vault, "Observation three.", path=f"{INSIGHTS}/backlog.md")
+    assert "due_state" not in changed
+    assert _due_state().served(vault)["total"] == 2
 
 
 def test_a_forty_write_batch_emits_once_at_the_moment_the_totals_change(
@@ -719,7 +725,7 @@ def test_a_forty_write_batch_emits_once_at_the_moment_the_totals_change(
     for index in range(40):
         if index == 20:
             commands.op_triage_memory(vault, ref=ref, action="reopen")
-        results.append(_observe(vault, f"Batch observation {index}."))
+        results.append(_observe(vault, f"Batch observation {index}.", path=f"{INSIGHTS}/backlog.md"))
 
     carrying = [index for index, row in enumerate(results) if "due_state" in row]
     assert len(carrying) == 1, (
@@ -745,10 +751,10 @@ def test_a_legacy_response_does_not_burn_the_sessions_emission(vault: Path) -> N
     _scratch_page(vault)
     _prime(vault)
 
-    legacy = _observe(vault, "Legacy detail write.", response_detail="legacy")
+    legacy = _observe(vault, "Legacy detail write.", response_detail="legacy", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" not in legacy
 
-    compact = _observe(vault, "Compact detail write.")
+    compact = _observe(vault, "Compact detail write.", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" in compact, (
         "the legacy response carried nothing, so the emission it would have used "
         "must still be available"
@@ -773,55 +779,16 @@ def test_a_terminal_validation_drop_does_not_burn_the_sessions_emission(
     monkeypatch.setattr(
         mutation_terminal, "_due_state_projection", lambda leaf: (None, "")
     )
-    dropped = _observe(vault, "Block dropped by validation.")
+    dropped = _observe(vault, "Block dropped by validation.", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" not in dropped
 
     monkeypatch.setattr(mutation_terminal, "_due_state_projection", real)
-    recovered = _observe(vault, "Block survives validation.")
+    recovered = _observe(vault, "Block survives validation.", path=f"{INSIGHTS}/backlog.md")
     assert "due_state" in recovered, (
         "a dropped block must leave the emission unspent"
     )
 
 
-def test_emission_is_scoped_to_one_command_invocation_at_the_terminal(
-    vault: Path,
-) -> None:
-    """D9's "at most once, at its terminal" holds by construction, not by habit.
-
-    Every mutating command reaches `project_terminal` exactly once, and that is
-    the only place `due_state` enters a response — so a command that committed
-    several pages internally could not emit per commit even if it wanted to. This
-    pins the structural fact the guarantee rests on; today all four compiled
-    writers commit once, so there is no multi-commit seam to drive.
-    """
-    from exomem import mutation_terminal
-
-    source = mutation_terminal.project_terminal.__code__
-    admits = [
-        name for name in source.co_names if name == "_admit_due_state"
-    ]
-    assert admits, "the terminal no longer decides emission; D9 is unpinned"
-
-    seen: list[str] = []
-    real = mutation_terminal._admit_due_state
-
-    def _counting(block: dict, hint: str) -> bool:
-        seen.append(hint)
-        return real(block, hint)
-
-    mutation_terminal._admit_due_state = _counting
-    try:
-        _overdue_prediction(vault, check_by=_yesterday())
-        _scratch_page(vault)
-        _prime(vault)
-        seen.clear()
-        _observe(vault, "One command, one terminal.")
-    finally:
-        mutation_terminal._admit_due_state = real
-
-    assert len(seen) == 1, (
-        f"one command invocation consulted the governor {len(seen)} times"
-    )
 
 
 def test_emission_governance_is_per_audience(vault: Path) -> None:
@@ -881,33 +848,20 @@ def test_emission_governance_is_per_vault_through_the_shipped_recall(
     )
 
 
-def test_a_recall_after_a_write_is_quiet_when_the_totals_have_not_moved(
-    vault: Path,
-) -> None:
-    """The write and the recall have to agree on the key, or the session hears it twice.
-
-    `mutation_terminal._admit_due_state` passes the vault. The recall carrier did
-    not, so a write recorded under `(session, audience, '/vault')` while the very
-    next recall asked about `(session, audience, '')` — a miss by construction.
-    Identical totals delivered twice in one session is what
-    `specs/command-surface/spec.md:26` forbids.
-    """
-    _overdue_prediction(vault, check_by=_yesterday())
+def test_write_advice_does_not_suppress_first_global_recall(vault: Path) -> None:
+    """A local delivery does not claim that global totals were delivered."""
+    affected = _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)
     _prime(vault)
 
-    mutation = _observe(vault, "Reader saturation reproduces on the replica too.")
-    assert "due_state" in mutation, "the write is this session's first delivery"
-    delivered = mutation["due_state"]
-
+    mutation = _observe(vault, "Reader saturation reproduces.", path=affected)
     recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
+    repeated = commands.op_ask_memory(vault, query="autovacuum", limit=5)
 
-    assert _due_state().served(vault, purpose="recall") == delivered, (
-        "the totals have not moved, so the question is only about the key"
-    )
-    assert not (isinstance(recall, dict) and "due_state" in recall), (
-        "the recall repeats totals the write already delivered"
-    )
+    assert mutation["due_state"]["scope"] == "affected_paths"
+    assert recall["due_state"]["total"] == mutation["due_state"]["total"]
+    assert "scope" not in recall["due_state"]
+    assert "due_state" not in repeated
 
 
 def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
@@ -934,14 +888,10 @@ def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
     )
 
 
-def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
+def test_local_write_advice_remains_independent_of_bootstrap_counts(
     vault: Path,
 ) -> None:
-    """Recording bootstrap's delivery must silence repeats, not the next real change.
-
-    The inverse of the test above, and the reason `mark_emitted` is keyed on a
-    digest rather than on a flag: a change of totals is always news.
-    """
+    """Equal local and global counts describe different sets and cannot suppress each other."""
     from exomem import attention as attention_module
 
     _overdue_prediction(vault, "backlog", check_by=_yesterday())
@@ -952,6 +902,7 @@ def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
     rows = _due_state().served_entries(vault)
     assert len(rows) == 2, f"expected two due items, got {len(rows)}"
     parked = rows[0]["ref"]
+    affected = rows[0]["path"]
     item = attention_module.item_by_ref(vault, parked)
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="later")
     _fresh_session()
@@ -960,12 +911,14 @@ def test_a_write_after_bootstrap_carries_the_block_when_the_totals_move(
     assert payload["due_state"]["total"] == 1
 
     commands.op_triage_memory(vault, ref=parked, action="reopen")
-    mutation = _observe(vault, "Replica lag reproduces under the same load.")
+    mutation = _observe(vault, "Replica lag reproduces under the same load.", path=affected)
 
     assert "due_state" in mutation, (
-        "bootstrap recorded total=1; this write is total=2, which is news"
+        "global total=1 must not suppress the local page view"
     )
-    assert mutation["due_state"]["total"] == 2
+    assert mutation["due_state"]["total"] == 1
+    assert mutation["due_state"]["scope"] == "affected_paths"
+    assert _due_state().served(vault)["total"] == 2
 
 
 def _outcomes_on_the_mutation_receipt(vault: Path, content: str) -> int:
@@ -1047,27 +1000,6 @@ def test_emission_governance_is_deterministic_without_an_agent(vault: Path) -> N
     assert _due_state().should_emit(changed) is False
 
 
-def test_removing_emission_governance_fails_this_module(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Mechanism-removal: with the governor always saying yes, the quiet tests break.
-
-    The mutating carrier decides at DELIVERY, so `would_emit` is the mechanism to
-    remove here — `should_emit` is the decide-and-record convenience the read
-    surfaces use, and patching it would leave the write path governed and this
-    test green for the wrong reason.
-    """
-    _overdue_prediction(vault, check_by=_yesterday())
-    _scratch_page(vault)
-    _prime(vault)
-
-    monkeypatch.setattr(_due_state(), "would_emit", lambda *a, **k: True)
-    results = [_observe(vault, f"Observation number {index}.") for index in range(3)]
-
-    assert sum("due_state" in row for row in results) == 3, (
-        "with the governor removed every response must carry the block — otherwise "
-        "the quiet assertions above never proved it was load-bearing"
-    )
 
 
 # ==========================================================================

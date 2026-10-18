@@ -15,6 +15,40 @@ def _terminal_module():
     return mutation_terminal
 
 
+@pytest.fixture
+def fresh_due_advice_session():
+    from exomem import due_state
+
+    due_state.reset_emission_state()
+    yield
+    due_state.reset_emission_state()
+
+
+@pytest.mark.parametrize("detail", ["compact", "full"])
+@pytest.mark.parametrize("scope", [None, "affected_paths", "unsupported"])
+def test_due_advice_scope_survives_terminal_without_changing_commit(
+    detail, scope, fresh_due_advice_session,
+) -> None:
+    module = _terminal_module()
+    advice = {"total": 1, "categories": {"prediction_window": 1}, "top": []}
+    if scope is not None:
+        advice["scope"] = scope
+    terminal = module.committed_terminal(
+        {"path": "Knowledge Base/Notes/Insights/example.md", "due_state": advice},
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-example",
+        idempotency_key=None,
+    )
+
+    projected = module.project_terminal(terminal, detail)
+
+    assert projected["state"] == "committed"
+    if scope == "unsupported":
+        assert "due_state" not in projected
+    else:
+        assert projected["due_state"] == advice
+
+
 def _fast_ack_terminal(
     *,
     derived_sync: str = "pending",

@@ -555,7 +555,7 @@ def semantic_preparation(
         )
         if len(source) != source_bytes or freshness.stat_signature(path) != signature:
             raise OSError("semantic input changed during preparation")
-        preparation.source = source.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        preparation.source = source.decode("utf-8")
         preparation.signature = signature
         # Dense inline YAML has many nodes even on one line. Charge before
         # either existing page/unit parser constructs them. The conservative

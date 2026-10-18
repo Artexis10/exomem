@@ -85,6 +85,23 @@ def test_warm_corpus_supplies_cold_writer_snapshot_without_body_rebuild(
     assert snapshot.titles == fresh.titles
 
 
+def test_startup_writer_prime_avoids_repeated_membership_proof(
+    warm_corpus: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first writer can fork the warmed broad view without walking the vault again."""
+    from exomem import warmup
+
+    warmup.prime_writer_resolver(warm_corpus)
+
+    def no_walk(_root):
+        raise AssertionError("a warmed writer walked unrelated pages")
+
+    monkeypatch.setattr(vault, "walk_vault_md", no_walk)
+    snapshot = find.writer_resolver_snapshot(warm_corpus)
+    assert "Knowledge Base/Records/record" in snapshot.full_paths
+    assert warm_corpus not in find._RECALL_RESOLVER_CACHE
+
+
 def test_warm_corpus_snapshot_is_detached_from_pending_destination(
     warm_corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

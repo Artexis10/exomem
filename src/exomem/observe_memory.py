@@ -354,7 +354,7 @@ def observe_memory(
                 # against those bytes; forwarding it again made one parameter
                 # carry two conventions, which no single value satisfies on a
                 # CRLF page. Matches what `edit` passes at the same seam.
-                expected_before_hash=editable.semantic_before_hash,
+                expected_before_hash=editable.raw_hash,
                 transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -439,9 +439,7 @@ def observe_memory(
             targets[fact.logical_target_ref] = fact.target_unit_fingerprint
             state = preflight.after_corpus.pages[fact.logical_target_path]
             source, guard = vault.read_guarded_text(vault_root, Path(vault_root) / state.path)
-            if vault.content_hash(
-                source.replace("\r\n", "\n").replace("\r", "\n")
-            ) != preflight.before_corpus.pages[state.path].source_hash:
+            if vault.content_hash(source) != preflight.before_corpus.pages[state.path].source_hash:
                 raise ObserveMemoryError(
                     "STALE_UNIT_TARGET", "a corrective target changed; read it again"
                 )
