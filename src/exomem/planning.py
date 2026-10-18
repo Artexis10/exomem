@@ -13,8 +13,9 @@ from typing import Any, Never
 
 import yaml
 
-from . import memory_refs, record_formats, record_governance, records
+from . import memory_refs, record_formats, record_governance, records, state_paths
 from . import structured_collections as collections
+from .collection_store import ownership
 from .governance import egress
 from .planning_values import PlanningValues, Unavailable
 from .structured_collections import CollectionError, parse_plan_ref
@@ -460,7 +461,7 @@ def query(
             )
     # Share ownership through validation, evaluation and projection before the receipt.
     with egress.disclosure_boundary(vault_root, "record_query", join_existing=True) as collector:
-        with record_governance.authorization_pass(vault_root):
+        with state_paths.resolution_scope(), ownership.read_scope(vault_root, finalize=True):
             if writer is not None:
                 manifest = writer._collection(collection, facade_profile="planning")[1]
                 adapter_authorize_path = writer._operation.allows_file

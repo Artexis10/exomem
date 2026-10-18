@@ -1348,7 +1348,7 @@ def query_collection(
             )
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
         # Verify the whole query before its receipt can claim release.
-        with authorization_pass(root):
+        with state_paths.resolution_scope(), ownership.read_scope(root, finalize=True):
             if writer is None:
                 policy = egress.policy_module.load(root)
                 manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
