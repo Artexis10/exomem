@@ -1385,10 +1385,8 @@ def find(
                     # remains unavailable until the live projection catches up.
                     state = "ready"
                     stale_recall_scopes = frozenset(admitted.lagging_scopes)
-                    lexstore.bind_admitted_catalog(
-                        vault_root,
-                        {scope: catalog_proof[scope] for scope in stale_recall_scopes},
-                    )
+                    # Exact admissions also pin the request before later live events.
+                    lexstore.bind_admitted_catalog(vault_root, catalog_proof)
                     if stale_recall_scopes and degraded_out is not None:
                         # Rides the existing warming disclosure: the envelope
                         # already projects `warming.components`, so a stale
