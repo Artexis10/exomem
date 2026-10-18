@@ -1922,3 +1922,179 @@ def test_publication_notice_reprojects_only_the_published_batch(
         assert _overlay(vault).ready is True
 
     assert len(hydration) == pending_total, len(hydration)
+
+
+@pytest.mark.parametrize("pending_ceiling", [1, 6])
+def test_optional_prompt_keeps_material_when_pending_identity_is_unprovable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending_ceiling: int,
+) -> None:
+    """A real prompt survives uncertain citations without claiming exact identity."""
+    import asyncio
+    import json
+
+    from fastmcp import FastMCP
+    from test_derived_identifier_egress import _govern
+    from test_governance_postfilter import _as_external_connector_client, _seed_adoption_run
+
+    from exomem import server
+    from exomem.governance import egress
+
+    visible, absent = memory_refs.new_id(), memory_refs.new_id()
+    _write(tmp_path, "Knowledge Base/Notes/open.md", _page(
+        title="Open", body="Admitted material.", updated="2026-01-01", exomem_id=visible,
+    ))
+    _govern(tmp_path, "external", scope="Notes/uncertain.md")
+    rule = tmp_path / "Knowledge Base/_Governance/rules/withheld.yaml"
+    rule.write_text(rule.read_text().replace("ceiling: 0", f"ceiling: {pending_ceiling}"))
+    pending_path = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending material.", updated="2026-01-01")
+    _publish_change(tmp_path, batch_id="optional-visible", generation="optional-visible", changes=(
+        (pending_path, None, after, None),
+    ))
+    (tmp_path / pending_path).write_bytes(b"\xff")
+    _reset_overlay()
+    refs = (memory_refs.memory_ref(visible), memory_refs.memory_ref(absent))
+    _seed_adoption_run(tmp_path, run_ref=f"Retain this material: {' '.join(refs)}")
+    _as_external_connector_client(monkeypatch)
+    mcp = FastMCP("pending-optional-prompt")
+    server.register_adoption_mcp(mcp, vault_root=tmp_path)
+
+    rendered = asyncio.run(mcp.render_prompt("continue_adoption"))
+    text = json.dumps([getattr(message.content, "text", "") for message in rendered.messages])
+    assert "Retain this material" in text
+    assert all(ref not in text for ref in refs)
+    assert egress.WITHHELD_REFERENCE in text
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        memory_refs.paths_for_ids_read_only(tmp_path, (visible,))
+
+
+def test_hidden_pending_withdrawal_preserves_redaction_with_equal_canonical_bytes(
+    tmp_path: Path,
+) -> None:
+    """Hidden custody cannot expose a formerly redacted stable-reference token."""
+    import shutil
+
+    from test_derived_identifier_egress import _govern
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    pending, settled = tmp_path / "pending", tmp_path / "settled"
+    identity, absent = memory_refs.new_id(), memory_refs.new_id()
+    hidden = "Knowledge Base/Notes/Withheld/hidden.md"
+    before = _page(title="Hidden", body="Before.", updated="2026-01-01", exomem_id=identity)
+    after = _page(title="Hidden", body="Committed.", updated="2026-01-02", exomem_id=identity)
+    _write(pending, hidden, before)
+    _govern(pending, "external")
+    _publish_change(pending, batch_id="optional-hidden", generation="optional-hidden", changes=(
+        (hidden, before, after, None),
+    ))
+    _write(pending, hidden, after + "\nLater bytes retain the same identity.\n")
+    _reset_overlay()
+    shutil.copytree(pending, settled)
+    who = RequestPrincipal("external", surface="mcp")
+    hidden_ref, absent_ref = memory_refs.memory_ref(identity), memory_refs.memory_ref(absent)
+    text = f"Read {hidden_ref} absent {absent_ref}."
+
+    assert egress.redact_withheld_references(pending, text, principal=who) == (
+        egress.redact_withheld_references(settled, text, principal=who)
+    ) == f"Read {egress.WITHHELD_REFERENCE} absent {absent_ref}."
+    assert memory_refs.paths_for_ids_read_only(
+        pending, (identity,),
+        admit_pending_paths=lambda paths: egress.pending_identity_candidates(
+            pending, paths, principal=who,
+        ),
+    ) == {identity: ()}, "redaction evidence must not revive current mappings"
+
+
+def test_new_hidden_pending_identity_does_not_change_an_absent_optional_reference(
+    tmp_path: Path,
+) -> None:
+    """A hidden unreadable new page cannot reveal custody through blanket omission."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    _govern(tmp_path, "external")
+    absent = memory_refs.memory_ref(memory_refs.new_id())
+    who = RequestPrincipal("external", surface="mcp")
+    text = f"Retain this material and {absent}."
+    before = egress.redact_withheld_references(tmp_path, text, principal=who)
+    hidden = "Knowledge Base/Notes/Withheld/new.md"
+    after = _page(title="Hidden", body="Pending.", updated="2026-01-01")
+    _publish_change(
+        tmp_path, batch_id="optional-new-hidden", generation="optional-new-hidden",
+        changes=((hidden, None, after, None),),
+    )
+    (tmp_path / hidden).write_bytes(b"\xff")
+    _reset_overlay()
+
+    assert egress.redact_withheld_references(tmp_path, text, principal=who) == before == text
+
+
+def test_optional_references_preserve_unknown_custody_and_error_input_exemptions(
+    tmp_path: Path,
+) -> None:
+    """Citation omission cannot hide damaged custody or reveal an echoed input's membership."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    _govern(tmp_path, "external")
+    ref = memory_refs.memory_ref(memory_refs.new_id())
+    uncertain = "Knowledge Base/Notes/uncertain.md"
+    after = _page(title="Pending", body="Pending.", updated="2026-01-01")
+    _publish_change(tmp_path, batch_id="optional-custody", generation="optional-custody", changes=(
+        (uncertain, None, after, None),
+    ))
+    (tmp_path / uncertain).write_bytes(b"\xff")
+    _reset_overlay()
+    who = RequestPrincipal("external", surface="mcp")
+    with request_scope(who):
+        error = ValueError(f"Could not read {ref}")
+        assert str(egress.postfilter_error("read_memory", error, tmp_path, request_kwargs={
+            "path": ref,
+        })) == str(error)
+    with sqlite3.connect(deferred_index.store_path(tmp_path)) as connection:
+        connection.execute("UPDATE pending_recall_rows SET canonical_generation = 'invalid'")
+    _reset_overlay()
+
+    with pytest.raises(find_module.RetrievalIndexWarming, match="warming"):
+        egress.redact_withheld_references(tmp_path, f"Read {ref}", principal=who)
+
+
+def test_optional_reference_uses_the_proven_destination_of_a_pending_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admitted old owner must not mask the withheld destination as a duplicate."""
+    from test_derived_identifier_egress import _govern
+
+    from exomem import semantic_contract
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal
+
+    monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "0")
+    identity = memory_refs.new_id()
+    ref = memory_refs.memory_ref(identity)
+    old = "Knowledge Base/Notes/open.md"
+    new = "Knowledge Base/Notes/Withheld/moved.md"
+    page = _page(title="Moved", body="Moved material.", updated="2026-01-01", exomem_id=identity)
+    _write(tmp_path, old, page)
+    _govern(tmp_path, "external")
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    _publish_change(
+        tmp_path, batch_id="optional-move", generation="optional-move",
+        changes=((old, page, None, ref), (new, None, page, ref)),
+    )
+    # The maintained source still observes the old owner; custody proves the move.
+    snapshot = semantic_contract.current_reference_identity_snapshot(tmp_path)
+    assert snapshot is not None and snapshot.reference_owners[identity] == (old,)
+    assert memory_refs.paths_for_ids_read_only(tmp_path, (identity,)) == {identity: (new,)}
+    who = RequestPrincipal("external", surface="mcp")
+
+    assert egress.redact_withheld_references(tmp_path, f"Read {ref}", principal=who) == (
+        f"Read {egress.WITHHELD_REFERENCE}"
+    )

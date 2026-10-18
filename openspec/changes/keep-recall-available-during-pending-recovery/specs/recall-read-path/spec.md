@@ -78,6 +78,46 @@ Pending content hydration SHALL remain bounded. A legitimate pending burst beyon
 - **WHEN** pending custody covers a page that the caller cannot access
 - **THEN** the response reveals no additional page content, identity, path, count, or diagnostic about that page
 
+### Requirement: Optional reference projection preserves admitted material
+
+Optional free-text projection SHALL preserve admitted material when trustworthy pending suppression exists but current reference identity remains incomplete. It SHALL omit uncertain well-formed stable references uniformly rather than establish uniqueness or cancel the whole response. Unknown authoritative custody SHALL remain unavailable.
+
+The redactor SHALL retain raw canonical-owner evidence separately from current mappings after pending withdrawal. It MAY use that evidence only for redaction, with current disclosure checks. It MUST NOT use it to resolve an identifier, revive a suppressed mapping, admit content, or claim current uniqueness. Source selection SHALL retain the existing vault-wide projection-or-scan rule and current-snapshot recheck.
+
+The redactor SHALL apply maintained body-free authority before excluding hidden pending uncertainty. It SHALL retain every custody withdrawal and every unresolved membership or possible widening grant. Equal canonical bytes and authority SHALL produce the same protected-reference redaction when only hidden pending custody changes. Public diagnostics SHALL expose no protected identifiers, paths, counts, or new per-reference state.
+
+#### Scenario: Optional identity is unprovable but coverage is servable
+
+- **WHEN** an admitted response contains an optional stable reference and potentially visible pending identity remains unprovable
+- **THEN** the response retains its admitted material and replaces the uncertain token with the existing withheld marker
+- **AND** exact identifier resolution still refuses when it cannot prove uniqueness
+
+#### Scenario: Pending withdrawal covers a known hidden owner
+
+- **WHEN** canonical bytes and authority remain equal while a known hidden owner enters unprovable pending custody
+- **THEN** raw ownership preserves its existing redaction without reviving its withdrawn current mapping
+- **AND** an unrelated absent reference remains unchanged
+
+#### Scenario: New hidden uncertainty accompanies an absent reference
+
+- **WHEN** independently hidden pending uncertainty appears without changing the canonical owner set of an absent optional reference
+- **THEN** maintained authority excludes that hidden uncertainty and the optional reference remains unchanged
+
+#### Scenario: Current mapping proves a pending move
+
+- **WHEN** pending custody proves a unique current mapping at a new path
+- **THEN** the redactor uses that current path and its authority without reviving the withdrawn old mapping
+
+#### Scenario: Custody is unknown during optional projection
+
+- **WHEN** authoritative pending custody cannot provide trustworthy suppression
+- **THEN** optional projection preserves the unavailable outcome instead of serving material after citation omission
+
+#### Scenario: The caller supplied an error reference
+
+- **WHEN** an error echoes a stable reference that the caller supplied
+- **THEN** the existing input exemption preserves that token without exposing its existence through redaction
+
 ### Requirement: The service recovers committed pending custody
 
 The existing bounded service worker SHALL recover committed pending custody without manual reconciliation. Recovery SHALL cover ready live rows and stranded batches, preserve exact per-path supersession and unfinished component demand, and apply retry backoff. It SHALL repair only receipt-covered derived state. Unproven mixed canonical state SHALL remain explicit and SHALL NOT gain committed proof.

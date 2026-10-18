@@ -6612,7 +6612,7 @@ class _ArtifactReferenceGate:
         token = token.split("#", 1)[0].strip().strip("\"'").rstrip(".,;:!?")
         return token, wikilink
 
-    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...]:
+    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
         if lifecycle.is_tombstoned(self.vault_root, token):
@@ -6622,11 +6622,16 @@ class _ArtifactReferenceGate:
             memory_id = memory_refs.parse_memory_ref(token)
             if memory_id is None:
                 return ()
-            # Preserve raw uniqueness before gating; visibility-filtered lookup
-            # would leave a hidden-only reference unresolved and unredacted.
-            paths = memory_refs.paths_for_ids_read_only(
+            # Redaction keeps raw hidden-owner evidence after pending withdrawal.
+            # Potentially visible uncertainty omits the token, not admitted material.
+            paths = memory_refs.paths_for_optional_references_read_only(
                 self.vault_root, (memory_id,),
+                admit_pending_paths=lambda paths: pending_identity_candidates(
+                    self.vault_root, paths, principal=self.who, purpose=self.purpose,
+                ),
             ).get(memory_id, ())
+            if paths is None:
+                return None
             if len(paths) != 1:
                 return ()
             token = paths[0]
@@ -6718,7 +6723,9 @@ class _ArtifactReferenceGate:
                     # replacing it tells them the item exists.
                     return token
             candidates = self.resolve(token)
-            if candidates and not all(self._permits(rel) for rel in candidates):
+            if candidates is None or (
+                candidates and not all(self._permits(rel) for rel in candidates)
+            ):
                 return WITHHELD_REFERENCE
             return token
 

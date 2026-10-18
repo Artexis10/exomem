@@ -12,6 +12,7 @@ Pending index work must reduce coverage honestly while the service repairs it, w
 - Treat the hydration limit as a body limit; use the existing custody rows for a complete path footprint during larger bursts.
 - Recover ready and stranded custody through the existing bounded service worker, including paths superseded outside governed writes.
 - Preserve current policy, access, tombstone, catalogue identity, and exact publication checks.
+- Keep optional reference uncertainty local to redaction while preserving admitted material and mandatory custody checks.
 - Keep malformed or unreadable authoritative state distinct from ordinary index lag.
 - Reuse the programme's shared live recall canary and release gate. This change adds no scheduler or synthetic production writes.
 

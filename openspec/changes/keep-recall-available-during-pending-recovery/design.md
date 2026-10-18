@@ -47,6 +47,33 @@ Current access, policy, catalogue identity, and terminal byte checks remain mand
 Public diagnostics stay content-free and preserve restricted callers' existing suppression.
 Raw pending paths remain internal; revealing those names would require their own release proof.
 
+### Separate redaction evidence from current reference resolution
+
+An optional citation lookup must not cancel material that passed recall admission.
+Reuse the maintained identity source before pending withdrawal, with its current-snapshot recheck and whole-batch fallback.
+Acquire that raw ownership once, then retain the existing pending adjustments for strict identifier resolution.
+Keep raw ownership, original unprovable paths, and current mappings distinct in an ephemeral owner view.
+This view adds no cache, index, sidecar query, or canonical write.
+
+The redactor applies `pending_identity_candidates` before interpreting uncertain coverage.
+Its existing minimum existence level preserves unresolved membership and possible widening grants.
+The callback excludes only independently hidden uncertainty; every custody withdrawal remains intact.
+For redaction only, combine proven current mappings with raw owners on unprovable custody paths.
+Those owner hints establish no current mapping, uniqueness, content admission, or disclosure grant.
+Keep proven moves, tombstones, and distinct-owner ambiguity under their existing rules.
+
+When potentially visible identity remains unprovable under servable coverage, omit the optional stable-reference token uniformly.
+Known, absent, and hidden-only identifiers share that uncertainty condition; do not choose omission from identifier membership.
+Keep existing canonical-owner redaction when only pending custody changes, including a previously hidden owner withdrawn from current resolution.
+Unknown authoritative custody remains unavailable; do not convert that failure into optional citation omission.
+Preserve caller-supplied error-reference exemptions and every current content-release check.
+Reuse existing coverage warnings without protected identifiers, paths, counts, or new public diagnostics.
+
+Conservative omission can remove a citation that would later prove valid.
+That cost replaces loss of the admitted recall answer, while current identity resolution remains strict.
+This repair preserves observed-checkpoint freshness and does not retain identity history absent from the maintained source.
+It neither reconstructs an unreadable earlier identity nor treats receipt hashes as that identity.
+
 ### Reuse bounded recovery without resetting healthy work
 
 Extend the existing derived worker's due recovery selection to ready live custody that needs supersession proof.
