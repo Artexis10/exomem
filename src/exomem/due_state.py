@@ -77,6 +77,7 @@ projection state.
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import functools
 import hashlib
@@ -333,6 +334,8 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 pass
             raise
     except Exception:  # noqa: BLE001 — a projection write never breaks a caller
+        with _SHARED_LOCK:
+            _SHARED.pop(str(vault_root), None)
         log.debug("could not persist the due-state projection", exc_info=True)
 
 
@@ -1272,7 +1275,7 @@ def visible_claim_items(vault_root: Path, manifest_path: str) -> list[dict[str, 
     if keep is not None and not keep(manifest_path):
         return []
     return [
-        dict(item)
+        copy.deepcopy(dict(item))
         for item in row["items"]
         if isinstance(item, Mapping)
         and type(item.get("path")) is str
@@ -1636,7 +1639,7 @@ def apply_observation_write_delta(
 
     `facets` are the page's type, category, project and tags; they are stored
     so a serve under a narrower audience re-applies `claims.match` exactly as
-    the write did.
+    the write did. Return None when the bucket is unchanged or state is unavailable.
     """
     if not _observations_at_write_time() or not state_path(vault_root).exists():
         return None
@@ -1743,11 +1746,11 @@ def apply_observation_write_delta(
         _track_batch_path(vault_root, str(path))
         if bucket is None:
             if str(path) not in pages:
-                return current
+                return None
             pages.pop(str(path), None)
         else:
             if bucket == pages.get(str(path)):
-                return current
+                return None
             pages[str(path)] = bucket
         categories[_OBSERVATION_FAMILY] = pages
         return _persist_delta(

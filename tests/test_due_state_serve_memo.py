@@ -139,13 +139,17 @@ def test_failed_projection_save_preserves_the_last_shared_state(
     from exomem import vault
 
     _persist(tmp_path, "first")
-    before = due_state._load_shared(tmp_path)
+    before = due_state.load(tmp_path)
+    before["claims"] = {"collection": {"tags": ["persisted"]}}
+    due_state.save(tmp_path, before)
 
     def refuse(_operation):
         raise OSError("replacement refused")
 
     monkeypatch.setattr(vault, "replace_tolerating_transient_sharing", refuse)
     _persist(tmp_path, "unsaved")
+    updated = due_state.apply_write_delta(tmp_path, PAGE)
+    updated["claims"]["collection"]["tags"].append("changed by the caller")
 
     assert due_state._load_shared(tmp_path) == before
     assert due_state.load(tmp_path)["marker"] == "first"

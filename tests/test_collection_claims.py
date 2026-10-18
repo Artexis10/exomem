@@ -566,6 +566,29 @@ def test_routing_targets_filter_the_manifest_before_disclosing_claims(tmp_path: 
     ) == []
 
 
+def test_mutating_visible_claim_rows_cannot_change_later_reads_or_page_deltas(tmp_path: Path) -> None:
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    _write_item(
+        tmp_path,
+        record_id="22222222-2222-4222-8222-222222222222",
+        account="account-alpha",
+        effective_on="2026-09-03",
+        status="active",
+        provider="Provider Alpha",
+        tags=["subscriptions"],
+    )
+    path, _ = _write_observation(tmp_path)
+    due_state.reconcile(tmp_path)
+    expected = due_state.load(tmp_path)["claims"][MANIFEST_PATH]["items"]
+    rows = due_state.visible_claim_items(tmp_path, MANIFEST_PATH)
+    rows[0]["values"]["account"] = "changed by the caller"
+    rows[0]["values"]["tags"].append("changed by the caller")
+
+    assert due_state.visible_claim_items(tmp_path, MANIFEST_PATH) == expected
+    due_state.apply_write_delta(tmp_path, path)
+    assert due_state.load(tmp_path)["claims"][MANIFEST_PATH]["items"] == expected
+
+
 def test_incomplete_claims_census_keeps_declared_terms_but_suppresses_derived(
     tmp_path: Path,
 ) -> None:
@@ -880,7 +903,7 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
 
     projection = due_state.state_path(tmp_path)
     before = projection.stat()
-    due_state.apply_observation_write_delta(
+    unchanged = due_state.apply_observation_write_delta(
         tmp_path,
         path=path,
         observation_ref=page_ref,
@@ -889,6 +912,7 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
         observed_at=observed_at,
     )
     after = projection.stat()
+    assert unchanged is None
     assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
 
     stored = due_state.load(tmp_path)["categories"]["unreflected_observations"][path]
@@ -926,9 +950,10 @@ def test_unrouted_observation_removes_its_stale_bucket_then_leaves_state_untouch
     projection = due_state.state_path(tmp_path)
     emission = due_state.emission_path(tmp_path)
     persisted = (projection.stat(), emission.stat())
-    due_state.apply_observation_write_delta(
+    unchanged = due_state.apply_observation_write_delta(
         tmp_path, path=path, observation_ref=page_ref, terms=[], routing=None, observed_at=now
     )
+    assert unchanged is None
     assert (projection.stat(), emission.stat()) == persisted
 
 
