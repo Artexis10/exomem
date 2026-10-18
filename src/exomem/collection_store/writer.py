@@ -1279,7 +1279,9 @@ class CollectionWriter:
                 request, digest, replay = self._identity("view_move", cid, arguments, request)
                 if replay is not None:
                     return result
-                txn = self._txn(row, manifest, "view_move", edit_back.why(path), request, digest, effects=arguments)
+                # Immutable receipt/effect facts reconstruct audit; request identity still binds the discarded formatting digest.
+                effects = {name: arguments[name] for name in ("old_path", "path", "generation", "version")}
+                txn = self._txn(row, manifest, "view_move", edit_back.why(path), request, digest, effects=effects)
                 self._execute("UPDATE items SET view_path=? WHERE row_id=?", (path, item["row_id"]))
                 self._execute("UPDATE projection_state SET path=?,install_json=NULL,stat_identity=NULL WHERE path=?",
                               (path, projection["path"]))

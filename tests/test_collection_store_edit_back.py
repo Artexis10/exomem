@@ -114,6 +114,45 @@ def test_an_offline_cross_directory_move_keeps_the_filename_and_payload_version(
     assert [(operation, actor) for operation, actor, _ in txns(store, "view_move")] == [("view_move", "owner:view-edit")]
 
 
+def test_a_move_event_remains_verifiable_after_its_formatting_correction_is_discarded(store):
+    """Discarded file formatting must not remove an input needed to verify immutable move history."""
+    from exomem import records
+
+    _, source = appended(store)
+    destination = source.with_name("Manual.md")
+    source.rename(destination)
+    edited = destination.read_bytes().replace(b"title: One", b"title: 'One'")
+    destination.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    assert store.connection.execute("SELECT view_path FROM items").fetchone() == (
+        destination.relative_to(store.root).as_posix(),)
+    assert any(raw == edited for _, _, raw in holds(store))
+    for reference, _, _ in holds(store):
+        store.discard_held(CID, held=reference, why="discard formatting correction")
+    assert holds(store) == []
+
+    cursor = store.connection.execute(
+        "SELECT t.*,m.manifest_text,c.manifest_path FROM txns t "
+        "JOIN collection_manifests m ON m.collection_id=t.collection_id "
+        "AND m.manifest_version=t.manifest_version_after "
+        "JOIN collections c ON c.collection_id=t.collection_id WHERE t.operation='view_move'")
+    [row] = cursor.fetchall()
+    txn = dict(zip((column[0] for column in cursor.description), row, strict=True))
+    receipt = json.loads(txn["receipt_json"])
+    version = store.connection.execute(
+        "SELECT version_before FROM audit_effects WHERE txn_id=?", (txn["txn_id"],)).fetchone()[0]
+    manifest = collections.parse_manifest_bytes(
+        store.root, txn["manifest_path"], txn["manifest_text"].encode())
+    # The v1 event envelope uses only immutable transaction, manifest, receipt and effect facts.
+    event = {name: txn[name] for name in (
+        "transition_id", "collection_id", "operation", "generation_before", "generation_after",
+        "manifest_version_before", "manifest_version_after", "prev_event_hash", "committed_at", "why", "request_hash")}
+    event.update(manifest_hash=manifest.manifest_version.hash,
+                 effects={"old_path": receipt["affected_paths"][0], "path": receipt["affected_paths"][1],
+                          "generation": txn["generation_before"], "version": version})
+    assert hashlib.sha256(b"exomem-collection-event:v1\0" + records._canonical_json(event)).hexdigest() == txn["event_hash"]
+
+
 def test_a_file_move_hint_completes_the_census_when_each_turn_visits_one_path(store):
     """An exact file hint must finish at window size one instead of preventing move discovery forever."""
     _, source = appended(store)
