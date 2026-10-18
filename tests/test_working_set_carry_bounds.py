@@ -435,17 +435,66 @@ def test_after_a_write_an_owner_whose_configuration_cannot_withhold_rebuilds_not
     assert _statistics_rebuilt(vault, owner) == 0
 
 
-def test_after_a_write_a_reader_rebuilds_its_statistics_once_per_revision(vault: Path) -> None:
+def test_a_reader_rebuilds_statistics_only_when_its_admitted_inputs_change(vault: Path) -> None:
     from exomem.governance.principal import RequestPrincipal
 
     reader = RequestPrincipal(audience_id="external", surface="mcp")
     _seed_withheld_twin(vault)
-    _statistics_rebuilt(vault, reader)
+    assert _statistics_rebuilt(vault, reader) == 1
+    before = _carry(vault, reader)
+    _write(
+        vault / _withheld(PRIVATE),
+        "---\ntype: note\nstatus: active\n---\n\n# Withheld revision\n\n" + TURN_WORDS * 2,
+    )
+    _settle(vault)
+
+    assert _statistics_rebuilt(vault, reader) == 0
+    assert _carry(vault, reader) == before
+
     _research_page(vault, "harbour-note", "A harbour note written after the carry warmed.")
     _settle(vault)
 
     assert _statistics_rebuilt(vault, reader) == 1
-    assert _statistics_rebuilt(vault, reader) == 0, "once per revision, not per turn"
+    assert _statistics_rebuilt(vault, reader) == 0, "once per changed input, not per turn"
+
+
+def test_an_fts_only_correction_changes_warm_admitted_ranking(vault: Path) -> None:
+    """A SQL repair can change scoring without a canonical checkpoint change."""
+    held = _seed_ranked(vault)
+    withheld = next(path for path in held if path.endswith("ranked-pair-repeated.md"))
+
+    def ranked() -> list[tuple[str, float]]:
+        context = lexstore.RequestQueryContext(
+            vault, lambda path: path != withheld, lifecycle_statuses.Basis(vault)
+        )
+        return _ranked(vault, 1000, query_context=context)
+
+    before = ranked()
+    store = lexstore.get_store(vault)
+    connection = store._connect()
+    try:
+        checkpoint = connection.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
+        ).fetchall()
+        with connection:
+            rowid = connection.execute(
+                "SELECT rowid FROM pages WHERE path = ?",
+                ("Knowledge Base/Notes/Journal/ordinary-note-00000.md",),
+            ).fetchone()
+            assert rowid is not None
+            connection.execute(
+                "UPDATE fts SET stemmed = ? WHERE rowid = ?", ("harbour " * 200, rowid[0])
+            )
+        assert connection.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' ORDER BY key"
+        ).fetchall() == checkpoint
+    finally:
+        connection.close()
+
+    after = ranked()
+    assert after != before, "a noncandidate's tokens change the admitted score denominator"
+    lexstore.clear_stores()
+    assert ranked() == after, "warm repair scores must equal a fresh process cache"
 
 
 def test_a_withheld_row_under_catalogue_ranking_ranks_on_admission(
