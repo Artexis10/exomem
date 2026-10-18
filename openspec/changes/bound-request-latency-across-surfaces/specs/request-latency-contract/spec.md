@@ -20,6 +20,16 @@ An independent source-only author SHALL establish source identity, state, and no
 
 A response that violates a valid schema SHALL fail the case with `unexpected-response`. An expectation execution or resolution error SHALL report `invalid-expectation`, preserve the parsed outcome and stop the series. That observer failure SHALL leave availability and coverage incomplete and fail the check without claiming a service outage. Reports and warnings MUST NOT expose private schemas, constants, responses or exception details. Legacy expectation behavior and failure codes SHALL remain unchanged.
 
+A mismatched attempt MAY retain `schema_failure` with only the validator keyword and SHA-256 of the first error's schema path encoded as compact JSON. This permitted projection MUST NOT include raw paths, instance paths, messages, schemas, constants or responses. The runner SHALL derive it from the same validation pass. Unavailable metadata SHALL NOT change the established mismatch.
+
+The fingerprint SHALL support correlation within its frozen case and observer version. Different assertions MAY share a validator path through references or composition. Consumers MUST NOT treat the fingerprint as a unique assertion identifier, exhaustive diagnosis or product cause.
+
+#### Scenario: A mismatch retains a safe validator path fingerprint
+
+- **WHEN** a response violates a valid schema with private field names or constants
+- **THEN** the attempt retains its existing failure and can correlate the first mismatch by keyword and schema-path fingerprint
+- **AND** the report omits raw paths, private values and exception text
+
 #### Scenario: Source-bound material appears after another result
 
 - **WHEN** a membership expectation finds its source identity and nonblank material together after unrelated results

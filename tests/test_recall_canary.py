@@ -282,6 +282,54 @@ def test_mcp_schema_can_require_the_target_at_an_exact_rank(tmp_path):
     assert report["cases"][0]["attempts"][0]["failure"] == "unexpected-response"
 
 
+def test_schema_mismatch_retains_a_fingerprint_without_private_fields_or_values(tmp_path):
+    import hashlib
+
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        return {"private-slot": [{"private-key": "actual-private"}]}
+
+    case = _canary_case()
+    case["expected"] = {
+        "response_schema": {
+            "type": "object",
+            "properties": {
+                "private-slot": {
+                    "type": "array",
+                    "contains": {
+                        "type": "object",
+                        "required": ["private-key"],
+                        "properties": {"private-key": {"const": "expected-private"}},
+                    },
+                },
+            },
+        },
+    }
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False, check="availability")
+    [attempt] = report["cases"][0]["attempts"]
+    assert attempt["failure"] == "unexpected-response"
+    assert report["availability"] == report["check_verdict"] == "failed"
+    schema_path = ["properties", "private-slot", "contains"]
+    assert attempt["schema_failure"] == {
+        "keyword": "contains",
+        "schema_path_sha256": hashlib.sha256(
+            json.dumps(schema_path, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    for value in (
+        "private-slot",
+        "private-key",
+        "actual-private",
+        "expected-private",
+        "private-question",
+    ):
+        assert value not in json.dumps(report)
+
+
 @pytest.mark.parametrize(
     "expected",
     [
