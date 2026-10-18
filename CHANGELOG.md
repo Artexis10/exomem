@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.5](https://github.com/Artexis10/exomem/compare/v0.127.4...v0.127.5) (2026-10-18)
+
+
+### Bug Fixes
+
+* **compiler:** clarify grounded follow-up recovery ([#1873](https://github.com/Artexis10/exomem/issues/1873)) ([c4e0dd3](https://github.com/Artexis10/exomem/commit/c4e0dd368a1f130b8ede81b450890d12ad67ce1d))
+* **observability:** expose read preparation and catalogue waits ([#1874](https://github.com/Artexis10/exomem/issues/1874)) ([6b94032](https://github.com/Artexis10/exomem/commit/6b940328b3fb3caf7cc08ef1a15b9a3f2c4e1f0a))
+* **schema:** preserve traversal profile byte guards ([#1875](https://github.com/Artexis10/exomem/issues/1875)) ([47a7366](https://github.com/Artexis10/exomem/commit/47a73662e4373abaf56898bc1daef40ee51f28f8))
+
 ## [0.127.4](https://github.com/Artexis10/exomem/compare/v0.127.3...v0.127.4) (2026-10-18)
 
 

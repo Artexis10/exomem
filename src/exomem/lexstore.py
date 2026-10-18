@@ -1416,6 +1416,8 @@ def runtime_retrieval_catalog_proof(
             scope,
             checkpoints[scope].triple,
             allow_delta=False,
+            # Strict readiness must not inherit a request's older admission.
+            recall_checkpoint=checkpoints[scope],
             **readiness_kwargs,
         ).complete
         for scope in ("kb", "vault")

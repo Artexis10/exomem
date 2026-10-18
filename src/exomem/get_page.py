@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, privacy_log, reserved_paths
+from . import access, call_spans, privacy_log, reserved_paths
 from . import find as find_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -143,26 +143,27 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     rel = missing_path_for(rel)
     missing_path = rel
 
-    candidate = vault_root / rel
+    with call_spans.span("read.prepare.resolve_path"):
+        candidate = vault_root / rel
 
-    # Back-compat shortcut: if the literal path doesn't exist but the same
-    # path under Knowledge Base/ does, use that. Lets callers write
-    # `Notes/Insights/foo` without the leading prefix.
-    if not candidate.exists() and not rel.startswith(kb_prefix()):
-        kb_rel = kb_prefix() + rel
-        kb_candidate = vault_root / kb_rel
-        if kb_candidate.exists():
-            candidate = kb_candidate
-            rel = kb_rel
+        # Back-compat shortcut: if the literal path doesn't exist but the same
+        # path under Knowledge Base/ does, use that. Lets callers write
+        # `Notes/Insights/foo` without the leading prefix.
+        if not candidate.exists() and not rel.startswith(kb_prefix()):
+            kb_rel = kb_prefix() + rel
+            kb_candidate = vault_root / kb_rel
+            if kb_candidate.exists():
+                candidate = kb_candidate
+                rel = kb_rel
 
-    try:
-        resolution = resolve_under_vault(vault_root, rel, return_details=True)
-    except VaultPathError as e:
-        raise GetError(
-            code="INVALID_PATH",
-            reason=f"path escapes vault or is unreadable: {e.reason}",
-        ) from None
-    assert isinstance(resolution, VaultPathResolution)
+        try:
+            resolution = resolve_under_vault(vault_root, rel, return_details=True)
+        except VaultPathError as e:
+            raise GetError(
+                code="INVALID_PATH",
+                reason=f"path escapes vault or is unreadable: {e.reason}",
+            ) from None
+        assert isinstance(resolution, VaultPathResolution)
 
     # `excluded` paths (_access.yaml) refuse identically to a missing file —
     # never a distinct error, never echoed differently — so the response is
@@ -187,15 +188,18 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # filesystem (Linux ext4) -- and refuses outright rather than guess
         # if two physical spellings collide; `physical=True` below then opens
         # exactly that confirmed spelling instead of re-normalizing it away.
-        physical_relative = reserved_paths.resolve_physical_relative(
-            vault_root, resolution.resolved_relative
-        )
-        expected_identity = reserved_paths.inspect_generic_file(
-            vault_root, physical_relative, physical=True
-        )
-        snapshot = reserved_paths.read_generic_bytes(
-            vault_root, physical_relative, physical=True
-        )
+        with call_spans.span("read.prepare.resolve_physical"):
+            physical_relative = reserved_paths.resolve_physical_relative(
+                vault_root, resolution.resolved_relative
+            )
+        with call_spans.span("read.prepare.inspect"):
+            expected_identity = reserved_paths.inspect_generic_file(
+                vault_root, physical_relative, physical=True
+            )
+        with call_spans.span("read.prepare.held_read"):
+            snapshot = reserved_paths.read_generic_bytes(
+                vault_root, physical_relative, physical=True
+            )
         if snapshot.identity != expected_identity:
             raise unreadable_or_absent(
                 vault_root,

@@ -351,10 +351,16 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `read.page`, `read.history`, `read.links` | Decode the prepared page, read the edit log (`entries`), and build the wikilink summary (`inbound`, `outbound`). Page preparation precedes `read.page`. |
 | `read.resolve_identifier`, `memory_refs.identity_census` | Resolve the requested page identifier. A valid memory UUID resolves from the server's current identity projection when one exists, otherwise from one full-KB scan. Vault state alone chooses between the two, so present and absent identities take the same path. The nested span reports `snapshot` (1 when the projection answered, 0 when the scan ran), `cpu_ms` (thread CPU time of the resolution) and, after a scan, the completed readable `pages`. It carries no paths or identities. Fields sum across the span's calls. |
 | `read.prepare`, `read.reference`, `read.release` | Acquire the page snapshot, resolve its stable reference and pending custody, then apply its release policy. These phases sit outside `read.page`; their durations include any waits. For a restricted caller, `read.release` also runs before `read.history` and `read.links` to refuse a withheld page early, so a read that is not refused counts it twice. |
+| `read.prepare.resolve_path` | Check the literal and shortcut paths, then resolve the canonical vault path. Exclusion checks follow this phase. |
+| `read.prepare.resolve_physical`, `read.prepare.inspect`, `read.prepare.held_read` | Resolve the physical spelling, inspect its identity, then acquire the held byte snapshot. These intervals include nested identity work. |
+| `reserved.identity.baseline_build`, `reserved.identity.baseline_wait` | Build the cold baseline catalogue, or wait on another caller's build. These spans carry no flight or holder identity. A background builder without a call token emits no request span. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
 never raises. A missing span leaves that phase's duration unknown.
+Nested intervals overlap; do not add them to enclosing spans.
+A wait span does not identify its leader or guard holder.
+Missing baseline spans do not prove a cache hit.
 
 Artifact-gate CPU is partial when `thread_cpu_calls` is less than the span's
 `count`. An unavailable clock contributes no CPU sample. Both filtering passes
