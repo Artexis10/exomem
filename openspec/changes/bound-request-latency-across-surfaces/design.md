@@ -8,6 +8,10 @@ An independent source-only author establishes each key's source identity, state 
 
 Schema mismatches report `unexpected-response`. Schema execution or resolution errors report `invalid-expectation`, retain the parsed outcome and stop the series. Such an observer error leaves availability and coverage incomplete and fails the check; it does not establish a service outage. Reports and warnings omit private schemas, constants, responses and exception details. Existing legacy failure codes remain unchanged. Frozen keys and failed series remain unchanged; independently authored replacement keys start a new series and preserve unused cases' blindness.
 
+An attempt can retain `schema_failure` from the first mismatch in that same validation pass. It contains only the validator keyword and a SHA-256 of the schema path encoded as compact JSON. The fingerprint supports correlation within the frozen case and observer version. Different assertions can share a validator path through references or composition. The fingerprint does not identify a unique assertion, establish its product cause or enumerate every failure.
+
+Raw paths, instance paths, messages, schemas, constants and responses stay absent. Hashes permit correlation and do not guarantee secrecy. Unavailable diagnostic metadata cannot change an established mismatch.
+
 The command selects availability or acceptance. Availability checks every configured case once and requires positive coverage for each represented tool. Its successful result can coexist with insufficient latency evidence. Acceptance retains the declared sample, warmth, contention and deployment requirements. Observer identity remains separate from deployment identity. A deployment change invalidates previous acceptance.
 
 A standard systemd user timer runs the availability check through an explicitly selected installed observer. The observer remains independent of the worker interpreter and upgrade path. One bounded oneshot unit prevents overlap; the application adds no scheduler or repair loop. Private configuration supplies existing credentials. Missing authorization leaves installation unconfigured; installation never issues a grant. The latest report is atomic and owner-only.
@@ -21,6 +25,8 @@ Write advice reuses the page delta's projection and serves only affected paths. 
 Flush receipt proof and pending publication newest-first before the outermost matching vault hold releases. Re-prove earlier session receipts whose paths overlap newer commits. Keep component waits and terminal persistence outside the hold. Record handoff failure as derived work pending, without changing the committed outcome. Direct leaves without a matching hold retain the guarded post-terminal path.
 
 Prime the broad writer resolver from the proven structural corpus after semantic warmup, with existing freshness checks. Ordinary recall retains its separate projection. Blocked edits never warm shared writer state. The existing cache and receipt machinery supply these capabilities; no new scheduler or readiness gate is needed.
+
+A carried corpus re-proves its retained census after the serving watcher seeds a new checkpoint. The existing warmer reuses unchanged pages and reconciles missed edits. An incremental publication captions the corpus only when retained history bridges its prior caption and covers every changed Markdown path.
 
 Manifest revisions refresh the touched claims projection before its served view is reused. Egress retains its independent release checks. Existing spans carry content-free CPU measurements where wall time alone cannot distinguish work from waiting.
 
