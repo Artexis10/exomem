@@ -401,6 +401,13 @@ def _stale():
     return CollectionStoreError(STALE, "the store, the marker or a view changed since the preview; preview again")
 
 
+def _require_plan(sealed, plan_id):
+    if sealed["verdict"] != "exportable":
+        raise _refused(sealed)
+    if sealed["plan_id"] != plan_id:
+        raise _stale()
+
+
 def _require_retire_route(fence_client):
     """Refuse before any change unless the coordinator serves the fence retire the export ends with.
 
@@ -424,6 +431,11 @@ def _require_retire_route(fence_client):
 def _begin(session, manager, fence_client, *, plan_id, why):
     """Record the export intent on an admitted store whose plan is still the previewed one; the intent and token."""
     records._validate_why(why)
+    # Admission publishes its lease epoch. Reject a known bad local plan before it changes the replica.
+    if session.path.exists():
+        with closing(connection.open_reader(session.path)) as reader:
+            _require_plan(plan(session.root, reader)[0], plan_id)
+    _require_retire_route(fence_client)
     opened = admission.open_store(session, manager, fence_client=fence_client)
     if opened["status"] != "admitted":
         raise session.runtime(retire=False)._refusal()
@@ -434,10 +446,7 @@ def _begin(session, manager, fence_client, *, plan_id, why):
         with closing(connection.open_reader(session.path)) as reader:
             sealed, _ = plan(session.root, reader)
             marker = ownership.current(session.root, conn=reader).marker
-        if sealed["verdict"] != "exportable":
-            raise _refused(sealed)
-        if sealed["plan_id"] != plan_id:
-            raise _stale()
+        _require_plan(sealed, plan_id)
         _require_retire_route(fence_client)
         if marker is None:
             raise CollectionStoreError(BLOCKED, "the store has no admitted collections")
