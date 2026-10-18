@@ -480,6 +480,7 @@ def query(
                 )
                 adapter_authorize_path = authorize_path
             require_planning_profile(manifest)
+            # nosemgrep: ep-word-membership -- The public lifecycle selector has these fixed protocol values.
             if lifecycle not in {"active", "archived", "all"}:
                 raise CollectionError("INVALID_PLAN_ARGUMENTS", "lifecycle selector is invalid")
             if view is not None and (filters or lifecycle != "active"):
