@@ -156,7 +156,7 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     assert "--group=${{ matrix.shard }}" in command
     algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
     assert f"--splitting-algorithm={algorithm}" in command
-    assert "--durations-path=.test_durations.json" in command
+    assert '--durations-path="$EXOMEM_DURATIONS_PATH"' in command
 
     # The tier suites share the environment the lean lane always had: full
     # history for the benchmark contract receipts, the pinned Bun runtime,
@@ -214,7 +214,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
         f"test-durations-{tier}-py${{{{ matrix.python-version }}}}"
         "-shard-${{ matrix.shard }}"
     )
-    assert durations_step["with"]["path"] == ".test_durations.json"
+    assert durations_step["with"]["path"] == _run_step(job)["env"]["EXOMEM_DURATIONS_PATH"]
 
     assert (ROOT / "scripts/refresh_test_durations.py").is_file()
 

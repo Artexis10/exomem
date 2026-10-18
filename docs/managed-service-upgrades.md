@@ -636,6 +636,18 @@ Each configured tool needs a successful positive case with its declared referenc
 An expected abstention checks only its declared negative case.
 The report retains latency results, even when the availability check passes with insufficient latency samples.
 
+An `expected` object uses either the existing indexed fields or `outcome` plus `response_schema`, never both.
+The schema format uses JSON Schema Draft 2020-12 against the complete parsed response.
+Use one `contains` witness to require source identity and nonblank material from the same result or parent.
+Use `prefixItems` with `minItems` when the source contract requires rank.
+Local schema references work; the observer never retrieves external schema resources.
+An invalid schema prevents connection. A response mismatch fails the case with `unexpected-response`.
+An evaluation error reports `invalid-expectation`, fails the check and leaves availability incomplete; it does not establish a service outage.
+
+An independent author derives each key from source truth and checks wrong identity, missing identity, blank material and material under another parent.
+Schema syntax validation cannot prove those obligations.
+Keep frozen keys and earlier failures unchanged; replacement keys start a new declared series without exposing unused cases.
+
 The default `--check acceptance` mode retains the complete warm programme contract.
 It requires its sample count, warm proof, known contention and verified deployment identity.
 The observer package identity describes the caller, while the deployment identity comes from the operator.

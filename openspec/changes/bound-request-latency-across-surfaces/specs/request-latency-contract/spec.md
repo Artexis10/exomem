@@ -14,6 +14,29 @@ The canary SHALL report availability separately from latency. A timeout, unavail
 
 The selected check SHALL determine exit status. Availability SHALL require every configured case and positive tool coverage. Acceptance SHALL apply all latency and provenance requirements.
 
+Case expectations SHALL support the existing indexed-path format and a strict Draft 2020-12 `response_schema` alternative without mixing formats. The runner SHALL compile schemas before connecting and validate the complete parsed response within the measured interval. Schema references MUST NOT retrieve network or filesystem resources. Conflicting dialect declarations in schema positions SHALL fail case loading without interpreting data-valued assertions as schemas.
+
+An independent source-only author SHALL establish source identity, state, and nonblank material bound to the same result or parent. Membership SHALL NOT require rank unless source truth establishes rank. The author SHALL check missing identity, wrong identity, blank material and material attached to another parent. Schema syntax validation SHALL NOT substitute for those key checks. Frozen keys and failed series SHALL remain unchanged. Replacement keys SHALL start independently authored new series without exposing unused cases.
+
+A response that violates a valid schema SHALL fail the case with `unexpected-response`. An expectation execution or resolution error SHALL report `invalid-expectation`, preserve the parsed outcome and stop the series. That observer failure SHALL leave availability and coverage incomplete and fail the check without claiming a service outage. Reports and warnings MUST NOT expose private schemas, constants, responses or exception details. Legacy expectation behavior and failure codes SHALL remain unchanged.
+
+#### Scenario: Source-bound material appears after another result
+
+- **WHEN** a membership expectation finds its source identity and nonblank material together after unrelated results
+- **THEN** the case passes without requiring the result to occupy a fixed position
+- **AND** material from another result or parent cannot satisfy that witness
+
+#### Scenario: Rank is part of the authored contract
+
+- **WHEN** a source-authored expectation requires rank and the complete witness moves to another rank
+- **THEN** the case fails despite the witness remaining present
+
+#### Scenario: The observer cannot evaluate an expectation
+
+- **WHEN** an expectation requires an unavailable external schema resource
+- **THEN** the observer performs no resource retrieval and retains the parsed outcome with `invalid-expectation`
+- **AND** the check fails with incomplete availability and coverage, even after another case passed
+
 #### Scenario: A fast refusal fails availability
 - **WHEN** a positive recall case returns a typed warming refusal below the latency ceiling
 - **THEN** the canary retains its elapsed time and refusal outcome
