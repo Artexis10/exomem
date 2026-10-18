@@ -6479,33 +6479,29 @@ def op_activate_context(
     trigger: Literal["user_turn", "task_refresh"] = "user_turn",
     initiator: str | None = None,
 ) -> dict:
-    """Compile authorized context for a human turn or agent task refresh.
+    """Compile bounded authorized context; abstain rather than guess.
 
-    Follow live recall policy; reuse injected context. Keep turn verbatim.
-    For task_refresh, put the task in conversation.focus. intent_resolution
-    qualifies the human request separately. Origin labels cues, not human words.
-    Returns bounded context, state, refs and provenance; abstains instead of guessing.
-    For a follow-up whose subject the conversation establishes, select its visible anchor.
-    Otherwise, supply optional conversation.focus naming current subjects, including attachment cues.
-    Focus is an agent cue; it cannot settle ambiguity in the human turn.
-    ask_memory recalls gaps; read_memory opens refs.
-    Reads no attachments. Due items and refresh grant no write authority.
+    Follow live recall policy; reuse held context. For long threads or attachments,
+    pass conversation as needed. origin=focus marks agent cues, not human words;
+    focus cannot settle human ambiguity. Reads no attachments.
+    Due items and refresh grant no writes.
 
     Args:
-        turn: Original human message verbatim. Empty abstains.
-        max_chars: Prose ceiling, clamped to 500..8,000; overflow becomes pointers.
-        purpose: Visibility purpose; never ranking.
-        continuity: Prior token unchanged; drop on compaction or new session.
-        anchor: Visible compiled ref chosen for a prior subject, ambiguity or correction.
+        turn: Human turn verbatim; never a summary. Empty abstains.
+        max_chars: Prose cap clamped to 500..8,000; overflow becomes pointers.
+        purpose: Visibility; never ranking.
+        continuity: Prior token unchanged; drop on compaction/new session.
+        anchor: Visible compiled ref for an established prior subject, ambiguity or correction.
             Hidden and ineligible refs refuse alike.
-        include_timings: Include stage timings.
+        include_timings: Stage timings.
         client: Lowercase client label; invalid labels ignored.
-        session: Stable opaque conversation ID, at most 256 characters.
-        workspace: Thread project key, at most 256 characters.
-        conversation: Optional fields: focus (one line/240 chars), refs (12 already-read pages),
-            recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
-        trigger: user_turn for initial recall; task_refresh keeps turn and uses focus.
-        initiator: Descriptive caller label; grants no authority. Invalid labels ignored.
+        session: Stable opaque conversation ID; max 256 chars.
+        workspace: Thread project key; max 256 chars.
+        conversation: All optional: focus (one line/240 chars; current subjects and attachment names/objects),
+            refs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
+        trigger: user_turn: initial recall. task_refresh: keep turn; task in focus;
+            intent_resolution qualifies human intent separately.
+        initiator: Caller label; no authority. Invalid labels ignored.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
     # middleware: `request_budget.current()` is always None on the REST and
