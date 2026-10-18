@@ -516,6 +516,9 @@ class PageContext:
         self.conn, self.root, self.manifest, self.cache = conn, root, manifest, cache
         self.through = through
         self.policy = policy.load(root)
+        # A failed policy read cannot turn its empty scopes into permission to publish history.
+        if self.policy.blocked:
+            governance.OperationAuthorization.refuse()
         self.tombstones = lifecycle.tombstoned_paths(root)
         access_fingerprint, self.access, self.access_blocked = access._policy_state(root)
         self.membership = membership

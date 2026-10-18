@@ -1503,6 +1503,7 @@ class CollectionWriter:
                             break
                         rendered = context.render_many(requested)
                         history_pages[manifest.collection_id] = context, rendered, discovered
+                        batch.history_contexts[(manifest.collection_id, manifest.manifest_version.hash)] = context
                     history_context, rendered, discovered = history_pages[manifest.collection_id]
                     history_version, history_text = rendered[projection["path"]]
                     history_digest = hashlib.sha256(history_text.encode()).hexdigest()
