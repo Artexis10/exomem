@@ -13,6 +13,10 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 
 ## What Changes
 
+**GA deployment scope.** One hosting node owns the live store. Consistent backups, explicit restore, local restart and managed upgrades remain required. Moving the active database between hosts waits for a concrete, exercisable use case. Cross-host takeover, replica transport and fleet custody acceptance are deferred beyond this GA. No file-sync product is a prerequisite. The existing lease and compatibility boundaries still apply.
+
+The in-vault snapshot supports backup and portability; it is not another query server. Existing snapshot publication costs remain subject to performance acceptance. GA retains explicit per-collection editable Markdown or bounded overview modes. There is no automatic size-based conversion. Selective item publication and a human table editor are deferred.
+
 **Supported-client boundary (owner, 2026-10-04).** Store admission and older-reader exclusion apply to supported Exomem launchers, including copied/restored vaults with fresh external state. Replication custody requires a verified supported deployment adapter; unknown custody leaves store activation unavailable while file collections and knowledge remain usable. This does not promise to control arbitrary historical executables or unmanaged sync programs launched outside that boundary.
 
 **First-owner release ruling (2026-10-04).** The first NEW owner-only summary collection uses the S1 gate in `add-collection-query-engine`. Its measured 15 ms public-inspect, 20 ms guarded-append and supporting append-stage timing targets remain optimisation goals, not release blockers for that slice; missed targets stay visible and P1a performance acceptance stays open. Data integrity, permissions, recoverability, compatibility, portability, parity and the other applicable gates remain mandatory. This exception neither migrates existing Records/Planning nor authorizes general store rollout.
@@ -32,6 +36,7 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
 - **Row-level governance.** Each row is evaluated as its own governance subject by the existing evaluator: its view path, its stable reference, and its declared tags, type and project. Policy is resolved once per operation and applied in the query layer before any count, sort or reduction. Store-mode content grants bind to individual canonical rows, so a hidden sibling edit cannot invalidate an unchanged row's grant; old grants never authorize new content, and file-mode grants stay unchanged. Withheld stays indistinguishable from absent. A uniform-release fast path covers the common case where policy cannot tell a collection's rows apart.
 - **Migration.** Existing file collections are imported with a verifiable round trip: files to rows, rows rendered and parsed back, the legacy audit chain imported event by event. Import changes no vault file, and a legacy exporter reverses it. It runs as a declared offline migration under the managed standby-upgrade handoff, so the live service keeps serving reads and pauses writes only for the ordinary bounded handoff.
 - **Backup.** Snapshots are consistent: the SQLite backup API writes to a staging file, which is integrity-checked and atomically renamed. A sync-safe single-file replica in the vault serves restic and vault copies. Cloud cells keep the live store on the tenant volume, and portability export carries the snapshot as canonical data.
+- **Portable collection export follow-up.** User-facing exports use ZIP64 with standard DEFLATE for compressible content. Complete collection descriptors, schemas, typed JSON and tabular CSV accompany the consistent SQLite snapshot. Stream rows without generating per-row Markdown. This follow-up does not gate the confirmed GA scope.
 - **Performance targets.** Append p95 < 20 ms at 10,000 rows. Bulk 500 rows < 1 s. Query results match the file path, and query latency is no worse. The spike under `benchmarks/collections_sqlite_spike/` measures the storage engine at 0.7 ms append p95 and 20 ms for a 500-row bulk at 10,000 rows.
 - **Deletion.** The hand-built container hashing, path and census guards on collection writes, twin scanning and ambiguity marking, manifest audit heads and item audit markers, `log.md` audit writing and parsing, chain reconstruction and depth caps, content-replay correlation, held files as storage, and per-write full-collection re-reads are removed. `design.md` §13 lists them.
 - **Safety amendments (critic review, ruled; `design.md` §16):**
@@ -39,7 +44,7 @@ The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, E
   - a stamp in every view and log block, so stale and foreign edits are held, never applied;
   - a coordinator-recorded store head, with a bounded `COLLECTION_STORE_SYNC_PENDING` on real cross-host handoffs only and an explicit `adopt-local`;
   - instance identity and immediate divergence detection;
-  - one vault-side mode marker, a fenced migration, a state descriptor and a tombstoned replica on export;
+  - canonical ownership, a compatibility marker, fenced migration, state descriptors and a tombstoned snapshot on export;
   - an uncapped legacy importer;
   - cached release decisions and no second fsync;
   - reserved `_Collections/` and listed leak surfaces;
