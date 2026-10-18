@@ -104,6 +104,55 @@ def test_a_current_log_read_requires_every_row_and_complete_fields(store, protec
             commands.op_get(store.root, path=path)
 
 
+def test_an_observed_summary_correction_keeps_owner_counts_private_when_a_row_is_hidden(store, monkeypatch):
+    """A held owner summary must not release its hidden row count through open manifest or held scopes."""
+    from test_collection_store_edit_back import passes
+    from test_collection_store_summary import create as create_summary
+    from test_collection_store_summary import pages
+
+    from exomem import commands
+    from exomem.collection_store import capability
+
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {
+        capability.COLLECTION_VIEWS_V1, capability.RECORDS_SUMMARY_V1})
+    with request_scope(owner_principal()):
+        create_summary(store)
+        store.append_record(CID, item={"title": "Visible", "count": 1}, item_key=KEY, why="capture")
+        store.append_record(CID, item={"title": "Hidden", "count": 2}, item_key=OTHER, why="capture")
+        store.reconcile_views()
+        store.reconcile_views()
+        page = pages(store)[0]
+        rendered = (store.root / page).read_bytes()
+        edited = rendered + b"\nAuthored annotation.\n"
+        (store.root / page).write_bytes(edited)
+        passes(store, 0.0, 2.0)  # No later row write is needed to observe and hold this save.
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")
+    write_rule(store.root, ceiling=0)
+    [(held_path,)] = store.connection.execute("SELECT view_path FROM held_candidates").fetchall()
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert edited.decode() in commands.op_get(store.root, path=held_path)["body"]
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        assert commands.op_get(store.root, path=manifest_path())["path"] == manifest_path()
+        with store.read_snapshot():
+            assert store._operation.projection_decision(page).level == 0
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(store.root, path=held_path)
+    assert store.connection.execute("SELECT held_bytes,quarantined FROM held_candidates").fetchall() == [(edited, 1)]
+    # Schema 11 holds gain a false flag on upgrade; their recorded canonical source still retains this floor.
+    store.connection.execute("UPDATE held_candidates SET quarantined=0")
+    store.connection.commit()
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert edited.decode() in commands.op_get(store.root, path=held_path)["body"]
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(store.root, path=held_path)
+        reference = held_path.rsplit("/", 1)[1].removesuffix(".md")
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            store.append_record(CID, held=reference, why="resume the summary correction")
+
+
 def test_withheld_append_refuses_without_changing_stored_data(store):
     """A hidden current collection cannot admit a new row or audit transition."""
     create(store)

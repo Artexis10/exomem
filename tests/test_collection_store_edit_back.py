@@ -94,6 +94,27 @@ def test_an_offline_cross_directory_move_keeps_the_filename_and_payload_version(
     assert [(operation, actor) for operation, actor, _ in txns(store, "view_move")] == [("view_move", "owner:view-edit")]
 
 
+def test_a_file_move_hint_completes_the_census_when_each_turn_visits_one_path(store):
+    """An exact file hint must finish at window size one instead of preventing move discovery forever."""
+    _, source = appended(store)
+    canonical = source.read_bytes()
+    destination = source.with_name("Manual.md")
+    source.rename(destination)
+    runner = edit_back.EditBack()
+    runner.hints(store, [(source.relative_to(store.root).as_posix(), destination.relative_to(store.root).as_posix(), False)])
+    for now in (0.0, SETTLED):
+        for _ in range(200):
+            if runner.run(store, now=now, limit=1) > 0:
+                break
+        else:
+            pytest.fail("the file-move census did not finish its bounded turns")
+    assert runner.last_status["status"] == "current"
+    assert store.connection.execute("SELECT view_path,row_version FROM items").fetchone() == (
+        destination.relative_to(store.root).as_posix(), 1)
+    assert len(txns(store, "view_move")) == 1 and holds(store) == []
+    assert destination.read_bytes() == canonical and not source.exists()
+
+
 def test_cyclic_moves_at_one_payload_version_do_not_replay_the_first_move(store):
     """A→B→A→B at the same item version is three moves, each with a fresh container generation."""
     _, first = appended(store)

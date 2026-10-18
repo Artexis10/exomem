@@ -1083,6 +1083,8 @@ class CollectionWriter:
     def _store_view_correction(self, projection, code, raw, reference, diagnostics, base, metadata,
                                *, candidate=None, quarantined=False):
         """Persist a correction after the caller derives its canonical authority."""
+        # Summary render bytes contain owner-only counts and basis; their held bytes retain that floor.
+        quarantined = quarantined or projection["kind"] == "summary"
         _, manifest, _ = self._collection(projection["collection_id"])
         path = f"{records._held_directory(manifest)}/{reference}.md"
         now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

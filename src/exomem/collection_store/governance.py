@@ -337,8 +337,13 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                            declared.item_type, raw_metadata, row_version, payload, "row")
     if not include_held or row_key is not None:
         return
+    # Legacy summary corrections have no persisted floor; canonical source ownership supplies the same held basis.
     with closing(conn.execute(
-        "SELECT held_id,view_path,governance_json,governance_hash,quarantined FROM held_candidates "
+        "SELECT held_id,view_path,governance_json,governance_hash,quarantined OR "
+        "(kind='view-correction' AND EXISTS (SELECT 1 FROM projection_state p "
+        "WHERE p.collection_id=h.collection_id AND p.kind='summary' AND p.path="
+        "json_extract(CASE WHEN json_valid(h.diagnostics_json) THEN h.diagnostics_json END,'$[0].path'))) "
+        "FROM held_candidates h "
         "WHERE collection_id=?" + held_filter + " ORDER BY held_id",
         (cid, *held_args),
     )) as cursor:

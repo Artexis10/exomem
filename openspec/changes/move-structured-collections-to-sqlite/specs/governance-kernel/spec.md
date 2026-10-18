@@ -1,5 +1,14 @@
 ## ADDED Requirements
 
+### Requirement: Held owner-summary bytes keep their owner boundary
+Held corrections of an owner-only summary SHALL retain the unrestricted-owner floor in every shared authorization path. This floor SHALL apply to legacy corrections whose stored source path resolves to a canonical summary projection, even without a stored quarantine flag. Ordinary refused row proposals SHALL keep their existing subject policy.
+
+#### Scenario: A legacy summary correction cannot expose hidden row counts
+- **WHEN** a recipient can read a collection manifest but cannot read one of its rows
+- **AND** a held summary correction predates the stored quarantine flag
+- **THEN** canonical summary ownership keeps that correction absent from the recipient's reads, inspection and attention
+- **AND** the unrestricted owner can read the preserved bytes
+
 ### Requirement: Collection store artifacts and view paths never disclose withheld items
 The vault-side collection directory (the replica, mode marker, staging, aside, foreign, exported and sync-conflict copies) SHALL be reserved and denied on every egress path, the hosted gateway, and every index and resolver. Release decisions SHALL be cached per audience, policy fingerprint and collection, and re-evaluated only for changed rows or a changed fingerprint. Every surface that can expose a view path SHALL authorize the item behind it before disclosing the path, its title-bearing filename or its existence: directory listing and counts, inbound links and graph neighbours, the wikilink and title resolver, lexical and reference indexes, page refusal shapes, file-tool refusals, attention and due-state entries, history-page links, held-correction views, inventory counts, and sync-conflict copies of views.
 

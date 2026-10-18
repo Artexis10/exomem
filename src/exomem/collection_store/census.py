@@ -337,7 +337,7 @@ class Census:
             target = destination + old[len(source):]
             if not target.startswith(root + "/"):
                 self.db.execute("INSERT OR REPLACE INTO temp.outmoves(old_path,path,cid) VALUES (?,?,?)", (old, target, cid))
-        if len(rows) == limit:
+        if directory and len(rows) == limit:
             self.after = rows[-1][0]
         else:
             self._hint_row, self._hint_active = identifier, None
