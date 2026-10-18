@@ -3174,6 +3174,7 @@ def _build_corpus_context_with_census(
     registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     warm: bool = False,
+    join_deadline: float | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -3315,6 +3316,9 @@ def _build_corpus_context_with_census(
             cache_key, census, relation_definitions, language
         )
         if not owns_flight:
+            initial_join = join_deadline is None
+            if not warm and initial_join:
+                join_deadline = time.monotonic() + _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
             same_inputs = (
                 flight.census == census
                 and flight.registry_identity == registry_identity
@@ -3326,12 +3330,22 @@ def _build_corpus_context_with_census(
                     # Startup owns the build lifetime, not an interactive budget.
                     completed = flight.done.wait()
                 else:
+                    assert join_deadline is not None
+                    # Recursive handoffs share one interactive waiting budget.
+                    remaining = (
+                        _CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
+                        if initial_join
+                        else max(0.0, join_deadline - time.monotonic())
+                    )
                     # Any thread may own the flight, a bulk pass included.
                     with foreground_priority.awaiting_bulk():
-                        completed = flight.done.wait(
-                            timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS
-                        )
-            if not completed:
+                        completed = flight.done.wait(timeout=remaining)
+            if not completed or (
+                not warm
+                and (not same_inputs or flight.discarded)
+                and join_deadline is not None
+                and time.monotonic() >= join_deadline
+            ):
                 raise OpError(
                     "MUTATION_WARMING",
                     "semantic corpus context is still being built",
@@ -3348,6 +3362,7 @@ def _build_corpus_context_with_census(
                     registry=registry,
                     language_registry=language_registry,
                     warm=warm,
+                    join_deadline=join_deadline,
                 )
             if flight.error is not None:
                 raise flight.error
@@ -3359,6 +3374,7 @@ def _build_corpus_context_with_census(
                     registry=registry,
                     language_registry=language_registry,
                     warm=True,
+                    join_deadline=join_deadline,
                 )
             assert flight.result is not None
             # Not `census`: that is this WAITER's own pre-wait walk, pinned
@@ -3385,6 +3401,7 @@ def _build_corpus_context_with_census(
                     registry=registry,
                     language_registry=language_registry,
                     warm=warm,
+                    join_deadline=join_deadline,
                 )
         started = time.perf_counter()
         context = _build_corpus_context_uncached(

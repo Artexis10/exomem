@@ -318,6 +318,48 @@ def _invoke_joining_mutation(vault: Path, state_dir: Path, *, request_id: str) -
     manager.invoke(command, (vault,), {}, mutation_request_id=request_id)
 
 
+def test_discarded_populates_share_one_interactive_join_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated recovery discards must not renew a writer's waiting allowance."""
+    elapsed = [0.0]
+    completions = [0]
+    monkeypatch.setattr(
+        semantic_contract,
+        "time",
+        SimpleNamespace(monotonic=lambda: elapsed[0], perf_counter=time.perf_counter),
+    )
+
+    class DiscardedDone(_ControlledDone):
+        def wait(self, timeout: float | None = None) -> bool:
+            assert timeout is not None
+            elapsed[0] += min(0.8, timeout)
+            if timeout < 0.8:
+                return False
+            self.settled = True
+            completions[0] += 1
+            if completions[0] < 3:
+                install_discarded_flight()
+            else:
+                with semantic_contract._CORPUS_CONTEXT_CACHE_LOCK:
+                    semantic_contract._CORPUS_CONTEXT_FLIGHTS.clear()
+            return True
+
+    def install_discarded_flight() -> None:
+        flight, *_ = _register_flight(vault, DiscardedDone())
+        flight.discarded = True
+
+    install_discarded_flight()
+    before = (vault / _PAGE).read_bytes()
+    with pytest.raises(OpError) as raised:
+        _invoke_joining_mutation(vault, vault / ".state", request_id="discarded-corpus")
+
+    assert raised.value.code == "MUTATION_WARMING"
+    assert raised.value.details["committed"] is False
+    assert elapsed[0] == pytest.approx(_JOIN_SECONDS)
+    assert (vault / _PAGE).read_bytes() == before
+
+
 def test_slow_corpus_flight_returns_mutation_warming_before_commit(vault: Path) -> None:
     done = _RecordingEvent()
     _register_flight(vault, done)
