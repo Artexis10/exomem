@@ -11,13 +11,15 @@ and changes only when governed state changes.
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pytest
 
-from exomem import due_state
+from exomem import due_state, review_state
 
 PAGE = "Knowledge Base/Notes/Insights/one.md"
+SIGNAL_ID = review_state.item_id(PAGE)
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +36,17 @@ def _persist(vault_root: Path, emission: dict | None = None) -> None:
     (vault_root / PAGE).write_text("# one\n", encoding="utf-8")
     payload = {
         "version": due_state.SCHEMA_VERSION,
-        "categories": {"predictions": {PAGE: {"open": [{"path": PAGE}]}}},
+        "categories": {
+            "prediction_window": {
+                PAGE: {"open": [{
+                    "path": PAGE,
+                    "item_id": SIGNAL_ID,
+                    "ref": review_state.review_ref(SIGNAL_ID),
+                    "fingerprint": "forecast-v1",
+                    "due_since": "2026-09-01",
+                }]},
+            },
+        },
     }
     if emission is not None:
         payload["emission"] = emission
@@ -70,10 +82,52 @@ def test_the_served_memo_survives_a_delivery(
 
     monkeypatch.setattr(due_state, "_served_entries_uncached", counted)
     now = dt.datetime(2026, 9, 16, 9, tzinfo=dt.UTC)
-    due_state.served_entries(tmp_path, now=now)
-    due_state.mark_emitted({"total": 1, "top": []}, vault_root=tmp_path)
-    due_state.served_entries(tmp_path, now=now)
+    first = due_state.served_entries(tmp_path, now=now)
+    assert first
+    due_state.mark_emitted(due_state.block(first), vault_root=tmp_path)
+    assert due_state.served_entries(tmp_path, now=now) == first
     assert len(calls) == 1
+
+
+def test_an_unreadable_review_store_withdraws_an_already_served_block(tmp_path: Path) -> None:
+    _persist(tmp_path)
+    now = dt.datetime(2026, 9, 16, 9, tzinfo=dt.UTC)
+    assert due_state.served_entries(tmp_path, now=now)
+    path = review_state.state_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not JSON", encoding="utf-8")
+    assert due_state.served_entries(tmp_path, now=now) == []
+
+
+def test_a_reopened_snapshot_is_not_cached_as_the_previous_dismissal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _persist(tmp_path)
+    now = dt.datetime(2026, 9, 16, 9, tzinfo=dt.UTC)
+    store = review_state.ReviewStateStore(tmp_path)
+    store.apply(SIGNAL_ID, "forecast-v1", action="dismiss", why="known", now=now)
+    dismissed = store.load()
+    real = review_state.ReviewStateStore.load
+    raced = False
+
+    def read_then_reopen(self, **kwargs):
+        nonlocal raced
+        payload = real(self, **kwargs)
+        if not raced:
+            raced = True
+            store.apply(SIGNAL_ID, "forecast-v1", action="reopen", now=now)
+        return payload
+
+    with monkeypatch.context() as race:
+        race.setattr(review_state.ReviewStateStore, "load", read_then_reopen)
+        due_state.served_entries(tmp_path, now=now)
+    assert raced
+    assert store.effective_state(SIGNAL_ID, "forecast-v1", today=now.date())[0] == "open"
+
+    replacement = store.path.with_suffix(".replacement")
+    replacement.write_text(json.dumps(dismissed), encoding="utf-8")
+    replacement.replace(store.path)
+    assert due_state.served_entries(tmp_path, now=now) == []
 
 
 def test_a_projection_written_before_the_sidecar_seeds_it(tmp_path: Path) -> None:

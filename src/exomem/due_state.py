@@ -2754,8 +2754,8 @@ def served_entries(
     host load after it, on every call, when nothing had changed; the cost is
     the recomposition of every collection candidate under the audience's
     filter. So one build is kept per (vault, audience, session, purpose, day)
-    and reused while the projection file and the review-state file are the
-    same objects on disk, the clock has not reached the earliest future
+    and reused while the projection and review inputs are unchanged, the clock
+    has not reached the earliest future
     `due_at` the build skipped, and the build is younger than
     `_SERVE_CACHE_TTL_SECONDS`.
 
@@ -2767,7 +2767,9 @@ def served_entries(
     out of band is omitted until reconcile exactly as before; a page deleted
     out of band is dropped from the hit the way the build drops it. A write
     that changes the projection beyond its emission ledger rebuilds once on the
-    next read (`_served_content_token`). A projection that could not be persisted is never cached,
+    next read (`_served_content_token`). Review delivery stamps do not affect
+    decisions or dispositions, so they do not rebuild the served view.
+    A projection that could not be persisted is never cached,
     because a write then updates it in memory with no file to notice.
     """
     from .governance import egress as egress_module
@@ -2790,8 +2792,14 @@ def served_entries(
         return _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )[0]
-    projection_token = _served_content_token(vault_root)
-    if projection_token is None:
+    with call_spans.span("recall.due_state.identity", {}):
+        projection_token = _served_content_token(vault_root)
+        payload = _load_shared(vault_root) if projection_token is not None else None
+        review_token = (
+            _review_content_token(vault_root)
+            if payload is not None and not _owes_nothing(payload) else None
+        )
+    if projection_token is None or review_token is None:
         rows, *_ = _served_entries_uncached(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )
@@ -2805,7 +2813,7 @@ def served_entries(
         purpose,
         today.isoformat(),
         projection_token,
-        _file_token(review_state_module.state_path(vault_root)),
+        review_token,
     )
     monotonic = time.monotonic()
     with _SERVE_LOCK:
@@ -2841,16 +2849,14 @@ def served_entries(
                     for row in hit["rows"]
                     if not row.get("path") or _page_exists(vault_root, row["path"])
                 ]
-    payload = _load_shared(vault_root)
-    if payload is None or _owes_nothing(payload):
-        # Unreadable: the build recomputes or recovers, and nothing is filed.
-        # Owes nothing: the empty list under any filter, and -- as in the
-        # build -- no release filter to pay for.
-        rows, *_ = _served_entries_uncached(
-            vault_root, today=today, now=effective_now, principal=who, purpose=purpose
-        )
-        return rows
     with call_spans.span("recall.due_state.build", {}):
+        try:
+            review_payload = review_state_module.ReviewStateStore(vault_root).load()
+        except ValueError:
+            return []
+        # Bind the memo to the review snapshot the build consumes, including a
+        # replacement between the initial identity lookup and this read.
+        key = (*key[:-1], _payload_content_token(review_payload, "surfaced"))
         rows, horizon, asked, role_token = _served_entries_uncached(
             vault_root,
             today=today,
@@ -2858,6 +2864,7 @@ def served_entries(
             principal=who,
             purpose=purpose,
             payload=payload,
+            review_payload=review_payload,
         )
     with _SERVE_LOCK:
         if len(_SERVE_CACHE) >= _SERVE_CACHE_CAP:
@@ -2880,36 +2887,61 @@ def _served_content_token(vault_root: Path) -> str | None:
     served list -- a release decision per due item -- on every write. Everything
     else is hashed, so a key a build starts reading invalidates by default.
     """
-    token = _file_token(state_path(vault_root))
-    if token is None:
+    return _content_token(
+        state_path(vault_root), lambda: _load_shared(vault_root), "emission"
+    )
+
+
+def _review_content_token(vault_root: Path) -> str | None:
+    try:
+        return _content_token(
+            review_state_module.state_path(vault_root),
+            lambda: review_state_module.ReviewStateStore(vault_root).load(),
+            "surfaced",
+        )
+    except ValueError:
         return None
-    key = (str(vault_root), token)
-    with _SERVE_LOCK:
-        known = _CONTENT_TOKENS.get(key)
-    if known is not None:
-        return known
-    payload = _load_shared(vault_root)
-    if payload is None:
-        return None
-    digest = hashlib.sha256(
+
+
+def _payload_content_token(payload: dict[str, Any], omitted: str) -> str:
+    # Only the declared bookkeeping field is excluded; new state fields still
+    # invalidate the memo until their consumers establish otherwise.
+    return hashlib.sha256(
         json.dumps(
-            {key: value for key, value in payload.items() if key != "emission"},
+            {key: value for key, value in payload.items() if key != omitted},
             sort_keys=True,
             separators=(",", ":"),
             default=str,
         ).encode("utf-8")
     ).hexdigest()
-    with _SERVE_LOCK:
-        if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
-            _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
-        _CONTENT_TOKENS[key] = digest
+
+
+def _content_token(
+    path: Path, load_payload: Callable[[], dict[str, Any] | None], omitted: str
+) -> str | None:
+    token = _file_token(path)
+    key = (str(path), token) if token is not None else None
+    if key is not None:
+        with _SERVE_LOCK:
+            known = _CONTENT_TOKENS.get(key)
+        if known is not None:
+            return known
+    payload = load_payload()
+    if payload is None:
+        return None
+    digest = _payload_content_token(payload, omitted)
+    if key is not None and _file_token(path) == token:
+        with _SERVE_LOCK:
+            if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
+                _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
+            _CONTENT_TOKENS[key] = digest
     return digest
 
 
 #: One served build per (vault, audience, session, purpose, day, projection
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
-#: Served-content identity per projection file version; see `_served_content_token`.
+#: Served-content identity per projection or review file version.
 _CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
@@ -2973,6 +3005,7 @@ def _served_entries_uncached(
     principal: Any = None,
     purpose: str | None = None,
     payload: dict[str, Any] | None = None,
+    review_payload: dict[str, Any] | None = None,
     paths: frozenset[str] | None = None,
     recover: bool = True,
 ) -> tuple[list[dict[str, Any]], dt.datetime | None, dict[str, bool], str | None]:
@@ -3052,7 +3085,7 @@ def _served_entries_uncached(
     role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
-        state_payload = store.load()
+        state_payload = store.load() if review_payload is None else review_payload
     except ValueError:
         # Fail closed, exactly as the decision read does — but the carrier's
         # safe direction is SILENCE, not a raise. Every row below is filtered
