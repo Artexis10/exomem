@@ -455,6 +455,36 @@ def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
         return None
 
 
+def _invalidate_graph_proof() -> bool:
+    """Withdraw the graph proof before replacing its adopted recall lineage."""
+    global _proved_token, _adoption, _proof_signal, _proof_marker
+    from . import runtime_readiness
+
+    with _lock:
+        if not _standby or _promoting or _promoted or _discarded:
+            return False
+        _proved_token = None
+        _adoption = None
+        _proof_signal = None
+        _proof_marker = None
+        runtime_readiness.invalidate_cached_readiness()
+    return True
+
+
+def _prove_reseeded_graph_snapshot(vault_root: Path) -> bool:
+    """Prime the resolver at this registry's checkpoint, then restore its proof."""
+    from . import find
+
+    try:
+        # Equal source projections can still cache the invalidated lineage's
+        # resolver checkpoint. Prime this registry's own before graph adoption.
+        find.evict_resolver_caches(vault_root)
+        warmup.prime_recall_resolver(vault_root)
+    except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
+        log.warning("standby recall resolver prime failed", exc_info=True)
+    return prove_graph_snapshot(vault_root)
+
+
 def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
     """Re-run the graph proof when the graph moved and the interval passed.
 
@@ -487,13 +517,15 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
         _attempt_stat = stat
     if signal == last_signal:
         return False
+    if not _invalidate_graph_proof():
+        return False
     # This process has no watcher, so its recall registry is as old as the
     # last seed; the adoption's origin is judged against it.
     try:
         freshness.rebaseline(vault_root)
     except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
         log.warning("standby recall registry reseed failed", exc_info=True)
-    proved = prove_graph_snapshot(vault_root)
+    proved = _prove_reseeded_graph_snapshot(vault_root)
     log.info("standby graph snapshot re-proof adopted=%s", proved)
     return proved
 
@@ -529,6 +561,8 @@ def reprove_until_promoted(
             if prepare_due:
                 # This standby has no watcher. Sample current source even when
                 # the old owner never publishes, at the existing proof interval.
+                if not _invalidate_graph_proof():
+                    return proved_checkpoint() is not None
                 try:
                     freshness.rebaseline(vault_root)
                 except Exception:  # noqa: BLE001 - an unseeded scope stays waiting
@@ -540,7 +574,15 @@ def reprove_until_promoted(
             elif prepare_due:
                 # Retry preparation at the existing reseed interval, even when
                 # a transient read recovered without a new live publication.
-                prepare_detached_catalog(vault_root)
+                if prepare_detached_catalog(vault_root):
+                    # As in initial warm, graph adoption starts after the build's
+                    # last source edits, with a fresh registry and resolver.
+                    try:
+                        freshness.rebaseline(vault_root)
+                    except Exception:  # noqa: BLE001 - the graph proof stays unready
+                        log.warning("standby recall registry reseed failed", exc_info=True)
+            if prepare_due:
+                _prove_reseeded_graph_snapshot(vault_root)
         if stop.wait(interval):
             with _lock:
                 return _proved_token is not None
@@ -863,11 +905,7 @@ def warm(vault_root: Path) -> None:
         # than left to `warm_caches`: that gate is closed in every resource mode
         # that does not preload CPU caches, and the ordering is what makes the
         # adoption's origin acceptable.
-        try:
-            warmup.prime_recall_resolver(vault_root)
-        except Exception:  # noqa: BLE001 - an unprimed resolver only costs adoption
-            log.warning("standby recall resolver prime failed", exc_info=True)
-        prove_graph_snapshot(vault_root)
+        _prove_reseeded_graph_snapshot(vault_root)
         # After the graph step, for the same reason `warm_all` puts the handoff
         # first: adoption is what the first governed write depends on, and the
         # corpus is what the gate that admits it waits for.

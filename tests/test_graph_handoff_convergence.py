@@ -706,22 +706,23 @@ def test_a_proved_standby_keeps_reproving_while_the_graph_moves(
     assert record["full_marker"] == "retired"
 
 
-def test_a_failed_reproof_keeps_the_proof_already_held(
+def test_a_failed_reproof_retires_the_proof_whose_lineage_was_reseeded(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = handoff_vault
     _enter_standby(monkeypatch)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is True
-    held = service_standby.proved_checkpoint()
 
     _decline_on_an_oversized_residue(root, monkeypatch)
     _land_a_batch_without_fanout(root)
     assert service_standby.reprove_graph_snapshot_if_due(root) is False
 
-    assert service_standby.cutover_components()["graph_snapshot"] == "ready"
-    assert service_standby.proved_checkpoint() == held
-    assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
+    assert service_standby.cutover_components()["graph_snapshot"] == "waiting"
+    assert service_standby.proved_checkpoint() is None
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "unproven"
+    assert "graph_handoff" not in record["carried_from_standby"]
 
 
 class _Clock:

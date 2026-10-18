@@ -1612,6 +1612,12 @@ cannot prove final runtime admission before stopping the serving worker, so this
 repair establishes delivery correctness rather than a full availability guarantee.
 Native preparation and stop-to-admission latency remain separate acceptance facts.
 
+A catalogue retry or graph reproof replaces the candidate's recall baseline and
+invalidates adopted graph origins. Withdraw the held graph proof before reseeding.
+Evict the exact vault's resolver cache, prime it at the new checkpoint, and
+reprove the graph before carrying its handoff. A declined reproof keeps graph
+cutover readiness waiting.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |

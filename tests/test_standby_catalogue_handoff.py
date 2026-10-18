@@ -415,8 +415,9 @@ def test_a_waiting_standby_recovers_after_the_serving_worker_repairs_its_catalog
     assert not observer.is_alive()
 
 
+@pytest.mark.parametrize("graph_recovers", [True, False])
 def test_a_transient_assessment_is_retried_without_a_live_publication(
-    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch, graph_recovers: bool
 ) -> None:
     """A recovered read must permit preparation even if the old owner never repairs."""
     import threading
@@ -440,16 +441,34 @@ def test_a_transient_assessment_is_retried_without_a_live_publication(
     assert service_standby.cutover_components()["lexical"] == "waiting"
     before = lexstore.lexical_path(root).read_bytes()
     locked = False
+    if not graph_recovers:
+        from exomem import epistemic_graph
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex,
+            "adopt_published_snapshot",
+            lambda self, **kwargs: epistemic_graph.SnapshotAdoption(False, reason="proof_declined"),
+        )
+    proof_finished = threading.Event()
+    prove_graph = service_standby.prove_graph_snapshot
+
+    def reprove(vault_root):
+        result = prove_graph(vault_root)
+        proof_finished.set()
+        return result
+
+    monkeypatch.setattr(service_standby, "prove_graph_snapshot", reprove)
     observer = threading.Thread(
         target=service_standby.reprove_until_promoted,
         args=(root,), kwargs={"poll_seconds": 0.01},
     )
     observer.start()
     try:
-        deadline = time.monotonic() + 5
-        while service_standby.cutover_components()["lexical"] != "ready" and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert proof_finished.wait(5)
         assert service_standby.cutover_components()["lexical"] == "ready"
+        assert service_standby.cutover_components()["graph_snapshot"] == (
+            "ready" if graph_recovers else "waiting"
+        )
         assert readiness.is_ready("retrieval_catalog") is False
         assert lexstore.lexical_path(root).read_bytes() == before
     finally:
