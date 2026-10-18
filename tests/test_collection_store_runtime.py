@@ -569,7 +569,7 @@ def test_retained_inspection_provenance_cannot_expose_a_live_connection(runtime)
         result = writer.inspect_collection(CID)
         assert egress.postfilter("record_memory", result, runtime.root) == result
     assert not runtime.manager._store_borrowers
-    evidence = result._canonical_inspection_evidence
+    evidence = result._canonical_metadata_evidence
     assert getattr(evidence.handle, "connection", None) is None
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(getattr, evidence.handle, "connection", None).result(timeout=2) is None

@@ -208,10 +208,11 @@ def test_validate_is_read_only_requires_no_reason_and_rejects_mutation_arguments
     _empty_vault(tmp_path)
     example = subject.record_memory(tmp_path, action="describe")["examples"]["minimal"]
 
+    before = _files(tmp_path)
     monkeypatch.setattr(
-        subject.records.writer_lease,
-        "active_manager",
-        lambda: (_ for _ in ()).throw(AssertionError("validate contacted writer authority")),
+        subject.records.writer_lease.LeaseManager,
+        "ensure_writer",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("validate acquired writer authority")),
     )
     result = subject.record_memory(
         tmp_path,
@@ -220,6 +221,7 @@ def test_validate_is_read_only_requires_no_reason_and_rejects_mutation_arguments
         manifest_text=example["manifest_text"],
     )
     assert result["valid"] is True
+    assert _files(tmp_path) == before
 
     with pytest.raises(OpError, match="^INVALID_RECORD_ARGUMENTS:"):
         subject.record_memory(
@@ -229,6 +231,7 @@ def test_validate_is_read_only_requires_no_reason_and_rejects_mutation_arguments
             manifest_text=example["manifest_text"],
             why="this is forbidden on read-only validation",
         )
+    assert _files(tmp_path) == before
 
 
 @pytest.mark.parametrize(

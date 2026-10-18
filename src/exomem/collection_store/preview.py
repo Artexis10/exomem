@@ -28,6 +28,10 @@ _BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
 )
 
 
+# Records and Planning share this disclosure protocol boundary.
+QUERY_RECEIPT_BOUNDARY = "record_query"
+
+
 @contextmanager
 def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
     """Bind a dark writer for this call context; ownership remains with the caller."""
@@ -139,7 +143,10 @@ def require_file_collection(vault_root, selector, *, authorize_path, notice_path
         return
     try:
         proof = ownership.current(root)
-    except (CollectionStoreError, RuntimeError, OpError):
+    except (CollectionStoreError, RuntimeError, OpError) as error:
+        # The mutation boundary's typed busy result drives the existing capture retry.
+        if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+            raise
         # Which collections the store owns is unknown, so none can be written as a file.
         path = notice_path if notice_path is not None else _selector_path(root, selector)
         _refuse(root, path, authorize_path, "COLLECTION_STORE_UNAVAILABLE", MARKER_UNREADABLE)
@@ -176,12 +183,14 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-def canonical_read(function=None, *, projection=False, unavailable=None):
+def canonical_read(function=None, *, projection=False, unavailable=None,
+                   receipt_boundary: str | None = None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
     from ..cli_ops import OpError
 
     if function is None:
-        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable)
+        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable,
+                                               receipt_boundary=receipt_boundary)
 
     @wraps(function)
     def read(vault_root, *args, **kwargs):
@@ -213,7 +222,21 @@ def canonical_read(function=None, *, projection=False, unavailable=None):
             return function(vault_root, *args, **kwargs)
     from .ownership import reader
 
-    return reader(read)
+    owned_read = reader(read)
+    if receipt_boundary is None:
+        return owned_read
+
+    @wraps(function)
+    def disclosed(vault_root, *args, **kwargs):
+        from ..governance import egress
+
+        # A composite owns its collector until the whole-result ownership proof finishes.
+        with egress.disclosure_boundary(vault_root, receipt_boundary, join_existing=True) as collector:
+            try:
+                return owned_read(vault_root, *args, **kwargs)
+            finally:
+                egress.emit_boundary_receipt(collector)
+    return disclosed
 
 
 def projection_decision(vault_root, path, *, policy, audience, purpose,

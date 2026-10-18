@@ -388,9 +388,15 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        # A takeover that is pending on the store's migration still releases the lease.
         with closing(connection.open_head_reader(self.path)) as reader:
-            return authority.pending_create(reader) is None
+            intent = authority.pending_create(reader)
+        if intent is None:
+            return True
+        # A fresh reader accepted no work; the migration owner still owes its own publication.
+        # A formerly admitted producer or pending create must retain its head handback obligation.
+        return (intent["kind"] == authority.MIGRATE and self._publisher is None
+                and self._admitted_token is None and self._acquisition is not None
+                and self._acquisition.fencing_token == token and self._acquisition.granted)
 
     def status(self):
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
@@ -808,19 +814,17 @@ def _curation_route(command, root, arguments):
 
     A step on a collection the store owns commits through the store writer, which only the store
     thread holds, so the whole command runs there. Every other curation, in a vault with a store
-    or without one, keeps its path. Where no service serves the vault, or the marker cannot be
-    read, nothing is routed: the step's own resolution then refuses, and it alone decides whether
-    this caller may hear that the collection exists. Raising here would tell every caller first.
+    or without one, keeps its path. With no service or an unavailable canonical ownership proof,
+    nothing is routed. The step's own resolution then refuses and alone decides whether this caller
+    may hear that the collection exists. Raising here would tell every caller first.
     """
-    from . import curation_step, ownership
+    from ..cli_ops import OpError
+    from . import curation_step
 
     try:
-        marker = ownership.current(root).marker
-        if marker is None:
+        if not curation_step.needs_store(root, command, arguments):
             return None
-    except connection.CollectionStoreError:
-        return None
-    if not curation_step.needs_store(root, marker, command, arguments):
+    except (connection.CollectionStoreError, OpError):
         return None
     connection.load_store_libraries()
     return _server(root)
@@ -842,7 +846,7 @@ def projection_route(vault_root, path):
         root = root.resolve()
     if not ownership.relevant(path):
         return None
-    canonical = root.resolve()
+    canonical = state_paths.resolved_vault_path(root, expanduser=False)
     if canonical != root:
         # Bind marker bytes to the canonical root, never to the earlier path spelling.
         # A root that is already canonical was just read there: recall routes every hit.
@@ -1505,7 +1509,7 @@ class StoreServer:
             if history_policy != self._history_policy:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                     fingerprint = _mutate(self.root, writer.invalidate_history_pages)
-                    self._history_policy = (writer.handle, fingerprint)
+                    self._history_policy = (self.runtime._handle, fingerprint)
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0

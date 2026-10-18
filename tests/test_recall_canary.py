@@ -207,6 +207,230 @@ def test_mcp_positive_cases_require_source_truth_and_material(tmp_path, response
     assert report["cases"][0]["attempts"][0]["failure"] == reason
 
 
+@pytest.mark.parametrize("enveloped", [True, False])
+@pytest.mark.parametrize("target_material", ["bound evidence", "  "])
+def test_mcp_schema_binds_material_to_the_target_at_any_rank(tmp_path, enveloped, target_material):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+    hits = [
+        {"ref": "source-other", "text": "unrelated material"},
+        {"ref": "source-another", "text": "more unrelated material"},
+        {"ref": "source-target", "text": target_material},
+    ]
+
+    def ask_memory(query: str) -> dict | list[dict]:
+        return {"hits": hits} if enveloped else hits
+
+    server.tool(ask_memory)
+    # The pattern checks nonblank string shape; it does not interpret the material.
+    target = {
+        "type": "object",
+        "required": ["ref", "text"],
+        "properties": {
+            "ref": {"const": "source-target"},
+            "text": {"type": "string", "pattern": r"\S"},
+        },
+    }
+    membership = {"type": "array", "contains": {"$ref": "#/$defs/target"}}
+    schema = {
+        "$defs": {"target": target},
+        **(
+            {"type": "object", "required": ["hits"], "properties": {"hits": membership}}
+            if enveloped
+            else membership
+        ),
+    }
+    case = _canary_case()
+    case["expected"] = {"response_schema": schema}
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False, check="availability")
+    attempt = report["cases"][0]["attempts"][0]
+    assert attempt["outcome"] == "ok"
+    assert attempt["elapsed_ms"] >= 0
+    assert attempt["failure"] == (None if target_material.strip() else "unexpected-response")
+    assert report["check_verdict"] == ("passed" if target_material.strip() else "failed")
+
+
+def test_mcp_schema_can_require_the_target_at_an_exact_rank(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def ask_memory(query: str) -> list[dict]:
+        return [
+            {"ref": "source-other", "text": "other material"},
+            {"ref": "source-target", "text": "target material"},
+        ]
+
+    case = _canary_case()
+    case["expected"] = {
+        "response_schema": {
+            "type": "array",
+            "minItems": 1,
+            "prefixItems": [
+                {
+                    "type": "object",
+                    "required": ["ref"],
+                    "properties": {"ref": {"const": "source-target"}},
+                }
+            ],
+        }
+    }
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False)
+    assert report["availability"] == "failed"
+    assert report["cases"][0]["attempts"][0]["failure"] == "unexpected-response"
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        {"response_schema": {"type": "invalid-type"}},
+        {"response_schema": {"$schema": "http://json-schema.org/draft-07/schema#"}},
+        {"response_schema": {"contains": {"$schema": "http://json-schema.org/draft-07/schema#"}}},
+        {"response_schema": {"$defs": {"unused": {"$schema": "https://schema.invalid/dialect"}}}},
+        {**_canary_case()["expected"], "response_schema": {}},
+        {"response_schema": {}, "outcome": "refused"},
+        {"response_schema": False},
+    ],
+)
+def test_mcp_invalid_schema_expectations_fail_before_connection(tmp_path, expected):
+    from fastmcp import FastMCP
+
+    case = _canary_case()
+    case["expected"] = expected
+    report = _run_canary(tmp_path, FastMCP("test"), [case])
+    assert report["failure"] == "invalid-cases"
+    assert report["initialization_ms"] is None
+    assert report["cases"] == []
+
+
+def test_mcp_schema_dialect_markers_in_constant_and_default_data_are_not_schemas(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+    data = {"$schema": "http://json-schema.org/draft-07/schema#", "value": "schema-data"}
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        return data
+
+    case = _canary_case()
+    case["expected"] = {
+        "response_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "const": data,
+            "default": {"$schema": "https://schema.invalid/data"},
+        }
+    }
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False, check="availability")
+    assert report["check_verdict"] == "passed"
+
+
+@pytest.mark.parametrize("scheme", ["https", "file"])
+def test_mcp_unresolved_schema_refs_are_observer_errors_without_retrieval_or_leaks(
+    tmp_path, monkeypatch, capsys, scheme
+):
+    import urllib.request
+
+    import fastmcp
+
+    server = fastmcp.FastMCP("test")
+    calls = []
+    retrievals = []
+
+    @server.tool
+    def ask_memory(query: str) -> dict:
+        calls.append(query)
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
+
+    def unexpected_retrieval(*args, **kwargs):
+        retrievals.append(True)
+        raise AssertionError("schema-retrieval-detail")
+
+    monkeypatch.setattr(urllib.request, "urlopen", unexpected_retrieval)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", unexpected_retrieval)
+    external = tmp_path / "external-schema-detail.json"
+    external.write_text("{}")
+    uri = (
+        "https://schema.invalid/schema-retrieval-detail" if scheme == "https" else external.as_uri()
+    )
+    broken = _canary_case()
+    broken.update(id="case-02", expected={"response_schema": {"$ref": uri}})
+    later = _canary_case()
+    later["id"] = "case-03"
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps([_canary_case(), broken, later]))
+    real_client = fastmcp.Client
+    monkeypatch.setattr(fastmcp, "Client", lambda transport, **kwargs: real_client(server))
+    monkeypatch.setenv("TEST_CANARY_TOKEN", "observer-test-token")
+    status = gate.main(
+        [
+            "--mcp-url",
+            "https://observer.invalid/mcp",
+            "--cases",
+            str(path),
+            "--token-env",
+            "TEST_CANARY_TOKEN",
+            "--package-mode",
+            "source",
+            "--check",
+            "availability",
+        ]
+    )
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert status == 1
+    assert report["failure"] == "invalid-expectation"
+    assert report["availability"] == "incomplete"
+    assert report["coverage"] == "incomplete"
+    assert report["verdict"] == report["check_verdict"] == "failed"
+    first, second, third = report["cases"]
+    assert first["availability"] == "passed"
+    assert second["availability"] == "incomplete"
+    assert second["measured_attempts"] == 1
+    [attempt] = second["attempts"]
+    assert attempt["failure"] == "invalid-expectation"
+    assert attempt["outcome"] == "ok"
+    assert attempt["elapsed_ms"] >= 0
+    assert third["availability"] == "unattempted"
+    assert third["attempts"] == []
+    assert len(calls) == 2
+    assert retrievals == []
+    assert json.loads(output.err)["fields"]["failure"] == "invalid-expectation"
+    for detail in (uri, "schema-retrieval-detail", "private-reference", "private-question"):
+        assert detail not in output.out + output.err
+
+
+def test_mcp_schema_preserves_abstention_and_checks_outcome_before_the_schema(tmp_path):
+    from fastmcp import FastMCP
+
+    server = FastMCP("test")
+
+    @server.tool
+    def activate_context(query: str) -> dict:
+        return {"abstained": True, "abstention": {"reason": "unresolved"}}
+
+    case = _canary_case()
+    case["tool"] = "activate_context"
+    case["expected"] = {
+        "outcome": "abstained",
+        "response_schema": {
+            "required": ["abstention"],
+            "properties": {"abstention": {"const": {"reason": "unresolved"}}},
+        },
+    }
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False)
+    assert report["availability"] == "incomplete"
+    assert report["cases"][0]["attempts"][0]["failure"] is None
+    case["expected"] = {"response_schema": {"$ref": "https://schema.invalid/unresolved"}}
+    report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False)
+    attempt = report["cases"][0]["attempts"][0]
+    assert attempt["outcome"] == "abstained"
+    assert attempt["failure"] == "unexpected-outcome"
+    assert report["availability"] == "failed"
+
+
 def test_mcp_declared_abstention_must_match_its_state(tmp_path):
     from fastmcp import FastMCP
 

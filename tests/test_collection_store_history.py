@@ -583,6 +583,21 @@ def test_history_withdraws_rows_when_current_content_access_changes(store, monke
     assert KEY not in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
 
 
+def test_blocked_history_policy_cannot_broaden_the_generated_page(store):
+    """A failed policy read must refuse instead of releasing every transition through empty scopes."""
+    from test_governance_egress import write_broken_policy
+
+    from exomem.collection_store import history
+
+    create(store)
+    _append(store)
+    manifest = store._projection_manifest(CID)
+    write_broken_policy(store.root)
+    with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+        history.render_page(store.connection, store.root, manifest, history.main_path(manifest),
+                            cache=store.handle.release_cache)
+
+
 def test_reader_windows_share_the_existing_byte_budget_and_evict_old_policy_namespaces(store):
     """Repeated policy changes must not retain unlimited history reader windows on a serving handle."""
     from exomem.collection_store import history

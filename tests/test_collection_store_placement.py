@@ -150,7 +150,12 @@ def test_index_rebuilds_leave_the_store_untouched(
     reconcile_module.reconcile(vault, dry_run=False, rebuild_graph=True)
     commands.op_maintain_memory(vault, mode="reconcile")
 
-    assert _fingerprint(store) == before
+    after = _fingerprint(store)
+    assert after[store.name] == before[store.name]
+    # Read-only ownership checks may create SQLite's empty WAL and reader bookkeeping.
+    assert set(after) <= {store.name, store.name + "-wal", store.name + "-shm"}
+    if store.name + "-wal" in after:
+        assert after[store.name + "-wal"][1] == 0
 
 
 def test_make_store_closes_writer_when_setup_write_fails(

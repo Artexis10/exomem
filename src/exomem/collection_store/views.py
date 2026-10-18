@@ -124,6 +124,7 @@ class PublicationBatch:
         self.pending = False
         self.committed = False
         self.contexts = {}
+        self.history_contexts = {}
         self.precommits = {}
         self.guards = {}
         self.identities = None
@@ -514,9 +515,14 @@ class PublicationBatch:
             for publication in publications:
                 if self.stopped():
                     break
-                version, text = self.writer._render_view(
-                    publication.projection, self.contexts[publication.context]
-                )
+                if publication.projection["kind"] == "history":
+                    # Its prepared policy predates filesystem identity exclusion; do not widen that domain here.
+                    version, text = self.history_contexts[publication.context].render_many((publication.path,))[
+                        publication.path]
+                else:
+                    version, text = self.writer._render_view(
+                        publication.projection, self.contexts[publication.context]
+                    )
                 data = text.encode()
                 if (
                     version != publication.projection["pending_row_version"]

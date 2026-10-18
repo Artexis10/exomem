@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.3](https://github.com/Artexis10/exomem/compare/v0.127.2...v0.127.3) (2026-10-18)
+
+
+### Bug Fixes
+
+* **compiler:** serve linked material without promoting partial names ([#1867](https://github.com/Artexis10/exomem/issues/1867)) ([66374d3](https://github.com/Artexis10/exomem/commit/66374d35fd4a02387e443724eb2014ebf3f7f7be))
+
+## [0.127.2](https://github.com/Artexis10/exomem/compare/v0.127.1...v0.127.2) (2026-10-18)
+
+
+### Bug Fixes
+
+* create private owner locks and validate canary membership ([#1864](https://github.com/Artexis10/exomem/issues/1864)) ([d078f00](https://github.com/Artexis10/exomem/commit/d078f003ea47b7ac92dac1a8444e737d76b211d6))
+* **recall:** retain distinct admitted statistics across snapshots ([#1863](https://github.com/Artexis10/exomem/issues/1863)) ([08423fa](https://github.com/Artexis10/exomem/commit/08423fac0040848c5f6f03ae6493704a7d4d7503))
+
+## [0.127.1](https://github.com/Artexis10/exomem/compare/v0.127.0...v0.127.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **writer:** preserve unrelated file writes during store custody refusal ([#1860](https://github.com/Artexis10/exomem/issues/1860)) ([38f3603](https://github.com/Artexis10/exomem/commit/38f3603c7e35f1b59963aab3c76320380f625abc))
+
+
+### Performance
+
+* **recall:** reuse statistics for unchanged admitted SQL inputs ([#1855](https://github.com/Artexis10/exomem/issues/1855)) ([2a3940e](https://github.com/Artexis10/exomem/commit/2a3940ebeeb14a7f811ddc1154eb7c448022049f))
+
 ## [0.127.0](https://github.com/Artexis10/exomem/compare/v0.126.1...v0.127.0) (2026-10-18)
 
 

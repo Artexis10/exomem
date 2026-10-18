@@ -32,7 +32,7 @@ from typing import Any
 
 from . import find_corpus, memory_refs, planning, record_governance
 from . import structured_collections as collections
-from .collection_store.preview import canonical_read
+from .collection_store.preview import QUERY_RECEIPT_BOUNDARY, canonical_read
 from .governance import egress
 from .structured_collections import CollectionError
 
@@ -247,7 +247,7 @@ def order_items(items: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     )
 
 
-@canonical_read
+@canonical_read(receipt_boundary=QUERY_RECEIPT_BOUNDARY)
 def review(
     vault_root: Path,
     *,

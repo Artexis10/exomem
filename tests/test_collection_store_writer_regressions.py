@@ -5,12 +5,15 @@ import time
 import uuid
 
 import pytest
+from test_collection_store_wire import paired as paired
+from test_collection_store_wire import paired_create, same_pending_wire, same_wire
+from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
+from test_collection_store_writer import store as store
 
-from exomem import mutation_terminal, planning, record_formats, structured_collections as collections
+from exomem import mutation_terminal, planning, record_formats
+from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import tokens
-from test_collection_store_wire import paired as paired, paired_create, same_wire
-from test_collection_store_writer import CID, KEY, manifest_path, manifest_text, store as store
 
 
 def test_planning_defaulted_natural_key_matches_file_identity(paired):
@@ -141,7 +144,9 @@ def test_planning_body_only_update_preserves_values(paired):
     updated = [invoke(mode, "planning", "update", collection=CID, plan_id=KEY,
                       body="New body\n", expected_container_hash=first[mode]["after_container_hash"],
                       expected_item_version=first[mode]["after_item_hash"], why="correct") for mode in (0, 1)]
-    same_wire(*updated)
+    for receipt in updated:
+        assert mutation_terminal.valid_collection_receipt(receipt)
+    same_pending_wire(*updated)
     assert handle.connection.execute("SELECT body, values_json FROM items").fetchone() == ("New body\n", old_values)
     manifest = collections.load_manifest(roots[0], manifest_path("planning"))
     body = record_formats.load_adapter(roots[0], manifest).read().records[0].body
@@ -174,7 +179,9 @@ def test_refresh_requires_presentation_recipe(paired, recipe, changes):
                 invoke(mode, "records", "update", **args)
             assert caught.value.code == ("NOOP_RECORD_PRESENTATION" if recipe else "INVALID_RECORD_PRESENTATION")
     if recipe and changes:
-        same_wire(*receipts)
+        for receipt in receipts:
+            assert mutation_terminal.valid_collection_receipt(receipt)
+        same_pending_wire(*receipts)
     else:
         assert tuple(handle.connection.iterdump()) == before
 
@@ -318,7 +325,6 @@ def test_missing_selector_shape_preserves_facade_refusals(paired, monkeypatch, p
     for spelling in (selector, f"./{selector}", f"  {selector}  ", str(roots[1] / selector)):
         with monkeypatch.context() as guarded:
             guarded.setattr(collections, "load_manifest", lambda *a, **k: pytest.fail("file manifest read"))
-            guarded.setattr(collections, "_safe_candidate_rel", lambda *a, **k: pytest.fail("file path probe"))
             with pytest.raises(OpError) as store_error:
                 invoke(1, profile, "inspect", collection=spelling)
         assert store_error.value.code == expected
@@ -366,7 +372,9 @@ def test_integer_refresh_flag_uses_existing_facade_forwarding(paired, recipe, ch
                 invoke(mode, "records", "update", **args)
             assert caught.value.code == "INVALID_RECORD_CHANGES"
     if changes:
-        same_wire(*updated)
+        for receipt in updated:
+            assert mutation_terminal.valid_collection_receipt(receipt)
+        same_pending_wire(*updated)
         assert json.loads(handle.connection.execute("SELECT values_json FROM items").fetchone()[0])["title"] == "Two"
     else:
         assert tuple(handle.connection.iterdump()) == before

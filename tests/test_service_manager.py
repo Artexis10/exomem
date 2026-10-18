@@ -5,12 +5,15 @@ import importlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_collection_store_s1_gate import ab as ab
+from test_collection_store_s1_gate import abc as abc
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Managed lifecycle is Linux-only")
 
@@ -678,12 +681,13 @@ def test_conditionally_supporting_candidate_skips_unchanged_physical_families(
 
 @pytest.mark.parametrize("invalidate", ["changed-target", "failed-target", "failed-probe"])
 def test_optional_support_cannot_outlive_its_verified_candidate(
-    tmp_path, monkeypatch, candidate_runtime, invalidate,
+    tmp_path, monkeypatch, candidate_runtime, invalidate, abc,
 ):
     from exomem import state_migration
 
-    vault = tmp_path / "vault"
-    _mixed_marker(vault)
+    abc.release()
+    vault = tmp_path / "copied-vault"
+    shutil.copytree(abc.root, vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     assert state_migration.recorded_descriptor_ids(vault) is None
 
@@ -1884,6 +1888,8 @@ def test_the_real_cold_readiness_loop_records_what_the_worker_is_waiting_on(
 
     module = _manager()
     monkeypatch.setattr(httpx, "AsyncClient", _WarmingClient)
+    # The fake client ignores its transport; keep SSL setup outside the loop budget.
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **kwargs: None)
 
     async def scenario():
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)

@@ -218,10 +218,10 @@ def owned_entry(root, marker, path):
 VIEW_PATH = "COLLECTION_VIEW_PATH"
 
 
-def refuse_view_paths(root, paths, refusal):
+def refuse_view_paths(root, paths, refusal, *, expected_marker=None):
     """Protect canonical collection paths and their ancestors inside the caller's mutation boundary."""
     try:
-        entry = _owning_entry(Path(root), paths)
+        entry = _owning_entry(Path(root), paths, expected_marker=expected_marker)
     except CollectionStoreError as error:
         raise refusal(error.code, error.reason) from None
     if entry is not None:
@@ -230,7 +230,7 @@ def refuse_view_paths(root, paths, refusal):
         raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
 
 
-def _owning_entry(root, paths):
+def _owning_entry(root, paths, *, expected_marker=None):
     from . import ownership
 
     paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
@@ -238,6 +238,14 @@ def _owning_entry(root, paths):
              if collections._reference_key(root, path) is not None]
     if not paths:
         return None
+    if expected_marker is not None:
+        try:
+            raw = read_marker(root)
+        except (held_fs.HeldFsError, OSError) as error:
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+        if raw != expected_marker:
+            # A file-only fallback retains the routing basis its acquisition proved.
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "mode marker changed after file authority was proved")
     return next((entry for path in paths if (entry := ownership.owned(root, path, ancestors=True)) is not None), None)
 
 
@@ -473,6 +481,22 @@ def require_intent_binding(conn, intent):
     if row is None:
         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "create intent lacks its committed transaction")
     return json.loads(row[0])
+
+
+def first_import_fence_matches(intent, target, fence):
+    """The actual fence is this first import's target, its pre-cut generation, or its bound predecessor."""
+    if (intent["kind"] != MIGRATE or intent["expected_marker"] is not None or "base_head" in intent):
+        return False
+    generation = target["collection_store_fence"]["generation"]
+    predecessor = intent.get("supersedes")
+    matching = (fence.enrolled and fence.store_id == target["store_id"] and fence.generation == generation)
+    if predecessor is None:
+        matching = matching or not fence.enrolled and generation == fence.generation + 1
+    else:
+        matching = generation == predecessor["generation"] + 1 and (matching or (
+            fence.enrolled and fence.store_id == predecessor["store_id"]
+            and fence.generation == predecessor["generation"]))
+    return matching and (not fence.enrolled or fence.capability == target["collection_store_fence"]["capability"])
 
 
 def marker_status(writer, intent):

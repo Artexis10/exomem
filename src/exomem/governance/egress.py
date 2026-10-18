@@ -5424,7 +5424,7 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         )
     from ..collection_store import governance as canonical_governance
 
-    inspection_evidence = canonical_governance._inspection_evidence(result)
+    metadata_evidence = canonical_governance._metadata_evidence(result)
     # Free text and nested resource/prompt strings have no structural entry
     # for the cross-check to drop. Resolve those only after structural paths
     # have been removed; scanning an ordinary released page body would change
@@ -5457,8 +5457,8 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         and cleaned != evidence_projection
     ):
         cleaned.pop("evidence_version", None)
-    return (canonical_governance._seal_inspection_projection(cleaned, inspection_evidence)
-            if inspection_evidence is not None else cleaned)
+    return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
+            if metadata_evidence is not None else cleaned)
 
 
 #: An error's human-readable payload, wherever the codebase parks it —
@@ -6945,10 +6945,8 @@ def release_walk_filter(
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
-        # The empty policy missed its shortcut only because a collection-store marker
-        # exists. Ordinary files keep the empty-policy answer, as `annotate_page` reads
-        # them, and only marker-owned paths take the per-path decision. The marker is
-        # read once for the walk, never per path.
+        # Disjoint files keep the empty-policy answer. Collection paths join the
+        # enclosing consumer's canonical ownership proof before their per-path decision.
         if unrestricted_content_access(vault_root, who):
             return lambda rel_path: keep(rel_path) if owned(rel_path) else True
         return lambda rel_path: (
@@ -7644,7 +7642,27 @@ def filter_withheld_entries(
     operation = writer._operation if writer is not None else None
     from ..collection_store import governance as canonical_governance
 
-    inspection_evidence = canonical_governance._inspection_evidence(payload)
+    metadata_evidence = canonical_governance._metadata_evidence(payload)
+    coverage = type(metadata_evidence) is canonical_governance._CanonicalCoverageEvidence
+    inspection_evidence = None if coverage else metadata_evidence
+    if coverage:
+        if operation is None:
+            from ..collection_store import runtime as store_runtime
+
+            if (metadata_evidence.root != vault_root.resolve()
+                    or metadata_evidence.principal != (principal if principal is not None else effective_principal())
+                    or not metadata_evidence.contributors):
+                canonical_governance.OperationAuthorization.refuse()
+            server = store_runtime.projection_route(vault_root, metadata_evidence.contributors[0][2])
+            if server is None:
+                canonical_governance.OperationAuthorization.refuse()
+            # The MCP second pass gets fresh canonical authority, without waking publication work.
+            return server.call(lambda: filter_withheld_entries(
+                vault_root, payload, principal=principal, purpose=purpose,
+                _artifact_scan_demand=_artifact_scan_demand,
+                explicit_reference_markup=explicit_reference_markup,
+                _current_parent_binding=_current_parent_binding), read_only=True, wake_maintenance=False)
+        metadata_evidence = operation.validate_coverage_projection(payload, writer)
     if inspection_evidence is not None:
         if operation is None:
             from ..collection_store import runtime as store_runtime
@@ -7657,7 +7675,8 @@ def filter_withheld_entries(
             # MCP layer's, has no bound operation to repeat that admission with.
             return payload
         inspection_evidence = operation.validate_inspection_projection(payload, writer.handle)
-    metadata_references = dict(inspection_evidence.references) if inspection_evidence is not None else {}
+        metadata_evidence = inspection_evidence
+    metadata_references = dict(metadata_evidence.references) if metadata_evidence is not None else {}
     policy = operation.policy if operation is not None else policy_module.load(vault_root)
     # File-mode decisions check live tombstones below; they never consume a captured set.
     tombstones = operation.tombstones if operation is not None else None
@@ -8012,8 +8031,8 @@ def filter_withheld_entries(
         and len(filtered.get("items", ())) != len(payload["items"])
     ):
         return _reconcile_attention_counts(filtered)
-    if inspection_evidence is not None:
-        filtered = canonical_governance._seal_inspection_projection(filtered, inspection_evidence)
+    if metadata_evidence is not None:
+        filtered = canonical_governance._seal_metadata_projection(filtered, metadata_evidence)
     if _artifact_scan_demand is not None:
         _artifact_scan_demand.complete = True
     return filtered

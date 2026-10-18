@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 from record_fixtures import copy_vehicle_maintenance_fixture, copy_x3_fixture
 
-from exomem import graph_sync, mutation_lock, record_formats, vault, writer_lease
+from exomem import graph_sync, record_formats, vault, writer_lease
 from exomem import structured_collections as collections
 
 
@@ -191,7 +192,7 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
     same_manifest = collections.load_manifest(same_root, same_fixture / "_collection.md")
     first_admitted = threading.Event()
     release_first = threading.Event()
-    second_blocked = threading.Event()
+    coordinators = []
     second_admitted = threading.Event()
     calls = 0
     calls_lock = threading.Lock()
@@ -207,15 +208,9 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
         with calls_lock:
             calls += 1
             ordinal = calls
-        if ordinal == 2:
-            probe = mutation_lock.VaultMutationCoordinator(self.config.state_dir, root)
-            state = mutation_lock._state_for(probe.lock_path)
-            if state.guard.acquire(blocking=False):
-                state.guard.release()
-                raise AssertionError("same-vault second mutation guard was not blocked")
-            second_blocked.set()
         with real_guard(self, root, **metadata):
             if ordinal == 1:
+                coordinators.append(self._mutation_coordinator_for(root))
                 first_admitted.set()
                 assert release_first.wait(10.0)
             else:
@@ -242,7 +237,10 @@ def test_record_boundaries_are_per_vault_but_serialize_same_vault(
             item_key="22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             why="wait for the same vault boundary",
         )
-        assert second_blocked.wait(10.0)
+        deadline = time.monotonic() + 10.0
+        while coordinators[0].waiter_count() == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert coordinators[0].waiter_count() > 0
         assert not second_admitted.is_set()
         release_first.set()
         assert first.result(timeout=10)["outcome"] == "committed"

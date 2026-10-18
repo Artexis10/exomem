@@ -168,9 +168,14 @@ def _tip_is_live(
     """
     from . import curation
 
-    if after != "absent" and keep is not None and not keep(path):
-        return False
     try:
+        visible = curation._records_item_visible(vault_root, evidence["binding"], path)  # noqa: SLF001
+        if visible is not None:
+            return visible and curation._verify_records_receipt(  # noqa: SLF001
+                vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
+            )
+        if after != "absent" and keep is not None and not keep(path):
+            return False
         if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
             # A Records item is current only while its Records receipt agrees.
             if curation._verify_records_receipt(  # noqa: SLF001

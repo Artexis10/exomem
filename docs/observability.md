@@ -166,6 +166,25 @@ access log (`event=http_request`), the tool trace
 `reads.jsonl` (additive `request_id` field), and `mutations.jsonl` all carry
 it, so one request id joins every source that touched that request.
 
+The access event keeps `duration_ms` as the inner ASGI application await.
+It excludes earlier authentication and body handling, plus its own logging and metrics.
+Two additive fields describe the worker boundary:
+
+- `worker_pre_access_ms` measures worker middleware entry through the existing access timer start.
+- `worker_to_final_body_ms` measures that entry through completion of the final body send await.
+  A successful final send remains known if later cleanup fails.
+
+The entry stamp precedes FastMCP authentication and carrier handling.
+The server error middleware and configured body limit can remain outside that stamp.
+Missing entry wiring or an unfinished final send produces `null`, never zero.
+Absent fields in older records also mean unknown.
+Early refusals before access still produce no access event.
+
+These intervals overlap; do not add them.
+Final body timing excludes trailers, later cleanup, managed forwarding and client receipt.
+A streaming response measures stream lifetime when its final send completes.
+Compare finite MCP calls separately from streaming responses.
+
 ## The call ledger (`ledger.jsonl`)
 
 One durable, structured row per **MCP tool call** — read or write, success or
@@ -320,6 +339,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `runtime.gc` | Garbage-collection pauses inside one `activate_context` call: the duration is the pause time and `collections` the number of collections. A collection stops every thread, so the pauses counted are those inside the call's interval, whichever thread triggered them. Absent when no collection ran. |
 | `command.leaf`, `command.postfilter` | The dispatcher envelope, then the MCP-layer filter and scrub. The dispatcher envelope includes its command body, first terminal filter and disclosure receipt. |
 | `command.body`, `command.terminal_filter`, `command.disclosure_receipt` | Dispatcher stages on the read-only and the mutation path: invoke the command, filter its result or error, then, on a read, emit the disclosure receipt. Failed stages retain their duration. |
+| `mutation.idempotency_claim` | Keyed claim attempts in the command body, including SQLite commit and close. Excludes capture queue waits, pending-replay polling, and the mutation operation. Wall and thread CPU totals aggregate repeated attempts. |
 | `command.refusal_floor` | A restricted caller's direct-read refusal, held to the fixed disclosure floor. `work_ms` is the refusal's work, from dispatch to the refusal, rounded up to whole milliseconds. `overrun` is 1 when that work alone ran past the floor, so the refusal completed late, and 0 otherwise. `deferred` is 1 when the MCP or REST surface waits out the floor after its own handling of the refusal; the span's duration is then near 0. Otherwise the dispatcher's thread waits, and the duration is that wait. Absent on successes and on owner refusals. |
 | `egress.cross_check`, `egress.scrub` | The terminal filter's withheld cross-check and credential scrub, beside `egress.artifact_gate`. On MCP the filter runs twice, under `command.terminal_filter` and again under `command.postfilter`, so each sums both passes. A raised error has no cross-check; its filter runs the gate and the scrub once per text value. |
 | `spans.overflow` | Every span recorded under a name past the per-call name bound, summed: how many and how long. Present only when a call ran out of names. |

@@ -9,6 +9,7 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.collection_store import governance
 from exomem.collection_store.preview import preview_store
 from exomem.governance import membership
@@ -138,7 +139,7 @@ def test_rebound_canonical_manifest_cannot_supply_another_collections_identity(s
                 (text, hashlib.sha256(text.encode()).hexdigest(), CID),
             )
             conn.execute("UPDATE collections SET manifest_version=2 WHERE collection_id=?", (CID,))
-        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
             collections.load_manifest(store.root, manifest_path())
 
 

@@ -51,6 +51,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -303,26 +304,22 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str) -> bool:
-    """Whether the page a committed leaf wrote is there to read back.
+def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str, keep) -> bool:
+    """Whether the committed leaf's current subject is available to this caller.
 
     A Records item on a store collection has a generated view that the store publishes after its
     commit, so its file may not exist yet. Its leaf is there when the vault routes the item's
     collection to the store: the leaf's witness is then checked against the store's transaction
     (`_tip_is_live`), and the file is not the evidence.
     """
-    from .collection_store.preview import selected_writer
-
-    if (vault_root / path).is_file():
-        return True
     try:
         item = curation.CurationStore(vault_root).load_plan(binding["run_id"])["binding_manifest"][
             binding["ordinal"]
         ]
-        return (
-            item.get("kind") in curation.RECORDS_STEP_KINDS
-            and selected_writer(vault_root, item["prepared"]["collection_id"]) is not None
-        )
+        visible = curation._records_item_visible(vault_root, item, path)  # noqa: SLF001
+        if visible is not None:
+            return visible
+        return (vault_root / path).is_file() and (keep is None or keep(path))
     except (curation.CurationError, KeyError, IndexError, TypeError):
         return False
 
@@ -398,6 +395,9 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     several distinct candidates landed on, with guidance to disposition each
     candidate; it never blocks attestation.
     """
+    from .collection_store import governance as canonical_governance
+    from .collection_store.preview import bound_writer
+
     session = _Session(vault_root, episode)
     state = session.state
     latest = state["input_revisions"][-1]
@@ -406,9 +406,13 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
     if page is None or page not in _visible(session.vault_root, [page]):
         ref = None
     keep = egress.restricted_release_filter(session.vault_root, principal=effective_principal())
-    receipts = []
+    receipts, contributors = [], []
+    writer = bound_writer(session.vault_root)
     # One consistent view of every committed page, as an attestation takes.
-    with session.store._guard():  # noqa: SLF001
+    with (
+        session.store._guard(),  # noqa: SLF001
+        writer.read_snapshot() if writer is not None else nullcontext(),
+    ):
         current = current_coverage(session.vault_root, state, keep=keep)
         for candidate in state["candidates"]:
             for leaf in candidate["leaves"]:
@@ -417,14 +421,23 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                 path = _written_path(session.vault_root, leaf["binding"])
                 if (
                     path is None
-                    or not _page_is_there(session.vault_root, leaf["binding"], path)
-                    or (keep is not None and not keep(path))
+                    or not _page_is_there(session.vault_root, leaf["binding"], path, keep)
                 ):
                     path, readback = None, "unavailable"
                 elif current[leaf["leaf_id"]]:
                     readback = "verified"
                 else:
                     readback = "changed"
+                if path is not None and writer is not None:
+                    binding = leaf["binding"]
+                    sealed = curation.CurationStore(session.vault_root).load_plan(binding["run_id"])[
+                        "binding_manifest"][binding["ordinal"]]
+                    if sealed.get("kind") in curation.RECORDS_STEP_KINDS:
+                        prepared = sealed["prepared"]
+                        subject = writer.admitted_item_metadata(
+                            prepared["collection_id"], prepared["item_key"], path)
+                        if subject is not None:
+                            contributors.append((leaf["leaf_id"], binding["operation_id"], path, subject))
                 receipts.append(
                     {
                         "candidate_key": candidate["candidate_key"],
@@ -435,22 +448,26 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                         "readback": readback,
                     }
                 )
-    sink = _sinks(session.vault_root, receipts)
-    return {
-        **_projection(session),
-        "action": "coverage",
-        "input": {
-            "input_revision": latest["revision"],
-            "ref": ref,
-            "recovery": latest["recovery"] if ref is not None else "unavailable",
-        },
-        "receipts": receipts,
-        "coverage_current": (
-            "verified" if all(item["readback"] == "verified" for item in receipts) else "changed"
-        ),
-        "sink": sink,
-        **({"sink_guidance": SINK_GUIDANCE} if sink else {}),
-    }
+        sink = _sinks(session.vault_root, receipts)
+        result = {
+            **_projection(session),
+            "action": "coverage",
+            "input": {
+                "input_revision": latest["revision"],
+                "ref": ref,
+                "recovery": latest["recovery"] if ref is not None else "unavailable",
+            },
+            "receipts": receipts,
+            "coverage_current": (
+                "verified" if all(item["readback"] == "verified" for item in receipts) else "changed"
+            ),
+            "sink": sink,
+            **({"sink_guidance": SINK_GUIDANCE} if sink else {}),
+        }
+        if contributors:
+            evidence = writer._operation.coverage_evidence(result, writer.handle, contributors)  # noqa: SLF001
+            return canonical_governance._seal_metadata_projection(result, evidence)  # noqa: SLF001
+        return result
 
 
 def _prepare_seal(vault_root: Path, leaf: Mapping[str, Any]) -> curation.PreparedProposal:

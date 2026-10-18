@@ -20,12 +20,14 @@ from . import (
     mutation_terminal,
     query_data,
     record_formats,
+    state_paths,
     structure_promotion,
     vault,
 )
 from . import structured_collections as collections
-from .collection_store import capability
+from .collection_store import capability, ownership
 from .collection_store.preview import (
+    QUERY_RECEIPT_BOUNDARY,
     bound_writer,
     canonical_read,
     production_bound,
@@ -989,13 +991,14 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
     if active is not None and active[0] == root:
         yield
         return
-    token = _AUTHORIZATION_PASS.set(
-        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root), {})
-    )
-    try:
-        yield
-    finally:
-        _AUTHORIZATION_PASS.reset(token)
+    with state_paths.resolution_scope(), ownership.read_scope(root, finalize=True):
+        token = _AUTHORIZATION_PASS.set(
+            (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root), {})
+        )
+        try:
+            yield
+        finally:
+            _AUTHORIZATION_PASS.reset(token)
 
 
 def _authorize(
@@ -1275,16 +1278,14 @@ def require_records_profile(
     return manifest
 
 
-@canonical_read
+@canonical_read(receipt_boundary="record_resolve")
 def resolve_collection(
     vault_root: Path, selector: str | Path | collections.CollectionManifest
 ) -> collections.CollectionManifest:
     """Resolve only a fully released manifest, treating every other case as absent."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_resolve", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, selector, receipt=True)
-        egress.emit_boundary_receipt(collector)
-        return manifest
+    manifest = _resolve_released_collection(root, selector, receipt=True)
+    return manifest
 
 
 def resolve_collection_for_mutation(
@@ -1344,43 +1345,45 @@ def query_collection(
                 root, manifest, semantic_profile=semantic_profile,
                 late_link_projection=late_link_projection, **kwargs,
             )
-    with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        if writer is None:
-            policy = egress.policy_module.load(root)
-            manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
-            authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
-        else:
-            manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
-            policy = writer._operation.policy
-            authorize_path = writer._operation.allows_file
-        if manifest.semantic_profile != semantic_profile:
-            error_code = (
-                "RECORDS_PROFILE_REQUIRED"
-                if semantic_profile == "records"
-                else "PLANNING_PROFILE_REQUIRED"
+    with egress.disclosure_boundary(root, QUERY_RECEIPT_BOUNDARY, join_existing=True) as collector:
+        # Verify the whole query before its receipt can claim release.
+        with state_paths.resolution_scope(), ownership.read_scope(root, finalize=True):
+            if writer is None:
+                policy = egress.policy_module.load(root)
+                manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
+                authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
+            else:
+                manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
+                policy = writer._operation.policy
+                authorize_path = writer._operation.allows_file
+            if manifest.semantic_profile != semantic_profile:
+                error_code = (
+                    "RECORDS_PROFILE_REQUIRED"
+                    if semantic_profile == "records"
+                    else "PLANNING_PROFILE_REQUIRED"
+                )
+                raise collections.CollectionError(
+                    error_code,
+                    "collection profile is not available",
+                )
+            if writer is None and not authorize_path(manifest.storage.source):
+                raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            links = _LinkProjector.create(
+                root, manifest, policy=policy, allow_cold_index=not late_link_projection,
+                authorize_path=authorize_path,
             )
-            raise collections.CollectionError(
-                error_code,
-                "collection profile is not available",
+            view = kwargs.get("view")
+            if view is not None:
+                _authorize_saved_view(root, manifest, view, links)
+            result = record_formats.query_collection(
+                root,
+                manifest,
+                authorize_path=authorize_path,
+                project_values=links,
+                project_child_value=links.project_presentation_value,
+                late_link_projection=late_link_projection,
+                **kwargs,
             )
-        if writer is None and not authorize_path(manifest.storage.source):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(
-            root, manifest, policy=policy, allow_cold_index=not late_link_projection,
-            authorize_path=authorize_path,
-        )
-        view = kwargs.get("view")
-        if view is not None:
-            _authorize_saved_view(root, manifest, view, links)
-        result = record_formats.query_collection(
-            root,
-            manifest,
-            authorize_path=authorize_path,
-            project_values=links,
-            project_child_value=links.project_presentation_value,
-            late_link_projection=late_link_projection,
-            **kwargs,
-        )
         egress.emit_boundary_receipt(collector)
         return result
 
@@ -1514,6 +1517,7 @@ def _saved_view_filter_links_are_authorized(
     return True
 
 
+@canonical_read(receipt_boundary="record_inspection")
 def inspect_collection(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -1523,10 +1527,7 @@ def inspect_collection(
     # `records` already imports this governance boundary for mutations.
     from . import records
 
-    with (
-        authorization_pass(root),
-        egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector,
-    ):
+    with authorization_pass(root):
         manifest = _resolve_released_collection(root, collection, receipt=True)
         if not _authorize(root, manifest.storage.source, receipt=True):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
@@ -1647,8 +1648,7 @@ def inspect_collection(
             }
         )
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
-        egress.emit_boundary_receipt(collector)
-        return projected
+    return projected
 
 
 def _collection_coverage(
@@ -1812,7 +1812,7 @@ def _presentation_inspection(
     }
 
 
-@canonical_read
+@canonical_read(receipt_boundary="record_inspection")
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1827,125 +1827,122 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     (a Records-layer artifact) differ.
     """
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
 
-        def authorize(path: str) -> bool:
-            return _authorize(root, path, receipt=True)
+    def authorize(path: str) -> bool:
+        return _authorize(root, path, receipt=True)
 
-        discovered, unreadable = collections.discover_collections_with_errors(
+    discovered, unreadable = collections.discover_collections_with_errors(
+        root, authorize_path=authorize
+    )
+    manifests = [
+        manifest
+        for manifest in discovered
+        if manifest.semantic_profile == semantic_profile
+        and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
+    ]
+    unreadable = tuple(row for row in unreadable if row.semantic_profile in (None, semantic_profile))
+    if production_bound(root) and not capability.records_summary_enabled(root):
+        # A summary collection is records-summary-v1: while the release keeps it off,
+        # the inventory names it as unavailable rather than reading its counts.
+        dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]
+        manifests = [m for m in manifests if m not in dark]
+        unreadable = (*unreadable, *(
+            collections.UnreadableManifest(m.path, capability.UNAVAILABLE,
+                                           f"this release has not enabled {capability.RECORDS_SUMMARY_V1}",
+                                           m.semantic_profile)
+            for m in dark))
+    legacy: tuple[collections.LegacyCollection, ...] = ()
+    legacy_truncated = False
+    if semantic_profile == "records":
+        legacy, legacy_truncated = collections.discover_legacy_trackers(
             root, authorize_path=authorize
         )
-        manifests = [
-            manifest
-            for manifest in discovered
-            if manifest.semantic_profile == semantic_profile
-            and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
-        ]
-        unreadable = tuple(row for row in unreadable if row.semantic_profile in (None, semantic_profile))
-        if production_bound(root) and not capability.records_summary_enabled(root):
-            # A summary collection is records-summary-v1: while the release keeps it off,
-            # the inventory names it as unavailable rather than reading its counts.
-            dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]
-            manifests = [m for m in manifests if m not in dark]
-            unreadable = (*unreadable, *(
-                collections.UnreadableManifest(m.path, capability.UNAVAILABLE,
-                                               f"this release has not enabled {capability.RECORDS_SUMMARY_V1}",
-                                               m.semantic_profile)
-                for m in dark))
-        legacy: tuple[collections.LegacyCollection, ...] = ()
-        legacy_truncated = False
-        if semantic_profile == "records":
-            legacy, legacy_truncated = collections.discover_legacy_trackers(
-                root, authorize_path=authorize
-            )
-        from . import due_state
+    from . import due_state
 
-        observations = due_state._collection_observation_coverages(
-            root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
-        )
-        payload = {
-            "kind": f"{semantic_profile}_inventory",
-            "report_only": True,
-            "collections": [
-                {
-                    "collection_id": manifest.collection_id,
-                    "title": manifest.title,
-                    "manifest_path": manifest.path,
-                    "semantic_profile": manifest.semantic_profile,
-                    "lifecycle": manifest.lifecycle,
-                    "storage_strategy": manifest.storage.strategy,
-                    "natural_key": list(manifest.schema.natural_key),
-                    **_inventory_coverage(root, manifest, authorize,
-                                          observations=observations[str(manifest.path)]),
-                }
-                for manifest in manifests
-            ],
-            # A manifest this sweep could not read is listed under every profile
-            # unless the store's marker records its profile: whichever inventory
-            # was asked for, an unread file of unknown profile is a hole in the
-            # answer. An empty list here is the honest "swept, everything read";
-            # omitting the key would make an unread file indistinguishable from no file.
-            "unreadable_manifests": [
-                {"path": row.path, "error_code": row.code, "message": row.message}
-                for row in unreadable
-            ],
-            # Records-layer only. Planning has no legacy trackers to sweep, and an
-            # empty list there reads as "swept, found none" -- a claim about a
-            # sweep that never ran. Absent is the honest shape.
-            **(
-                {
-                    "legacy_trackers": [
-                        {"path": tracker.path, "inspect_only": tracker.inspect_only}
-                        for tracker in legacy
-                    ]
-                }
-                if semantic_profile == "records"
-                else {}
-            ),
-            "truncated": {
-                # Both are False on the same basis: discovery raises
-                # COLLECTION_DISCOVERY_LIMIT rather than dropping a candidate,
-                # so a returned sweep is a complete one.
-                "collections": False,
-                "unreadable_manifests": False,
-                **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
-            },
-            "contract_route": {
-                "tool": "record_memory",
-                "arguments": {"action": "describe"},
-            },
-        }
-        egress.emit_boundary_receipt(collector)
-        return payload
+    observations = due_state._collection_observation_coverages(
+        root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
+    )
+    payload = {
+        "kind": f"{semantic_profile}_inventory",
+        "report_only": True,
+        "collections": [
+            {
+                "collection_id": manifest.collection_id,
+                "title": manifest.title,
+                "manifest_path": manifest.path,
+                "semantic_profile": manifest.semantic_profile,
+                "lifecycle": manifest.lifecycle,
+                "storage_strategy": manifest.storage.strategy,
+                "natural_key": list(manifest.schema.natural_key),
+                **_inventory_coverage(root, manifest, authorize,
+                                      observations=observations[str(manifest.path)]),
+            }
+            for manifest in manifests
+        ],
+        # A manifest this sweep could not read is listed under every profile
+        # unless the store's marker records its profile: whichever inventory
+        # was asked for, an unread file of unknown profile is a hole in the
+        # answer. An empty list here is the honest "swept, everything read";
+        # omitting the key would make an unread file indistinguishable from no file.
+        "unreadable_manifests": [
+            {"path": row.path, "error_code": row.code, "message": row.message}
+            for row in unreadable
+        ],
+        # Records-layer only. Planning has no legacy trackers to sweep, and an
+        # empty list there reads as "swept, found none" -- a claim about a
+        # sweep that never ran. Absent is the honest shape.
+        **(
+            {
+                "legacy_trackers": [
+                    {"path": tracker.path, "inspect_only": tracker.inspect_only}
+                    for tracker in legacy
+                ]
+            }
+            if semantic_profile == "records"
+            else {}
+        ),
+        "truncated": {
+            # Both are False on the same basis: discovery raises
+            # COLLECTION_DISCOVERY_LIMIT rather than dropping a candidate,
+            # so a returned sweep is a complete one.
+            "collections": False,
+            "unreadable_manifests": False,
+            **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
+        },
+        "contract_route": {
+            "tool": "record_memory",
+            "arguments": {"action": "describe"},
+        },
+    }
+    return payload
 
 
+@canonical_read(receipt_boundary="record_inspection")
 def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]:
     """Inspect a manifest-less tracker at collection granularity without parsing items."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
-        legacy = collections.inspect_legacy_tracker(
-            root, path, authorize_path=lambda relative: _authorize(root, relative, receipt=True)
-        )
-        payload = _RecordEnvelope(
-            {
-                "kind": "legacy_tracker",
-                "report_only": True,
-                "contract": None,
-                "legacy": {
-                    "collection_id": legacy.collection_id,
-                    "path": legacy.path,
-                    "inspect_only": legacy.inspect_only,
-                },
-                "snapshot": None,
-                "source_versions": [],
-                "diagnostics": [],
-                "audit": {"status": "not_applicable", "gaps": []},
-                "saved_views": [],
-            }
-        )
-        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
-        egress.emit_boundary_receipt(collector)
-        return projected
+    legacy = collections.inspect_legacy_tracker(
+        root, path, authorize_path=lambda relative: _authorize(root, relative, receipt=True)
+    )
+    payload = _RecordEnvelope(
+        {
+            "kind": "legacy_tracker",
+            "report_only": True,
+            "contract": None,
+            "legacy": {
+                "collection_id": legacy.collection_id,
+                "path": legacy.path,
+                "inspect_only": legacy.inspect_only,
+            },
+            "snapshot": None,
+            "source_versions": [],
+            "diagnostics": [],
+            "audit": {"status": "not_applicable", "gaps": []},
+            "saved_views": [],
+        }
+    )
+    projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
+    return projected
 
 
 def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, Any]:
@@ -2916,52 +2913,52 @@ def _project_governance(value: Mapping[str, Any]) -> dict[str, Any]:
     return projected
 
 
+@canonical_read(receipt_boundary="record_manifest")
 def project_manifest(
     vault_root: Path, collection: str | Path | collections.CollectionManifest
 ) -> dict[str, Any]:
     """Project a manifest only after every returned template target is released."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_manifest", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, collection, receipt=True)
-        if not _authorize(root, manifest.storage.source, receipt=True) or any(
-            not _authorize(root, template.path, receipt=True) for template in manifest.templates
-        ):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        templates: list[dict[str, Any]] = []
-        links = _LinkProjector.create(root, manifest)
-        for template in manifest.templates:
-            defaults = _project_schema_values(
-                root, manifest, template.default_properties, template_metadata=True, links=links
-            )
-            if defaults is None:
-                continue
-            templates.append({"path": template.path, "default_properties": defaults})
-        payload = _RecordEnvelope(
-            {
-                "collection_id": manifest.collection_id,
-                "path": manifest.path,
-                "title": manifest.title,
-                "storage": {
-                    "strategy": manifest.storage.strategy,
-                    "source": manifest.storage.source,
-                    "format_version": manifest.storage.format_version,
-                },
-                "templates": templates,
-                "plans": [
-                    projected
-                    for plan in manifest.links.plans
-                    if (projected := _project_plan_link(root, manifest, plan, links=links))
-                    is not None
-                ],
-                "views": _project_views(root, manifest, links=links),
-                "governance": _project_governance(manifest.governance),
-            }
+    manifest = _resolve_released_collection(root, collection, receipt=True)
+    if not _authorize(root, manifest.storage.source, receipt=True) or any(
+        not _authorize(root, template.path, receipt=True) for template in manifest.templates
+    ):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    templates: list[dict[str, Any]] = []
+    links = _LinkProjector.create(root, manifest)
+    for template in manifest.templates:
+        defaults = _project_schema_values(
+            root, manifest, template.default_properties, template_metadata=True, links=links
         )
-        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_manifest") or {}
-        egress.emit_boundary_receipt(collector)
-        return projected
+        if defaults is None:
+            continue
+        templates.append({"path": template.path, "default_properties": defaults})
+    payload = _RecordEnvelope(
+        {
+            "collection_id": manifest.collection_id,
+            "path": manifest.path,
+            "title": manifest.title,
+            "storage": {
+                "strategy": manifest.storage.strategy,
+                "source": manifest.storage.source,
+                "format_version": manifest.storage.format_version,
+            },
+            "templates": templates,
+            "plans": [
+                projected
+                for plan in manifest.links.plans
+                if (projected := _project_plan_link(root, manifest, plan, links=links))
+                is not None
+            ],
+            "views": _project_views(root, manifest, links=links),
+            "governance": _project_governance(manifest.governance),
+        }
+    )
+    projected = egress.project(payload, egress.LEVEL_FULL, kind="record_manifest") or {}
+    return projected
 
 
+@canonical_read(receipt_boundary="record_template")
 def read_template(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -2969,23 +2966,21 @@ def read_template(
 ) -> bytes:
     """Return an explicitly declared template only after its L6 path decision."""
     root = Path(vault_root)
-    with egress.disclosure_boundary(root, "record_template", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, collection, receipt=True)
-        declared = {template.path for template in manifest.templates}
-        if (
-            not _authorize(root, manifest.path, receipt=True)
-            or template_path not in declared
-            or not _authorize(root, template_path, receipt=True)
-        ):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        try:
-            data, _guard = vault.read_bounded_guarded_bytes(root, template_path, limit=512 * 1024)
-        except vault.PathGuardError as error:
-            raise collections.CollectionError(
-                "COLLECTION_NOT_FOUND", "collection was not found"
-            ) from error
-        egress.emit_boundary_receipt(collector)
-        return data
+    manifest = _resolve_released_collection(root, collection, receipt=True)
+    declared = {template.path for template in manifest.templates}
+    if (
+        not _authorize(root, manifest.path, receipt=True)
+        or template_path not in declared
+        or not _authorize(root, template_path, receipt=True)
+    ):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    try:
+        data, _guard = vault.read_bounded_guarded_bytes(root, template_path, limit=512 * 1024)
+    except vault.PathGuardError as error:
+        raise collections.CollectionError(
+            "COLLECTION_NOT_FOUND", "collection was not found"
+        ) from error
+    return data
 
 
 def precommit_authorize_mutation(
@@ -3012,15 +3007,14 @@ def precommit_authorize_mutation(
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
-    with (
-        authorization_pass(root),
-        egress.disclosure_boundary(root, "record_mutation_precommit") as collector,
-    ):
-        for path in sorted(paths):
-            if not _authorize(root, path, receipt=True):
-                raise collections.CollectionError(
-                    "COLLECTION_NOT_FOUND", "collection was not found"
-                )
+    # Precommit owns its receipt so an ambient boundary cannot defer the publication gate.
+    with egress.disclosure_boundary(root, "record_mutation_precommit") as collector:
+        with authorization_pass(root):
+            for path in sorted(paths):
+                if not _authorize(root, path, receipt=True):
+                    raise collections.CollectionError(
+                        "COLLECTION_NOT_FOUND", "collection was not found"
+                    )
         egress.emit_boundary_receipt(collector)
 
 

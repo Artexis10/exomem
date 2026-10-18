@@ -288,8 +288,13 @@ def _require_collection_store_recovery(session, token) -> None:
                 fence = session.fence_client.collection_store_fence()
                 intended = None if intent is None else authority.parse_marker(session.root,
                     intent["expected_marker"] if intent["kind"] == authority.EXPORT else intent["target_marker"])
-                if ((fence.enrolled and fence.store_id != sid)
-                        or intended is not None and intended["store_id"] != sid
+                foreign = fence.enrolled and fence.store_id != sid
+                # A bound first import may replace exactly its predecessor; complete import proof still precedes CAS.
+                if (foreign and intended is not None and intended["store_id"] == sid
+                        and authority.first_import_fence_matches(intent, intended, fence)
+                        and authority.intent_status(session.root, reader, intent) == "pending"):
+                    foreign = False
+                if (foreign or intended is not None and intended["store_id"] != sid
                         or not fence.enrolled and intended is None):
                     raise connection.CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "collection-store recovery identity differs")
         session.require(token)

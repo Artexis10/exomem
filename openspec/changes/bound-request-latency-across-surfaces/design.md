@@ -2,6 +2,12 @@
 
 The programme uses one packaged MCP observer. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
 
+Case expectations retain the existing indexed-path representation and add a strict `response_schema` alternative. A case cannot mix the representations. The alternative uses the existing `jsonschema` dependency with Draft 2020-12 and validates the complete parsed response. The runner compiles validators before connecting and keeps response validation inside the measured interval. Schema resources use an empty `referencing` registry without retrieval; local references work, while unavailable external references fail locally. Conflicting dialect declarations in schema positions are invalid; dictionaries inside data-valued assertions retain their literal meaning.
+
+An independent source-only author establishes each key's source identity, state and material requirements. One witness must bind source identity and nonblank material to the same result or parent. Membership does not imply rank; keys require rank only when source truth establishes that contract. The author checks missing identity, wrong identity, blank material and material attached to another parent. Generic schema validation proves schema syntax and the supplied assertions, not that a key establishes these semantic obligations. Trusted private schemas retain synchronous evaluation; the asynchronous timeout does not establish a schema CPU deadline.
+
+Schema mismatches report `unexpected-response`. Schema execution or resolution errors report `invalid-expectation`, retain the parsed outcome and stop the series. Such an observer error leaves availability and coverage incomplete and fails the check; it does not establish a service outage. Reports and warnings omit private schemas, constants, responses and exception details. Existing legacy failure codes remain unchanged. Frozen keys and failed series remain unchanged; independently authored replacement keys start a new series and preserve unused cases' blindness.
+
 The command selects availability or acceptance. Availability checks every configured case once and requires positive coverage for each represented tool. Its successful result can coexist with insufficient latency evidence. Acceptance retains the declared sample, warmth, contention and deployment requirements. Observer identity remains separate from deployment identity. A deployment change invalidates previous acceptance.
 
 A standard systemd user timer runs the availability check through an explicitly selected installed observer. The observer remains independent of the worker interpreter and upgrade path. One bounded oneshot unit prevents overlap; the application adds no scheduler or repair loop. Private configuration supplies existing credentials. Missing authorization leaves installation unconfigured; installation never issues a grant. The latest report is atomic and owner-only.
@@ -81,6 +87,13 @@ The closest maintained option is the existing `latency_watch` with its shared su
 | Background freshness | Committed generation through required derived visibility/convergence | Existing receipts and freshness instruments |
 
 Do not relabel a stored `duration_ms` or `total_ms`. If current producers stop before response construction, measure the remaining work and introduce the complete boundary explicitly. A timer cannot measure network delivery it never observes.
+
+The existing HTTP access event adds worker entry-to-access and entry-to-final-body intervals.
+A scope stamp precedes FastMCP authentication and carrier handling; the existing send wrapper records successful final-body handoff.
+The original access duration still ends when the inner ASGI application returns.
+Missing entry or final-send evidence remains null, and a completed final send remains known despite later cleanup failure.
+The intervals overlap and exclude manager forwarding and client receipt; streaming duration describes stream lifetime.
+Early refusals before access retain their existing lack of an access event.
 
 Use the existing request correlation context to distinguish intervals. MCP middleware owns its dispatch observation; nested activation owns only its leaf observation. REST activation likewise has different command and leaf intervals. A missing correlation field prevents a joined claim, not the request itself.
 
@@ -164,6 +177,11 @@ A request that ranks on admission, owner or restricted, ranks the phrase rung as
 Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts.
 
 A request that ranks on admission reuses its statistics while the complete catalogue snapshot key holds. After that key changes, it reads every current admitted path and stem string in one SQL snapshot. A framed fingerprint of these complete inputs can authorize reuse for the same scope and admitted set. Changed inputs rebuild the statistics, including SQL-only repairs that leave canonical checkpoints unchanged. The existing four-entry bound remains. This saves token splitting and aggregation after an unrelated edit, but adds hashing and temporary raw strings on cache misses.
+
+Final cache installation replaces equivalent snapshot aliases under the cache lock.
+Aliases for one admitted corpus therefore do not evict another reader's unchanged statistics.
+Old snapshot readers retain their immutable statistics, but a later lookup may repeat the SQL read and hash.
+The four-entry bound can retain four distinct vocabulary maps; alias compaction adds no retained state.
 
 Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
 

@@ -160,6 +160,183 @@ def test_first_admission_invalidates_an_owner_listing_after_its_physical_snapsho
     assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("profile", ("records", "planning"))
+def test_first_admission_invalidates_a_standalone_query_before_its_receipt(tmp_path, monkeypatch, profile):
+    from test_collection_store_service import A_PATH, B_PATH
+
+    from exomem import planning, record_formats, record_governance
+    from exomem.governance.principal import owner_principal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    captured, resume = threading.Event(), threading.Event()
+    original = record_formats.query_collection
+    result = []
+
+    def paused(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if threading.current_thread().name == "ownership-query":
+            assert value.total_matched == 0
+            captured.set()
+            assert resume.wait(15)
+        return value
+
+    monkeypatch.setattr(record_formats, "query_collection", paused)
+
+    def read():
+        with request_scope(owner_principal(surface="cli")):
+            try:
+                value = (record_governance.query_collection(root, A_PATH) if profile == "records"
+                         else planning.query(root, B_PATH, lifecycle="all"))
+                result.append(value)
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-query")
+        reader.start()
+        try:
+            assert captured.wait(10)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == "record_query"
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+
+
+@pytest.mark.parametrize("phase", ("during_query", "after_query"))
+def test_first_admission_invalidates_a_composite_query_before_its_receipt(tmp_path, monkeypatch, phase):
+    from test_collection_store_service import B_PATH
+    from test_record_governance import _write_l6_rule
+
+    from exomem import plan_progress, planning
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    _write_l6_rule(root, ceiling=6, paths="Planning/**")
+    captured, resume = threading.Event(), threading.Event()
+    target, name = ((planning, "_project_query") if phase == "during_query"
+                    else (plan_progress, "_planning_page"))
+    original = getattr(target, name)
+    result = []
+    evaluated = []
+
+    def paused(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if threading.current_thread().name == "ownership-progress":
+            evaluated.append(value)
+            captured.set()
+            assert resume.wait(15)
+        return value
+
+    monkeypatch.setattr(target, name, paused)
+
+    def read():
+        with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+            try:
+                result.append(plan_progress.review(root, collection=B_PATH))
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-progress")
+        reader.start()
+        try:
+            assert captured.wait(10), result
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert evaluated and evaluated[0]["total_matched"] == 0
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == "record_query"
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+
+
+@pytest.mark.parametrize(("action", "boundary"), [
+    ("resolve", "record_resolve"),
+    ("inventory", "record_inspection"),
+    ("manifest", "record_manifest"),
+    ("history", "record_history"),
+])
+def test_first_admission_rejects_a_standalone_collection_read_before_its_receipt(tmp_path, monkeypatch, action, boundary):
+    from test_collection_store_service import A_PATH
+    from test_record_governance import _write_l6_rule
+
+    from exomem import record_governance, record_history
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    _write_l6_rule(root, ceiling=6, paths="Records/**")
+    item = (root / A_PATH).parent / "Items" / (KEY + ".md")
+    item.write_text("---\ntype: record\ncollection_id: " + KEY + "\nrecord_id: " + KEY
+                    + "\nschema_version: 1\ntitle: File row\n---\n")
+    captured, resume = threading.Event(), threading.Event()
+    result, evaluated = [], []
+    if action == "resolve":
+        target, name = record_governance, "_resolve_released_collection"
+    elif action == "inventory":
+        target, name = record_governance, "_inventory_coverage"
+    else:
+        target, name = egress, "project"
+    original = getattr(target, name)
+
+    def paused(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if (threading.current_thread().name == "ownership-collection-read"
+                and not captured.is_set()
+                and (target is not egress or kwargs.get("kind") == boundary)):
+            evaluated.append(value)
+            captured.set()
+            assert resume.wait(15)
+        return value
+
+    monkeypatch.setattr(target, name, paused)
+
+    def read():
+        with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+            try:
+                if action == "resolve":
+                    value = record_governance.resolve_collection(root, A_PATH)
+                elif action == "inventory":
+                    value = record_governance.inventory_collections(root)
+                elif action == "manifest":
+                    value = record_governance.project_manifest(root, A_PATH)
+                else:
+                    value = record_history.read(root, A_PATH, item_key=KEY, semantic_profile="records")
+                result.append(value)
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-collection-read")
+        reader.start()
+        try:
+            assert captured.wait(10), result
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert evaluated and evaluated[0]
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == boundary
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+
+
 @pytest.mark.parametrize(("failed_read", "alias"), [(False, False), (False, True), (True, False)])
 def test_ownership_rejection_keeps_credential_evidence_without_a_successful_release(tmp_path, monkeypatch, failed_read, alias):
     root = _served_vault(tmp_path, monkeypatch)
@@ -213,27 +390,38 @@ def test_ownership_rejection_keeps_credential_evidence_without_a_successful_rele
 
 
 def test_complete_negative_ownership_reads_no_row_or_projection_census(service, monkeypatch):
+    from contextvars import ContextVar
+
     root = service.root
     path = "Knowledge Base/Records/Work/Independent.md"
     (root / path).write_text("# Ordinary file\n\nordinary-body\n")
     opened = connection._open_read_only
     attempted = []
+    observed = set()
+    foreground = ContextVar("negative_ownership_foreground", default=False)
 
     def no_rows(*args, **kwargs):
         conn, version = opened(*args, **kwargs)
 
         def authorize(action, table, *_):
             # These store tables contain rows or publications, not declaration ownership.
-            if action == sqlite3.SQLITE_READ and table in ("items", "held_candidates", "projection_state"):
-                attempted.append(table)
-                return sqlite3.SQLITE_DENY
+            if foreground.get() and action == sqlite3.SQLITE_READ:
+                observed.add(table)
+                if table in ("items", "held_candidates", "projection_state"):
+                    attempted.append(table)
+                    return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
         conn.set_authorizer(authorize)
         return conn, version
 
     monkeypatch.setattr(connection, "_open_read_only", no_rows)
-    assert "ordinary-body" in call(root, "read_memory", path=path)["body"]
+    token = foreground.set(True)
+    try:
+        assert "ordinary-body" in call(root, "read_memory", path=path)["body"]
+    finally:
+        foreground.reset(token)
+    assert observed, "the foreground ownership proof did not reach the read observer"
     assert attempted == []
 
 

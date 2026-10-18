@@ -6555,69 +6555,76 @@ def op_activate_context(
     # Finalization and logging share the leaf's budget, including error paths.
     bound_token = None
     try:
-        bounded = working_set_conversation_module.bound(conversation)
-        # The dispatcher runs this as a foreground request, ahead of in-process
-        # bulk passes (`writer_lease._foreground_priority_request`).
-        with (
-            # Collector pauses inside the call, as the `runtime.gc` span.
-            call_spans_module.gc_window(),
-            state_paths_module.resolution_scope(),
-            working_set_runtime_module.defer_index_refreshes(),
-        ):
-            if readiness_module.runtime_managed() and request_budget_module.current() is None:
-                bound_token = request_budget_module.set_current(
-                    request_budget_module.RequestBudget(
-                        seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
-                    )
-                )
-            packet = _op_activate_context_body(
-                vault_root,
-                turn,
-                max_chars,
-                purpose=purpose,
-                continuity=continuity,
-                anchor=anchor,
-                include_timings=include_timings,
-                client=client,
-                session=session,
-                workspace=workspace,
-                conversation=bounded,
-                observation_timings=observation_timings,
-                trigger=trigger,
-                intent_resolution=intent_resolution,
-            )
-            # After the guard and outside the packet cache, like `continuity`:
-            # at a caller's session start, at most one upkeep item, and only in
-            # the process whose background worker proposed it. Never raises.
-            from . import sensed_model
-            from . import upkeep as upkeep_module
+        from .collection_store import ownership
 
-            upkeep_module.for_packet(vault_root, packet, session=session)
-            # Also outside the cache: each resolved anchor page's sensed status.
-            sensed_model.for_packet(vault_root, packet)
-            from . import due_state as due_state_module
+        with egress_module.disclosure_boundary(vault_root, "activate_context", join_existing=True) as collector:
+            try:
+                with ownership.read_scope(vault_root, finalize=True):
+                    bounded = working_set_conversation_module.bound(conversation)
+                    # The dispatcher runs this as a foreground request, ahead of in-process
+                    # bulk passes (`writer_lease._foreground_priority_request`).
+                    with (
+                        # Collector pauses inside the call, as the `runtime.gc` span.
+                        call_spans_module.gc_window(),
+                        state_paths_module.resolution_scope(),
+                        working_set_runtime_module.defer_index_refreshes(),
+                    ):
+                        if readiness_module.runtime_managed() and request_budget_module.current() is None:
+                            bound_token = request_budget_module.set_current(
+                                request_budget_module.RequestBudget(
+                                    seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                                )
+                            )
+                        packet = _op_activate_context_body(
+                            vault_root,
+                            turn,
+                            max_chars,
+                            purpose=purpose,
+                            continuity=continuity,
+                            anchor=anchor,
+                            include_timings=include_timings,
+                            client=client,
+                            session=session,
+                            workspace=workspace,
+                            conversation=bounded,
+                            observation_timings=observation_timings,
+                            trigger=trigger,
+                            intent_resolution=intent_resolution,
+                        )
+                        # After the guard and outside the packet cache, like `continuity`:
+                        # at a caller's session start, at most one upkeep item, and only in
+                        # the process whose background worker proposed it. Never raises.
+                        from . import sensed_model
+                        from . import upkeep as upkeep_module
 
-            # Guarded material supplies relevance; the agent decides whether to raise it.
-            due_state_module.for_activation(vault_root, packet, purpose=purpose)
-        _carry_thread_through_abstention(packet, continuity)
-        _withhold_vault_generation(vault_root, packet)
-        if intent_resolution is not None:
-            packet["trigger"] = trigger
-            packet["intent_resolution"] = {"status": intent_resolution["status"]}
-        declared_initiator = working_set_heat_module.client_label(initiator)
-        if declared_initiator:
-            packet["initiator"] = declared_initiator
-        # Every packet reports how its conversation was bounded; the compiler has
-        # already said `absent` when it skipped the stage for the request's budget.
-        if isinstance(packet.get("generation"), dict):
-            packet["generation"].setdefault("conversation", bounded.state)
-        # Served packets include optional omissions; abstentions retain their own cause.
-        if packet.get("abstained") is False:
-            active_budget = request_budget_module.current()
-            block = active_budget.as_response_block() if active_budget is not None else None
-            if block is not None:
-                packet["request_budget"] = block
-        return packet
+                        upkeep_module.for_packet(vault_root, packet, session=session)
+                        # Also outside the cache: each resolved anchor page's sensed status.
+                        sensed_model.for_packet(vault_root, packet)
+                        from . import due_state as due_state_module
+
+                        # Guarded material supplies relevance; the agent decides whether to raise it.
+                        due_state_module.for_activation(vault_root, packet, purpose=purpose)
+                    _carry_thread_through_abstention(packet, continuity)
+                    _withhold_vault_generation(vault_root, packet)
+                    if intent_resolution is not None:
+                        packet["trigger"] = trigger
+                        packet["intent_resolution"] = {"status": intent_resolution["status"]}
+                    declared_initiator = working_set_heat_module.client_label(initiator)
+                    if declared_initiator:
+                        packet["initiator"] = declared_initiator
+                    # Every packet reports how its conversation was bounded; the compiler has
+                    # already said `absent` when it skipped the stage for the request's budget.
+                    if isinstance(packet.get("generation"), dict):
+                        packet["generation"].setdefault("conversation", bounded.state)
+                    # Served packets include optional omissions; abstentions retain their own cause.
+                    if packet.get("abstained") is False:
+                        active_budget = request_budget_module.current()
+                        block = active_budget.as_response_block() if active_budget is not None else None
+                        if block is not None:
+                            packet["request_budget"] = block
+                    return packet
+            finally:
+                egress_module.emit_boundary_receipt(collector)
     except Exception as error:
         outcome = "refused" if isinstance(error, ValueError) else "error"
         error_code = type(error).__name__
