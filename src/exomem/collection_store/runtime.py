@@ -388,9 +388,15 @@ class CollectionStoreRuntime:
             return False
         if not self.path.exists():
             return True
-        # A takeover that is pending on the store's migration still releases the lease.
         with closing(connection.open_head_reader(self.path)) as reader:
-            return authority.pending_create(reader) is None
+            intent = authority.pending_create(reader)
+        if intent is None:
+            return True
+        # A fresh reader accepted no work; the migration owner still owes its own publication.
+        # A formerly admitted producer or pending create must retain its head handback obligation.
+        return (intent["kind"] == authority.MIGRATE and self._publisher is None
+                and self._admitted_token is None and self._acquisition is not None
+                and self._acquisition.fencing_token == token and self._acquisition.granted)
 
     def status(self):
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
@@ -684,10 +690,11 @@ class CollectionStoreRuntime:
         except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
             logger.warning("pending collection views were not installed before the handoff", exc_info=True)
 
-    def flush(self, token, *, deadline, cancelled=None):
+    def flush(self, token, *, deadline, cancelled=None, drain_views=True):
         """Called only after admission stops, drainage and boundary acquisition."""
         with self._publication_writer(token) as writer:
-            self._drain_views(writer, deadline=deadline, cancelled=cancelled)
+            if drain_views:
+                self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
@@ -742,12 +749,12 @@ def serve(vault_root, manager):
     Called at service startup and standby promotion. A vault that routes nothing to a
     store starts its thread at its first store-routed request instead.
     """
-    from . import authority
+    from . import ownership
 
     root = Path(vault_root).resolve()
     with _SERVERS_LOCK:
         _SERVED[root] = manager
-    if authority.read_marker(root) is not None:
+    if not ownership.file_only(root):
         _server(root)
 
 
@@ -771,27 +778,26 @@ def route(command, vault_root, arguments):
         return _curation_route(command, root, arguments)
     if command not in _STORE_COMMANDS:
         return None
-    from . import authority
+    from . import ownership
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
-    raw = authority.read_marker(root)
+    proof = ownership.current(root)
     summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
-    if raw is not None or summary:
+    if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
 
         connection.load_store_libraries()
     if summary:
-        if raw is None:
+        if proof.marker is None:
             from . import admission, capability
 
             capability.require_records_summary(root)
             raise admission.enrollment_required()
     elif command == "record_memory" and arguments.get("action") in {"describe", "inspect"} and selector is None:
-        server = None if raw is None else _server(root)
+        server = None if proof.marker is None else _server(root)
         return server if server is not None and server.runtime is not None else None
-    elif selector is None or raw is None or (authority.selected_entry(
-            root, authority.parse_marker(root, raw), selector) is None and not _creating(root, selector)):
+    elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
         return None
     server = _server(root)
     if server is None and not summary:
@@ -808,20 +814,17 @@ def _curation_route(command, root, arguments):
 
     A step on a collection the store owns commits through the store writer, which only the store
     thread holds, so the whole command runs there. Every other curation, in a vault with a store
-    or without one, keeps its path. Where no service serves the vault, or the marker cannot be
-    read, nothing is routed: the step's own resolution then refuses, and it alone decides whether
-    this caller may hear that the collection exists. Raising here would tell every caller first.
+    or without one, keeps its path. With no service or an unavailable canonical ownership proof,
+    nothing is routed. The step's own resolution then refuses and alone decides whether this caller
+    may hear that the collection exists. Raising here would tell every caller first.
     """
-    from . import authority, curation_step
+    from ..cli_ops import OpError
+    from . import curation_step
 
     try:
-        raw = authority.read_marker(root)
-        if raw is None:
+        if not curation_step.needs_store(root, command, arguments):
             return None
-        marker = authority.parse_marker(root, raw)
-    except connection.CollectionStoreError:
-        return None
-    if not curation_step.needs_store(root, marker, command, arguments):
+    except (connection.CollectionStoreError, OpError):
         return None
     connection.load_store_libraries()
     return _server(root)
@@ -832,7 +835,7 @@ def projection_route(vault_root, path):
     import os
 
     from ..cli_ops import OpError
-    from . import authority
+    from . import ownership
     from .preview import bound_writer
 
     root = Path(vault_root)
@@ -841,19 +844,14 @@ def projection_route(vault_root, path):
     # Resolve Windows root junctions before no-follow anchoring.
     if os.name == "nt" or root.is_symlink():
         root = root.resolve()
-    raw = authority.read_marker(root)
-    if raw is None:
+    if not ownership.relevant(path):
         return None
-    canonical = root.resolve()
+    canonical = state_paths.resolved_vault_path(root, expanduser=False)
     if canonical != root:
         # Bind marker bytes to the canonical root, never to the earlier path spelling.
         # A root that is already canonical was just read there: recall routes every hit.
         root = canonical
-        raw = authority.read_marker(root)
-        if raw is None:
-            return None
-    marker = authority.parse_marker(root, raw)
-    entry = authority.owned_entry(root, marker, path)
+    entry = ownership.owned(root, path)
     if entry is None:
         return None
     server = _server(root)
@@ -1065,6 +1063,7 @@ class StoreServer:
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
         self._edit_handle = None
+        self._history_policy = None  # the handle and compiled policy whose history pages the drain has queued
         # False waits for exact-path lookup; True retains an unhandled hint for the census.
         self._view_changes = {}
         self._view_census_needed = False
@@ -1504,6 +1503,13 @@ class StoreServer:
                     and any(not checked for checked in self._view_changes.values()):
                 wait = 0.0
         try:
+            from ..governance import policy
+
+            history_policy = (self.runtime._handle, policy.load(self.root).fingerprint)
+            if history_policy != self._history_policy:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    fingerprint = _mutate(self.root, writer.invalidate_history_pages)
+                    self._history_policy = (self.runtime._handle, fingerprint)
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                     self._views_after, self._views_passes = None, 0

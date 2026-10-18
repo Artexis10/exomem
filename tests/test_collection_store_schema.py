@@ -381,7 +381,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 12
+    assert schema.SCHEMA_VERSION == 13
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -428,6 +428,17 @@ def test_a_store_newer_than_this_release_refuses(tmp_path: Path) -> None:
     assert refused.value.code == "COLLECTION_STORE_SCHEMA_NEWER"
 
 
+def test_schema_12_readers_refuse_projection_exposure_metadata(store, monkeypatch):
+    """An old direct writer must not discard historical policy from a schema 13 descriptor."""
+    path = store.path
+    store.close()
+    monkeypatch.setattr(schema, "SCHEMA_VERSION", 12)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_reader(path)
+    with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+        connection.open_writer(path, lease_check=_allow)
+
+
 @pytest.mark.parametrize("revision", [None, "unknown", "7"])
 def test_present_revision_metadata_cannot_masquerade_as_legacy(
     store: connection.WriterConnection, revision: str | None,
@@ -447,7 +458,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["12", "9"])
+@pytest.mark.parametrize("revision", ["13", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -462,12 +473,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 12
+        assert schema.schema_version(store.connection) == 13
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 12
+            assert schema.schema_version(reader) == 13
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("12",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("13",)]
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -481,7 +492,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("12",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("13",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 

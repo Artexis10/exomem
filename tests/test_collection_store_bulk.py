@@ -53,6 +53,7 @@ def test_public_bulk_refuses_authored_view_stamp_without_changing_canonical_data
     # A custom schema must not let bulk persist an authored stamp hidden by the renderer.
     text = manifest_text().replace("    count:", "    exomem_view: {type: string}\n    count:")
     store.create_collection(manifest_path(), text, why="create")
+    store.reconcile_views()
     _evidence(store.root)
     before = tuple(store.connection.iterdump())
     manifest = store.root / manifest_path()

@@ -24,6 +24,8 @@ These PRs do not cover P4 authoring, the full P1a phase, or production custody o
 
 ## S1 — First owner slice: NEW Records summary collection in the real vault
 
+Deployment acceptance follows the single-host GA scope in `move-structured-collections-to-sqlite`. Local admission, restart, consistent backup, explicit restore and compatibility remain required. Cross-host takeover, transport and fleet custody proof are deferred. Performance targets and the recorded S1 safety obligations remain unchanged.
+
 The first slice is owner-only. The parent §12/spec latency exception separates the two 15/20 ms optimisation targets from S1 eligibility; report actual measured performance and keep unmet phase tasks open. Required foundation and S1.2a/b safety cannot be waived, and existing collections remain file-authoritative.
 
 The owner-approved supported-client boundary (2026-10-04) scopes S1.2a/b's older-reader checks to supported launchers, including fresh-root copy/restore, and sync custody to verified supported deployment adapters across their participating endpoints. Test an actual unsupported interpreter through the launcher and actual adapter custody, not attestations. Unknown custody leaves C pending without disabling A/B or knowledge; no implementation checkbox is closed by this policy decision.

@@ -3171,6 +3171,14 @@ def agent_audit_history(
     authorize_path: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Return the bounded agent-mutation chain without canonical item values."""
+    from .collection_store.preview import selected_writer
+
+    writer = selected_writer(vault_root, collection)
+    if writer is not None:
+        from .collection_store.history import agent_history
+
+        with writer.read_collection(collection) as manifest:
+            return agent_history(writer, manifest)
     chain = _inspect_audit_chain(Path(vault_root), collection, authorize_path=authorize_path)
     events = chain.events[:_MAX_AGENT_AUDIT_HISTORY]
     return {

@@ -1,7 +1,10 @@
 """File-mode curation receipts remain provable after migration and view regeneration."""
 
+import json
+
 import pytest
 from test_collection_store_file_writers import (
+    EPISODE,
     episode,
     migrated,
     prepare_and_route,
@@ -13,11 +16,14 @@ from test_collection_store_migration import stop_writer
 from test_collection_store_service import OWNER, call
 from test_episode_records_leaf import COLLECTION, READING, _collection
 
-from exomem import commands, episode_workflow, record_formats, records
+from exomem import command_surface, commands, episode_workflow, record_formats, records
+from exomem import schema as schema_module
 from exomem import structured_collections as collections
+from exomem.collection_store import governance as canonical_governance
 from exomem.collection_store import runtime
 from exomem.collection_store.preview import bound_writer
-from exomem.governance.principal import request_scope
+from exomem.governance import egress
+from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.init import init_vault
 
 
@@ -87,7 +93,39 @@ def test_a_file_receipt_survives_migration_and_view_regeneration(env, capsys, mo
                      expected_container_hash=guard, expected_item_version=current["item_version"],
                      why="Correct the current observation.")
             head = store_head(root)
-            assert [row["readback"] for row in episode(root, action="coverage")["receipts"]] == ["changed"]
+            covered = episode(root, action="coverage")
+            assert [row["readback"] for row in covered["receipts"]] == ["changed"]
+            command = next(command for command in commands.product_commands_for("mcp")
+                           if command.name == "episode_memory")
+            bound = command_surface.bind_vault(
+                command.leaf, root, schema_module.load_source_schema(root), command=command)
+            with request_scope(OWNER):
+                assert bound(action="coverage", episode=EPISODE)["receipts"] == covered["receipts"]
+                # A wire copy has no authority to name stale physical bytes.
+                assert egress.postfilter("episode_memory", json.loads(json.dumps(covered)), root)["receipts"] == []
+                evidence = canonical_governance._metadata_evidence(covered)
+                receipt = covered["receipts"][0]
+                unproven = {**receipt, "leaf_id": "unproven-leaf", "operation_id": "unproven-operation"}
+                mixed = canonical_governance._seal_metadata_projection({
+                    **covered, "receipts": [unproven, receipt],
+                    "sink": [{"path": receipt["path"]}],
+                }, evidence)
+                cleaned = egress.postfilter("episode_memory", mixed, root)
+                assert cleaned["receipts"] == [receipt]
+                assert cleaned["sink"] == []
+                assert egress.postfilter("episode_memory", cleaned, root)["receipts"] == [receipt]
+                # Editing a carrier cannot retain its producer's whole-payload binding.
+                covered["body"] = f"Read [[{receipt['path']}]] next."
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.postfilter("episode_memory", covered, root)
+                del covered["body"]
+                covered["coverage_current"] = "verified"
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.postfilter("episode_memory", covered, root)
+                covered["coverage_current"] = "changed"
+            with request_scope(RequestPrincipal(audience_id="another-reader", surface="mcp")):
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    egress.postfilter("episode_memory", covered, root)
             assert store_head(root) == head
     finally:
         service.stop()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping
@@ -18,7 +19,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from .. import access, find_corpus, records, vault
+from .. import access, find_corpus, vault
 from .. import structured_collections as collections
 from ..find_types import ParsedPage
 from ..governance import authorization_session_authority as authority
@@ -143,6 +144,26 @@ class CanonicalSubject:
     basis: CanonicalGrantBasis
 
 
+def content_available(path, identity, access_rules, access_blocked, tombstones):
+    """Share the current content floor across canonical subjects and generated history."""
+    return (not access_blocked
+            and not lifecycle.is_tombstoned_in(tombstones, path)
+            and not (identity and lifecycle.is_tombstoned_in(tombstones, identity))
+            and not access._matches(access_rules["excluded"], access._kb_relative(path)))
+
+
+def subject_policy(basis, scope_ids, effective):
+    """Apply the registry's default audience before using the shared decision kernel."""
+    if basis.default_audience == "owner":
+        scopes = {key: replace(scope, default_deny=True) for key, scope in effective.scopes.items()}
+        if not scope_ids:
+            default = f"collection-type-default:{basis.type_name}:{basis.type_version}"
+            scopes[default] = policy.Scope(id=default, source="collection-type", default_deny=True)
+            scope_ids = (default,)
+        effective = replace(effective, scopes=scopes)
+    return scope_ids, effective
+
+
 @dataclass(frozen=True, slots=True)
 class SummaryRelease:
     """A summary collection's release for one operation, decided without holding its row subjects."""
@@ -187,7 +208,7 @@ class _ReleaseSelection:
     notice_decisions: tuple[Decision, ...] | None
 
 
-_INSPECTION_SEAL = object()
+_METADATA_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,15 +231,33 @@ class _CanonicalInspectionEvidence:
         raise TypeError("canonical inspection evidence is process-local")
 
 
-class _CanonicalInspectionProjection(dict[str, Any]):
-    """JSON-compatible inspection with private canonical metadata provenance."""
+@dataclass(frozen=True, slots=True)
+class _CanonicalCoverageEvidence:
+    """Current contributors and stable receipt owners for one episode coverage result."""
 
-    def __init__(self, value, evidence: _CanonicalInspectionEvidence) -> None:
-        super().__init__(value)
-        self._canonical_inspection_evidence = evidence
+    root: Path
+    handle: object
+    store_identity: tuple[tuple[str, str], ...]
+    principal: RequestPrincipal
+    purpose: str | None
+    contributors: tuple[tuple[str, str, str, CanonicalSubject], ...]
+    references: tuple[tuple[tuple[str | int, ...], str], ...]
+    payload_hash: str
+    _seal: object
 
     def __reduce__(self) -> object:
-        raise TypeError("canonical inspection projection is process-local")
+        raise TypeError("canonical coverage evidence is process-local")
+
+
+class _CanonicalMetadataProjection(dict[str, Any]):
+    """JSON-compatible output with private canonical metadata provenance."""
+
+    def __init__(self, value, evidence) -> None:
+        super().__init__(value)
+        self._canonical_metadata_evidence = evidence
+
+    def __reduce__(self) -> object:
+        raise TypeError("canonical metadata projection is process-local")
 
     def __copy__(self):
         return dict(self)
@@ -230,13 +269,19 @@ class _CanonicalInspectionProjection(dict[str, Any]):
         return deepcopy(dict(self), memo)
 
 
-def _inspection_evidence(value: Any) -> _CanonicalInspectionEvidence | None:
-    if type(value) is not _CanonicalInspectionProjection:
+def _metadata_evidence(value: Any) -> _CanonicalInspectionEvidence | _CanonicalCoverageEvidence | None:
+    if type(value) is not _CanonicalMetadataProjection:
         return None
-    evidence = getattr(value, "_canonical_inspection_evidence", None)
-    if type(evidence) is not _CanonicalInspectionEvidence or evidence._seal is not _INSPECTION_SEAL:
+    evidence = getattr(value, "_canonical_metadata_evidence", None)
+    if (type(evidence) not in (_CanonicalInspectionEvidence, _CanonicalCoverageEvidence)
+            or evidence._seal is not _METADATA_SEAL):
         OperationAuthorization.refuse()
     return evidence
+
+
+def _inspection_evidence(value: Any) -> _CanonicalInspectionEvidence | None:
+    evidence = _metadata_evidence(value)
+    return evidence if type(evidence) is _CanonicalInspectionEvidence else None
 
 
 def _inspection_reference(value, location):
@@ -249,12 +294,51 @@ def _inspection_reference(value, location):
 
 
 def _seal_inspection_projection(value, evidence):
+    return _seal_metadata_projection(value, evidence)
+
+
+def _coverage_receipts(value):
+    """Validate the fixed receipt fields and readback tokens emitted by episode_workflow.coverage."""
+    if (not isinstance(value, Mapping) or value.get("action") != "coverage"
+            or type(value.get("receipts")) is not list
+            or value.get("coverage_current") not in ("verified", "changed")):
+        OperationAuthorization.refuse()
+    identities = set()
+    for receipt in value["receipts"]:
+        if (type(receipt) is not dict or receipt.keys() != {
+                "candidate_key", "leaf_id", "operation_id", "receipt_digest", "path", "readback"}
+                or any(type(receipt[name]) is not str or not receipt[name]
+                       for name in ("candidate_key", "leaf_id", "operation_id", "receipt_digest"))
+                # nosemgrep: ep-word-membership -- episode_workflow.coverage fixes these wire readback tokens.
+                or receipt["readback"] not in ("verified", "changed", "unavailable")
+                or (receipt["path"] is None) != (receipt["readback"] == "unavailable")
+                or receipt["path"] is not None and type(receipt["path"]) is not str):
+            OperationAuthorization.refuse()
+        identity = receipt["leaf_id"], receipt["operation_id"]
+        if identity in identities:
+            OperationAuthorization.refuse()
+        identities.add(identity)
+    return value["receipts"]
+
+
+def _coverage_references(value, contributors):
+    owners = {(leaf, operation, path) for leaf, operation, path, _subject in contributors}
+    return tuple((("receipts", index, "path"), receipt["path"])
+                 for index, receipt in enumerate(_coverage_receipts(value))
+                 if (receipt["leaf_id"], receipt["operation_id"], receipt["path"]) in owners)
+
+
+def _seal_metadata_projection(value, evidence):
     """Only the producer and trusted terminal transformations call this."""
-    references = tuple((location, path) for location, path in evidence.references
-                       if _inspection_reference(value, location) == path)
+    if type(evidence) is _CanonicalCoverageEvidence:
+        # File receipt removal can shift indexes; only the original sealed owners receive new slots.
+        references = _coverage_references(value, evidence.contributors)
+    else:
+        references = tuple((location, path) for location, path in evidence.references
+                           if _inspection_reference(value, location) == path)
     evidence = replace(evidence, references=references,
                        payload_hash=hashlib.sha256(_json(value).encode()).hexdigest())
-    return _CanonicalInspectionProjection(value, evidence)
+    return _CanonicalMetadataProjection(value, evidence)
 
 
 def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
@@ -262,17 +346,8 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
     return tuple(iter_subjects(conn, cid, logical_vault_id, identity=identity, view_path=view_path))
 
 
-def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
-                  view_path=None, row_key=None, include_held=True, batch_size=128,
-                  query_order=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata, yielding the manifest before opening row cursors.
-
-    ``row_key`` selects one item by its key alone: no manifest and no held candidate.
-    """
-    if type(batch_size) is not int or not 1 <= batch_size <= 128:
-        raise ValueError("canonical subject batches must contain 1 to 128 rows")
-    if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
-        raise ValueError("canonical subject lookup must have one selector")
+def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
+    """Load one canonical contract for streamed or selected subject construction."""
     row = conn.execute(
         "SELECT c.manifest_path,c.source_path,c.layout,c.manifest_version,m.manifest_hash,m.governance_json,"
         "c.type_name,c.type_version,t.declaration_hash,t.declaration_json,ct.builtin,c.view_mode "
@@ -291,7 +366,6 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         raise ValueError("canonical type identity differs")
     manifest_meta = _metadata(metadata)
     # Summary rows have no view file; ordinary declared row policy still governs them.
-    summary = view_mode == "summary"
     audience = declared.default_audience
 
     def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain, quarantined=False):
@@ -305,6 +379,20 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                                     name, type_version, declaration_hash, domain, bool(quarantined))
         return CanonicalSubject(cid, row_id, basis)
 
+    return path, source_path, layout, view_mode, manifest_meta, declared, make, metadata, version, content_hash
+
+
+def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
+                  view_path=None, row_key=None, include_held=True, batch_size=128,
+                  query_order=False) -> Iterator[CanonicalSubject]:
+    """Stream canonical metadata; a row key selects no manifest or held candidate."""
+    if type(batch_size) is not int or not 1 <= batch_size <= 128:
+        raise ValueError("canonical subject batches must contain 1 to 128 rows")
+    if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
+        raise ValueError("canonical subject lookup must have one selector")
+    (path, source_path, layout, view_mode, manifest_meta, declared, make,
+     metadata, version, content_hash) = subject_factory(conn, cid, logical_vault_id)
+    summary = view_mode == "summary"
     if identity in (None, path) and row_key is None:
         yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
@@ -413,10 +501,19 @@ class ReleaseCache:
     """Handle-owned pure state; proposed identities belong to the transaction."""
 
     def __init__(self, conn):
+        from .history import PrefixProofs
         from .inspection import InspectionCache
 
         self.conn = conn
         self.inspections = InspectionCache()
+        self.history = PrefixProofs()
+        self.history_windows = OrderedDict()
+        self.history_sweep = None
+        self.history_sweep_before = None
+        self.history_sweep_next = None
+        self.history_sweep_staged = False
+        self.history_queue_next = {}
+        self.inspections.reserve(sys.getsizeof(self.history_windows))
         self.states = OrderedDict()
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
@@ -446,13 +543,89 @@ class ReleaseCache:
                 self.clear()
 
     def clear(self):
+        self.discard_history()
         self.inspections.clear()
+        self.history.clear()
         self.states.clear()
         self.contracts.clear()
         self.memberships.clear()
         self.decisions.clear()
         self.replacements.clear()
         self.observed = self._stamp()
+
+    def discard_history(self, cid=None, *, new_row=False):
+        changed = False
+        for key, window in tuple(self.history_windows.items()):
+            if (cid is None or key[0] == cid) and (not new_row or window.unresolved):
+                del self.history_windows[key]
+                changed = True
+        unresolved = (self.history_sweep is not None and self.history_sweep.unresolved
+                      and (cid is None or self.history_sweep.key[0] == cid))
+        unresolved |= (self.history_sweep_staged and self.history_sweep_next is not None
+                       and self.history_sweep_next.unresolved and (cid is None or self.history_sweep_next.key[0] == cid))
+        changed |= unresolved
+        if not new_row or changed:
+            if self.history_sweep is not None and (cid is None or self.history_sweep.key[0] == cid):
+                self.history_sweep = None
+            if self.history_sweep_staged and (self.history_sweep_next is None or cid is None
+                                             or self.history_sweep_next.key[0] == cid):
+                self.history_sweep_next, self.history_sweep_staged = None, False
+            self.history_queue_next = {key: value for key, value in self.history_queue_next.items()
+                                       if cid is not None and key[0] != cid}
+        self._charge_history()
+        return changed
+
+    def _charge_history(self):
+        from .inspection import _size
+
+        size = sys.getsizeof(self.history_windows)
+        size += sum(_size(key) + _size(window) for key, window in self.history_windows.items())
+        size += _size((self.history_sweep, self.history_sweep_next, self.history_sweep_before, self.history_queue_next))
+        self.inspections.reserve(size)
+        return size
+
+    def remember_history(self, key, window):
+        from .history import MAX_READER_WINDOWS
+
+        self.history_windows[key] = window
+        self.history_windows.move_to_end(key)
+        # One handle keeps at most sixteen reader windows within its existing inspection byte budget.
+        while self.history_windows:
+            self._charge_history()
+            if len(self.history_windows) <= MAX_READER_WINDOWS and self.inspections._bytes <= self.inspections.maximum_bytes:
+                return
+            evicted, _ = self.history_windows.popitem(last=False)
+            self._forget_history_coverage(evicted[0])
+        self._charge_history()
+
+    def _forget_history_coverage(self, cid):
+        for key, window in tuple(self.history_windows.items()):
+            if key[0] == cid and window.queued is not None:
+                self.history_windows[key] = replace(window, queued=None)
+        self.history_queue_next = {key: value for key, value in self.history_queue_next.items() if key[0] != cid}
+
+    def stage_history_queue(self, key, checkpoint):
+        if key in self.history_windows:
+            self.history_queue_next[key] = checkpoint
+        self._charge_history()
+
+    def stage_history_sweep(self, sweep):
+        self.history_sweep_next, self.history_sweep_staged = sweep, True
+        self._charge_history()
+        if self.inspections._bytes > self.inspections.maximum_bytes:
+            self.inspections.clear()
+        while self.history_sweep_next is not None and self.history_sweep_next.counts \
+                and self.inspections._bytes > self.inspections.maximum_bytes:
+            self.history_sweep_next = replace(self.history_sweep_next, counts=self.history_sweep_next.counts[:-1],
+                                              excess_domains=True)
+            self._charge_history()
+        while self.history_windows and self.inspections._bytes > self.inspections.maximum_bytes:
+            evicted, _ = self.history_windows.popitem(last=False)
+            self._forget_history_coverage(evicted[0])
+            self._charge_history()
+
+    def queued_history_sweep(self):
+        return self.history_sweep_next if self.history_sweep_staged else self.history_sweep
 
     def begin(self):
         self.check()
@@ -461,6 +634,9 @@ class ReleaseCache:
         self.replacements = {}
         self.accounted = self.conn.total_changes
         self.prepared = {}
+        self.history_sweep_before = self.history_sweep
+        self.history_sweep_next, self.history_sweep_staged = None, False
+        self.history_queue_next = {}
 
     def account(self, changes):
         if self.pending is not None:
@@ -515,12 +691,28 @@ class ReleaseCache:
                         for _denied, dirty in state.summaries.values():
                             dirty[identity] = current
             self._evict()
+            if self.history_sweep_staged:
+                self.history_sweep = self.history_sweep_next
+            for key, checkpoint in self.history_queue_next.items():
+                if key in self.history_windows:
+                    self.history_windows[key] = replace(self.history_windows[key], queued=checkpoint)
         elif changed or self.unmanaged:
+            self.discard_history()
             self.inspections.clear()
+            self.history.clear()
             self.states.clear()
             self.contracts.clear()
             self.memberships.clear()
             self.decisions.clear()
+        if not committed:
+            self.history.clear()
+            self.discard_history()
+        if not committed:
+            self.history_sweep = self.history_sweep_before
+        self.history_sweep_before = None
+        self.history_sweep_next, self.history_sweep_staged = None, False
+        self.history_queue_next = {}
+        self._charge_history()
         self.pending = None
         self.replacements = {}
         self.prepared = {}
@@ -814,15 +1006,12 @@ class OperationAuthorization:
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
-        if self.tombstones and (lifecycle.is_tombstoned_in(self.tombstones, path)
-                               or lifecycle.is_tombstoned_in(self.tombstones, basis.identity)):
+        if not content_available(path, basis.identity, self.access, self.access_blocked, self.tombstones):
             return Decision(0)
-        if self.access["excluded"] or self.mutation:
+        if self.mutation:
             relative = access._kb_relative(path)
-            if access._matches(self.access["excluded"], relative):
-                return Decision(0)
-            if self.mutation and (access._matches(self.access["readonly"], relative)
-                                  or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
+            if (access._matches(self.access["readonly"], relative)
+                    or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
                 return Decision(0)
         scope_ids = self.cache.scopes(subject, self.policy)
         ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
@@ -843,14 +1032,7 @@ class OperationAuthorization:
             if authority.SessionMembership(basis.identity, basis.fingerprint, scope_ids) in grant.membership:
                 grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
                                                    grant.audience, grant.ceiling))
-        effective = self.policy
-        if basis.default_audience == "owner":
-            scopes = {key: replace(scope, default_deny=True) for key, scope in effective.scopes.items()}
-            if not scope_ids:
-                default = f"collection-type-default:{basis.type_name}:{basis.type_version}"
-                scopes[default] = policy.Scope(id=default, source="collection-type", default_deny=True)
-                scope_ids = (default,)
-            effective = replace(effective, scopes=scopes)
+        scope_ids, effective = subject_policy(basis, scope_ids, self.policy)
         decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
                           policy=effective, active_grants=grants)
         if not active:
@@ -1208,22 +1390,16 @@ class OperationAuthorization:
         return _CanonicalInspectionEvidence(
             self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
             self.who, self.purpose, selection.manifest, selection.contributors,
-            selection.snapshot, references, "", _INSPECTION_SEAL,
+            selection.snapshot, references, "", _METADATA_SEAL,
         )
 
     def validate_inspection_projection(self, payload, handle):
         """Fresh canonical admission; physical views cannot change this metadata."""
-        from . import views
-
         evidence = _inspection_evidence(payload)
         if evidence is None:
             return None
         try:
-            if (evidence.root != self.root.resolve() or evidence.handle is not handle._inspection_identity
-                    or evidence.principal != self.who or evidence.purpose != self.purpose
-                    or evidence.store_identity != tuple(sorted(views.store_identity(self.conn).items()))
-                    or evidence.payload_hash != hashlib.sha256(_json(payload).encode()).hexdigest()):
-                self.refuse()
+            self._validate_metadata_binding(payload, handle, evidence)
             cid = evidence.manifest.collection_id
             selection = self.inspection_selection(cid)
             contributors_match = (
@@ -1233,6 +1409,48 @@ class OperationAuthorization:
             if (selection.manifest != evidence.manifest or not contributors_match
                     or selection.snapshot != evidence.snapshot):
                 self.refuse()
+            return evidence
+        except (ValueError, TypeError, KeyError, sqlite3.Error):
+            self.refuse()
+
+    def _validate_metadata_binding(self, payload, handle, evidence):
+        from . import views
+
+        if (evidence.root != self.root.resolve() or evidence.handle is not handle._inspection_identity
+                or evidence.principal != self.who or evidence.purpose != self.purpose
+                or evidence.store_identity != tuple(sorted(views.store_identity(self.conn).items()))
+                or evidence.payload_hash != hashlib.sha256(_json(payload).encode()).hexdigest()):
+            self.refuse()
+
+    def coverage_evidence(self, payload, handle, contributors):
+        """Seal only authenticated coverage receipt paths; retain every current contributor."""
+        from . import views
+
+        contributors = tuple(contributors)
+        references = _coverage_references(payload, contributors)
+        if len(references) != len(contributors):
+            self.refuse()
+        return _CanonicalCoverageEvidence(
+            self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
+            self.who, self.purpose, contributors, references, "", _METADATA_SEAL,
+        )
+
+    def validate_coverage_projection(self, payload, writer):
+        """Recheck current contributor authority, including receipts removed by earlier filtering."""
+        evidence = _metadata_evidence(payload)
+        if type(evidence) is not _CanonicalCoverageEvidence:
+            self.refuse()
+        try:
+            self._validate_metadata_binding(payload, writer.handle, evidence)
+            _coverage_receipts(payload)
+            for _leaf, _operation, path, subject in evidence.contributors:
+                row = self.conn.execute(
+                    "SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
+                    (subject.row_id, subject.collection_id),
+                ).fetchone()
+                if (row is None
+                        or writer.admitted_item_metadata(subject.collection_id, row[0], path) != subject):
+                    self.refuse()
             return evidence
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             self.refuse()
@@ -1265,68 +1483,24 @@ class OperationAuthorization:
 
     def projection_subjects(self, path: str) -> tuple[CanonicalSubject, ...] | None:
         """None is an ordinary file; an empty tuple is an unbound owned path."""
-        from . import authority as collection_authority
+        from . import ownership
+        from .preview import production_bound
 
+        proof = ownership.current(self.root, conn=self.conn, private=not production_bound(self.root))
+        entry = proof.owner(self.root, path)
+        if entry is None:
+            return None
+        cid = entry["collection_id"]
+        if cid not in proof.admitted:
+            return ()
+        owners = {cid}
         projection = self.conn.execute(
             "SELECT collection_id,row_id,kind FROM projection_state WHERE path=?", (path,),
         ).fetchone()
-        owners = {row[0] for row in self.conn.execute(
-            "SELECT collection_id,manifest_path,source_path FROM collections "
-            "WHERE manifest_path=? OR source_path=? OR collection_id IN "
-            "(SELECT collection_id FROM items WHERE view_path=? UNION ALL "
-            "SELECT collection_id FROM held_candidates WHERE view_path=? UNION ALL "
-            "SELECT collection_id FROM projection_state WHERE path=?)",
-            (path, path, path, path, path),
-        )}
-        if projection is not None:
-            owners.add(projection[0])
-        for cid, manifest_path, source_path, layout in self.conn.execute(
-            "SELECT collection_id,manifest_path,source_path,layout FROM collections",
-        ):
-            directory = Path(manifest_path).parent
-            roots = ((directory / records._HELD_DIRECTORY).as_posix(),
-                     (directory / "_history").as_posix())
-            log_item = False
-            if layout == "markdown-log" and path.startswith(source_path + "#"):
-                try:
-                    records._validate_item_key(path[len(source_path) + 1:])
-                    log_item = True
-                except collections.CollectionError:
-                    pass
-            if (any(path == root or path.startswith(root + "/") for root in roots)
-                    or path == (directory / "_history.md").as_posix()
-                    or (layout == "markdown-items" and
-                        (path == source_path or path.startswith(source_path + "/")))
-                    or log_item):
-                owners.add(cid)
-        raw = collection_authority.read_marker(self.root)
-        if raw is not None:
-            marker = collection_authority.parse_marker(self.root, raw)
-            if marker["version"] == 2:
-                entry = collection_authority.owned_entry(self.root, marker, path)
-                if entry is None:
-                    return None
-                collection_authority.require_selected(self.conn, marker, entry, root=self.root)
-                if owners - {entry["collection_id"]}:
-                    return ()
-                owners = {entry["collection_id"]}
-            entries = {cid: collection_authority.selected_entry(self.root, marker, cid) for cid in owners}
-            intent = collection_authority.pending_create(self.conn)
-            if intent is not None and any(entries[cid] is None for cid in
-                                          collection_authority.intent_collection_ids(intent) & owners):
-                return ()
-            owners = {cid for cid, entry in entries.items() if entry is not None}
-            for cid in owners:
-                collection_authority.require_selected(self.conn, marker, entries[cid], root=self.root)
-            entry = collection_authority.selected_entry(self.root, marker, path)
-            if entry is not None and owners != {entry["collection_id"]}:
-                return ()
-            if projection is not None and projection[0] not in owners:
-                projection = None
-        if not owners:
-            return None
+        if projection is not None and projection[0] != cid:
+            return ()
         # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-        if projection is not None and projection[2] not in {"manifest", "item", "held", "log", "summary"}:
+        if projection is not None and projection[2] not in {"manifest", "item", "held", "log", "summary", "history"}:
             return ()
         if len(owners) != 1:
             return ()
@@ -1335,6 +1509,8 @@ class OperationAuthorization:
             "SELECT manifest_path,source_path,layout FROM collections WHERE collection_id=?", (cid,),
         ).fetchone()
         self._load_grants()
+        if projection is not None and projection[2] == "history":
+            return subjects(self.conn, cid, self.logical_vault_id, identity=manifest_path)
         if projection is not None and projection[2] == "summary":
             release = self.summary_release(cid)
             return (release.manifest,) if release is not None else ()
@@ -1374,10 +1550,9 @@ class OperationAuthorization:
             if not plan.owner and projection_kind == ("summary",):
                 # The stored page carries private stamps; direct reads use the canonical released overview instead.
                 return Decision(0)
-            if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
-                # Raw file views carry complete fields and guards. Recipients use canonical record/summary projections.
-                if projection_kind != ("summary",):
-                    return Decision(0)
+            if not plan.owner and plan.whole_fields != set(manifest.schema.fields):
+                # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
+                return Decision(0)
             decisions = tuple(self.decision(subject) for subject in targets)
             if path != targets[0].basis.identity:
                 if decisions[0].level < 6:
@@ -1386,6 +1561,15 @@ class OperationAuthorization:
             decision = egress._meet_decisions(decisions)
             if decision.level == 0:
                 return decision
+            if projection_kind == ("history",):
+                from . import history
+
+                if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
+                    return Decision(0)
+                context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
+                if not context.exists(path):
+                    # A retired page must not disclose a raw-history boundary through an empty matching header.
+                    return Decision(0)
             if content is not None:
                 from . import views
 
@@ -1395,7 +1579,7 @@ class OperationAuthorization:
                     return Decision(0)
                 projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
                 # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-                if projection["kind"] not in {"manifest", "item", "held", "summary", "log"}:
+                if projection["kind"] not in {"manifest", "item", "held", "summary", "log", "history"}:
                     return Decision(0)
                 if projection["kind"] == "item" and not any(
                     subject.row_id == projection["row_id"] for subject in targets[1:]
@@ -1404,6 +1588,7 @@ class OperationAuthorization:
                 manifest = manifest_for(projection["collection_id"])
                 _version, rendered = views.render_view(
                     self.conn, views.store_identity(self.conn), projection, manifest,
+                    root=self.root, cache=self.cache,
                 )
                 if content != rendered.encode("utf-8"):
                     return Decision(0)
@@ -1454,7 +1639,7 @@ class OperationAuthorization:
         return self._allows_path_metadata(path)
 
     def _allows_path_metadata(
-        self, path: str, content_sha256: str | Callable[[], str] | None = None
+        self, path: str, content_sha256: str | Callable[[], str] | None = None, *, metadata=None,
     ) -> bool:
         if not connector_boundary.permits(self.root, path, self.who):
             return False
@@ -1464,16 +1649,19 @@ class OperationAuthorization:
             if content_sha256 is None
             else (path, content_sha256) if isinstance(content_sha256, str) else None
         )
+        if metadata is not None:
+            key = (key, metadata)
         if key in self.file_decisions:
             return self.file_decisions[key].level >= 6
         decision = Decision(0)
         try:
             if (self.failed or self.policy.blocked or self.access_blocked
                     or (not self.who.resolved and not self.policy.empty)
-                    or lifecycle.is_tombstoned_in(self.tombstones, path)
-                    or access._matches(self.access["excluded"], access._kb_relative(path))):
+                    or not content_available(path, None, self.access, self.access_blocked, self.tombstones)):
                 return False
-            scope_ids = membership.evaluate_path_only(self.root, path, self.policy).require_classified()
+            # A renderer supplies canonical metadata; editable bytes never supply this classification proof.
+            scope_ids = (membership.evaluate_metadata(metadata, self.policy) if metadata is not None else
+                         membership.evaluate_path_only(self.root, path, self.policy).require_classified())
             grants = list(self.policy.grants)
             if self.authority is not None and not self.policy.empty:
                 fingerprint = content_sha256

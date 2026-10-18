@@ -4,8 +4,7 @@
 
 Records are Exomem's human-owned layer for observed events and current state:
 training sessions, symptoms, measurements, transactions, maintenance, inventory,
-operational logs, and other longitudinal data. They are not a new database and
-they do not replace Notes or Planning.
+operational logs, and other longitudinal data. They complement Notes and Planning.
 
 ## Product boundary
 
@@ -52,8 +51,7 @@ Outcomes and reusable lessons can then become governed Notes.
 
 ## One public action surface
 
-Use `record_memory`, not a collection of format-specific tools. It has exactly
-five actions:
+Use `record_memory` for collection actions:
 
 | Action | Use it for |
 | --- | --- |
@@ -62,6 +60,49 @@ five actions:
 | `query` | Read a bounded current view, filters, aggregation, saved view, continuation, or optional bounded agent history. Derived JSON, Markdown, and CSV output is not persisted. |
 | `append` | Safely add a new item with a concise reason and current container guard. |
 | `update` | Target one item with its item key, current container and item-version guards, and a concise reason. |
+| `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. |
+| `revise` | Change a collection declaration with current manifest and container guards. |
+| `rebaseline` | Acknowledge an exact, positively established imported audit gap. |
+| `bulk_upsert` | Import a bounded batch of observations from preserved source references. |
+| `import` | Manage a resumable collection import. |
+| `discard` | Discard a held candidate with a reason. |
+| `describe` / `validate` | Read the contract or validate a proposed collection without committing it. |
+
+## Collections in the store
+
+An admitted collection keeps its canonical declaration, rows, versions and audit
+history in SQLite. Collections outside that route retain file authority. The
+migration release gate controls admission; the presence of this reference does
+not enable migration.
+
+Markdown files remain readable views at the collection's existing paths. The
+service acknowledges the durable SQLite save, then publishes item views,
+manifests, log views and history pages asynchronously. Structured queries see
+the saved record immediately. `get_page` reads only a valid physical view;
+that file can lag the saved record. `inspect` reports pending
+views and held view corrections without writing, repairing or publishing them.
+
+The service turns valid item or declaration edits into governed transitions.
+Invalid or stale edits become held corrections. History pages are read-only;
+the service replaces edits to those pages with their canonical render.
+
+Each collection has `_history.md` with its newest 200 released transitions.
+Numbered pages under `_history/` hold older transitions in groups of 500,
+newest first within each page. Pages contain operations, reasons and item links,
+without item values. Every page uses the intersection of its readers' release.
+A mixed bulk transition omits its reason when any effect is withheld.
+
+`query(include_agent_history=true)` returns bounded, governed audit events.
+`history` returns prior item payloads and distinguishes missing legacy content
+from retained content. Import keeps the original audit assessment. Rebaseline
+can acknowledge an imported positive gap; it preserves the discontinuity after
+later writes. Native history and unknown imported history cannot be rebaselined.
+Store mutations leave existing activity-log history untouched.
+
+One service holds the writer lease. Two independent writers against the same
+store are unsupported. Backups use the collection backup command.
+A direct copy of an open SQLite file can omit
+committed WAL data and is not a supported backup.
 
 Natural routing stays simple:
 
@@ -81,8 +122,8 @@ way to rewrite or reinterpret a person's canonical history.
 
 ## Human-owned storage
 
-A collection declares or infers one canonical storage strategy. All three forms
-remain ordinary files that a person can open and change without an AI client:
+A collection with file authority declares or infers one canonical storage strategy.
+These forms remain ordinary files that a person can open and change without an AI client:
 
 1. **Chronological Markdown log** — fast append-heavy dated or stably identified
    blocks, such as a training log.
@@ -93,7 +134,7 @@ remain ordinary files that a person can open and change without an AI client:
    aggregates, and longitudinal analysis. Dataset mutation is deliberately
    refused in this first delivery.
 
-There is no opaque canonical database. Indexes, audit state, and generated views
+For collections with file authority, indexes, audit state, and generated views
 are rebuildable from the declared source files. A generated dataset from a log is
 derived until a person explicitly promotes it through a provenance-preserving
 migration. `record_memory` does not automatically promote, migrate, or persist a
@@ -117,8 +158,10 @@ mutate `.obsidian`. When the Knowledge Base directory is the Obsidian vault,
 that Exomem path. A parent-directory Obsidian configuration is a different vault
 and does not override the Knowledge Base setting.
 
-Fresh structured queries read canonical files, so a direct change in an editor
-is immediately visible. `inspect` is report-only: it can identify direct-edit
+For collections with file authority, fresh structured queries read canonical files,
+so a direct change in an editor is immediately visible. Admitted SQLite collections
+read committed SQL state and publish governed Markdown views in the background.
+`inspect` is report-only: it can identify direct-edit
 drift, duplicate or missing identities, schema violations, missing templates,
 and bounded agent-audit gaps, but it does not repair canonical files. Reconcile
 repairs only derived state.
@@ -152,11 +195,12 @@ further append for that key refuses: update one of the named items to a distinct
 natural key, or delete/archive one, then retry. An update that leaves the key
 unchanged is never refused, so the corrective edit itself always goes through.
 
-Agent writes use stable item identity, stale-write guards, bounded edits, atomic
-publication, same-vault mutation serialisation, auditable reasons, and receipts.
+Agent writes use stable item identity, stale-write guards, bounded edits, durable
+commits, same-vault mutation serialisation, auditable reasons, and receipts.
 They refuse ambiguous or stale targets rather than replacing a whole large file.
-An agent-history view is bounded, content-free where appropriate, and can report
-that history is incomplete after direct editing.
+An agent-history view is bounded and content-free. File collections can report
+audit gaps after direct editing. Store collections record accepted edits as
+transitions and preserve imported gaps as provenance.
 
 Governance applies before a Record row, link, history field, or aggregate is
 reduced or rendered. Records require the structured-read L6 boundary; an
