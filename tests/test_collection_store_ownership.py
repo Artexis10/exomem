@@ -262,6 +262,81 @@ def test_first_admission_invalidates_a_composite_query_before_its_receipt(tmp_pa
                    for outcome in event["outcomes"])
 
 
+@pytest.mark.parametrize(("action", "boundary"), [
+    ("resolve", "record_resolve"),
+    ("inventory", "record_inspection"),
+    ("manifest", "record_manifest"),
+    ("history", "record_history"),
+])
+def test_first_admission_rejects_a_standalone_collection_read_before_its_receipt(tmp_path, monkeypatch, action, boundary):
+    from test_collection_store_service import A_PATH
+    from test_record_governance import _write_l6_rule
+
+    from exomem import record_governance, record_history
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    _write_l6_rule(root, ceiling=6, paths="Records/**")
+    item = (root / A_PATH).parent / "Items" / (KEY + ".md")
+    item.write_text("---\ntype: record\ncollection_id: " + KEY + "\nrecord_id: " + KEY
+                    + "\nschema_version: 1\ntitle: File row\n---\n")
+    captured, resume = threading.Event(), threading.Event()
+    result, evaluated = [], []
+    if action == "resolve":
+        target, name = record_governance, "_resolve_released_collection"
+    elif action == "inventory":
+        target, name = record_governance, "_inventory_coverage"
+    else:
+        target, name = egress, "project"
+    original = getattr(target, name)
+
+    def paused(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if (threading.current_thread().name == "ownership-collection-read"
+                and not captured.is_set()
+                and (target is not egress or kwargs.get("kind") == boundary)):
+            evaluated.append(value)
+            captured.set()
+            assert resume.wait(15)
+        return value
+
+    monkeypatch.setattr(target, name, paused)
+
+    def read():
+        with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+            try:
+                if action == "resolve":
+                    value = record_governance.resolve_collection(root, A_PATH)
+                elif action == "inventory":
+                    value = record_governance.inventory_collections(root)
+                elif action == "manifest":
+                    value = record_governance.project_manifest(root, A_PATH)
+                else:
+                    value = record_history.read(root, A_PATH, item_key=KEY, semantic_profile="records")
+                result.append(value)
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-collection-read")
+        reader.start()
+        try:
+            assert captured.wait(10), result
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert evaluated and evaluated[0]
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == boundary
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+
+
 @pytest.mark.parametrize(("failed_read", "alias"), [(False, False), (False, True), (True, False)])
 def test_ownership_rejection_keeps_credential_evidence_without_a_successful_release(tmp_path, monkeypatch, failed_read, alias):
     root = _served_vault(tmp_path, monkeypatch)

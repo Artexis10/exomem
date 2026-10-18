@@ -49,6 +49,7 @@ from typing import Any
 from . import registry_history
 from . import structured_collections as collections
 from . import vault as vault_module
+from .collection_store.preview import canonical_read
 from .governance import egress
 from .kbdir import kb_dirname
 
@@ -210,6 +211,7 @@ def project_revision(root, policy, principal, revision):
     return revision
 
 
+@canonical_read(receipt_boundary="record_history")
 def read(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -241,41 +243,39 @@ def read(
         with writer.read_collection(collection, facade_profile=semantic_profile) as manifest:
             return row_history(writer, manifest, item_key=item_key, limit=limit, continuation=continuation)
     page_size, after = _page_bounds(limit, continuation)
-    with egress.disclosure_boundary(root, "record_history", join_existing=True) as collector:
-        policy = egress.policy_module.load(root)
-        manifest = record_governance._resolve_released_collection(
-            root, collection, receipt=True, policy=policy
+    policy = egress.policy_module.load(root)
+    manifest = record_governance._resolve_released_collection(
+        root, collection, receipt=True, policy=policy
+    )
+    if manifest.semantic_profile != semantic_profile:
+        raise collections.CollectionError(
+            "RECORDS_PROFILE_REQUIRED"
+            if semantic_profile == "records"
+            else "PLANNING_PROFILE_REQUIRED",
+            "collection profile is not available",
         )
-        if manifest.semantic_profile != semantic_profile:
-            raise collections.CollectionError(
-                "RECORDS_PROFILE_REQUIRED"
-                if semantic_profile == "records"
-                else "PLANNING_PROFILE_REQUIRED",
-                "collection profile is not available",
-            )
 
-        def authorize(path: str) -> bool:
-            return record_governance._authorize(root, path, receipt=True, policy=policy)
+    def authorize(path: str) -> bool:
+        return record_governance._authorize(root, path, receipt=True, policy=policy)
 
-        if not authorize(manifest.storage.source):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
-        matches = [record for record in snapshot.records if record.identity.key == item_key]
-        if len(matches) != 1 or matches[0].ambiguous or not authorize(matches[0].source.path):
-            raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-        relative = history_dir(manifest.collection_id, item_key)
-        names = registry_history.kept_names(root, relative, suffix=_SUFFIX) or []
-        unchanged = registry_history.kept_names(root, relative, suffix=_UNCHANGED) or []
-        versions = [name[: -len(_SUFFIX)] for name in names]
-        older = [version for version in versions if after is None or version < after]
-        page = older[:page_size]
-        principal = effective_principal()
-        revisions = []
-        for version in page:
-            revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
-            revisions.append(project_revision(root, policy, principal, revision))
-        chain = records._inspect_audit_chain(root, manifest, authorize_path=authorize)
-        egress.emit_boundary_receipt(collector)
+    if not authorize(manifest.storage.source):
+        raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+    snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
+    matches = [record for record in snapshot.records if record.identity.key == item_key]
+    if len(matches) != 1 or matches[0].ambiguous or not authorize(matches[0].source.path):
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    relative = history_dir(manifest.collection_id, item_key)
+    names = registry_history.kept_names(root, relative, suffix=_SUFFIX) or []
+    unchanged = registry_history.kept_names(root, relative, suffix=_UNCHANGED) or []
+    versions = [name[: -len(_SUFFIX)] for name in names]
+    older = [version for version in versions if after is None or version < after]
+    page = older[:page_size]
+    principal = effective_principal()
+    revisions = []
+    for version in page:
+        revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
+        revisions.append(project_revision(root, policy, principal, revision))
+    chain = records._inspect_audit_chain(root, manifest, authorize_path=authorize)
     kept_tags = {
         name.rsplit("-", 1)[-1].split(".", 1)[0] for name in (*names, *unchanged)
     }
