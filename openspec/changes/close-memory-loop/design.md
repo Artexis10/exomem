@@ -24,6 +24,33 @@ The active agent decides meaning, importance, equivalence, candidate disposition
 
 The programme serves a domain-neutral epistemic substrate, not only conversational memory. Canonical means accepted governed state with an attributable basis, not certified truth. Preserve observations, reported interpretations, decisions and intentions without imposing one validation method on all of them. The compiler supplies task-relevant context; it is one part of the loop, not its historian, authority owner or semantic judge.
 
+#### Integrated epistemic acceptance
+
+Epistemic commitments govern how supported knowledge is formed, justified, connected, used and revised across the product. Sources, interpretations, structured state and later answers must preserve those commitments together. A collection is part of that knowledge lifecycle, with exact mutable values linked to their available evidence and interpreted meaning.
+
+Methods depend on the subject and task. Ordinary interaction must not require scientific terminology, formal hypotheses, experiments or numeric confidence. Users can inspect evidence, qualifications, relationships and prior interpretations on demand through supported interfaces. An interface claim requires exercising that interface; backend support alone does not demonstrate a viewer or embedded product.
+
+The acceptance object is an evolving body of knowledge used successfully in a later task. A passing writer, graph edge or compact packet proves only its own contribution. The following dimensions reuse existing owners and tasks; they are neither a closed knowledge ontology nor additional workstreams.
+
+| Journey dimension | Existing owner or task | Required integrated evidence |
+|---|---|---|
+| Preserve and interpret material | 3.12–3.14; existing preservation owners | Original bytes remain distinct from extractions and interpretations, with attributable source bindings and explicit missing material. |
+| Correct and evolve understanding | 3.13, 3.15, 3.17; `resolve-relation-fragment-targets` | Local and cross-note relationships retain exact endpoints; ordinary edits retain history without gratuitous correction objects or edges. |
+| Join structured state and explanations | 3.14; `move-structured-collections-to-sqlite` | Exact rows, collection authority, interpreted claims and evidence agree through supported writes, corrections and later reads. |
+| Deliver useful context | 3.18; 6.1–6.9; existing graph and compiler owners | Fresh answers retain necessary dependencies, qualifications, uncertainty and provenance within declared resource budgets. |
+| Inspect and recover knowledge | 3.15, 3.19; existing disclosure and portability owners | Authorized history reads and supported recovery preserve identities and retained material; unavailable history remains explicit. |
+| Operate naturally and reliably | 3.16; 6.x; 9.3 | Ordinary agent initiation, supported client or consumer behaviour, contention and safe degraded operation are observed separately. |
+
+Use a few source-authored journeys that expose distinct failures, rather than a Cartesian combination of every dimension. Include a simple factual correction and a later qualification or refutation across units. Preserve unaffected propositions and reasoning-critical dependencies. Repeated extraction from one source must not become independent corroboration.
+
+Report implemented, merged, released, installed, enabled and operationally demonstrated states separately. Reuse existing proof when its source, configuration and conditions still match. Forced tool calls, synthetic actors and hand-built packets cannot establish ordinary agent initiation or fresh-session usefulness.
+
+Feature overlap does not establish whole-system equivalence. Comparative assessment must examine the supported lifecycle and useful outcomes under matched conditions. Architectural breadth and coherent commitments are relevant evidence, but neither proves measured superiority or universal domain coverage.
+
+This reconciliation retains current storage authorities and the existing collection GA sequence. It selects no semantic-store migration or independent unit-identity redesign. A later storage comparison must isolate an unmet requirement or measured storage cause while preserving semantics, retrieval policy and authorization. Reuse 3.19 and the existing benchmark before proposing custom instruments. Compare canonical commit, publication, useful answers, resource cost, history, recovery, portability and governed edit-back; faster inserts or fewer tokens alone do not justify migration.
+
+These are programme acceptance criteria, not new gates on unrelated ordinary releases. Close the relevant capability only after its claimed journey is demonstrated. Keep broader product ambition explicit without making every future domain or optional comparison a prerequisite for the current tranche.
+
 **Recoverable correction without page proliferation.** A knowledge object keeps its stable identity through ordinary refinement. Retain consequential previous interpretation content, rationale, author/operation and evidence/version bindings as revisions through the owning guarded writer. Supersession remains an explicit semantic transition, not a storage trick for every edit. SQLite collection `item_versions` already supplies row content history; ordinary note-edit rationales and file Records audit hashes do not. Reuse existing version and receipt mechanisms where they provide the required evidence. For the remaining note/unit and file-mode seams, settle the smallest bounded revision representation in task 3.15 before implementing it; prefer per-object records and payload reuse, not whole-vault snapshots or a universal event store. Revision payloads are authoritative history, not disposable graph/index state. The supported backup/export/restore path must retain them. No legacy history is fabricated from a hash.
 
 Only semantic changes covered by the correction contract require such interpretation history; formatting and derived maintenance do not create new knowledge objects. Bounded history reads must not scan every prior revision or the whole vault. Retention, deletion and current disclosure govern historical payloads as well as current content; keep an explicit unavailable state if retained content is no longer accessible. Measure storage/write amplification and bounded history-read cost at realistic correction depth, including retention/restore, before claiming the representation scales. This does not make full history a prerequisite for ordinary current-state reads.
