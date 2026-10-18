@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.0](https://github.com/Artexis10/exomem/compare/v0.126.1...v0.127.0) (2026-10-18)
+
+
+### Features
+
+* **collections:** reconcile editable views through bounded watcher turns ([#1850](https://github.com/Artexis10/exomem/issues/1850)) ([50a3d6f](https://github.com/Artexis10/exomem/commit/50a3d6fc8c7e75ed434cdfd0e1d32ff95ac628c8))
+
+
+### Bug Fixes
+
+* **cloud:** preserve canonical collections in operator exports ([#1849](https://github.com/Artexis10/exomem/issues/1849)) ([72929f5](https://github.com/Artexis10/exomem/commit/72929f5b450f81ac831e4d5f88cf0dbe643c7bb4))
+* preserve recall during optional reference uncertainty ([#1852](https://github.com/Artexis10/exomem/issues/1852)) ([46f5d70](https://github.com/Artexis10/exomem/commit/46f5d704e6ba191dfa1fcbb324bdb2fe1311410a))
+* **service:** prepare compatible stale catalogues before cutover ([#1854](https://github.com/Artexis10/exomem/issues/1854)) ([ea42b7b](https://github.com/Artexis10/exomem/commit/ea42b7b63c810d2403692cefc9a5e7dbb2ebd5ab))
+
 ## [0.126.1](https://github.com/Artexis10/exomem/compare/v0.126.0...v0.126.1) (2026-10-18)
 
 
