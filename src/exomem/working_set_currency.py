@@ -151,13 +151,21 @@ def annotate(
             by_page.setdefault(item.path, []).append(index)
     superseded: set[int] = set()
     for path, indices in by_page.items():
-        parent_ref = items[indices[0]].ref.rpartition("#")[0]
+        # Role copies share an exact identity; they are not ambiguous authored anchors.
+        unit_indices: dict[str, list[int]] = {}
+        for index in indices:
+            if reference := items[index].ref:
+                unit_indices.setdefault(reference, []).append(index)
+        references = tuple(unit_indices)
+        if not references:
+            continue
+        parent_ref = references[0].rpartition("#")[0]
         # Currency shares the exact identity resolver; it never folds unit anchors.
         structure = semantic_units.SelectedStructure(
             tuple(semantic_units.UnitStructure(
-                form="rich", kind="", category="", anchor=unquote(items[index].ref.rpartition("#")[2]),
-                line=0, end_line=0, source_hash="", unit_ref=items[index].ref,
-            ) for index in indices), (), parent_ref=parent_ref,
+                form="rich", kind="", category="", anchor=unquote(reference.rpartition("#")[2]),
+                line=0, end_line=0, source_hash="", unit_ref=reference,
+            ) for reference in references), (), parent_ref=parent_ref,
         )
         for index in indices:
             for target in items[index].provenance.get("supersedes_targets") or ():
@@ -168,8 +176,8 @@ def annotate(
                 if not fragment:
                     continue
                 resolved = structure.resolve_fragment(fragment)
-                if resolved.index is not None and indices[resolved.index] != index:
-                    superseded.add(indices[resolved.index])
+                if resolved.index is not None and (target := references[resolved.index]) != items[index].ref:
+                    superseded.update(unit_indices[target])
     annotated = tuple(
         replace(item, lifecycle=SUPERSEDED)
         if index in superseded

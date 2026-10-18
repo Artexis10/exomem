@@ -157,6 +157,32 @@ def test_idempotency_secret_runtime_artifacts_are_owner_only(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+def test_unrelated_owner_mode_does_not_block_private_claim_or_replay(tmp_path: Path) -> None:
+    store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+    owners = store.state_dir / "idempotency-owners"
+    unrelated = owners / "other-runtime.lock"
+    unrelated.write_bytes(b"")
+    unrelated.chmod(0o644)
+    original_entries = set(owners.iterdir())
+    calls = 0
+
+    def leaf():
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "value": "saved"}
+
+    first = store.run("fresh", "digest", leaf)
+    replay = store.run("fresh", "digest", lambda: pytest.fail("replay ran the leaf"))
+
+    assert first == replay == {"ok": True, "value": "saved"}
+    assert calls == 1
+    assert set(owners.iterdir()) == original_entries
+    assert stat.S_IMODE(unrelated.stat().st_mode) == 0o644
+    for path in (store.state_dir, owners, store.path):
+        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
 def test_insecure_idempotency_database_is_rejected_before_unpickle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
