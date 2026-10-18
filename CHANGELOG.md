@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.126.0](https://github.com/Artexis10/exomem/compare/v0.125.0...v0.126.0) (2026-10-18)
+
+
+### Features
+
+* install recall monitoring and scope write work ([01fe425](https://github.com/Artexis10/exomem/commit/01fe42556387c29dff45c46c9b23e81abc786996))
+
+
+### Bug Fixes
+
+* **benchmarks:** retire completed visibility before cold writes ([16ddfc9](https://github.com/Artexis10/exomem/commit/16ddfc9c8f1640a1c36c94b7945f234c4067a164))
+* **collections:** preserve historical curation receipt proof ([#1837](https://github.com/Artexis10/exomem/issues/1837)) ([71e14e3](https://github.com/Artexis10/exomem/commit/71e14e3af769e148bbcddf76e0ecd325905abc31))
+* preserve upload retries and parallelize CI ([#1827](https://github.com/Artexis10/exomem/issues/1827)) ([220d33c](https://github.com/Artexis10/exomem/commit/220d33cd4e622d06dbeeb6645bfe1fe8ded13e62))
+* **recall:** keep admitted results available during pending recovery ([#1840](https://github.com/Artexis10/exomem/issues/1840)) ([cbb8d7d](https://github.com/Artexis10/exomem/commit/cbb8d7d5038e0fdf68991c24fc948068d6f4a730))
+* **runtime:** retry catalogue repairs without client traffic ([b33929f](https://github.com/Artexis10/exomem/commit/b33929f314ea5211998194758ea2405a4c75ddcc))
+* stabilize reload coverage and RAG ingestion ([#1841](https://github.com/Artexis10/exomem/issues/1841)) ([0be5d1b](https://github.com/Artexis10/exomem/commit/0be5d1bb5b95c175659f0833e710c00953e20472))
+
+
+### Performance
+
+* **collections:** reuse read leases and retain inspection caches ([0b288d6](https://github.com/Artexis10/exomem/commit/0b288d640ebec695ae80b65f779ac49a7a1c4852))
+
 ## [0.125.0](https://github.com/Artexis10/exomem/compare/v0.124.0...v0.125.0) (2026-10-17)
 
 
