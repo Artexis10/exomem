@@ -1718,6 +1718,15 @@ def request_repair(vault_root: Path) -> None:
         _schedule_repair(vault_root)
 
 
+def retry_pending_repair(vault_key: Path) -> bool:
+    """Retry preserved work for a resolved vault key; report pending or active work.
+
+    The runtime resolves the key once, so idle checks need only the queue lock.
+    This seam never observes the sources or creates a new repair claim.
+    """
+    return _schedule_repair(vault_key, pending_only=True)
+
+
 def repair_progress(vault_root: Path) -> dict[str, object] | None:
     """Return fixed, content-free progress for one managed lexical repair."""
     key = vault_root.resolve()
@@ -1788,7 +1797,12 @@ def clear_stores() -> None:
         )
 
 
-def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = None) -> None:
+def _schedule_repair(
+    vault_root: Path,
+    *,
+    deferred_paths: list[Path] | None = None,
+    pending_only: bool = False,
+) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
     Foreground retrieval uses this seam after declining stale or missing
@@ -1796,7 +1810,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
     with a single atomic rename (`rebuild_atomic`) — never mutating or emptying
     the live sidecar in place — so a concurrent query never observes a
     half-built or emptied catalog, and a fatally-retired store can recover.
-    Callers return immediately and may retry on a later request.
+    Callers return immediately; the runtime or a later request retries failures.
 
     `deferred_paths` names the ONE case that does not need that: a foreground
     upsert the publication barrier was merely too busy to take. The rows are
@@ -1812,15 +1826,22 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
     a full pass is already active are one level-triggered observation and are
     coalesced into that pass instead of creating an unbounded rebuild chain.
     """
-    key = vault_root.resolve()
+    # Pending-only callers already hold the resolved key; idle recovery must
+    # inspect only process-local claims, without even resolving a path again.
+    key = vault_root if pending_only else vault_root.resolve()
     observation: object = _UNKNOWN_REPAIR_GENERATION
-    if not deferred_paths:
+    if not pending_only and not deferred_paths:
         try:
             observation = _live_repair_generation(vault_root) or observation
         except Exception:  # noqa: BLE001 - scheduling must remain best-effort
             pass
     with _REPAIRS_LOCK:
-        if deferred_paths:
+        if pending_only:
+            if key in _REPAIRS_IN_FLIGHT:
+                return True
+            if key not in _FULL_REBUILD_REQUESTED and not _DEFERRED_UPSERTS.get(key):
+                return False
+        elif deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
         elif key in _FULL_REBUILDS_IN_FLIGHT:
             _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
@@ -1829,7 +1850,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
         if key in _REPAIRS_IN_FLIGHT:
             # The running worker re-reads both queues before it exits, so this
             # request is picked up rather than dropped.
-            return
+            return True
         _REPAIRS_IN_FLIGHT.add(key)
         _set_repair_progress(key, "queued")
 
@@ -1849,7 +1870,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                     if full_requested and full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
                         if not paths:
                             # Keep the full request pending, but yield ownership.
-                            # A later caller starts a fresh bounded flight; this
+                            # The runtime or a caller starts a fresh bounded flight;
                             # worker never chains whole-vault scans indefinitely.
                             _FULL_REBUILDS_IN_FLIGHT.discard(key)
                             _FULL_REBUILD_REOBSERVED.pop(key, None)
@@ -2020,11 +2041,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
                             _FULL_REBUILD_REQUESTED.add(key)
-                            if repaired and promoted:
-                                _PUBLISHED_HANDOFF_PENDING.add(key)
+                        if repaired and key in _FULL_REBUILD_REQUESTED:
+                            # Another proof can win admission during promotion.
+                            # Re-prove this publication before rebuilding it.
+                            _PUBLISHED_HANDOFF_PENDING.add(key)
                         else:
-                            _PUBLISHED_HANDOFF_PENDING.discard(key)
-                        if not (repaired and promoted):
                             _PUBLISHED_HANDOFF_PENDING.discard(key)
                         _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 rebuild = False
@@ -2034,11 +2055,8 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
             log.warning("lexical background repair skipped (%s)", e)
             with _REPAIRS_LOCK:
                 # Put back what this pass consumed and could not finish. Repair
-                # stays best-effort and nothing here retries on its own, but the
-                # next caller that needs the sidecar should find the request
-                # still pending rather than a queue this thread emptied on its
-                # way out -- which is the same "invalidate cheaply, leave the
-                # cost to whoever asks next" shape this change exists to remove.
+                # stays best-effort; the runtime recovery owner or a later
+                # caller can retry the preserved claim in a fresh flight.
                 if rebuild:
                     _FULL_REBUILD_REQUESTED.add(key)
                 if paths:
@@ -2076,6 +2094,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
             _REPAIRS_IN_FLIGHT.discard(key)
             _set_repair_progress(key, "idle", result="error")
         log.warning("lexical background repair could not start for %s", key)
+    return True
 
 
 #: Deadlock valve for `await_repairs_idle`. Repair is bounded work, so

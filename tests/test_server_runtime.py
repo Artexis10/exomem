@@ -1017,6 +1017,9 @@ def test_later_drop_is_immediately_blocked_after_runtime_start_failure(
 
 
 def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation, "_start_catalogue_recovery", lambda self, _root: None
+    )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
     monkeypatch.setattr(
         server_runtime, "_start_compute_runtime", lambda _root: calls.append("compute")

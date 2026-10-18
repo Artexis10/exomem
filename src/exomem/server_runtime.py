@@ -39,6 +39,11 @@ log = logging.getLogger(__name__)
 # background catalogue warm/repair path from starting indefinitely.
 RECALL_SEED_WAIT_SECONDS = 120.0
 
+# Failed catalogue publication can require another whole-vault build. Back off
+# to limit repeated I/O under persistent failure, with a cap for quiet recovery.
+CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS = 1.0
+CATALOGUE_RECOVERY_MAX_BACKOFF_SECONDS = 60.0
+
 
 @dataclass(frozen=True)
 class ServerRuntime:
@@ -136,6 +141,8 @@ class LocalRuntimeActivation:
         self.derived_drain: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
+        self.catalogue_recovery: threading.Thread | None = None
+        self._catalogue_stop = threading.Event()
         # The recovery watcher runs until told to stop, so it has its own stop
         # event: every path that stops the other workers stops it too.
         self._vocabulary_stop = threading.Event()
@@ -213,6 +220,10 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("projector refresh", refresh_obsolete_projector)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("catalogue recovery", self._start_catalogue_recovery)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -327,6 +338,9 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
+        with self._lock:
+            # The retry lock prevents any later repair scheduling after stop.
+            self._catalogue_stop.set()
         if self.graph_drain is not None:
             from . import graph_drain
 
@@ -402,6 +416,43 @@ class LocalRuntimeActivation:
         from . import semantic_drain
 
         self.semantic_drain = semantic_drain.start(vault_root)
+
+    def _start_catalogue_recovery(self, vault_root: Path) -> None:
+        """Own pending catalogue retries before admission and throughout serving."""
+        with self._lock:
+            if (
+                self.catalogue_recovery is not None
+                or self._shutdown.is_set()
+                or self._catalogue_stop.is_set()
+            ):
+                return
+            thread = threading.Thread(
+                target=self._recover_catalogue,
+                args=(vault_root.resolve(),),
+                name="exomem-catalogue-recovery",
+                daemon=True,
+            )
+            thread.start()
+            self.catalogue_recovery = thread
+
+    def _recover_catalogue(self, vault_key: Path) -> None:
+        from . import lexstore
+
+        backoff = CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS
+        while not self._catalogue_stop.wait(backoff):
+            with self._lock:
+                if self._shutdown.is_set() or self._catalogue_stop.is_set():
+                    return
+                try:
+                    pending = lexstore.retry_pending_repair(vault_key)
+                except Exception:  # noqa: BLE001 - retry ownership must survive transient failure
+                    log.warning("catalogue recovery retry failed", exc_info=True)
+                    pending = True
+            backoff = (
+                min(backoff * 2, CATALOGUE_RECOVERY_MAX_BACKOFF_SECONDS)
+                if pending
+                else CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS
+            )
 
     def _start_vocabulary_recovery(self, vault_root: Path) -> None:
         """Drain queued recovery in the background, not on a client review call."""
