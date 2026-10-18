@@ -159,7 +159,13 @@ The ranking mode never depends on which pages exist, so adding or removing a wit
 
 In catalogue mode each snapshot still checks that the admission withholds no page row. The request's predicate there admits every path, so only a caller that builds a context claiming catalogue ranking with a narrower predicate can fail the check. It then ranks on the admitted pages and logs `catalogue_ranking_withheld_row`.
 
-A request that ranks on admission, owner or restricted, ranks the phrase rung as before. Its title rung now filters and ranks on the admitted pages too, where the owner's title rung used to rank on the unfiltered catalogue and leave withheld pages to the served guard. Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts. A request that ranks on admission still rebuilds its admitted statistics once per catalogue revision. Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
+A request that ranks on admission, owner or restricted, ranks the phrase rung as before. Its title rung now filters and ranks on the admitted pages too, where the owner's title rung used to rank on the unfiltered catalogue and leave withheld pages to the served guard.
+
+Some corpus-sized work remains, all of it in SQLite rather than in the carry's own loops. The request's admission reads every page row's path, the rarity window is 0.5% of the knowledge base, catalogue ranking reads every row that holds a turn word, and a write invalidates the catalogue's cached word counts.
+
+A request that ranks on admission reuses its statistics while the complete catalogue snapshot key holds. After that key changes, it reads every current admitted path and stem string in one SQL snapshot. A framed fingerprint of these complete inputs can authorize reuse for the same scope and admitted set. Changed inputs rebuild the statistics, including SQL-only repairs that leave canonical checkpoints unchanged. The existing four-entry bound remains. This saves token splitting and aggregation after an unrelated edit, but adds hashing and temporary raw strings on cache misses.
+
+Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
 
 ## Risks / Trade-offs
 

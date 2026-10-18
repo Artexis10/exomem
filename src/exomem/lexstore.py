@@ -2203,6 +2203,12 @@ _ADMITTED_STATISTICS_MAX = 4
 CATALOGUE_RANKING_CONTRACT_VIOLATION = "catalogue_ranking_withheld_row"
 
 
+@dataclass(frozen=True, slots=True)
+class _AdmittedStatisticsEntry:
+    fingerprint: bytes
+    statistics: Any
+
+
 @dataclass
 class RequestQueryContext:
     """Admission shared within one request, re-proved on each query snapshot.
@@ -3707,9 +3713,9 @@ class LexicalStore:
         self._term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         self._filtered_term_frequency_cache: tuple[tuple, Mapping[str, int], int] | None = None
         # (scope, catalogue generation, admitted-set digest) -> that admitted
-        # corpus's Okapi figures, so a warm restricted ranking reads only its
-        # candidates. Few entries: each holds one vocabulary-sized mapping.
-        self._admitted_statistics: dict[tuple, Any] = {}
+        # corpus's Okapi figures. A miss can reuse the math after a complete
+        # SQL input check. Each entry holds one vocabulary-sized mapping.
+        self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
 
     def _decline_rebuild(self, reason: str) -> bool:
         """Record one stable, content-free repair result and decline."""
@@ -7544,7 +7550,7 @@ class LexicalStore:
     def _admitted_corpus_statistics(
         self, conn: sqlite3.Connection, scope: str, admitted_paths: set[str]
     ) -> Any:
-        """Okapi figures over the admitted pages, reused while the snapshot holds."""
+        """Okapi figures reused only for the same snapshot or complete SQL inputs."""
         from . import bm25 as bm25_module
 
         owns_snapshot = not conn.in_transaction
@@ -7559,20 +7565,40 @@ class LexicalStore:
             with self._term_frequency_cache_lock:
                 cached = self._admitted_statistics.get(key)
             if cached is not None:
-                return cached
-            call_spans.measure(call_spans.STATS_REBUILT)
+                return cached.statistics
             col = "in_vault" if scope == "vault" else "in_kb"
-            statistics = bm25_module.CorpusStatistics.of({
-                path: stemmed.split() for path, stemmed in conn.execute(
-                    f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
-                    f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
-                )
-            })
+            rows = dict(conn.execute(
+                f"SELECT p.path, fts.stemmed FROM {_FTS_PAGES} "
+                f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY p.path",
+                (json.dumps(sorted(admitted_paths), ensure_ascii=False),),
+            ))
+            fingerprint = hashlib.sha256()
+            for path, stemmed in rows.items():
+                for value in (path, stemmed):
+                    encoded = value.encode("utf-8", "surrogatepass")
+                    # Length framing keeps field and row boundaries unambiguous.
+                    fingerprint.update(len(encoded).to_bytes(8, "big"))
+                    fingerprint.update(encoded)
+            current_fingerprint = fingerprint.digest()
+            with self._term_frequency_cache_lock:
+                statistics = next((
+                    entry.statistics
+                    for retained_key, entry in self._admitted_statistics.items()
+                    if retained_key[0] == scope and retained_key[-1] == digest
+                    and entry.fingerprint == current_fingerprint
+                ), None)
+            if statistics is None:
+                call_spans.measure(call_spans.STATS_REBUILT)
+                statistics = bm25_module.CorpusStatistics.of({
+                    path: stemmed.split() for path, stemmed in rows.items()
+                })
             with self._term_frequency_cache_lock:
                 if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
                     self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
-                self._admitted_statistics[key] = statistics
+                self._admitted_statistics[key] = _AdmittedStatisticsEntry(
+                    current_fingerprint, statistics
+                )
             return statistics
         finally:
             if owns_snapshot:
