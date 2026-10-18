@@ -405,12 +405,16 @@ def test_unknown_imported_provenance_stays_unknown_after_native_writes(tmp_path,
 
 
 @pytest.mark.parametrize("restriction", ["named", "default", "purpose"])
-def test_history_page_metadata_and_bytes_ignore_hidden_only_transactions(store, restriction):
-    from test_collection_store_writer import OTHER
+@pytest.mark.parametrize("published", [False, True])
+def test_history_page_metadata_and_bytes_ignore_hidden_only_transactions(store, restriction, published):
+    from test_collection_store_writer import OTHER, manifest_path, manifest_text
 
     from exomem.collection_store import history
 
-    create(store)
+    if published:
+        create(store)
+    else:
+        store.create_collection(manifest_path(), manifest_text(), why="capture", scaffold=False)
     _append(store)
     store.append_record(CID, item={"title": "Withheld", "count": 1}, item_key=OTHER, why="private capture")
     write_scope(store.root, paths=f"Records/**/{OTHER}.md", default_deny=restriction == "default")
@@ -418,10 +422,13 @@ def test_history_page_metadata_and_bytes_ignore_hidden_only_transactions(store, 
         write_rule(store.root, ceiling=0, extra='purpose: analysis\n' if restriction == "purpose" else "")
     manifest = store._projection_manifest(CID)
     path = history.main_path(manifest)
-    store.reconcile_views()
-    store.reconcile_views()
     file = store.root / path
-    physical = file.read_bytes(), file.stat().st_mtime_ns
+    if published:
+        store.reconcile_views()
+        store.reconcile_views()
+        physical = file.read_bytes(), file.stat().st_mtime_ns
+    else:
+        assert not file.exists()
     before = history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)
     with request_scope(_external("analysis" if restriction == "purpose" else None)):
         pending_before = store.inspect_collection(CID)["projection"]["pending_views"]
@@ -431,8 +438,13 @@ def test_history_page_metadata_and_bytes_ignore_hidden_only_transactions(store, 
     after = history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)
     with request_scope(_external("analysis" if restriction == "purpose" else None)):
         assert store.inspect_collection(CID)["projection"]["pending_views"] == pending_before
-    store.reconcile_views()
-    assert (file.read_bytes(), file.stat().st_mtime_ns) == physical
+    if published:
+        store.reconcile_views()
+        assert (file.read_bytes(), file.stat().st_mtime_ns) == physical
+    else:
+        assert not file.exists()
+        store.reconcile_views()
+        assert file.read_text() == after[1]
     assert before == after
     assert "private" not in after[1] and OTHER not in after[1]
     assert "create" in after[1]  # A meaningful effectless transition stays visible.

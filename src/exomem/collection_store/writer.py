@@ -599,7 +599,10 @@ class CollectionWriter:
             from . import history
 
             context = history.PageContext(self.connection, self.root, manifest, cache=self.handle.release_cache)
-            pending += sum(digest != pending_history[path] for path, digest in context.digests(pending_history))
+            published_history = {path: digest for path, digest in pending_history.items() if digest is not None}
+            # Every render has a digest, so an admitted unpublished page is already pending.
+            pending += len(pending_history) - len(published_history)
+            pending += sum(digest != published_history[path] for path, digest in context.digests(published_history))
         held = self.connection.execute(
             "SELECT held_id, updated_at, candidate_json, diagnostics_json, kind, code "
             f"FROM held_candidates WHERE collection_id = ? AND held_id IN ({','.join('?' for _ in held_ids)}) ORDER BY held_id",

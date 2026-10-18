@@ -188,6 +188,34 @@ def test_ref_selector_resolves_membership(vault: Path) -> None:
     assert "01ARZ3NDEKTSV4RRFFQ69G5FB4" in membership.evaluate(parsed, pol)
 
 
+@pytest.mark.parametrize("excluded", [False, True])
+def test_metadata_refs_follow_directory_and_selector_changes_without_clearing(monkeypatch, excluded):
+    """A warm selector must not retain membership from another KB name or policy edit."""
+    from dataclasses import replace
+
+    subject = membership.MetadataSubject("Notes/entry.md")
+    values = ("Notebook/Notes/entry.md",)
+    scope = policy.Scope(
+        id="explicit", source="fixture",
+        paths=("Notes/**",) if excluded else (),
+        refs=() if excluded else values,
+        exclude_refs=values if excluded else (),
+    )
+    pol = policy.Policy(fingerprint="fixture", scopes={scope.id: scope})
+    expected = frozenset({scope.id})
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Knowledge Base")
+    assert membership.evaluate_metadata(subject, pol) == (expected if excluded else frozenset())
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Notebook")
+    assert membership.evaluate_metadata(subject, pol) == (frozenset() if excluded else expected)
+    changed = ("Notebook/Notes/other.md",)
+    edited = replace(scope, **{"exclude_refs" if excluded else "refs": changed})
+    assert membership.evaluate_metadata(subject, replace(pol, scopes={scope.id: edited})) == (
+        expected if excluded else frozenset()
+    )
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Knowledge Base")
+    assert membership.evaluate_metadata(subject, pol) == (expected if excluded else frozenset())
+
+
 def test_exclude_selector_removes_membership(vault: Path) -> None:
     _write_scope(
         vault,
