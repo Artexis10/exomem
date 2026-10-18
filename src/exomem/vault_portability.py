@@ -1501,9 +1501,9 @@ def checked_collection_replica(
             os.close(descriptor)
         check()
         snapshot.migrate_copy(path, check)
-        with closing(sqlite3.connect(path, isolation_level=None)) as reader:
+        with closing(sqlite3.connect(path, isolation_level=None)) as reader, connection.checked_sql(reader, check):
             metadata = snapshot._validate(reader, check)
-            chain.verify_store_chain(reader)
+            chain.verify_store_chain(reader, check=check)
             if metadata[schema.META_STORE_ID] != marker["store_id"]:
                 _fail("INVALID_ARCHIVE", "collection replica belongs to another store")
             intent = authority.pending_create(reader)

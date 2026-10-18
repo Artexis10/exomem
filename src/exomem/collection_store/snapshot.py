@@ -138,18 +138,32 @@ def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
     caller's own validation refuses a newer or unreadable one as before. The migration takes
     no writer lease and rewrites the file in place, so only a private copy may pass here.
     """
+    stopped = []
+
+    def checked():
+        try:
+            check()
+        except BaseException as error:
+            stopped.append(error)
+            raise
+
     with closing(sqlite3.connect(path, isolation_level=None)) as conn:
         try:
-            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
-        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError):
+            with connection.checked_sql(conn, checked):
+                found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+                if not 0 < found < schema.SCHEMA_VERSION:
+                    return
+                _validate(conn, checked, version=found)
+        except (sqlite3.DatabaseError, schema.SchemaMetadataError, schema.SchemaVersionError) as error:
+            if stopped and error is stopped[-1]:
+                raise
             return
-        if not 0 < found < schema.SCHEMA_VERSION:
-            return
-        _validate(conn, check, version=found)
     try:
-        with connection.staging_store(path):
+        with connection.staging_store(path, check=checked):
             pass  # The staging writer migrates the copy in one transaction.
     except Exception as error:  # noqa: BLE001 - a copy that cannot migrate is as unusable as a damaged one
+        if stopped and error is stopped[-1]:
+            raise
         raise connection.CollectionStoreError(
             "COLLECTION_SNAPSHOT_INVALID", "copied store failed its schema migration"
         ) from error

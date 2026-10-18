@@ -166,7 +166,38 @@ def _writer_engine(database: str):
 
 
 @contextmanager
-def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
+def checked_sql(conn, check):
+    """Keep the caller's interruption when SQLite or a migration wraps its progress error."""
+    if check is None:
+        yield
+        return
+    from sqlalchemy.exc import DBAPIError
+
+    interrupted = None
+
+    def progress():
+        nonlocal interrupted
+        try:
+            check()
+        except BaseException as error:  # noqa: BLE001 - SQLite otherwise discards the caller's interruption
+            interrupted = error
+            return 1
+        return 0
+
+    conn.set_progress_handler(progress, 1000)
+    try:
+        check()
+        yield
+    except (sqlite3.DatabaseError, CollectionStoreError, DBAPIError) as error:
+        if interrupted is not None:
+            raise interrupted from error
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+@contextmanager
+def staging_store(path: Path, *, check: Callable[[], None] | None = None) -> Iterator[sqlite3.Connection]:
     """A private, unpublished store at ``path`` with the current schema, for a proof that never publishes.
 
     It takes no writer lease: only its caller opens it, and the caller removes it.
@@ -177,10 +208,11 @@ def staging_store(path: Path) -> Iterator[sqlite3.Connection]:
     try:
         with engine.connect() as core:
             conn = core.connection.driver_connection
-            conn.execute("PRAGMA recursive_triggers=ON")
-            conn.execute("PRAGMA foreign_keys=ON")
-            schema.ensure_schema(core)
-            yield conn
+            with checked_sql(conn, check):
+                conn.execute("PRAGMA recursive_triggers=ON")
+                conn.execute("PRAGMA foreign_keys=ON")
+                schema.ensure_schema(core)
+                yield conn
     finally:
         engine.dispose()
 

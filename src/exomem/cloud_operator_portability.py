@@ -178,10 +178,17 @@ def prepare_export(
                 if digest.hexdigest() != artifact.file_sha256:
                     raise ValueError("prepared snapshot changed")
 
+            def validate_existing(file):
+                unchanged()
+                if snapshot._file_sha256(file.descriptor, check) != previous_digest:
+                    raise held_fs.HeldFsError("IDENTITY_CHANGED", "held filesystem content changed")
+                unchanged()
+
             with reserved_paths._subsystem_authority_scope("collection_store.replica"):
                 held_fs.publish_bytes(
                     vault_fs, target_parent, target.name, held_fs.Chunks(chunks),
-                    expected_identity=previous_identity, expected_sha256=previous_digest,
+                    expected_identity=previous_identity, validate_existing=validate_existing,
+                    prepare=lambda _file: unchanged(),
                 ).require()
                 vault_fs.flush_directory(target_parent).require()
             return {"ok": True, "store": "prepared", "commit_seq": artifact.commit_seq,

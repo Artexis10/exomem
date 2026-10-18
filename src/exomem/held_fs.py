@@ -391,6 +391,7 @@ def publish_bytes(
     *,
     expected_identity: StableIdentity | None = None,
     expected_sha256: str | None = None,
+    validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes, or `Chunks` of them, under one held parent.
@@ -402,6 +403,8 @@ def publish_bytes(
     With no expected identity the publish is create-only and uses a no-replace
     hard-link installation. With an expected identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.
+    ``validate_existing`` checks that borrowed handle before and after staging;
+    the callback must neither close nor mutate it.
     """
 
     if not isinstance(data, bytes | Chunks):
@@ -447,6 +450,8 @@ def publish_bytes(
                             "IDENTITY_CHANGED", "held filesystem content changed"
                         )
                     )
+            if validate_existing is not None:
+                validate_existing(existing)
 
         created = filesystem.file(
             parent,
@@ -526,6 +531,9 @@ def publish_bytes(
                             "IDENTITY_CHANGED", "held filesystem content changed"
                         )
                     )
+            if validate_existing is not None:
+                assert existing is not None
+                validate_existing(existing)
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
                 return publication_error(replaced.error)

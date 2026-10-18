@@ -34,7 +34,7 @@ from test_collection_store_s1_gate import (
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, manifest_path
 
-from exomem import cloud_import_job, state_migration, state_paths, vault_portability
+from exomem import cloud_import_job, held_fs, state_migration, state_paths, vault_portability
 from exomem import cloud_operator_portability as operator
 from exomem.cloud_import import ArchiveRefused
 from exomem.collection_store import (
@@ -252,6 +252,30 @@ def test_cloud_collection_refusal_preserves_destination(abc, tmp_path, damage):
     assert not list(vault.parent.glob(".restore-prior-*"))
 
 
+def test_unwrapped_cloud_restore_keeps_an_ordinary_vault_directory(abc, tmp_path):
+    """An authored vault/ child must not turn a valid unwrapped vault into an archive wrapper."""
+    from exomem.cloud_import import unpack_stream
+
+    source = shutil.copytree(abc.root, tmp_path / "incoming")
+    _sentinel(source)
+    (source / "vault").mkdir()
+    (source / "vault/note.md").write_text("ordinary authored directory")
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as archive:
+        for path in source.rglob("*"):
+            archive.add(path, arcname=path.relative_to(source).as_posix(), recursive=False)
+    staging = tmp_path / "unpacked"
+    unpack_stream(io.BytesIO(payload.getvalue()), staging, max_bytes=20 * 1024 * 1024)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "original.md").write_text("prior vault")
+    request = _request()
+    cloud_import_job._restore(destination, staging, request)
+    assert (destination / "vault/note.md").read_text() == "ordinary authored directory"
+    assert authority.read_marker(destination) == authority.read_marker(source)
+    assert (destination.parent / f".restore-prior-{request.import_id}/vault/original.md").read_text() == "prior vault"
+
+
 def test_old_schema_validation_preserves_archived_replica(ab, tmp_path):
     """Checking a supported earlier schema must migrate only the disposable checking copy."""
     _earlier_c(ab)
@@ -267,6 +291,150 @@ def test_old_schema_validation_preserves_archived_replica(ab, tmp_path):
     with closing(sqlite3.connect(replica.replica_path(vault))) as reader:
         assert schema.schema_version(reader) == 10
     assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
+
+
+@pytest.mark.parametrize("phase", ["integrity", "migration", "chain"])
+def test_replica_deadline_interrupts_private_sql_and_chain_without_changing_bytes(ab, tmp_path, monkeypatch, phase):
+    """A caller deadline must stop private validation work and retain the original deadline exception."""
+    _earlier_c(ab)
+    vault, _host, state = _backup_roots(ab, tmp_path)
+    source_before = {path.name: path.read_bytes() for path in state.iterdir()}
+    replica_before = replica.replica_path(vault).read_bytes()
+    inside_sql = False
+    inside_migration = False
+    hashed = 0
+    stop = TimeoutError("caller validation deadline")
+    original_connect = sqlite3.connect
+    original_schema = schema.ensure_schema
+    original_head = chain.tokens.store_head_hash
+
+    class ObservedConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            nonlocal inside_sql
+            inside_sql = sql == "PRAGMA integrity_check"
+            try:
+                return super().execute(sql, *args, **kwargs)
+            finally:
+                inside_sql = False
+
+    def connect(*args, **kwargs):
+        kwargs["factory"] = ObservedConnection
+        return original_connect(*args, **kwargs)
+
+    def migrate(core):
+        nonlocal inside_migration
+        inside_migration = True
+        try:
+            return original_schema(core)
+        finally:
+            inside_migration = False
+
+    def head(*args):
+        nonlocal hashed
+        hashed += 1
+        return original_head(*args)
+
+    def check():
+        if (phase == "integrity" and inside_sql or phase == "migration" and inside_migration
+                or phase == "chain" and hashed):
+            raise stop
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    monkeypatch.setattr(schema, "ensure_schema", migrate)
+    monkeypatch.setattr(chain.tokens, "store_head_hash", head)
+    with pytest.raises(TimeoutError) as caught:
+        with vault_portability.checked_collection_replica(vault, check=check):
+            pytest.fail("validation ignored the caller deadline")
+    assert caught.value is stop
+    if phase == "chain":
+        assert hashed == 1  # The second transaction must not finish after the caller stops the chain.
+    assert replica.replica_path(vault).read_bytes() == replica_before
+    assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_AS is a POSIX process limit")
+def test_large_old_replica_publishes_within_the_archive_pods_memory_limit(abc, tmp_path):
+    """A 300 MiB old replica must not require whole-file CAS buffers inside the 512 MiB archive Pod."""
+    vault, host_root, state = _backup_roots(abc, tmp_path)
+    old = replica.replica_path(vault)
+    with sqlite3.connect(old) as writer:
+        writer.execute("CREATE TABLE memory_fixture(payload BLOB)")
+        writer.execute("INSERT INTO memory_fixture VALUES(zeroblob(?))", (300 * 1024 * 1024,))
+        writer.commit()
+        writer.execute("DROP TABLE memory_fixture")
+        writer.commit()
+        assert writer.execute("PRAGMA freelist_count").fetchone()[0] > 0
+    assert old.stat().st_size >= 300 * 1024 * 1024
+    source_before = {path.name: path.read_bytes() for path in state.iterdir()}
+    script = """
+import resource, sys, json
+resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+from pathlib import Path
+import exomem
+assert Path(exomem.__file__).resolve().parent == Path(sys.argv[1]).resolve()
+from exomem.cloud_operator_portability import prepare_export
+result = prepare_export(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]),
+                        source_state_directory=Path(sys.argv[5]), timeout_seconds=120)
+print(json.dumps(result))
+"""
+    package = Path(operator.__file__).resolve().parent
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(package.parent), str(Path(__file__).resolve().parent)))}
+    completed = subprocess.run([sys.executable, "-c", script, str(package), str(vault), str(host_root),
+                                str(abc.root), str(state)], env=env, capture_output=True, text=True, timeout=150)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout)["ok"]
+    with vault_portability.checked_collection_replica(vault) as reader:
+        assert reader.execute("SELECT collection_id FROM collections").fetchall() == [(CID,)]
+    assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
+    assert not list(vault.parent.glob(".exomem-operator-store-*"))
+    assert not list(old.parent.glob(held_fs.PUBLISH_TEMP_PREFIX + "*"))
+
+
+@pytest.mark.parametrize("interruption", ["target-changed", "deadline"])
+def test_publication_rechecks_old_bytes_and_deadline_after_the_copy(abc, tmp_path, monkeypatch, interruption):
+    """A staged copy must not replace changed old bytes or publish after its final hash misses the deadline."""
+    vault, host_root, state = _backup_roots(abc, tmp_path)
+    target = replica.replica_path(vault)
+    before = target.read_bytes()
+    source_before = {path.name: path.read_bytes() for path in state.iterdir()}
+    target_identity = target.stat()
+    copied = expired = False
+    original_publish = held_fs.publish_bytes
+    original_hash = snapshot._file_sha256
+    original_clock = time.monotonic
+
+    def publish(*args, **kwargs):
+        original_prepare = kwargs["prepare"]
+
+        def after_copy(file):
+            nonlocal copied
+            copied = True
+            if interruption == "target-changed":
+                with target.open("ab") as stream:
+                    stream.write(b"changed old target")
+            original_prepare(file)
+
+        return original_publish(*args, **{**kwargs, "prepare": after_copy})
+
+    def hashed(descriptor, check=None):
+        nonlocal expired
+        found = os.fstat(descriptor)
+        if (interruption == "deadline" and copied
+                and (found.st_dev, found.st_ino) == (target_identity.st_dev, target_identity.st_ino)):
+            expired = True
+        return original_hash(descriptor, check)
+
+    monkeypatch.setattr(held_fs, "publish_bytes", publish)
+    monkeypatch.setattr(snapshot, "_file_sha256", hashed)
+    monkeypatch.setattr(time, "monotonic", lambda: original_clock() + (60 if expired else 0))
+    error = held_fs.HeldFsError if interruption == "target-changed" else TimeoutError
+    with pytest.raises(error):
+        operator.prepare_export(vault, host_root, abc.root, source_state_directory=state, timeout_seconds=20)
+    assert copied
+    assert target.read_bytes() == before + (b"changed old target" if interruption == "target-changed" else b"")
+    assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
+    assert not list(vault.parent.glob(".exomem-operator-store-*"))
+    assert not list(target.parent.glob(held_fs.PUBLISH_TEMP_PREFIX + "*"))
 
 
 @pytest.mark.parametrize("marker_version", [1, 2])

@@ -248,7 +248,7 @@ def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> No
     from .vault import _is_vault
 
     # Operator tar exports have one fixed vault/ wrapper; mixed archive roots are ambiguous.
-    if (staging / "vault").exists():
+    if not _is_vault(staging) and (staging / "vault").exists():
         if staging.is_symlink() or sorted(path.name for path in staging.iterdir()) != ["vault"]:
             raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "mixed_vault_roots")
         staging = staging / "vault"
