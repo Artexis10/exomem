@@ -18,20 +18,21 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
 import sqlite3
 import time
 import uuid
-from contextlib import closing
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
-from .. import state_paths
+from .. import held_fs, reserved_paths, state_paths
+from ..cli_ops import OpError
 from . import (
     admission,
     authority,
     capability,
     chain,
     connection,
+    handoff_state,
     legacy_import,
     owner,
     preflight,
@@ -40,7 +41,6 @@ from . import (
     snapshot,
     takeover,
 )
-from . import handoff_state
 from .connection import CollectionStoreError
 
 logger = logging.getLogger(__name__)
@@ -56,14 +56,104 @@ def _staging_directories(root):
     return connection.migration_staging_directories(root)
 
 
+@contextmanager
+def _migration_scope(root, deadline=None):
+    reserved_paths.warm_identity_catalogue_before_boundary(root)
+    try:
+        with reserved_paths._subsystem_authority_scope("collection_store.migration"), \
+                reserved_paths._identity_coordination_scope(root, descriptor_ids=(connection.MIGRATION_STAGING,),
+                                                           deadline=deadline):
+            _check_deadline(deadline)
+            yield
+    except OpError:
+        _check_deadline(deadline)
+        raise
+
+
+@contextmanager
+def _held_workspace(directory, *, create=False):
+    with held_fs.acquire(directory.parent.parent).require() as filesystem, \
+            filesystem.parent(directory.parent.name, access="mutate").require() as state, \
+            filesystem.parent(f"{directory.parent.name}/{directory.name}", create=create, exclusive=create,
+                              access="mutate").require() as staging:
+        def check():
+            try:
+                filesystem.validate_directory(state).require()
+                filesystem.validate_directory(staging).require()
+            except held_fs.HeldFsError as error:
+                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging directory changed during migration") from error
+        check()
+        if create:
+            filesystem.flush_directory(state).require()
+        yield filesystem, state, staging, check
+
+
+@contextmanager
+def _held_staging(directory, leaf=_STAGING):
+    """Keep the actual state, staging and database identities through comparison and installation."""
+    with _held_workspace(directory) as (filesystem, _state, staging, parent_check), \
+            filesystem.file(staging, leaf).require() as database:
+        def check():
+            parent_check()
+            try:
+                with filesystem.file(staging, leaf).require() as named:
+                    if not held_fs._same_file_identity(named.identity, database.identity):
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store changed during cutover")
+            except held_fs.HeldFsError as error:
+                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store changed during cutover") from error
+        check()
+        yield filesystem, staging, database, check
+
+
+def _single_file(conn, directory):
+    return (conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+            and not any((directory / (_STAGING + suffix)).exists() for suffix in snapshot._COMPANIONS))
+
+
+def _proved_version(directory, database):
+    with closing(connection.open_reader(directory / _STAGING)) as reader:
+        if not _single_file(reader, directory):
+            raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store requires SQLite companions")
+    return database.version()
+
+
 def _discard(directory):
-    shutil.rmtree(directory)
+    """Remove only a recognized, closed staging database; preserve unknown or changed entries."""
+    try:
+        with held_fs.acquire(directory.parent.parent).require() as filesystem, \
+                filesystem.parent(f"{directory.parent.name}/{directory.name}", access="mutate").require() as staging:
+            if not set(filesystem.iter_names(staging)):
+                filesystem.unlink_directory(staging).require()
+                return True
+        with _held_staging(directory) as (filesystem, staging, database, check):
+            if set(filesystem.iter_names(staging)) != {_STAGING}:
+                return False
+            version = database.version()
+            with closing(connection.open_reader(directory / _STAGING)) as reader:
+                if not _single_file(reader, directory):
+                    return False
+                basis = _read_basis(reader)
+                pending = authority.pending_create(reader)
+                if basis is None and (pending is None or pending["kind"] != authority.MIGRATE):
+                    return False
+                chain.verify_store_chain(reader)
+            check()
+            if database.version() != version:
+                return False
+            with filesystem.file(staging, _STAGING, access="mutate").require() as current:
+                if current.identity != database.identity or current.version() != version:
+                    return False
+                filesystem.unlink(current).require()
+            filesystem.unlink_directory(staging).require()
+            return True
+    except (OSError, ValueError, held_fs.HeldFsError, sqlite3.DatabaseError, CollectionStoreError, chain.StoreChainError):
+        return False
 
 
-def _new_directory(root):
-    directory = state_paths.ensure_vault_state_dir(root) / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
-    directory.mkdir(mode=0o700)
-    return directory
+def _check_deadline(deadline):
+    if _expired(deadline):
+        raise TimeoutError("COLLECTION_MIGRATION_DEADLINE: migration deadline elapsed")
+
 
 
 def _scratch(root):
@@ -94,22 +184,20 @@ def _copied(copied):
 _HEAD = ("store_id", "instance_id", "commit_seq", "head_hash")
 
 
-def _live_snapshot(root, directory, deadline=None):
-    """Copy the live store into ``directory`` as the staging base; what the copy was taken from."""
-    with snapshot.staged_snapshot(root, directory=_scratch(root), deadline=_deadline(deadline)) as copied:
-        copied.path.rename(directory / _STAGING)
-        return _copied(copied)
-
-
 def _live_copy(root, deadline=None):
     """The head and digest of a fresh validated copy of the live store, compared to the staging base's."""
     with snapshot.staged_snapshot(root, directory=_scratch(root), deadline=_deadline(deadline)) as copied:
         return _copied(copied)
 
 
-def _read_basis(conn):
+def _basis_text(conn):
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (_BASIS,)).fetchone()
-    return None if row is None else json.loads(row[0])
+    return None if row is None else row[0]
+
+
+def _read_basis(conn):
+    raw = _basis_text(conn)
+    return None if raw is None else json.loads(raw)
 
 
 def _write_basis(conn, basis):
@@ -126,19 +214,20 @@ def _recorder(staging):
             "layout": manifest.storage.strategy, "semantic_profile": manifest.semantic_profile,
             "basis": captured.collection_basis, "txn_id": result.checkpoint_txn_id,
             "rows": result.item_count, "legacy_events": result.legacy_event_count,
-            "legacy_audit_status": captured.legacy_inspection["status"]}
+            "legacy_audit_status": captured.legacy_inspection["status"],
+            "material_version": legacy_import.MATERIAL_VERSION, "material_digest": result.material_digest}
         _write_basis(staging, basis)
     return record
 
 
 #: The fields ``_recorder`` writes per collection; a basis missing one is rebuilt, never read.
 _RECORDED = frozenset({"manifest_path", "source_path", "layout", "semantic_profile", "basis", "txn_id", "rows",
-                       "legacy_events", "legacy_audit_status"})
+                       "legacy_events", "legacy_audit_status", "material_version", "material_digest"})
 
 
 def _usable(basis):
     try:
-        return (basis["version"] == 1
+        return (basis["version"] == 2
                 and (basis["live"] is None or (isinstance(basis["live"]["snapshot_sha256"], str)
                                                and set(_HEAD) <= basis["live"].keys()))
                 and all(isinstance(entry, dict) and _RECORDED <= entry.keys()
@@ -176,39 +265,125 @@ def _require_stageable(root):
     return intent
 
 
-def _stage(root, *, base=True, deadline=None):
-    """Build fresh staging from the live store (if any) and every file collection's import and proof.
-
-    ``base=False`` starts from an empty store, for a first enrolment whose own unadmitted
-    store is live. Returns the report and the retained staging directory, or None when
-    nothing is ready or a collection is blocked: a failed proof leaves no staging behind.
-    A collection not checked by ``deadline`` is blocked as the preflight's deadline blocks it.
-    """
-    for old in _staging_directories(root):
-        _discard(old)
+def _stage(root, *, base=True, deadline=None, donor=None):
+    """Assemble a fresh candidate, retaining only eligible, unchanged proved legacy material."""
     rows, pending, store_ids = preflight.candidates(root)
     if not pending:
-        # Nothing left to import, as on a vault that has migrated: no copy, no staging.
         return preflight.report(rows, store_ids), None
-    directory = _new_directory(root)
-    try:
-        live = (_live_snapshot(root, directory, deadline)
-                if base and connection.store_path(root).exists() else None)
-        with connection.staging_store(directory / _STAGING) as staging:
-            staging.execute("BEGIN IMMEDIATE")
-            _write_basis(staging, {"version": 1, "live": live, "collections": {}})
-            staging.execute("COMMIT")
-            rows.extend(preflight.prove_into(root, pending, staging, _scratch(root),
-                                             preflight.import_context(_ACTOR), record=_recorder(staging),
-                                             deadline=deadline))
-        report = preflight.report(rows, store_ids)
-    except BaseException:
-        _discard(directory)
-        raise
-    if report["verdict"] != "migratable":
-        _discard(directory)
-        return report, None
-    return report, directory
+    directory = (state_paths.ensure_vault_state_dir(root) / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
+                 if donor is None else donor)
+    # A stopped attempt may leave unknown bytes; a new private leaf preserves them without blocking a retry.
+    leaf = _STAGING if donor is None else f"refresh-{uuid.uuid4().hex}.sqlite"
+    candidate = directory / leaf
+    installed = False
+    # The donor stays held and untouched until the entire replacement is valid and closed.
+    with ExitStack() as stack:
+        filesystem, state, parent, workspace_check = stack.enter_context(_held_workspace(directory, create=donor is None))
+        candidate_file = None
+        donor_reader, basis, donor_check = None, None, lambda: None
+        if donor is not None:
+            database = stack.enter_context(filesystem.file(parent, _STAGING).require())
+            donor_reader = stack.enter_context(closing(connection.open_reader(donor / _STAGING)))
+            basis = _read_basis(donor_reader)
+            if basis is None or not _usable(basis) or authority.pending_create(donor_reader) is not None:
+                basis = None
+            donor_version = database.version()
+            def donor_check():
+                with filesystem.file(parent, _STAGING).require() as current:
+                    if current.identity != database.identity or current.version() != donor_version:
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the donor staging store changed during refresh")
+        def check():
+            _check_deadline(deadline)
+            workspace_check()
+            donor_check()
+            if candidate_file is not None:
+                with filesystem.file(parent, leaf).require() as current:
+                    if not held_fs._same_file_identity(candidate_file.identity, current.identity):
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the replacement staging store changed during refresh")
+        check()
+        live = None
+        if base and connection.store_path(root).exists():
+            with snapshot.staged_snapshot(root, directory=_scratch(root), deadline=_deadline(deadline),
+                                          cancelled=lambda: check() or False) as copied:
+                with filesystem.file(state, copied.path.name, access="mutate").require() as source:
+                    check()
+                    # The snapshot already proved and closed this live base; move its one file into our workspace.
+                    filesystem.rename(source, parent, leaf, replace=False).require()
+                    live = _copied(copied)
+            candidate_file = stack.enter_context(filesystem.file(parent, leaf, access="mutate").require())
+        else:
+            candidate_file = stack.enter_context(filesystem.file(parent, leaf, create=True, exclusive=True,
+                                                                  access="mutate").require())
+        try:
+            with connection.staging_store(candidate) as staging, legacy_import.checked_sql(staging, check):
+                staging.execute("BEGIN IMMEDIATE")
+                _write_basis(staging, {"version": 2, "live": live, "collections": {}})
+                staging.execute("COMMIT")
+                context = preflight.import_context(_ACTOR)
+                with preflight.scanned(root, _scratch(root), pending, deadline=deadline) as (audit, blocked):
+                    if audit is None:
+                        rows.extend(blocked)
+                    else:
+                        for manifest in pending:
+                            check()
+                            try:
+                                captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
+                            except preflight._REFUSALS as error:
+                                rows.append(preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error)))
+                                continue
+                            entry = None if basis is None else basis["collections"].get(manifest.collection_id)
+                            material = None
+                            if entry is not None and captured.collection_basis == entry["basis"]:
+                                try:
+                                    with legacy_import.checked_sql(donor_reader, check):
+                                        material = legacy_import.retained_material(donor_reader, entry, check=check)
+                                except (ValueError, TypeError, KeyError, sqlite3.DatabaseError):
+                                    material = None
+                            staging.execute("BEGIN IMMEDIATE")
+                            try:
+                                result = (legacy_import.assemble(staging, material, check) if material is not None else
+                                          legacy_import.import_legacy_collection(staging, captured, audit=audit, context=context))
+                                _recorder(staging)(captured, result)
+                                staging.execute("COMMIT")
+                            except preflight._REFUSALS as error:
+                                if staging.in_transaction:
+                                    staging.execute("ROLLBACK")
+                                rows.append(preflight._row(manifest.path, manifest, status="blocked", blocker=preflight._blocker(error)))
+                                continue
+                            except BaseException:
+                                if staging.in_transaction:
+                                    staging.execute("ROLLBACK")
+                                raise
+                            rows.append(preflight._row(manifest.path, manifest, status="ready", proof="passed",
+                                rows=result.item_count, legacy_events=result.legacy_event_count,
+                                legacy_audit_status=captured.legacy_inspection["status"]))
+                chain.verify_store_chain(staging, check=check)
+                if staging.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the refreshed staging store has invalid references")
+                if staging.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the refreshed staging store is still open")
+            report = preflight.report(rows, store_ids)
+            check()
+            if any((directory / (leaf + suffix)).exists() for suffix in snapshot._COMPANIONS):
+                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the refreshed staging store is still open")
+            if report["verdict"] != "migratable":
+                return report, None
+            if donor is not None:
+                donor_reader.close()
+                donor_check()
+                filesystem.rename(candidate_file, parent, _STAGING, replace=True).require()
+                filesystem.flush_directory(parent).require()
+            installed = True
+            return report, directory
+        finally:
+            if not installed:
+                # This attempt owns this exact file; held unlink preserves a replacement at its name.
+                filesystem.unlink(candidate_file)
+                if donor is None and not set(filesystem.iter_names(parent)):
+                    # Only this attempt's freshly created, now-empty directory can be removed here.
+                    with held_fs.acquire(directory.parent).require() as state_fs, \
+                            state_fs.parent(directory.name, access="mutate").require() as empty:
+                        state_fs.unlink_directory(empty).require()
 
 
 #: Why an apply rebuilt its staging, as the report names it: closed reasons of this module.
@@ -220,7 +395,7 @@ SET_CHANGED, AUDIT_UNREADABLE, BASIS_CHANGED = "collection_set_changed", "audit_
 LIVE_REWRITTEN = "live_store_rewritten"
 
 
-def _carried(root, directory, *, supersede=False, deadline=None):
+def _carried(root, directory, *, supersede=False, deadline=None, verified=None):
     """The report for staging that still matches every input it was built from, or why it does not.
 
     Each collection is compared by its own basis, so an unrelated activity-log write does
@@ -234,7 +409,10 @@ def _carried(root, directory, *, supersede=False, deadline=None):
         return None, STAGING_MISSING, []
     try:
         with closing(connection.open_reader(path)) as reader:
-            basis = _read_basis(reader)
+            if not _single_file(reader, directory):
+                return None, NO_BASIS, []
+            basis_text = _basis_text(reader)
+            basis = None if basis_text is None else json.loads(basis_text)
             unfinished = authority.pending_create(reader) is not None
     except (CollectionStoreError, sqlite3.DatabaseError, ValueError):
         # Staging that cannot be read is rebuilt, never trusted.
@@ -263,13 +441,20 @@ def _carried(root, directory, *, supersede=False, deadline=None):
         if audit is None:
             return None, AUDIT_UNREADABLE, []
         for manifest in pending:
+            _check_deadline(deadline)
             try:
                 captured = legacy_import.capture_legacy_collection(root, manifest.path, audit=audit)
             except (TimeoutError, *preflight._REFUSALS):
                 changed.append(manifest.path)
                 continue
             entry = recorded[manifest.collection_id]
-            if captured.collection_basis != entry["basis"]:
+            try:
+                with closing(connection.open_reader(path)) as donor_reader, legacy_import.checked_sql(
+                        donor_reader, lambda: _check_deadline(deadline)):
+                    material = legacy_import.retained_material(donor_reader, entry, check=lambda: _check_deadline(deadline))
+            except (ValueError, TypeError, KeyError, sqlite3.DatabaseError):
+                material = None
+            if captured.collection_basis != entry["basis"] or material is None:
                 changed.append(manifest.path)
                 continue
             rows.append(preflight._row(manifest.path, manifest, status="ready", proof="passed",
@@ -277,6 +462,8 @@ def _carried(root, directory, *, supersede=False, deadline=None):
                                        legacy_audit_status=entry["legacy_audit_status"]))
     if changed:
         return None, BASIS_CHANGED, sorted(changed)
+    if verified is not None:
+        verified["basis_text"] = basis_text
     return preflight.report(rows, store_ids), None, []
 
 
@@ -302,7 +489,14 @@ def prepare(vault_root, *, deadline=None) -> dict:
     if _require_stageable(root) is not None:
         raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                    "a migration cutover is unfinished; run the apply step to finish it")
-    report, directory = _stage(root, deadline=deadline)
+    with _migration_scope(root, deadline):
+        if _require_stageable(root) is not None:
+            raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "a migration cutover is unfinished")
+        old = _staging_directories(root)
+        report, directory = _stage(root, deadline=deadline)
+        if directory is not None:
+            for stale in old:
+                _discard(stale)
     return {**report, "step": "prepare", "coordinator": coordinator,
             "staging": "retained" if directory is not None else "none"}
 
@@ -314,12 +508,10 @@ def discard_staging(vault_root) -> int:
     beside a pending cutover stays, for that cutover's apply step to judge.
     """
     root = Path(vault_root).resolve()
-    if _require_stageable(root) is not None:
-        return 0
-    directories = _staging_directories(root)
-    for directory in directories:
-        _discard(directory)
-    return len(directories)
+    with _migration_scope(root):
+        if _require_stageable(root) is not None:
+            return 0
+        return sum(_discard(directory) for directory in _staging_directories(root))
 
 
 def _require_current_coordinator(runtime, fence_client, marker, staging, supersedes=None):
@@ -388,7 +580,7 @@ def _intent(root, marker, raw, staging, fence, supersedes=None):
                                                                for name in ("commit_seq", "head_hash")}})}
 
 
-def _seal(directory, intent, adopted=None):
+def _seal(directory, intent, adopted=None, *, expected_identity, expected_version, basis_text, check, deadline=None):
     """Record the intent in the staging store and close it journal-free, ready to rename into place.
 
     It opens only the existing file and replaces only the basis this cutover verified, so a
@@ -398,25 +590,51 @@ def _seal(directory, intent, adopted=None):
     bytes as ``.foreign-*`` evidence instead of reading them as divergence.
     """
     path = directory / _STAGING
+    check()
+    _check_deadline(deadline)
     try:
-        with closing(sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True, isolation_level=None)) as staging:
-            staging.execute("BEGIN IMMEDIATE")
-            if _read_basis(staging) is None:
-                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store changed during cutover")
-            staging.execute("DELETE FROM store_meta WHERE key=?", (_BASIS,))
-            staging.execute("INSERT INTO store_meta(key,value) VALUES (?,?)",
-                            (authority.PENDING_CREATE, json.dumps(intent, sort_keys=True, separators=(",", ":"))))
-            if adopted is not None:
-                staging.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)",
-                                (schema.META_ADOPTED_FOREIGN_REPLICA, adopted))
-            staging.execute("COMMIT")
-            chain.verify_store_chain(staging)
-            if staging.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
-                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store is still open")
+        with _held_staging(directory) as (_filesystem, _parent, database, named_check):
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True, isolation_level=None, timeout=0)) as staging:
+                if not _single_file(staging, directory):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store requires SQLite companions")
+                # Private staging keeps SQLite's writer lock through version capture; contention costs one safe retry.
+                if staging.execute("PRAGMA locking_mode=EXCLUSIVE").fetchone() != ("exclusive",):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store cannot retain its writer lock")
+                # This coordinated attempt is the sole private writer; a busy writer costs one safe retry.
+                staging.execute("BEGIN IMMEDIATE")
+                check()
+                _check_deadline(deadline)
+                named_check()
+                if not held_fs._same_file_identity(database.identity, expected_identity):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging identity changed during cutover")
+                if database.version() != expected_version or not _single_file(staging, directory):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the proved staging bytes changed during cutover")
+                if _basis_text(staging) != basis_text:
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store changed during cutover")
+                deleted = staging.execute("DELETE FROM store_meta WHERE key=? AND value=?", (_BASIS, basis_text)).rowcount
+                if deleted != 1:
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging basis changed during cutover")
+                if authority.pending_create(staging) is not None:
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store already has an intent")
+                staging.execute("INSERT INTO store_meta(key,value) VALUES (?,?)",
+                                (authority.PENDING_CREATE, json.dumps(intent, sort_keys=True, separators=(",", ":"))))
+                if adopted is not None:
+                    staging.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)",
+                                    (schema.META_ADOPTED_FOREIGN_REPLICA, adopted))
+                _check_deadline(deadline)
+                staging.execute("COMMIT")
+                chain.verify_store_chain(staging)
+                if staging.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store is still open")
+                # EXCLUSIVE may retain its own rollback journal until close; no main writes follow this witness.
+                sealed_version = database.version()
+            check()
+            if database.version() != sealed_version or any(
+                    (directory / (_STAGING + suffix)).exists() for suffix in snapshot._COMPANIONS):
+                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging bytes changed after close")
+            return sealed_version
     except sqlite3.OperationalError as error:
         raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store changed during cutover") from error
-    if any((directory / (_STAGING + suffix)).exists() for suffix in snapshot._COMPANIONS):
-        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging store is still open")
 
 
 STALE = "COLLECTION_STORE_MIGRATION_STALE"
@@ -689,8 +907,9 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                 changed = [] if admitted else _changed_since_publication(root, pending, deadline)
                 if not changed:
                     result = admission._resume_locked(session, fence_client, preparation_token=token)
-                    for leftover in _staging_directories(root):
-                        _discard(leftover)
+                    with _migration_scope(root):
+                        for leftover in _staging_directories(root):
+                            _discard(leftover)
                     return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
                             "staging": "resumed", **result}
             if _expired(deadline):
@@ -719,61 +938,94 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             # cutover's checks read; the route migrates again under a new acquisition.
             return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
                     "status": RESTORED, "restored": restored}
-        supersede = pending is not None
-        # Staging runs under the mutation boundary alone, which keeps the files and the live
-        # store still only for processes that share this lease state directory. The lease waits
-        # until there is a store to publish, because an unadmitted token cannot hand it back.
-        directories = _staging_directories(root)
-        if supersede:
-            # Nothing fences or routes the published store yet: fresh staging supersedes it.
-            report, reason, directory = None, BASIS_CHANGED, None
-        else:
-            report, reason, changed = _carried(root, directories[0], deadline=deadline) if len(directories) == 1 else (
-                None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
-            directory = directories[0] if report is not None else None
-        if report is None:
-            if deadline is not None and reason == LIVE_CHANGED:
-                # Copying the moved store again is the owner's offline apply (D4).
-                return _abandoned(coordinator, reason)
-            report, directory = _stage(root, base=not supersede, deadline=deadline)
-        if directory is None:
-            if _expired(deadline):
-                return _abandoned(coordinator, DEADLINE, changed)
-            return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
-        # A cut fence admits only a lease that carries the store capability, which a bound runtime sends.
-        runtime = session.runtime() if marker is not None or supersedes is not None else None
-        with manager.writer_authority_guard(vault_root=root):
-            token = manager._fencing_token
-            # Staging held no lease, so a lease holder with another state directory may have
-            # written meanwhile. Under the lease none can; only a writer outside it still can.
-            rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline)
-            if rechecked is None:
-                if deadline is not None and why == LIVE_CHANGED:
-                    return _abandoned(coordinator, why)
-                report, directory = _stage(root, base=not supersede, deadline=deadline)
-                reason, changed = why, rechanged
-                if directory is None:
+        with _migration_scope(root, deadline):
+            supersede = pending is not None
+            # Staging runs under the mutation boundary alone, which keeps the files and the live
+            # store still only for processes that share this lease state directory. The lease waits
+            # until there is a store to publish, because an unadmitted token cannot hand it back.
+            current_pending = _require_stageable(root)
+            if current_pending != pending:
+                raise CollectionStoreError("COLLECTION_STORE_BUSY", "the live migration changed during coordination")
+            directories = _staging_directories(root)
+            if supersede:
+                # Nothing fences or routes the published store yet: fresh staging supersedes it.
+                report, reason, directory = None, BASIS_CHANGED, None
+            else:
+                report, reason, changed = _carried(root, directories[0], deadline=deadline) if len(directories) == 1 else (
+                    None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
+                directory = directories[0] if len(directories) == 1 else None
+            if report is None:
+                if deadline is not None and reason == LIVE_CHANGED:
+                    # Copying the moved store again is the owner's offline apply (D4).
+                    return _abandoned(coordinator, reason)
+                report, directory = _stage(root, base=not supersede, deadline=deadline,
+                                           donor=directory if not supersede and reason not in (
+                                               INTERRUPTED, STAGING_MISSING, NO_BASIS) else None)
+            if directory is None:
+                if _expired(deadline):
+                    return _abandoned(coordinator, DEADLINE, changed)
+                return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
+            # A cut fence admits only a lease that carries the store capability, which a bound runtime sends.
+            runtime = session.runtime() if marker is not None or supersedes is not None else None
+            with manager.writer_authority_guard(vault_root=root):
+                token = manager._fencing_token
+                # Staging held no lease, so a lease holder with another state directory may have
+                # written meanwhile. Under the lease none can; only a writer outside it still can.
+                with ExitStack() as final:
+                    _filesystem, _parent, staged_file, staging_check = final.enter_context(_held_staging(directory))
+                    proved_version = _proved_version(directory, staged_file)
+                    verified = {}
+                    rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline,
+                                                       verified=verified)
+                    if rechecked is None:
+                        final.close()
+                        if deadline is not None and why == LIVE_CHANGED:
+                            return _abandoned(coordinator, why)
+                        report, directory = _stage(root, base=not supersede, deadline=deadline,
+                                                   donor=None if why == NO_BASIS else directory)
+                        reason, changed = why, rechanged
+                        if directory is None:
+                            if _expired(deadline):
+                                return _abandoned(coordinator, DEADLINE, changed)
+                            return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
+                        _filesystem, _parent, staged_file, staging_check = final.enter_context(_held_staging(directory))
+                        proved_version = _proved_version(directory, staged_file)
+                        rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline,
+                                                           verified=verified)
+                        if rechecked is None:
+                            if deadline is not None:
+                                return _abandoned(coordinator, DEADLINE if _expired(deadline) else why, rechanged)
+                            raise CollectionStoreError("COLLECTION_STORE_BUSY", "the migration inputs changed at the final comparison")
+                    staging_check()
+                    if staged_file.version() != proved_version:
+                        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging bytes changed during the final proof")
+                    with closing(connection.open_reader(directory / _STAGING)) as staging:
+                        fence = _require_current_coordinator(runtime, fence_client, marker, staging, supersedes)
+                        intent = _intent(root, marker, raw, staging, fence, supersedes)
+                        basis_text = verified["basis_text"]
+                        if _basis_text(staging) != basis_text:
+                            raise CollectionStoreError("COLLECTION_STORE_BUSY", "the staging basis changed after comparison")
+                        identity = tuple(staging.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
+                                         for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID))
                     if _expired(deadline):
+                        # The last point before a live change: from the seal on, the cutover finishes.
                         return _abandoned(coordinator, DEADLINE, changed)
-                    return {**report, "step": "apply", "coordinator": coordinator, "staging": "none"}
-            with closing(connection.open_reader(directory / _STAGING)) as staging:
-                fence = _require_current_coordinator(runtime, fence_client, marker, staging, supersedes)
-                intent = _intent(root, marker, raw, staging, fence, supersedes)
-                identity = tuple(staging.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
-                                 for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID))
-            if _expired(deadline):
-                # The last point before a live change: from the seal on, the cutover finishes.
-                return _abandoned(coordinator, DEADLINE, changed)
-            _seal(directory, intent, _adopted_replica(root, session.path) if supersede else None)
-            if runtime is not None and not runtime.retire_idle_handle():
-                raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
-            session.require(token)
-            takeover.replace_live(session, _STAGING, lambda: session.require(token), subdirectory=directory.name)
-            if supersedes is not None:
-                # The runtime opened the superseded store; it now serves the store the fence moves to.
-                runtime.rebind(identity)
+                    sealed_version = _seal(directory, intent, _adopted_replica(root, session.path) if supersede else None,
+                                           expected_identity=staged_file.identity, expected_version=proved_version,
+                                           basis_text=basis_text, check=staging_check, deadline=deadline)
+                    if runtime is not None and not runtime.retire_idle_handle():
+                        raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
+                    session.require(token)
+                    takeover.replace_live(session, _STAGING, lambda: session.require(token),
+                                          subdirectory=directory.name, expected_identity=staged_file.identity,
+                                          expected_version=sealed_version)
+                    if supersedes is not None:
+                        # The runtime opened the superseded store; it now serves the store the fence moves to.
+                        runtime.rebind(identity)
         result = admission._resume_locked(session, fence_client, preparation_token=token)
-        _discard(directory)
+        with _migration_scope(root):
+            for leftover in _staging_directories(root):
+                _discard(leftover)
     return {**report, "step": "apply", "coordinator": coordinator,
             "staging": "carried_forward" if reason is None else "rebuilt",
             **({"rebuilt_because": reason, "changed": changed} if reason is not None else {}),

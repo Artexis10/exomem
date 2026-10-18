@@ -255,6 +255,8 @@ class _FastAcknowledgementBatch:
     #: The route's own sweep inputs, when the leaf declared them for this
     #: batch's advisory target (`declare_write_advisory`).
     advisory_inputs: Any | None = None
+    handoff_outcome: str | None = None
+    handoff_error: _PostCommitOutcomeUncertain | None = None
 
 
 @dataclass(slots=True)
@@ -274,6 +276,7 @@ class _FastAcknowledgementSession:
     advisory_prepared_target: str | None = None
     advisory_prepared_inputs: Any | None = None
     batches: list[_FastAcknowledgementBatch] = field(default_factory=list)
+    handoff_in_progress: bool = False
 
 
 _ACTIVE_FAST_ACK_SESSION: ContextVar[_FastAcknowledgementSession | None] = ContextVar(
@@ -701,7 +704,7 @@ def complete_active_derived_batch(
     *,
     canonical_commit_monotonic: float,
 ) -> None:
-    """Retain a successfully committed receipt for the post-authority handoff."""
+    """Retain a committed receipt until the outer vault hold hands it off."""
     if receipt is None:
         return
     session = _ACTIVE_FAST_ACK_SESSION.get()
@@ -817,6 +820,88 @@ def _acknowledgement_component_names() -> tuple[str, ...]:
     )
 
 
+def _handoff_derived_batches(session: _FastAcknowledgementSession) -> None:
+    """Cache exact custody before releasing canonical writers, without waits.
+
+    A newer hold can move a path whose earlier receipt was already handed off.
+    Re-prove only those overlapping receipts after publishing the newer custody.
+    A failed handoff stays pending and cannot escape into canonical rollback.
+    """
+    if session.handoff_in_progress:
+        return
+    pending = [
+        batch
+        for batch in session.batches
+        if batch.handoff_outcome is None and batch.handoff_error is None
+    ]
+    if not pending:
+        return
+    changed_paths = {path.rel_path for batch in pending for path in batch.receipt.paths}
+    affected = [
+        batch
+        for batch in reversed(session.batches)
+        if any(path.rel_path in changed_paths for path in batch.receipt.paths)
+    ]
+    where: dict[str, str | None] = {"stage": "setup", "component": None, "outcome": None}
+    # Public proof and publication guards reenter consistency_guard, including
+    # on the direct leaf fallback where no enclosing canonical hold exists.
+    session.handoff_in_progress = True
+    try:
+        from . import derived_receipts
+
+        for batch in affected:
+            batch.handoff_outcome = None
+            batch.handoff_error = None
+        # Newer live custody must exist before an older receipt can hand on its
+        # moved paths. Component projection still uses commit order below.
+        for batch in affected:
+            receipt = batch.receipt
+            observed_generation = (
+                _current_canonical_generation(session.vault_root)
+                or receipt.canonical_generation
+            )
+            where.update(stage="receipt_proof", component=None, outcome=None)
+            with call_spans.span("derived.receipt_proof"):
+                proof = derived_receipts.prove_committed(
+                    session.vault_root,
+                    receipt,
+                    current_generation=observed_generation,
+                )
+            where["outcome"] = proof.outcome
+            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
+                raise RuntimeError("derived receipt proof does not match this batch")
+            if proof.outcome != "superseded":
+                if proof.outcome != "ready":
+                    raise RuntimeError(
+                        "derived receipt did not prove the committed generation"
+                    )
+                where["stage"] = "pending_visibility"
+                with call_spans.span("derived.pending_visibility"):
+                    published = derived_receipts.publish_pending_visibility(
+                        session.vault_root,
+                        receipt,
+                        publisher=_PENDING_VISIBILITY_PUBLISHER,
+                    )
+                if not published:
+                    raise RuntimeError("pending visibility publication was not proven")
+                where["stage"] = "signal"
+                derived_receipts.signal_components(session.vault_root, receipt)
+            batch.handoff_outcome = proof.outcome
+    except Exception as error:
+        logger.warning(
+            "fast acknowledgement failed; the persisted terminal degrades to "
+            "derived_sync=pending (%s)",
+            _content_free_cause(error, **where),
+        )
+        uncertain = _PostCommitOutcomeUncertain()
+        uncertain.advisory_result_ref = _claimed_advisory_ref(session)
+        for batch in affected:
+            if batch.handoff_outcome is None:
+                batch.handoff_error = uncertain
+    finally:
+        session.handoff_in_progress = False
+
+
 def _acknowledge_derived_batches_timed(
     result: Any,
     session: _FastAcknowledgementSession,
@@ -855,57 +940,16 @@ def _acknowledge_derived_batches_timed(
         )
         if budget_deadline is not None:
             deadline = min(deadline, budget_deadline)
-        # Prove and publish newest first. An older batch is superseded only once
-        # the newer batch covering it holds live pending custody, and when both
-        # batches belong to one mutation the newer one is published by this same
-        # loop -- so proving in commit order would ask the store about a
-        # supersession it cannot yet see and fail closed into
-        # committed-uncertain on a write that is entirely sound. The projection
-        # below still runs in commit order, so terminal field order is
-        # unchanged.
-        superseded_batches: set[str] = set()
-        for batch in reversed(session.batches):
-            receipt = batch.receipt
-            observed_generation = (
-                _current_canonical_generation(session.vault_root)
-                or receipt.canonical_generation
-            )
-            where.update(stage="receipt_proof", component=None, outcome=None)
-            with call_spans.span("derived.receipt_proof"):
-                proof = derived_receipts.prove_committed(
-                    session.vault_root,
-                    receipt,
-                    current_generation=observed_generation,
-                )
-            where["outcome"] = proof.outcome
-            if proof.batch_id != receipt.batch_id or proof.canonical_replay_authorized:
-                raise RuntimeError("derived receipt proof does not match this batch")
-            if proof.outcome == "superseded":
-                superseded_batches.add(receipt.batch_id)
-                continue
-            # No generation comparison here: the store echoes
-            # ``current_generation`` straight back into the proof, and its
-            # ``ready`` outcome is what already enforces that the stored
-            # generation matches the observed one.
-            if proof.outcome != "ready":
-                raise RuntimeError(
-                    "derived receipt did not prove the committed generation"
-                )
-            where["stage"] = "pending_visibility"
-            with call_spans.span("derived.pending_visibility"):
-                published = derived_receipts.publish_pending_visibility(
-                    session.vault_root,
-                    receipt,
-                    publisher=_PENDING_VISIBILITY_PUBLISHER,
-                )
-            if not published:
-                raise RuntimeError("pending visibility publication was not proven")
-            where["stage"] = "signal"
-            derived_receipts.signal_components(session.vault_root, receipt)
+        # Direct leaves without a matching vault hold keep the guarded fallback.
+        # Held writes reuse their exact handoff, including a cached failure.
+        _handoff_derived_batches(session)
+        for batch in session.batches:
+            if batch.handoff_error is not None:
+                raise batch.handoff_error
 
         for batch in session.batches:
             receipt = batch.receipt
-            superseded = receipt.batch_id in superseded_batches
+            superseded = batch.handoff_outcome == "superseded"
             # A superseded batch owes nothing: the newer batch that covers it
             # owns its convergence.
             batch_owed = set() if superseded else set(_acknowledgement_component_names())
@@ -4487,12 +4531,20 @@ class LeaseManager:
     ) -> Iterator[VaultMutationCoordinator]:
         """Serialize hosted reads with mutations without requiring writer authority."""
         mutation = self._mutation_coordinator_for(vault_root)
+        outermost = not mutation.current_thread_holds_boundary()
         with mutation.hold(
             request_id=request_id,
             operation=operation,
             holder_kind=holder_kind,
         ):
-            yield mutation
+            try:
+                yield mutation
+            finally:
+                session = _ACTIVE_FAST_ACK_SESSION.get()
+                if outermost and session is not None and active_derived_batch_custody(vault_root):
+                    # _mutation_boundary has bumped the generation. Keep exact
+                    # receipt custody visible before any waiting writer enters.
+                    _handoff_derived_batches(session)
 
     @contextmanager
     def reserved_identity_guard(
@@ -4505,6 +4557,7 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "reserved-state",
+        deadline: float | None = None,
     ) -> Iterator[str]:
         """Coordinate one owner's identities without serializing other owners."""
 
@@ -4515,7 +4568,8 @@ class LeaseManager:
         ):
             raise ValueError("reserved identity domains must be registered labels")
         vault_identity = canonical_mutation_identity(vault_root)
-        deadline = time.monotonic() + self._mutation_timeout_seconds
+        manager_deadline = time.monotonic() + self._mutation_timeout_seconds
+        deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
         gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
         def enter(
@@ -4980,11 +5034,6 @@ class LeaseManager:
             from .vocabulary_gate import attach_evidence, operation_context
 
             gate_context = None
-            fast_ack_token = (
-                _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
-                if fast_ack_session is not None
-                else None
-            )
             post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
             housekeeping_token = _ACTIVE_POST_TERMINAL_HOUSEKEEPING.set(
                 post_terminal_housekeeping
@@ -5060,8 +5109,6 @@ class LeaseManager:
                 commit_state["observed"] = _ACTIVE_MUTATION_COMMITTED.get()
                 _ACTIVE_POST_TERMINAL_FANOUT.reset(post_terminal_token)
                 _ACTIVE_POST_TERMINAL_HOUSEKEEPING.reset(housekeeping_token)
-                if fast_ack_token is not None:
-                    _ACTIVE_FAST_ACK_SESSION.reset(fast_ack_token)
                 _ACTIVE_LEASE_MANAGER.reset(manager_token)
                 _ACTIVE_MUTATION_COMMITTED.reset(commit_token)
                 _ACTIVE_MUTATION_TRACE.reset(trace_token)
@@ -5724,6 +5771,31 @@ class LeaseManager:
             return finish_fast_ack_and_graph(result)
 
         try:
+            @contextmanager
+            def operation_guard() -> Iterator[None]:
+                # Wide guards outlive invoke_leaf; retain the session until
+                # their outer hold has handed off its committed receipts.
+                token = _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)
+                try:
+                    guard = (
+                        self.writer_authority_guard(
+                            vault_root=mutation_subject,
+                            session_open_admission=session_open_admission,
+                        )
+                        if narrow_boundary
+                        else self.mutation_guard(
+                            mutation_subject,
+                            request_id=request_id,
+                            operation=command.name,
+                            holder_kind="command",
+                            session_open_admission=session_open_admission,
+                        )
+                    )
+                    with guard:
+                        yield
+                finally:
+                    _ACTIVE_FAST_ACK_SESSION.reset(token)
+
             def run_idempotent() -> Any:
                 return self.idempotency.run(
                     key,
@@ -5731,22 +5803,7 @@ class LeaseManager:
                     invoke_leaf,
                     expires_after=expires_after,
                     on_replay=on_replay,
-                    operation_guard=(
-                        (
-                            lambda: self.writer_authority_guard(
-                                vault_root=mutation_subject,
-                                session_open_admission=session_open_admission,
-                            )
-                        )
-                        if narrow_boundary
-                        else lambda: self.mutation_guard(
-                            mutation_subject,
-                            request_id=request_id,
-                            operation=command.name,
-                            holder_kind="command",
-                            session_open_admission=session_open_admission,
-                        )
-                    ),
+                    operation_guard=operation_guard,
                     commit_observed=lambda: commit_state["observed"],
                     after_canonical_persisted=persist_graph_sync_progress,
                     after_operation_guard=finish_before_terminal_persistence,

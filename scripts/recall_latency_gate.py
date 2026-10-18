@@ -23,7 +23,13 @@ from typing import Any, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
+# Legacy diagnostics retain their source default. MCP evidence defaults to the
+# installed observer; adding source requires an explicit opt-in before import.
+_bootstrap = argparse.ArgumentParser(add_help=False)
+_bootstrap.add_argument("--package-mode", choices=("installed", "source"))
+_bootstrap.add_argument("--mcp-url")
+_boot_args = _bootstrap.parse_known_args()[0]
+if (_boot_args.package_mode or ("installed" if _boot_args.mcp_url else "source")) == "source" and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
@@ -821,6 +827,9 @@ def _sample_from_envelope(data: Any) -> Sample:
     )
 
 
+# --- Read-only MCP canary ----------------------------------------------------
+
+
 # --- Entry point ------------------------------------------------------------
 
 
@@ -833,6 +842,9 @@ def main(argv: list[str] | None = None) -> int:
         "--served-url", help="base URL of a served cell, e.g. http://127.0.0.1:8765"
     )
     source.add_argument("--vault", type=Path, help="vault root, for an in-process run")
+    from exomem.recall_canary import add_arguments, run_cli
+
+    add_arguments(parser, source_group=source, selectable_check=False)
     parser.add_argument(
         "--check",
         action="store_true",
@@ -846,6 +858,9 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait for the load average to fall before refusing",
     )
     args = parser.parse_args(argv)
+
+    if args.mcp_url:
+        return run_cli(args)
 
     if args.served_url:
         key = os.environ.get("EXOMEM_REST_API_KEY", "").strip()

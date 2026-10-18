@@ -90,6 +90,43 @@ def test_a_phase_that_raised_is_still_recorded(token) -> None:
     assert [s["name"] for s in call_spans.pop_call_spans(token)] == ["phase.explodes"]
 
 
+def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> None:
+    """A long wall interval must not be reported as CPU consumed by its thread."""
+    ticks = iter((1_000_000, 3_500_000))
+    monkeypatch.setattr(time, "thread_time_ns", lambda: next(ticks))
+    with call_spans.span("phase.waits"):
+        time.sleep(0.01)
+
+    row = call_spans.pop_call_spans(token)[0]
+    assert row["fields"]["thread_cpu_us"] == 2500
+    assert row["ms"] >= 10
+
+
+def test_cpu_attribution_preserves_the_carry_rebuild_sentinel(
+    token, tmp_path, monkeypatch
+) -> None:
+    import json
+
+    from exomem import working_set
+
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path))
+    call_ledger.reset_chain_cache()
+    with call_spans.meter(*working_set.CARRY_SPAN_FIELDS) as measured:
+        with call_spans.span("recall.working_set.carry.phrase", measured):
+            call_spans.measure(call_spans.STATS_REBUILT, 1)
+
+    call_ledger.record_call(
+        request_id="carry-cpu", tool="activate_context", outcome="ok", duration_ms=1.0,
+        spans=call_spans.pop_call_spans(token),
+    )
+    stored = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
+    row = stored["spans"][0]
+    assert row["fields"][call_spans.STATS_REBUILT] == 1
+    assert set(working_set.CARRY_SPAN_FIELDS) <= row["fields"].keys()
+    assert row["fields"][call_spans.THREAD_CPU_US] >= 0
+    assert call_ledger.verify() == []
+
+
 def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, token) -> None:
     """A fast page timer must not hide preparation, filtering or receipt cost."""
     from exomem import commands, writer_lease
@@ -104,7 +141,7 @@ def test_direct_read_exposes_dispatcher_stages_without_changing_the_page(vault, 
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
         assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
-        assert set(stages[name]) == {"name", "count", "ms"}
+        assert stages[name]["fields"]["thread_cpu_us"] >= 0
 
 
 def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -> None:
@@ -119,7 +156,7 @@ def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     for name in ("command.body", "command.terminal_filter", "command.disclosure_receipt"):
         assert stages[name]["count"] == 1 and stages[name]["ms"] >= 0
-        assert set(stages[name]) == {"name", "count", "ms"}
+        assert stages[name]["fields"]["thread_cpu_us"] >= 0
 
 
 def test_span_measures_real_elapsed_time(token) -> None:

@@ -46,7 +46,6 @@ from .vault import (
     PathGuardError,
     PlannedWrite,
     batch_atomic_write,
-    content_hash,
     document_newline,
     kb_root,
     parse_frontmatter,
@@ -98,11 +97,6 @@ def _read_replace_source(
             missing=["old_path"],
             reason="old page is unreadable",
         ) from error
-    # ``Path.read_text`` historically supplied logical text to replace: on
-    # Windows its universal-newline layer converted CRLF before the CAS hash
-    # was computed. The retained byte reader must preserve that public hash
-    # contract while the raw bytes remain available for identity guards.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return snapshot.data, text, snapshot.mtime
 
 
@@ -178,12 +172,12 @@ def _legacy_replace(
         )
 
     # Load one content version of the old page for both eligibility and CAS.
-    _old_bytes, old_text, _old_mtime = _read_replace_source(
+    old_bytes, old_text, _old_mtime = _read_replace_source(
         vault_root,
         rel_old_with_ext,
     )
     old_frontmatter, _old_body, _old_frontmatter_text = parse_frontmatter(old_text)
-    old_expected_hash = content_hash(old_text)
+    old_expected_hash = hashlib.sha256(old_bytes).hexdigest()
 
     if (
         lifecycle_statuses.Basis(vault_root).classify(

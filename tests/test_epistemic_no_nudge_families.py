@@ -1481,18 +1481,15 @@ def test_the_f23_journey_refuses_without_an_installed_envelope(monkeypatch) -> N
 def test_the_f23_journey_runs_against_the_installed_envelope(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Track D for f23: both assertions, scored on what this runtime produced.
+    """Score dismissal and source-only batch evidence from the installed runtime.
 
     Every step is a separate process against the discovered CLI, on a throwaway
     copy of the product's own sample vault, so the maintenance passes are also
     genuine engine restarts. If no envelope is installed the test says so and
     skips; an in-process run would measure the library rather than the runtime.
 
-    Both halves must now pass. The bulk leaf still reaches
-    `due_state.block_for_write` zero times, but it carries one batch block from
-    `due_state.block_for_batch` at the invocation terminal. That makes the
-    counter assertion decidable on an emission delta of one against twelve
-    governed writes.
+    A source-only batch has no affected due pages. Its zero emissions leave
+    counter repetition unsupported; they do not prove the positive carrier.
     """
 
     from epistemic.journeys import f23_dismissal
@@ -1516,8 +1513,7 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert int(ledger.raw["writes"]) - int(prior_ledger.raw["writes"]) == (
         f23_dismissal.BULK_DOCUMENTS
     )
-    # The operation leaf delivers one batch block, never one per governed write.
-    assert int(ledger.raw["emissions"]) - int(prior_ledger.raw["emissions"]) == 1
+    assert int(ledger.raw["emissions"]) - int(prior_ledger.raw["emissions"]) == 0
 
     context = AssertionContext(
         snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
@@ -1526,11 +1522,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert dismissal.outcome == "pass", dismissal.evidence
 
     counters = resolve("counter_emission_not_repeated_per_write")(context)
-    assert counters.outcome == "pass", counters.evidence
-    assert "emitted 1 counters block(s)" in counters.evidence, counters.evidence
+    assert counters.outcome == "unsupported", counters.evidence
     assert (
-        f"batch of {f23_dismissal.BULK_DOCUMENTS} write(s)" in counters.evidence
-    ), counters.evidence
+        f"delivered 0 block(s) across {f23_dismissal.BULK_DOCUMENTS} governed write(s)"
+        in counters.evidence
+    )
 
 
 def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
@@ -1617,7 +1613,7 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
             block = due_state.block_for_write(vault, page)
             due_state.should_emit(block, vault_root=vault)
     if scoped:
-        due_state.should_emit(due_state.served(vault), vault_root=vault)
+        due_state.should_emit(due_state.block_for_batch(vault), vault_root=vault)
 
     snapshot = f23_dismissal.project_run(
         vault,

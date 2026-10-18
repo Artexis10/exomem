@@ -20,19 +20,15 @@ drifts. There is one now, imported by both.
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Any
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from exomem import lexstore, readiness  # noqa: E402
 
 
-def enter_managed_recall(vault_root: Path) -> dict[str, Any]:
+def enter_managed_recall(
+    vault_root: Path, *, full_startup: bool = False
+) -> dict[str, Any]:
     """Stand up the admission a served process has, for this phase only.
 
     The warm window is not the admission. `begin_warm`/`finish_warm` only open
@@ -50,6 +46,9 @@ def enter_managed_recall(vault_root: Path) -> dict[str, Any]:
     That keeps the rebaseline, the live-projection requirement, the maintained
     versus reference index distinction and the proof CAS in one place, and it
     means this warm-up cannot drift away from the product's.
+
+    Installed write acceptance requests `full_startup` to run the product's
+    complete startup, including graph handoff and writer resolver priming.
 
     `EXOMEM_EAGER_BOOT` is set for the call because a benchmark needs the
     synchronous contract: without it, an incomplete catalogue is delegated to
@@ -72,7 +71,10 @@ def enter_managed_recall(vault_root: Path) -> dict[str, Any]:
     os.environ["EXOMEM_EAGER_BOOT"] = "1"
     readiness.begin_warm()
     try:
-        warmup.warm_retrieval_catalog(vault_root)
+        if full_startup:
+            warmup.warm_all(vault_root)
+        else:
+            warmup.warm_retrieval_catalog(vault_root)
     finally:
         readiness.finish_warm()
         if previous_eager is None:

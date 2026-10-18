@@ -1496,7 +1496,7 @@ def save_contract(
     path = contract_path(vault_root, parsed.name)
     current_hash: str | None = None
     if path.exists():
-        current = path.read_text(encoding="utf-8")
+        current, _guard = vault.read_guarded_text(vault_root, path)
         current_hash = vault.content_hash(current)
         if expected_hash is None:
             raise ValueError(
@@ -1514,7 +1514,15 @@ def save_contract(
         default_flow_style=False,
     )
     vault.batch_atomic_write(
-        [vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root
+        [
+            vault.PlannedWrite(
+                path=path, content=rendered,
+                expected_hash=(
+                    current_hash if current_hash is not None else vault.MISSING_CONTENT_HASH
+                ),
+            )
+        ],
+        vault_root=vault_root,
     )
     return {
         "path": path.relative_to(vault_root).as_posix(),
@@ -1541,8 +1549,8 @@ def load_contract(vault_root: Path, name: str) -> tuple[MemoryContract, str, str
             f"INVALID_CONTRACT: contract path {path.name!r} must be a regular file"
         )
     try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        raw, _guard = vault.read_guarded_text(vault_root, path)
+    except (OSError, UnicodeDecodeError, vault.PathGuardError) as exc:
         raise ValueError(
             f"INVALID_CONTRACT: could not read {path.name}: {exc}"
         ) from exc
@@ -1591,8 +1599,8 @@ def load_saved_contracts(vault_root: Path) -> tuple[LoadedMemoryContract, ...]:
                 f"INVALID_CONTRACT: contract path {path.name!r} must be a regular file"
             )
         try:
-            raw = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            raw, _guard = vault.read_guarded_text(vault_root, path)
+        except (OSError, UnicodeDecodeError, vault.PathGuardError) as error:
             raise ValueError(
                 f"INVALID_CONTRACT: could not read {path.name}: {error}"
             ) from error

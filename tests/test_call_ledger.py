@@ -687,7 +687,9 @@ def test_a_recall_row_attributes_its_time_by_stage(
     recall = [span for span in row["spans"] if span["name"].startswith("recall.")]
     assert recall, row["spans"]
     for span in recall:
-        assert set(span) == {"name", "count", "ms"}
+        assert {"name", "count", "ms"} <= span.keys()
+        if "thread_cpu_us" in span.get("fields", {}):
+            assert span["fields"]["thread_cpu_us"] >= 0
         assert isinstance(span["ms"], float)
         # Stage names only: no path, no query, no excerpt can ride in one.
         assert "/" not in span["name"] and " " not in span["name"]

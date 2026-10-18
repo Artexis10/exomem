@@ -29,6 +29,33 @@ def _page(identity: str | None, body: str = "# Page\n") -> str:
     return f"---\ntype: insight\ncreated: 2026-07-09{id_line}\n---\n\n{body}"
 
 
+def test_a_legacy_bom_negative_row_rebuilds_without_rewriting_the_page(tmp_path: Path) -> None:
+    import hashlib
+    import sqlite3
+
+    path = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    path.parent.mkdir(parents=True)
+    identity = memory_refs.new_id()
+    raw = ("\ufeff" + _page(identity)).encode("utf-8")
+    path.write_bytes(raw)
+    rel = path.relative_to(tmp_path).as_posix()
+    index = memory_refs.ReferenceIndex(tmp_path)
+    index.rebuild_all()
+    with sqlite3.connect(index.path) as connection:
+        # Version 3 could record a BOM page as missing while retaining its exact byte hash.
+        connection.execute("UPDATE ref_meta SET value='3' WHERE key='schema_version'")
+        connection.execute(
+            "UPDATE identities SET exomem_id=NULL,raw_id='',status='missing' WHERE path=?",
+            (rel,),
+        )
+
+    assert memory_refs.holds_content_identities(
+        tmp_path, {rel: hashlib.sha256(raw).hexdigest()}
+    ) == {rel: False}
+    assert index.ref_for_path(rel) == memory_refs.memory_ref(identity)
+    assert path.read_bytes() == raw
+
+
 def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     old = vault / "Knowledge Base" / "Notes" / "old.md"

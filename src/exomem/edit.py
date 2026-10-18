@@ -344,7 +344,7 @@ def edit(
                 path=rel_path,
                 after_source=new_text,
                 operation="edit",
-                expected_before_hash=editable.semantic_before_hash,
+                expected_before_hash=editable.raw_hash,
                 transition_token=semantic_transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -383,7 +383,7 @@ def edit(
         why=why,
         changed=changed,
         extra_warnings=body_warnings + tag_warnings,
-        expected_before_hash=editable.semantic_before_hash,
+        expected_before_hash=editable.raw_hash,
         semantic_transition_token=semantic_transition_token,
         relation_disposition=relation_disposition,
         relation_review_hash=relation_review_hash,
@@ -529,24 +529,16 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
 
 @dataclass
 class _Editable:
-    """A page resolved + guarded for in-place editing, split into parts.
+    """A page resolved for editing with its exact stored-byte hash.
 
-    Carries two hashes, because two conventions meet here and conflating them
-    is what made CRLF pages un-editable. `raw_hash` is the whole-file
-    `content_hash` over the bytes on disk: the value `get` hands callers, the
-    value `expected_hash` is compared against, and the value a caller echoes
-    back into the next write. `semantic_before_hash` is over the
-    newline-normalized logical source, which is what the semantic index and its
-    `parent_source_hash` are keyed on. The two coincide on an LF page and
-    diverge on a CRLF one, so hand each to the seam that owns it rather than
-    whichever is in reach.
+    `original_text` contains logical LF text for rendering. `raw_hash` guards
+    the stored bytes through semantic preflight and commit.
     """
 
     abs_path: Path
     rel_path: str
     original_text: str
     raw_hash: str
-    semantic_before_hash: str
     fm_text: str
     body: str
     has_frontmatter: bool
@@ -675,7 +667,6 @@ def load_editable(
                 rel_path=rel_path,
                 original_text=original_text,
                 raw_hash=content_hash(raw_text),
-                semantic_before_hash=content_hash(original_text),
                 fm_text="",
                 body=original_text,
                 has_frontmatter=False,
@@ -693,7 +684,6 @@ def load_editable(
         rel_path=rel_path,
         original_text=original_text,
         raw_hash=content_hash(raw_text),
-        semantic_before_hash=content_hash(original_text),
         fm_text=fm_match.group(1),
         body=fm_match.group(2),
         has_frontmatter=True,

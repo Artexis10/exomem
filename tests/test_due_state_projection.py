@@ -41,6 +41,71 @@ from exomem.governance.principal import RequestPrincipal, request_scope
 TODAY = dt.date(2026, 8, 16)
 TOMORROW = dt.date(2026, 8, 17)
 
+
+def test_write_advice_counts_only_affected_pages(vault: Path) -> None:
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    advice = due_state_module.block_for_write(vault, affected, today=TODAY)
+
+    assert advice is not None
+    assert advice["total"] == 1
+    assert advice["scope"] == "affected_paths"
+    assert due_state_module.served(vault, today=TODAY)["total"] == 2
+
+
+def test_local_delivery_does_not_reset_global_emission_history(vault: Path) -> None:
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    due_state_module.reset_emission_state()
+    global_advice = due_state_module.served(vault, today=TODAY)
+    assert due_state_module.should_emit(global_advice, vault_root=vault)
+
+    local_advice = due_state_module.block_for_write(vault, affected, today=TODAY)
+    assert due_state_module.should_emit(local_advice, vault_root=vault)
+
+    assert not due_state_module.should_emit(global_advice, vault_root=vault)
+    assert not due_state_module.should_emit(local_advice, vault_root=vault)
+
+
+def test_batch_advice_counts_union_of_affected_pages(vault: Path) -> None:
+    first = _prediction(vault, "first", check_by="2026-08-01")
+    second = _prediction(vault, "second", check_by="2026-08-01")
+    _prediction(vault, "unrelated", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+
+    with due_state_module.batch_scope(vault):
+        first_advice = due_state_module.block_for_write(vault, first, today=TODAY)
+        second_advice = due_state_module.block_for_write(vault, second, today=TODAY)
+        assert not due_state_module.should_emit(first_advice, vault_root=vault)
+        assert not due_state_module.should_emit(second_advice, vault_root=vault)
+    advice = due_state_module.block_for_batch(vault, today=TODAY)
+
+    assert advice["scope"] == "affected_paths"
+    assert advice["total"] == 2
+    assert due_state_module.served(vault, today=TODAY)["total"] == 3
+
+
+def test_delivery_records_the_fingerprint_that_was_shown(vault: Path) -> None:
+    from exomem import review_state
+
+    affected = _prediction(vault, "affected", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    delivered = due_state_module.block_for_write(vault, affected, today=TODAY)
+    old = delivered["top"][0]
+    _prediction(vault, "affected", check_by="2026-08-02")
+    current = due_state_module.block_for_write(vault, affected, today=TODAY)["top"][0]
+    assert old["fingerprint"] != current["fingerprint"]
+
+    due_state_module.mark_emitted(delivered, vault_root=vault)
+
+    state = review_state.ReviewStateStore(vault).load()
+    review_id = old["ref"].rsplit("/", 1)[-1]
+    assert review_state.surfaced_family(state, review_id, old["fingerprint"]) == old["category"]
+    assert review_state.surfaced_family(state, review_id, current["fingerprint"]) is None
+
 INSIGHTS = "Knowledge Base/Notes/Insights"
 RESTRICTED = "Knowledge Base/Notes/Patterns"
 

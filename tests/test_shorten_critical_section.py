@@ -306,7 +306,10 @@ def test_remember_reuses_its_preflight_relation_review_while_the_stamp_is_curren
     spans = {span["name"]: span for span in call_spans.pop_call_spans("reuse-observed")}
 
     assert (vault / result["path"]).is_file()
-    assert spans["commit.relation_review_prepare"].get("fields") == {"reused": 1}
+    fields = spans["commit.relation_review_prepare"]["fields"]
+    assert {key: value for key, value in fields.items() if key != call_spans.THREAD_CPU_US} == {
+        "reused": 1,
+    }
 
 
 @pytest.mark.usefixtures("corpus_cache_on")

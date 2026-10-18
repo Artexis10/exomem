@@ -895,8 +895,11 @@ def test_preserve_description_and_text_render_both_sections(vault: Path) -> None
     assert "DISTRICT COURT" in body
 
 
-def test_preserve_appends_to_log(vault: Path) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_preserve_appends_to_log(vault: Path, newline: str) -> None:
     log_file = vault / "Knowledge Base" / "log.md"
+    original = log_file.read_text(encoding="utf-8")
+    log_file.write_bytes((original + "\n## [2026-05-24] Older log entry\n").replace("\n", newline).encode("utf-8"))
     preserve_module.preserve(
         vault,
         scope="Rental",
@@ -909,3 +912,6 @@ def test_preserve_appends_to_log(vault: Path) -> None:
     text = _read(log_file)
     assert "## [2026-05-25] preserve | Evidence/Rental/logged/logged.txt" in text
     assert "Why preserved" in text
+    assert text.index("## [2026-05-25] preserve") < text.index("Older log entry")
+    if newline == "\r\n":
+        assert b"\n" not in log_file.read_bytes().replace(b"\r\n", b"")
