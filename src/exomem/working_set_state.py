@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import lifecycle_statuses
-from .collection_store.preview import bound_writer, canonical_read, selected_projection_writer
+from .collection_store.preview import QUERY_RECEIPT_BOUNDARY, bound_writer, canonical_read, selected_projection_writer
 from .working_set_index import normalize, terms_of
 
 log = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ def _from_canonical_page(
     return entry
 
 
-@canonical_read
+@canonical_read(receipt_boundary=QUERY_RECEIPT_BOUNDARY)
 def current_state_for(
     vault_root: Path,
     *,

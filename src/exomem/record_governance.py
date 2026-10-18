@@ -27,6 +27,7 @@ from . import (
 from . import structured_collections as collections
 from .collection_store import capability, ownership
 from .collection_store.preview import (
+    QUERY_RECEIPT_BOUNDARY,
     bound_writer,
     canonical_read,
     production_bound,
@@ -1346,7 +1347,7 @@ def query_collection(
                 root, manifest, semantic_profile=semantic_profile,
                 late_link_projection=late_link_projection, **kwargs,
             )
-    with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
+    with egress.disclosure_boundary(root, QUERY_RECEIPT_BOUNDARY, join_existing=True) as collector:
         # Verify the whole query before its receipt can claim release.
         with state_paths.resolution_scope(), ownership.read_scope(root, finalize=True):
             if writer is None:

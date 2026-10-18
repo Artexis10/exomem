@@ -28,6 +28,10 @@ _BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
 )
 
 
+# Records and Planning share this disclosure protocol boundary.
+QUERY_RECEIPT_BOUNDARY = "record_query"
+
+
 @contextmanager
 def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
     """Bind a dark writer for this call context; ownership remains with the caller."""
@@ -179,12 +183,14 @@ def selected_projection_writer(vault_root, path):
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-def canonical_read(function=None, *, projection=False, unavailable=None):
+def canonical_read(function=None, *, projection=False, unavailable=None,
+                   receipt_boundary: str | None = None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
     from ..cli_ops import OpError
 
     if function is None:
-        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable)
+        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable,
+                                               receipt_boundary=receipt_boundary)
 
     @wraps(function)
     def read(vault_root, *args, **kwargs):
@@ -216,7 +222,21 @@ def canonical_read(function=None, *, projection=False, unavailable=None):
             return function(vault_root, *args, **kwargs)
     from .ownership import reader
 
-    return reader(read)
+    owned_read = reader(read)
+    if receipt_boundary is None:
+        return owned_read
+
+    @wraps(function)
+    def disclosed(vault_root, *args, **kwargs):
+        from ..governance import egress
+
+        # A composite owns its collector until the whole-result ownership proof finishes.
+        with egress.disclosure_boundary(vault_root, receipt_boundary, join_existing=True) as collector:
+            try:
+                return owned_read(vault_root, *args, **kwargs)
+            finally:
+                egress.emit_boundary_receipt(collector)
+    return disclosed
 
 
 def projection_decision(vault_root, path, *, policy, audience, purpose,
