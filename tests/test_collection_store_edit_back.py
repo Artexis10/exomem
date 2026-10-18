@@ -321,8 +321,16 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
     assert store_rows(root, edits) == [("view_edit", "owner:view-edit")]
     until(lambda: owner(root, "read_memory", path=relative)["frontmatter"]["count"] == 7)
     rendered = path.read_bytes()
+
+    def view_is_current():
+        try:
+            return path.read_bytes() == rendered
+        except FileNotFoundError:
+            # Publication moves the old view aside before the no-clobber install.
+            return False
+
     path.write_bytes(edited)  # the same save again
-    until(lambda: path.read_bytes() == rendered)
+    until(view_is_current)
     assert len(store_rows(root, edits)) == 1
     path.write_bytes(first.replace(b"count: 1", b"count: 9"))  # a stale buffer, stamped before the edit
     until(lambda: owner(root, "record_memory", action="inspect", collection=CID)["projection"]
@@ -332,7 +340,7 @@ def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is
     held = inspected["coverage"]["held_refs"][0]["held_id"]
     attention = owner(root, "review_memory", mode="attention")  # the default union
     assert held in json.dumps(attention)
-    until(lambda: path.read_bytes() == rendered)  # the view shows the store again
+    until(view_is_current)  # the view shows the store again
     owner(root, "record_memory", action="discard", collection=CID, held=held, why="a stale buffer")
     assert owner(root, "record_memory", action="inspect", collection=CID)["projection"]["held_view_corrections"] == 0
     assert held not in json.dumps(owner(root, "review_memory", mode="attention"))
