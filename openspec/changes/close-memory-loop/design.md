@@ -1589,6 +1589,29 @@ standby warm budget's value; a fixed shorter window restarted the unit into the
 same cold catalog. It is a separate setting because it answers a separate
 question: how long a hung cold worker stays invisible with nothing else serving.
 
+The candidate also needs a path past an unfixed serving worker whose compatible
+catalogue repair never publishes current rows. Reuse detached build, adoption
+and healing for positively proven compatible staleness. Read schema, semantic
+identity and well-formed stored checkpoints in one SQLite snapshot, against
+explicitly captured candidate projections. Revalidate candidate projections and
+semantic/access identities before deciding; a missing, malformed, unreadable,
+busy or unsampled observation cannot establish compatible staleness. Retry
+assessment at the existing reproof interval without requiring a live publication.
+
+Preparation writes only a complete held temporary and takes no publication
+barrier or source proof. The assessment uses a normal read-only SQLite transaction.
+It causes no source, catalogue-content, committed-WAL, descriptor or owner-publication
+writes. SQLite may initialize and update native coordination on the exact live
+SHM path; that permission covers no application publication or checkpoint.
+
+Ordinary source edits do not discard the held build.
+After ownership, adoption and watcher seed, existing healing updates changed
+and new pages and removes deleted or excluded pages before strict runtime proof.
+A prepared cutover component never admits runtime retrieval. Today's primitives
+cannot prove final runtime admission before stopping the serving worker, so this
+repair establishes delivery correctness rather than a full availability guarantee.
+Native preparation and stop-to-admission latency remain separate acceptance facts.
+
 | Contract | Owner | Programme integration |
 | --- | --- | --- |
 | Activation, roles, host continuity | Canonical `context-activation`, `context-roles`, `context-activation-continuity`; active `make-anchor-resolution-sound` | Reconcile current merges and convention work before wiring activation; preserve their requirements |

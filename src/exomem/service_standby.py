@@ -5,9 +5,9 @@ needs — the lexical catalog, the embedding model when preload is allowed, and 
 read-only proof of the current graph snapshot — while the previous worker keeps
 serving.  Until the supervisor promotes it, the standby owns nothing: it takes
 no writer lease, publishes no index or graph state, schedules no drain, media or
-watcher work, and starts no descendants.  Where the live lexical catalogue is an
-earlier release's, the standby builds its own into a rebuild temp it holds, and
-only promotion publishes it.
+watcher work, and starts no descendants. Where the live lexical catalogue is
+proven incompatible or compatible but stale, the standby builds a private temp.
+Only promotion publishes it; runtime admission still needs the subsequent proof.
 
 Promotion is the only place ownership changes hands.  It runs after the previous
 worker and its descendants have provably exited, re-validates the checkpoint the
@@ -65,10 +65,10 @@ _collections_settled = False
 #: What a collections pre-import leaves of the warm budget, so that it settles before the
 #: supervisor discards a standby that never reported cutover readiness.
 COLLECTIONS_PREIMPORT_MARGIN_SECONDS = 10.0
-#: This release's lexical catalogue, built beside a live one an earlier release
-#: published, held until promotion adopts it or a stop discards it.
+#: This release's lexical catalogue, built beside the serving worker's live one,
+#: held until promotion adopts it or a stop discards it.
 _detached_catalog: Any = None
-#: Whether that catalogue was built; `lexical` is cutover-ready once it was.
+#: Preparation only; the promoted worker still proves runtime retrieval.
 _detached_built = False
 #: Set once an unpromoted standby is being stopped; a build that finishes
 #: afterwards discards what it built instead of holding it.
@@ -233,9 +233,8 @@ def cutover_components() -> dict[str, str]:
             if _collections_migration_released():
                 components[component] = "ready" if collections_settled else "waiting"
         elif component == "lexical":
-            # A catalogue built detached is what promotion adopts, so it is as
-            # ready as a live one proved current. Its caches are the promoted
-            # worker's to warm (`lexical` is not carried in that case).
+            # A complete detached build permits cutover preparation, not runtime
+            # admission. Promotion still owes watcher seed, heal and proof.
             ready = catalogue_built or readiness.is_ready(component)
             components[component] = "ready" if ready else "waiting"
         else:
@@ -437,14 +436,6 @@ def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
     return tuple(_file_stat(path) for path in paths)
 
 
-def _catalogue_stat(vault_root: Path) -> tuple[Any, ...]:
-    """Observe atomic catalogue replacement and SQLite WAL publication."""
-    from . import lexstore
-
-    path = lexstore.lexical_path(vault_root)
-    return _file_stat(path), _file_stat(path.with_name(path.name + "-wal"))
-
-
 def _graph_snapshot_signal(vault_root: Path) -> tuple[Any, Any]:
     """What a declined proof waits on: the durable generation and the published snapshot.
 
@@ -512,13 +503,12 @@ def reprove_until_promoted(
 ) -> bool:
     """Keep cutover proofs current until promotion or discard.
 
-    Returns whether a proof is held when it stops. Reads only, like the proof;
-    the supervisor's warm budget still bounds how long a standby may wait.
+    Returns whether a graph proof is held when it stops. Catalogue preparation
+    may write a private temp; the supervisor's warm budget still bounds waiting.
     """
     from . import freshness, readiness
 
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
-    catalogue_stat = None
     catalogue_reseeded_at = None
     while True:
         with _lock:
@@ -531,22 +521,26 @@ def reprove_until_promoted(
         except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
         if not catalogue_built and not readiness.is_ready("lexical"):
-            observed = _catalogue_stat(vault_root)
             now = _clock()
-            if observed != catalogue_stat and (
+            prepare_due = (
                 catalogue_reseeded_at is None
                 or now - catalogue_reseeded_at >= REPROVE_INTERVAL_SECONDS
-            ):
-                # No watcher runs here. Refresh only after publication moves,
-                # at the existing proof interval, never on every polling pass.
+            )
+            if prepare_due:
+                # This standby has no watcher. Sample current source even when
+                # the old owner never publishes, at the existing proof interval.
                 try:
                     freshness.rebaseline(vault_root)
-                    catalogue_stat = observed
                 except Exception:  # noqa: BLE001 - an unseeded scope stays waiting
                     log.warning("standby recall registry reseed failed", exc_info=True)
+                    prepare_due = False
                 catalogue_reseeded_at = _clock()
             if prove_retrieval_catalog(vault_root):
                 _warm_proven_catalogue(vault_root)
+            elif prepare_due:
+                # Retry preparation at the existing reseed interval, even when
+                # a transient read recovered without a new live publication.
+                prepare_detached_catalog(vault_root)
         if stop.wait(interval):
             with _lock:
                 return _proved_token is not None
@@ -575,9 +569,8 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     publication barrier, and ``request_repair`` schedules a publication — both
     belong to the worker that is still serving, which is the single repair owner
     for this vault. The standby therefore only asks whether the catalog is
-    already current, with repair scheduling explicitly off. An uncurrent catalog
-    leaves ``lexical`` waiting; the serving worker's own repair owner is the only
-    thing allowed to fix it, and the warm budget covers the wait.
+    already current, with repair scheduling explicitly off. A failed proof may
+    permit isolated preparation, but never a publication by the standby.
     """
     from . import freshness, lexstore
 
@@ -612,30 +605,33 @@ def _warm_proven_catalogue(vault_root: Path) -> None:
 
 
 def prepare_detached_catalog(vault_root: Path) -> bool:
-    """Build this release's lexical catalogue beside an incompatible live one.
+    """Prepare beside a proven incompatible or compatible stale live catalogue.
 
-    Called only when the read-only proof failed. A live catalogue at this
-    release's schema and semantic identity that merely lags the corpus is the
-    serving worker's repair owner's to catch up, and so is a missing one; the
-    standby leaves both alone and `lexical` stays waiting, as before. A live
-    catalogue an earlier release published can never become current for this
-    one while that release serves, so the standby builds its own into a rebuild
-    temp. The build takes no publication barrier and touches no live file; the
-    temp is published only by promotion, after the serving worker has exited.
+    A failed readiness proof alone establishes neither case. Missing, busy and
+    unknown observations leave the standby waiting. A complete private build
+    survives ordinary source edits; promotion owns adoption and the subsequent
+    watcher seed, heal and strict runtime proof. Preparation never publishes.
     """
     global _detached_catalog, _detached_built
-    from . import lexstore
+    from . import freshness, lexstore
 
     try:
         if not lexstore.maintained_content_index_enabled():
             return False
         vault_root = Path(vault_root)
-        if not lexstore.lexical_path(vault_root).exists():
-            return False
-        if lexstore.live_catalog_compatible(vault_root):
+        assessment = lexstore.assess_live_catalog(
+            vault_root, require_live_projection=freshness.event_indexes_enabled()
+        )
+        if not (
+            assessment.compatibility == "incompatible"
+            or (
+                assessment.compatibility == "compatible"
+                and any(not scope.complete for scope in assessment.scopes.values())
+            )
+        ):
             return False
         with _lock:
-            if _discarded or _promoted:
+            if _discarded or _promoted or _detached_built:
                 return False
         started = time.monotonic()
         detached = lexstore.build_detached_catalog(vault_root, cancel=_discard_requested)
@@ -827,7 +823,7 @@ def warm(vault_root: Path) -> None:
     make while another worker owns the vault. Everything here reads: the catalog
     is proved, the rebuildable caches are populated in memory, the models are
     loaded, and the graph snapshot is proved against disk. The one write is a
-    catalogue built detached, beside a live one an earlier release published,
+    catalogue built detached, beside the serving worker's live one,
     which nothing reads until promotion adopts it. Never raises; an unready
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
@@ -860,8 +856,8 @@ def warm(vault_root: Path) -> None:
                 log.warning("standby recall registry reseed failed", exc_info=True)
         else:
             log.info(
-                "standby retrieval catalog is not current; the serving worker's "
-                "repair owner has to publish one before this candidate can cut over"
+                "standby retrieval catalog is not current; awaiting a current "
+                "publication or a proven catalogue for isolated preparation"
             )
         # After the seed and after the resolver, which is primed here rather
         # than left to `warm_caches`: that gate is closed in every resource mode

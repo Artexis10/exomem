@@ -589,6 +589,7 @@ from exomem.vault import walk_vault_md  # noqa: E402
 
 root = Path(sys.argv[1])
 generated = root / GENERATED
+compatible_stale = len(sys.argv) > 2 and sys.argv[2] == "compatible-stale"
 
 calls = {{"rebuild_atomic": 0, "in_place_rebuild": 0, "heal_delta": 0}}
 heal_results = []
@@ -635,6 +636,35 @@ lexstore.LexicalStore._heal_delta = counted_heal
 lexstore.heal_adopted_catalog = timed_heal_adopted
 
 live = lexstore.lexical_path(root)
+live_before = live.read_bytes()
+
+def serving_writes():
+    edited = generated / "generated-note-0001.md"
+    newline = chr(10)
+    edited.write_text(
+        edited.read_text(encoding="utf-8") + newline + "quokkaeditedafterbuild" + newline,
+        encoding="utf-8",
+    )
+    created = generated / "generated-note-9999.md"
+    created.write_text(
+        newline.join(
+            ["---", "type: note", "---", "", "# Created after the build", "", "quokkacreatedafterbuild", ""]
+        ),
+        encoding="utf-8",
+    )
+    (generated / "generated-note-0002.md").unlink()
+
+
+if compatible_stale:
+    materialize = lexstore.LexicalStore._materialize_catalog
+
+    def materialize_with_edits(self, *args, **kwargs):
+        result = materialize(self, *args, **kwargs)
+        # The completed build survives source movement before its builder returns.
+        serving_writes()
+        return result
+
+    lexstore.LexicalStore._materialize_catalog = materialize_with_edits
 
 service_standby.enter_standby()
 warm_started = time.monotonic()
@@ -643,24 +673,18 @@ warm_seconds = round(time.monotonic() - warm_started, 3)
 cutover = service_standby.readiness_payload()
 temps_at_cutover = len(list(live.parent.glob(live.name + ".rebuild-*.tmp")))
 standby_calls = dict(calls)
+live_unchanged = live.read_bytes() == live_before
+prepared_admitted = readiness.is_ready("retrieval_catalog")
 
-# The worker still serving keeps writing between the detached build and the
-# promotion: an edit, a new note and a delete, none of which this process sees.
-edited = generated / "generated-note-0001.md"
-newline = chr(10)
-edited.write_text(
-    edited.read_text(encoding="utf-8") + newline + "quokkaeditedafterbuild" + newline,
-    encoding="utf-8",
-)
-created = generated / "generated-note-9999.md"
-created.write_text(
-    newline.join(
-        ["---", "type: note", "---", "", "# Created after the build", "", "quokkacreatedafterbuild", ""]
-    ),
-    encoding="utf-8",
-)
-(generated / "generated-note-0002.md").unlink()
+if compatible_stale:
+    # Access movement after preparation must remove formerly admitted material.
+    (root / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded: [Notes/Generated/generated-note-0003.md]" + chr(10), encoding="utf-8"
+    )
+else:
+    serving_writes()
 
+promotion_started = time.monotonic()
 promotion = service_standby.promote(root, migrated=False)
 
 # `release()` starts the watcher, whose boot pass seeds both recall scopes
@@ -687,19 +711,32 @@ readiness.manage_runtime()
 thread = warmup.start_background(root)
 thread.join(timeout=300)
 lexstore.await_repairs_idle(root)
+promotion_to_admission_seconds = round(time.monotonic() - promotion_started, 3)
+admitted = readiness.is_ready("retrieval_catalog")
+catalogue_current = lexstore.runtime_retrieval_catalog_current(root, schedule_repair=False)
+
+public_edited = find_module.find(
+    root, query="quokkaeditedafterbuild", mode="keyword", graph=False, rerank=False
+)
+public_created = find_module.find(
+    root, query="quokkacreatedafterbuild", mode="keyword", graph=False, rerank=False
+)
 
 print(
     json.dumps(
         {{
             "cutover": cutover,
             "warm_seconds": warm_seconds,
+            "promotion_to_admission_seconds": promotion_to_admission_seconds,
+            "live_unchanged": live_unchanged,
+            "prepared_admitted": prepared_admitted,
             "temps_at_cutover": temps_at_cutover,
             "standby_calls": standby_calls,
             "promotion": promotion,
             "calls": calls,
             "heal_results": heal_results,
             "heal_ms": heal_ms,
-            "admitted": readiness.is_ready("retrieval_catalog"),
+            "admitted": admitted,
             "compatible": getattr(lexstore, "live_catalog_compatible", lambda _r: None)(root),
             "edited_found": bool(
                 lexstore.search_bm25(root, "quokkaeditedafterbuild", k=3, scope="kb")
@@ -707,8 +744,14 @@ print(
             "created_found": bool(
                 lexstore.search_bm25(root, "quokkacreatedafterbuild", k=3, scope="kb")
             ),
+            "public_edited": [hit.path for hit in public_edited],
+            "public_created": [hit.path for hit in public_created],
+            "current": catalogue_current,
             "deleted_rows": lexstore.get_store(root).page_content_hashes(
                 [str((generated / "generated-note-0002.md").relative_to(root).as_posix())]
+            ),
+            "excluded_rows": lexstore.get_store(root).page_content_hashes(
+                [str((generated / "generated-note-0003.md").relative_to(root).as_posix())]
             ),
             "temps_after": len(list(live.parent.glob(live.name + ".rebuild-*"))),
         }}
@@ -739,7 +782,9 @@ def _older_schema_live_catalogue(vault: Path) -> None:
         connection.close()
 
 
-def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
+def _run_catalogue_handoff(
+    vault: Path, tmp_path: Path, *, compatible_stale: bool = False
+) -> dict:
     script = tmp_path / "catalogue_handoff_child.py"
     script.write_text(
         _CATALOGUE_HANDOFF_CHILD.format(tests_dir=str(Path(__file__).parent)),
@@ -750,7 +795,7 @@ def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
         [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
     completed = subprocess.run(
-        [sys.executable, str(script), str(vault)],
+        [sys.executable, str(script), str(vault), "compatible-stale" if compatible_stale else "schema"],
         capture_output=True,
         text=True,
         env=environment,
@@ -761,8 +806,9 @@ def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.parametrize("compatible_stale", [False, True], ids=["schema", "compatible-stale"])
 def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
-    handoff_vault: Path, tmp_path: Path
+    handoff_vault: Path, tmp_path: Path, compatible_stale: bool
 ) -> None:
     """A schema-bump upgrade cuts over, and the writes it raced are not lost.
 
@@ -773,13 +819,22 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
     rebuild, and every one of them is searchable once retrieval is admitted.
     """
     _run_child(handoff_vault, tmp_path, ["outgoing"])
-    _older_schema_live_catalogue(handoff_vault)
-    report = _run_catalogue_handoff(handoff_vault, tmp_path)
+    if compatible_stale:
+        from exomem import lexstore
+
+        lexstore.ensure_fresh(handoff_vault)
+        path = handoff_vault / "Knowledge Base/Notes/Generated/generated-note-0000.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\nA later observation.\n", encoding="utf-8")
+    else:
+        _older_schema_live_catalogue(handoff_vault)
+    report = _run_catalogue_handoff(handoff_vault, tmp_path, compatible_stale=compatible_stale)
 
     cutover = report["cutover"]
     assert cutover["components"]["lexical"] == "ready", cutover
     assert cutover["cutover_ready"] is True, cutover
     assert report["temps_at_cutover"] == 1
+    assert report["live_unchanged"] is True
+    assert report["prepared_admitted"] is False
     assert report["standby_calls"] == {
         "rebuild_atomic": 0,
         "in_place_rebuild": 0,
@@ -795,5 +850,10 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
     assert report["compatible"] is True
     assert report["edited_found"] is True
     assert report["created_found"] is True
+    assert report["public_edited"] == ["Knowledge Base/Notes/Generated/generated-note-0001.md"]
+    assert report["public_created"] == ["Knowledge Base/Notes/Generated/generated-note-9999.md"]
+    assert report["current"] is True
     assert list(report["deleted_rows"].values()) == [None]
+    if compatible_stale:
+        assert list(report["excluded_rows"].values()) == [None]
     assert report["temps_after"] == 0

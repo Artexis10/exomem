@@ -21,6 +21,8 @@ Oct 4 delivery priority: the current compiler correction, compact public-tool su
 - [x] 2.1 Add failing staging-source tests and an explicit immutable-wheel source to `service_upgrade` and supported staging entrypoints; verify digest/revision/interpreter identity and published-version compatibility without editing a serving environment. Delivered in PR #1309 with independent review and required CI; the supported candidate entrypoint is `python -m exomem.service_upgrade`.
 - [ ] 2.2 Exercise local-wheel staging through managed standby/admission/cutover in isolated state; verify single-writer ownership, compatible-descriptor reuse, unsupported-runtime refusal and descriptor-changing recovery boundaries.
 - [ ] 2.3 Document the development, personal-candidate and public-release commands in the existing operational runbook; verify scoped development tests and full completion gates are distinct and a candidate does not require PyPI publication.
+- [x] 2.4 Permit isolated standby preparation after positive compatible-stale assessment. Verify unknown-read refusal, reproof recovery, unchanged live content/publication state and current post-adoption material without a whole rebuild. Keep native handoff latency acceptance under 2.2; preparation is not runtime admission.
+  Scoped standby/catalogue checks pass 77 tests, including a fresh-interpreter lifecycle arm with edits during preparation, deletion, exclusion and public reads after admission. The content census permits only SQLite-native coordination on the exact live SHM path. Integrated review, full CI and native two-worker timing remain delivery checks; this task does not claim an availability bound.
 
 ## 3. Prove the first complete episode slice
 
