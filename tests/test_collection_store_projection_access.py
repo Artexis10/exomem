@@ -40,6 +40,7 @@ def test_projected_page_cannot_drop_canonical_restricted_tags(store, kind):
     else:
         receipt = store.append_record(CID, item=item, item_key=KEY, why="capture")
         path = receipt["affected_paths"][0]
+        store.reconcile_views()
         page = store.root / path
         frontmatter, body, _ = vault.parse_frontmatter(page.read_text(), strict=True)
         assert frontmatter["tags"] == ["secret"]
@@ -61,6 +62,7 @@ def test_current_projection_is_returned_from_physical_bytes(store):
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY,
                                   body="Canonical body\n", why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     with preview_store(store.root, store.handle), request_scope(_external()):
         page = _through_dispatcher(store.root, "get", path=path, include_raw=True)
     assert page["content"] == (store.root / path).read_text()
@@ -73,6 +75,7 @@ def test_canonical_inspection_versions_do_not_depend_on_unaccepted_view_edits(st
     store.create_collection(manifest_path(profile), manifest_text(profile), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
         before = _through_dispatcher(store.root, command, action="inspect", collection=CID)
         assert path in {version["path"] for version in before["source_versions"]}
@@ -95,6 +98,7 @@ def test_mcp_second_pass_keeps_provenance_but_json_copy_has_no_exemption(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     command = next(command for command in commands.COMMANDS if command.name == "record_memory")
@@ -114,6 +118,7 @@ def test_canonical_metadata_does_not_authorize_the_same_resource_reference(store
     store.create_collection(manifest_path(), text, why="create")
     store.append_record(CID, item={"title": "Current", "resource": f"Read [[{path}]] next."},
                         item_key=KEY, why="capture")
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -135,6 +140,7 @@ def test_admitted_source_versions_still_scrub_and_filter_ordinary_copies(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -166,6 +172,7 @@ def test_source_version_extra_fields_keep_generic_filtering_and_scrub_collisions
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     page.write_text(page.read_text() + "\nUnaccepted local edit\n")
     with preview_store(store.root, store.handle), request_scope(owner_principal()):
@@ -231,6 +238,7 @@ def test_terminal_filter_rechecks_distinct_views_after_bytes_and_policy_change(s
         store.append_record(CID, item={"title": title}, item_key=key, why="capture")
         for title, key in (("One", KEY), ("Two", OTHER))
     ]
+    store.reconcile_views()
     paths = [receipt["affected_paths"][0] for receipt in receipts]
     payload = {"items": [{"path": path} for path in paths]}
     with preview_store(store.root, store.handle), request_scope(_external()):
@@ -249,6 +257,7 @@ def test_terminal_filter_observes_a_new_deletion_tombstone(store):
     store.create_collection(manifest_path(), manifest_text(), why="create")
     receipt = store.append_record(CID, item={"title": "Current"}, item_key=KEY, why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     write_scope(store.root, paths=path.removeprefix("Knowledge Base/"))
     write_rule(store.root, ceiling=0)
     payload = {"items": [{"path": path}]}
@@ -266,6 +275,7 @@ def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monke
     store.create_collection(manifest_path(), manifest_text(), why="create")
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     path = first["affected_paths"][0]
+    store.reconcile_views()
     page = store.root / path
     original = page.read_bytes()
     if stale:
@@ -276,6 +286,10 @@ def test_current_row_grant_cannot_release_unproven_projection_bytes(store, monke
     with preview_store(store.root, store.handle):
         token = inspection_token(store, who)
         assert redeem(store, who, token)["status"] == "committed"
+        if stale:
+            with request_scope(who), pytest.raises(ValueError, match="NOT_FOUND"):
+                _through_dispatcher(store.root, "get", path=path)
+            store.reconcile_views()
         with request_scope(who):
             assert _through_dispatcher(store.root, "get", path=path)["frontmatter"]["title"] == (
                 "Two" if stale else "One"
@@ -291,6 +305,7 @@ def test_current_projection_preserves_partial_release_levels(store, level):
     receipt = store.append_record(CID, item={"title": "Private title"}, item_key=KEY,
                                   body="Permitted excerpt\n", why="capture")
     path = receipt["affected_paths"][0]
+    store.reconcile_views()
     write_scope(store.root, paths="Records/**/Items/**")
     write_rule(store.root, ceiling=level, extra='options:\n  notice: "Limited"\n' if level == 1 else "")
     with preview_store(store.root, store.handle), request_scope(_external()):

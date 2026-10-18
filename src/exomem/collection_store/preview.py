@@ -139,7 +139,10 @@ def require_file_collection(vault_root, selector, *, authorize_path, notice_path
         return
     try:
         proof = ownership.current(root)
-    except (CollectionStoreError, RuntimeError, OpError):
+    except (CollectionStoreError, RuntimeError, OpError) as error:
+        # The mutation boundary's typed busy result drives the existing capture retry.
+        if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+            raise
         # Which collections the store owns is unknown, so none can be written as a file.
         path = notice_path if notice_path is not None else _selector_path(root, selector)
         _refuse(root, path, authorize_path, "COLLECTION_STORE_UNAVAILABLE", MARKER_UNREADABLE)

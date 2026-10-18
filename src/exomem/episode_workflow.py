@@ -303,26 +303,22 @@ def _written_path(vault_root: Path, binding: Mapping[str, Any]) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str) -> bool:
-    """Whether the page a committed leaf wrote is there to read back.
+def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str, keep) -> bool:
+    """Whether the committed leaf's current subject is available to this caller.
 
     A Records item on a store collection has a generated view that the store publishes after its
     commit, so its file may not exist yet. Its leaf is there when the vault routes the item's
     collection to the store: the leaf's witness is then checked against the store's transaction
     (`_tip_is_live`), and the file is not the evidence.
     """
-    from .collection_store.preview import selected_writer
-
-    if (vault_root / path).is_file():
-        return True
     try:
         item = curation.CurationStore(vault_root).load_plan(binding["run_id"])["binding_manifest"][
             binding["ordinal"]
         ]
-        return (
-            item.get("kind") in curation.RECORDS_STEP_KINDS
-            and selected_writer(vault_root, item["prepared"]["collection_id"]) is not None
-        )
+        visible = curation._records_item_visible(vault_root, item, path)  # noqa: SLF001
+        if visible is not None:
+            return visible
+        return (vault_root / path).is_file() and (keep is None or keep(path))
     except (curation.CurationError, KeyError, IndexError, TypeError):
         return False
 
@@ -417,8 +413,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                 path = _written_path(session.vault_root, leaf["binding"])
                 if (
                     path is None
-                    or not _page_is_there(session.vault_root, leaf["binding"], path)
-                    or (keep is not None and not keep(path))
+                    or not _page_is_there(session.vault_root, leaf["binding"], path, keep)
                 ):
                     path, readback = None, "unavailable"
                 elif current[leaf["leaf_id"]]:

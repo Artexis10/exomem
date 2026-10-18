@@ -1231,8 +1231,13 @@ def discover_collections_with_errors(
     manifests: list[CollectionManifest] = list(stored)
     unreadable: list[UnreadableManifest] = list(store_errors)
     visible = {manifest.collection_id for manifest in stored}
+    reported = {error.path for error in store_errors}
     for entry in proof.entries:
-        if entry["collection_id"] not in visible and notice(entry["manifest_path"]):
+        if entry["collection_id"] in visible or entry["manifest_path"] in reported:
+            continue
+        if writer is not None and entry["collection_id"] in proof.admitted:
+            continue  # The writer already assessed release; an omitted manifest is withheld, not unreadable.
+        if notice(entry["manifest_path"]):
             unreadable.append(UnreadableManifest(entry["manifest_path"], "COLLECTION_STORE_UNAVAILABLE",
                                                  UNSERVED, entry["semantic_profile"]))
     if len(stored) + len(unreadable) > max_raw_candidates:
@@ -1622,21 +1627,22 @@ def inspect_legacy_tracker(
 ) -> LegacyCollection:
     """Inspect a manifest-less tracker without making it queryable or mutable."""
     root = Path(vault_root)
+    raw = str(path).strip()
     authorize = authorize_path or (lambda _path: True)
     # `record_memory` routes every non-manifest `.md` spelling here instead of
     # to `resolve_collection`, so this route has to make the same
     # withheld-before-stat decision or the two surfaces disagree about the same
     # path -- and the pair of answers is itself the leak.
-    key = _reference_key(root, str(path))
+    key = _reference_key(root, raw)
     if key is None:
-        raise _spelling_reference_error(str(path))
+        raise _spelling_reference_error(raw)
     if not authorize(key):
         # A tracker is not a manifest, so "pass the `_collection.md` path" would
         # be wrong advice here; "no such tracker" is the honest refusal, and it
         # is what an absent one answers below.
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
-        tracker, rel = _safe_existing_path(root, path)
+        tracker, rel = _safe_existing_path(root, raw)
     except CollectionError as error:
         if _absent_leaf(root, key):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error

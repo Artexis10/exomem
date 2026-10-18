@@ -2275,6 +2275,40 @@ def _committed_operation_witness(
     )
 
 
+def _records_item_visible(
+    vault_root: Path, binding: Mapping[str, Any], path: str
+) -> bool | None:
+    """Canonical visibility of a sealed Records item; None only for a file-backed leaf."""
+    from . import structured_collections as collections
+    from .collection_store import ownership
+    from .collection_store.preview import selected_writer
+
+    if not isinstance(binding, Mapping):
+        return False
+    if binding.get("kind") not in RECORDS_STEP_KINDS:
+        return None
+    prepared = binding.get("prepared")
+    if not isinstance(prepared, Mapping):
+        return False
+    cid, key = prepared.get("collection_id"), prepared.get("item_key")
+    if not isinstance(cid, str) or not isinstance(key, str) or prepared.get("destination") != path:
+        return False
+    writer = selected_writer(vault_root, cid)
+    if writer is None:
+        proof = ownership.current(vault_root)
+        return False if proof.selected(vault_root, cid) is not None or proof.owner(vault_root, path) is not None else None
+    try:
+        with writer.read_snapshot():
+            # Coverage attests the whole sealed effect; a partial-field reader cannot attest it.
+            writer._operation.require_complete_fields(cid)
+            item = writer.connection.execute(
+                "SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (cid, key)
+            ).fetchone()
+            return item is not None and item[0] == path and writer._allows_item(cid, key)
+    except collections.CollectionError:
+        return False
+
+
 def _verify_records_receipt(
     vault_root: Path,
     binding: Mapping[str, Any],
