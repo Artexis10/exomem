@@ -14,6 +14,7 @@ from __future__ import annotations
 import fnmatch
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -75,13 +76,18 @@ def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
     _PATH_MEMO.clear()
+    _normalized_refs.cache_clear()
 
 
 def _kb_relative(rel_path: str) -> str:
     """Strip a leading KB dirname so both authored path forms compare equal."""
+    return _relative_to_kb(rel_path, kb_dirname())
+
+
+def _relative_to_kb(rel_path: str, dirname: str) -> str:
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0].casefold() == kb_dirname().casefold():
+    if parts and parts[0].casefold() == dirname.casefold():
         return "/".join(parts[1:])
     return rel
 
@@ -101,12 +107,22 @@ class MetadataSubject:
     classes: tuple[str, ...] = ()
 
 
-def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
-    kb_rel = _kb_relative(rel_path)
+@lru_cache(maxsize=128)
+def _normalized_refs(values: tuple[str, ...], dirname: str) -> frozenset[str]:
+    # Cache only configured selector data; current subject and authorization decisions stay fresh.
     normalized: set[str] = set()
     for v in values:
         normalized.add(v)
-        normalized.add(_kb_relative(v))
+        normalized.add(_relative_to_kb(v, dirname))
+    return frozenset(normalized)
+
+
+def _matches_refs(values: tuple[str, ...], rel_path: str) -> bool:
+    if not values:
+        return False
+    dirname = kb_dirname()
+    kb_rel = _relative_to_kb(rel_path, dirname)
+    normalized = _normalized_refs(values, dirname)
     return rel_path in normalized or kb_rel in normalized
 
 

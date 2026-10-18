@@ -30,7 +30,7 @@ from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_typed_history_generations import previous_release
 
-from exomem import records, state_migration
+from exomem import held_fs, records, state_migration
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
@@ -827,20 +827,74 @@ def test_a_second_write_waits_out_the_window_until_the_export_flush(abc, tmp_pat
     assert not [path for path in staged.rglob("*") if path.name.endswith(("-wal", "-shm"))]
 
 
-def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc, monkeypatch):
-    """Defect: publication holds the vault-wide boundary while it copies, so writes refuse MUTATION_BUSY."""
+@pytest.mark.parametrize("phase", ["copy", "current-head", "cold-ready", "cold-intent-copy", "predecessor", "installed"])
+def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc, monkeypatch, phase):
+    """Defect: publication verification holds exclusion and makes ordinary writes refuse MUTATION_BUSY."""
     from exomem.collection_store import runtime
 
     monkeypatch.setattr(runtime, "PUBLISH_SETTLE_SECONDS", 0.1)
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
     _published(abc)
-    staged, release = _stalled_copy(monkeypatch)
+    if phase == "copy":
+        staged, release = _stalled_copy(monkeypatch)
+    else:
+        staged, release = threading.Event(), threading.Event()
+        outside = replica._Publisher.outside
+        resolve = replica._Publisher.resolve
+
+        if phase in {"cold-ready", "cold-intent-copy"}:
+            def leave_ready(publisher, pending, **kwargs):
+                if pending["phase"] == "ready":
+                    raise replica._Retry("interrupted after ready")
+                return resolve(publisher, pending, **kwargs)
+
+            monkeypatch.setattr(replica._Publisher, "resolve", leave_ready)
+            abc.write_c(str(uuid.uuid4()), "Ready copy awaiting recovery")
+            _until(lambda: (raw := abc.meta().get(schema.META_PENDING_REPLICA_PUBLICATION))
+                   is not None and json.loads(raw)["phase"] == "ready")
+
+        if phase == "cold-intent-copy":
+            with held_fs.acquire(abc.root).require() as filesystem:
+                filesystem_type = type(filesystem)
+            copy = filesystem_type.copy
+
+            def stalled_descriptor_copy(filesystem, source, parent, leaf, **kwargs):
+                installed = replica.replica_path(abc.root).stat()
+                if (source.identity.device, source.identity.inode) == (installed.st_dev, installed.st_ino):
+                    staged.set()
+                    assert release.wait(20), "descriptor-copy barrier was not released"
+                return copy(filesystem, source, parent, leaf, **kwargs)
+
+            monkeypatch.setattr(filesystem_type, "copy", stalled_descriptor_copy)
+
+        @contextmanager
+        def stalled_verification(publisher, **kwargs):
+            with outside(publisher, **kwargs):
+                pending = json.loads(publisher.pending_raw) if publisher.pending_raw else None
+                hashing = [witness for witness in publisher.verifications.values() if witness.digest is None]
+                stage_exists = (pending is not None and publisher.workspace_relative is not None
+                                and (publisher.root / publisher.workspace_relative / pending["stage_leaf"]).exists())
+                selected = (
+                    phase == "current-head" and pending is None
+                    or pending is not None and pending["phase"] == "ready" and (
+                        phase == "cold-ready" and any(w.leaf == pending["stage_leaf"] for w in hashing)
+                        or phase == "predecessor" and stage_exists
+                        or phase == "installed" and not stage_exists
+                    )
+                )
+                if hashing and selected:
+                    staged.set()
+                    assert release.wait(20), "verification barrier was not released"
+                yield
+
+        monkeypatch.setattr(replica._Publisher, "outside", stalled_verification)
+        monkeypatch.setattr(replica._Publisher, "resolve", resolve)
     abc.write_c(LATER, "Starts a publication")
-    assert staged.wait(10)
     try:
+        assert staged.wait(10)
         started = time.monotonic()
-        assert abc.write_a("A file write during the copy") == "committed"
-        assert abc.write_c(str(uuid.uuid4()), "A store write during the copy")["outcome"] == "committed"
+        assert abc.write_a("A file write during publication verification") == "committed"
+        assert abc.write_c(str(uuid.uuid4()), "A store write during publication verification")["outcome"] == "committed"
         took = time.monotonic() - started
     finally:
         release.set()

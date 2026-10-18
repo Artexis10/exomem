@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from exomem import held_fs, reserved_paths
-from exomem.collection_store import connection, schema, snapshot, tokens
+from exomem.collection_store import authority, connection, schema, snapshot, tokens
 
 COLLECTION_ID = "00000000-0000-4000-8000-000000000001"
 H = "a" * 64
@@ -105,6 +105,9 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
     live = connection.store_path(root)
     with connection.open_writer(live, lease_check=lambda: True) as writer:
         before_head = _commit(writer, initial=True)
+        with writer.transaction() as conn:
+            conn.execute("INSERT INTO store_meta VALUES (?,?)",
+                         (authority.PENDING_CREATE, '{"request_id":"before-copy"}'))
         expected = dict(writer.connection.execute("SELECT key,value FROM store_meta"))
     copying = threading.Event()
     committed = threading.Event()
@@ -115,6 +118,9 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
             with connection.open_writer(live, lease_check=lambda: True) as writer:
                 assert copying.wait(10)
                 result["head"] = _commit(writer)
+                with writer.transaction() as conn:
+                    conn.execute("UPDATE store_meta SET value=? WHERE key=?",
+                                 ('{"request_id":"after-copy"}', authority.PENDING_CREATE))
                 committed.set()
                 assert result["consumer"].wait(10)
                 result["checkpoint"] = writer.connection.execute(
@@ -153,6 +159,7 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
             assert artifact.instance_id == expected[schema.META_INSTANCE_ID]
             assert artifact.lineage_json == expected[schema.META_LINEAGE]
             assert artifact.lease_epoch is None
+            assert artifact.pending_create_raw == expected[authority.PENDING_CREATE]
             assert artifact.schema_version == schema.SCHEMA_VERSION
             assert artifact.size_bytes == artifact.path.stat().st_size
             assert artifact.file_sha256 == hashlib.sha256(artifact.path.read_bytes()).hexdigest()
@@ -182,6 +189,8 @@ def test_snapshot_pins_one_wal_boundary_and_releases_reader_before_yield(
             assert reader.execute(
                 "SELECT value FROM store_meta WHERE key='store_head_hash'"
             ).fetchone() == (result["head"],)
+            assert reader.execute("SELECT value FROM store_meta WHERE key=?",
+                                  (authority.PENDING_CREATE,)).fetchone() == ('{"request_id":"after-copy"}',)
     finally:
         copying.set()
         result["consumer"].set()
@@ -556,6 +565,23 @@ def test_context_cleanup_removes_scratch_after_hard_link_install(genesis) -> Non
         expected_hash = artifact.file_sha256
     assert not scratch.exists()
     assert hashlib.sha256(installed.read_bytes()).hexdigest() == expected_hash
+
+
+def test_publication_owns_scratch_after_snapshot_context_closes(genesis) -> None:
+    root, stage, _writer = genesis
+    installed = stage / "installed.sqlite"
+    with snapshot.staged_snapshot(
+        root, directory=stage, deadline=time.monotonic() + 10, cleanup=False
+    ) as artifact:
+        artifact.path.rename(installed)
+        expected_hash = artifact.file_sha256
+    assert hashlib.sha256(installed.read_bytes()).hexdigest() == expected_hash
+    # An intent, rather than the snapshot context, owns an interrupted copy too.
+    with snapshot.staged_snapshot(
+        root, directory=stage, deadline=time.monotonic() + 10, cleanup=False
+    ) as interrupted:
+        pass
+    assert interrupted.path.is_file()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="unlink/recreate requires POSIX deletion semantics")
