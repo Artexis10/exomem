@@ -317,7 +317,8 @@ def test_crash_around_marker_cutover_recovers_the_same_create_once(ab, cut, tmp_
     assert ab_bytes(ab.root) == before
 
 
-@pytest.mark.parametrize("evidence", ["configured_sync_root", "sync_client_metadata", "windows_sync_folder"])
+@pytest.mark.parametrize("evidence", ["configured_sync_root", "sync_client_metadata", "sync_client_metadata_in_kb",
+                                      "sync_client_metadata_at_marker", "windows_sync_folder"])
 def test_unverified_custody_refuses_the_c_producer_and_leaves_a_b_usable(abc, evidence, monkeypatch, tmp_path):
     """Defect: a synced or overlapping deployment mints store custody, or refusing it blocks A/B writes."""
     root = abc.root
@@ -325,6 +326,10 @@ def test_unverified_custody_refuses_the_c_producer_and_leaves_a_b_usable(abc, ev
         monkeypatch.setenv(custody.SYNC_ROOTS_ENV, str(tmp_path))
     elif evidence == "sync_client_metadata":
         (abc.root / ".stfolder").mkdir()
+    elif evidence == "sync_client_metadata_in_kb":
+        (authority.marker_path(abc.root).parent.parent / ".stfolder").mkdir()
+    elif evidence == "sync_client_metadata_at_marker":
+        (authority.marker_path(abc.root).parent / ".stfolder").mkdir()
     else:
         # A Windows-mounted OneDrive folder keeps no client metadata in the tree.
         root = tmp_path / "OneDrive - Contoso" / "vault"
