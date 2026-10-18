@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import get_type_hints
 
 import pytest
 
@@ -100,19 +101,40 @@ def test_mcp_deep_recall_cannot_pass_the_ordinary_population(tmp_path):
 def test_mcp_canary_accepts_required_material_with_partial_warming(tmp_path):
     from fastmcp import FastMCP
 
+    from exomem.commands import op_ask_memory
+
     server = FastMCP("test")
 
-    @server.tool
     def ask_memory(query: str) -> dict:
         return {
-            "hits": [{"type": "page", "ref": "private-reference", "text": query}],
+            "hits": [
+                {
+                    "path": "notes/example.md",
+                    "type": "note",
+                    "scope": "example",
+                    "title": "Example",
+                    "updated": "2026-01-01",
+                    "ref": "private-reference",
+                    "excerpt": query,
+                }
+            ],
             "warming": {"components": ["pending_visibility"]},
         }
 
+    ask_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
+        "return"
+    ]
+    server.tool(ask_memory)
     report = _run_canary(
         tmp_path,
         server,
-        [_canary_case(state_path=["hits", 0, "type"], state="page")],
+        [
+            _canary_case(
+                state_path=["hits", 0, "type"],
+                state="note",
+                material_paths=[["hits", 0, "excerpt"]],
+            )
+        ],
         samples=1,
         warm_up=False,
         check="availability",
@@ -127,12 +149,18 @@ def test_mcp_canary_accepts_required_material_with_partial_warming(tmp_path):
 def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
     from fastmcp import FastMCP
 
+    from exomem.cli_ops import envelope
+    from exomem.commands import op_ask_memory
+
     server = FastMCP("test")
 
-    @server.tool
     def ask_memory(query: str) -> dict:
-        return {"ok": False, "error": {"code": "RETRIEVAL_INDEX_WARMING"}}
+        return envelope(False, error={"code": "RETRIEVAL_INDEX_WARMING"})
 
+    ask_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
+        "return"
+    ]
+    server.tool(ask_memory)
     report = _run_canary(tmp_path, server, [_canary_case()])
     assert report["verdict"] == "failed"
     assert report["availability"] == "failed"
@@ -154,7 +182,7 @@ def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
         ({"ok": True, "hits": [{"ref": "wrong", "text": "material"}]}, "missing-reference"),
         ({"ok": True, "hits": [{"ref": "private-reference", "text": "  "}]}, "missing-material"),
         ({"ok": True}, "missing-reference"),
-        ({"ok": False}, "unexpected-outcome"),
+        ({"success": False}, "unexpected-outcome"),
     ],
 )
 def test_mcp_positive_cases_require_source_truth_and_material(tmp_path, response, reason):
@@ -297,6 +325,8 @@ def test_mcp_cli_rejects_invalid_target_without_leaking_inputs(tmp_path, capsys)
 def test_mcp_measured_failure_retains_all_outcomes_and_unattempted_cases(tmp_path):
     from fastmcp import FastMCP
 
+    from exomem.cli_ops import envelope
+
     server = FastMCP("test")
     completed = 0
 
@@ -305,7 +335,7 @@ def test_mcp_measured_failure_retains_all_outcomes_and_unattempted_cases(tmp_pat
         nonlocal completed
         completed += 1
         if completed == 3:
-            return {"ok": False, "error": {"code": "RETRIEVAL_INDEX_WARMING"}}
+            return envelope(False, error={"code": "RETRIEVAL_INDEX_WARMING"})
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     later = _canary_case()
