@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 import yaml
 
-from exomem import epistemic_graph, relation_registry, traversal_profiles
+from exomem import commands, epistemic_graph, relation_registry, traversal_profiles
+from exomem import vault as vault_module
 
 
 def test_builtins_are_bounded_and_domain_distinct() -> None:
@@ -94,6 +96,62 @@ def test_profile_save_uses_expected_hash(tmp_path: Path) -> None:
         vault, proposal, expected_hash=created["content_hash"]
     )
     assert updated["created"] is False
+
+
+def test_profile_validation_and_overwrite_use_stored_crlf_hash(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    proposal = {"schema_version": 1, "profiles": {}}
+    commands.op_schema_memory(
+        root, operation="infer", subject="traversal-profiles", proposal=proposal, save=True
+    )
+    path = traversal_profiles.profile_path(root)
+    crlf = path.read_bytes().replace(b"\n", b"\r\n")
+    path.write_bytes(crlf)
+
+    inspected = commands.op_schema_memory(
+        root, operation="validate", subject="traversal-profiles"
+    )
+    expected = hashlib.sha256(crlf).hexdigest()
+    assert inspected["content_hash"] == expected
+    assert path.read_bytes() == crlf
+    saved = commands.op_schema_memory(
+        root, operation="infer", subject="traversal-profiles", proposal=proposal,
+        save=True, expected_hash=expected,
+    )
+    assert saved["saved"]["previous_hash"] == expected
+    assert saved["saved"]["content_hash"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "overwrite"])
+def test_profile_save_preserves_an_edit_during_rendering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    root = tmp_path / "vault"
+    proposal = {"schema_version": 1, "profiles": {}}
+    path = traversal_profiles.profile_path(root)
+    expected = None
+    if existing:
+        created = commands.op_schema_memory(
+            root, operation="infer", subject="traversal-profiles", proposal=proposal, save=True
+        )
+        expected = created["saved"]["content_hash"]
+    concurrent = b"schema_version: 1\r\nprofiles: {}\r\n# Kept by the editor.\r\n"
+    dump = yaml.safe_dump
+
+    def edit_during_render(*args, **kwargs):
+        rendered = dump(*args, **kwargs)
+        if kwargs.get("sort_keys") is False:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(concurrent)
+        return rendered
+
+    monkeypatch.setattr(yaml, "safe_dump", edit_during_render)
+    with pytest.raises(vault_module.ContentHashMismatchError):
+        commands.op_schema_memory(
+            root, operation="infer", subject="traversal-profiles", proposal=proposal,
+            save=True, expected_hash=expected,
+        )
+    assert path.read_bytes() == concurrent
 
 
 def _write(vault: Path, rel: str, body: str) -> None:
