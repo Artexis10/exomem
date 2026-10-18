@@ -600,7 +600,7 @@ def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
     """A sweep files old vectors only after another thread replaces its encoder."""
     vault, _log = lifecycle
     embeddings.get_model()
-    real_embed = embeddings.embed_texts
+    real_record = call_spans.record_span
 
     for model_name in ("model-b", "model-a"):
         encoded = threading.Event()
@@ -608,11 +608,11 @@ def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
         errors: list[Exception] = []
         body = "First hand-off paragraph.\n\nSecond hand-off paragraph."
 
-        def pause_after_encode(texts, *, encoded=encoded, publish=publish, **kwargs):
-            vectors = real_embed(texts, **kwargs)
-            encoded.set()
-            assert publish.wait(30), "the reaper did not release the encoded sweep"
-            return vectors
+        def pause_after_encode(name, elapsed_ms, fields=None, *, encoded=encoded, publish=publish):
+            real_record(name, elapsed_ms, fields)
+            if name == "embeddings.encode":
+                encoded.set()
+                assert publish.wait(30), "the reaper did not release the encoded sweep"
 
         def sweep(body, errors):
             try:
@@ -621,8 +621,8 @@ def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
                 errors.append(error)
 
         with monkeypatch.context() as paused:
-            # Pause after the real encode releases its guard, before the sweep files vectors.
-            paused.setattr(embeddings, "embed_texts", pause_after_encode)
+            # Pause at the encoder span after its guard exits, keeping encoder identity unchanged.
+            paused.setattr(call_spans, "record_span", pause_after_encode)
             worker = threading.Thread(target=sweep, args=(body, errors), daemon=True)
             worker.start()
             try:
@@ -636,13 +636,13 @@ def test_handed_on_vectors_follow_the_resident_model_under_concurrent_reloads(
                 publish.set()
                 worker.join(timeout=30)
 
-        assert not worker.is_alive()
-        assert errors == []
-        chunks = embeddings.chunk_text("Reload probe", body)
-        vectors = embeddings._embed_live_chunks_reusing(chunks, {})
-        assert vectors[:, 0].tolist() == [resident.tag] * len(chunks), (
-            "the upsert took vectors from the encoder replaced during the sweep"
-        )
+            assert not worker.is_alive()
+            assert errors == []
+            chunks = embeddings.chunk_text("Reload probe", body)
+            vectors = embeddings._embed_live_chunks_reusing(chunks, {})
+            assert vectors[:, 0].tolist() == [resident.tag] * len(chunks), (
+                "the upsert took vectors from the encoder replaced during the sweep"
+            )
 
 
 def test_a_remembered_long_text_does_not_pin_its_own_bytes(live) -> None:
