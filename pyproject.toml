@@ -195,6 +195,7 @@ dev = [
     "pytest>=8.0",
     "pytest-split>=0.11,<1",
     "pytest-timeout>=2.3",
+    "pytest-xdist>=3.6",
     "tiktoken>=0.7",
     "tokenizers>=0.20",
 ]

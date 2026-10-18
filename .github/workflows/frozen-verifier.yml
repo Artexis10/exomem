@@ -26,17 +26,21 @@ on:
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: frozen-verifier-${{ github.ref }}
+  # Independent main runs must not cancel the verifier called by full CI.
+  group: frozen-verifier-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   exact-multilingual-pin:
     name: exact multilingual pin
+    # Base-controlled release validation permits only version changes; full CI proves the base.
+    if: ${{ github.head_ref != 'release-please--branches--main' && !(github.event_name == 'push' && github.ref == 'refs/heads/release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
