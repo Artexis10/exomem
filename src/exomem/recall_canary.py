@@ -94,15 +94,17 @@ def _at_path(data: Any, path: list[str | int]) -> Any:
 def _canary_result(result, expected) -> tuple[str, str | None]:
     if result.is_error:
         return "error", "tool-error"
-    data = result.structured_content
-    if not isinstance(data, dict) or result.data is None:
+    # The SDK parses the published output schema and removes its transport wrapper.
+    data = result.data
+    if not isinstance(data, (dict, list)):
         return "error", "malformed-terminal"
     # Public OpError and activation fields are product protocol shapes.
+    envelope = data if isinstance(data, dict) else {}
     outcome = (
         "refused"
-        if data.get("ok") is False
+        if envelope.get("success") is False
         else "abstained"
-        if data.get("abstained") is True
+        if envelope.get("abstained") is True
         else "ok"
     )
     if outcome != expected.outcome:

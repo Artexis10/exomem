@@ -5322,16 +5322,16 @@ def _current_read_parent_binding(vault_root: Path, parent: Mapping[str, Any]) ->
 
 
 def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
-    """Run a terminal filter outside any request's memo, so it reads host configuration live.
+    """Read host configuration afresh for each terminal filter.
 
-    `state_paths.resolution_scope` promises that a request boundary re-reads the connector
-    ceiling before it releases a result. Doing that here, once, means no caller can forget it:
-    a store-routed read runs its whole dispatch, this filter included, inside a scope.
+    Reset the body's memo before opening one for this pass. Reuse placement and
+    connector configuration within the pass, without inheriting an earlier
+    release decision. Live evidence checks remain outside the resolution memo.
     """
 
     @functools.wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-        with state_paths.outside_resolution_scope():
+        with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
             return function(*args, **kwargs)
 
     return wrapped
@@ -6619,10 +6619,17 @@ class _ArtifactReferenceGate:
             return (token,)
         lowered = token.casefold()
         if lowered.startswith(memory_refs.REF_PREFIX):
-            try:
-                token = memory_refs.resolve_identifier_read_only(self.vault_root, token)
-            except memory_refs.ReferenceError:
+            memory_id = memory_refs.parse_memory_ref(token)
+            if memory_id is None:
                 return ()
+            # Preserve raw uniqueness before gating; visibility-filtered lookup
+            # would leave a hidden-only reference unresolved and unredacted.
+            paths = memory_refs.paths_for_ids_read_only(
+                self.vault_root, (memory_id,),
+            ).get(memory_id, ())
+            if len(paths) != 1:
+                return ()
+            token = paths[0]
         else:
             for prefix in _EXOMEM_PATH_PREFIXES:
                 if lowered.startswith(prefix):
