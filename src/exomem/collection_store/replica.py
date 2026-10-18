@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -79,8 +79,9 @@ def _json(value: dict) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
-def _intent_digest(raw: str | None) -> str | None:
+def _intent_digest(metadata: Mapping[str, str | None]) -> str | None:
     """The digest of the store's pending intent row, or None when it has none."""
+    raw = metadata.get(authority.PENDING_CREATE)
     return None if raw is None else hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -709,7 +710,7 @@ class _Publisher:
                         or artifact.lease_epoch != pending["lease_epoch"]
                         or any(getattr(artifact, key) != pending[key] for key in self.identity)):
                     raise _Retry("snapshot metadata differs from the ready intent")
-                return _intent_digest(artifact.pending_create_raw)
+                return _intent_digest({authority.PENDING_CREATE: artifact.pending_create_raw})
             witness = self.verifications[(id(self.parent), leaf)]
             with self.outside():
                 self._progress()
@@ -749,7 +750,7 @@ class _Publisher:
             if (copied != {key: pending[key] for key in self.identity}
                     or metadata.get(schema.META_LEASE_EPOCH) != pending["lease_epoch"]):
                 raise _Retry("private copy metadata differs from the ready intent")
-            return _intent_digest(metadata.get(authority.PENDING_CREATE))
+            return _intent_digest(metadata)
 
     def abandon(self, intent, predecessor):
         """Remove an adopted-over tenure's publication workspace: bounded recovery (A4).
@@ -799,7 +800,7 @@ class _Publisher:
         alone does not prove that a host adopting the replica reads it.
         """
         metadata = _metadata(self.writer)
-        return _intent_digest(metadata.get(authority.PENDING_CREATE)) == metadata.get(_INTENT)
+        return _intent_digest(metadata) == metadata.get(_INTENT)
 
     def run(self, stage_new):
         """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary.
