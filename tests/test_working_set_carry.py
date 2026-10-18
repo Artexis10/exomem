@@ -25,6 +25,7 @@ from exomem import (
     lexstore,
     request_budget,
     working_set,
+    working_set_conversation,
     working_set_heat,
     working_set_index,
     working_set_resolve,
@@ -2771,8 +2772,9 @@ def _statuses(packet: dict) -> dict[str, str]:
     return {item["path"]: item["status"] for item in packet["anchors"]}
 
 
+@pytest.mark.parametrize("with_prior", [False, True])
 def test_a_band_resolution_on_an_ordinary_word_yields_to_the_page_the_turn_names(
-    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch, with_prior: bool,
 ) -> None:
     """ "sled" is written as an ordinary word in a cased turn whose phrase
     names the research note. Without the band the sled is `partial` and the
@@ -2780,7 +2782,12 @@ def test_a_band_resolution_on_an_ordinary_word_yields_to_the_page_the_turn_names
     turn = "What did we decide about the quillon vantry window for the sled?"
     _band_on_the_sled(monkeypatch)
 
-    packet = working_set.compile_packet(carry_vault, turn=turn, max_chars=4000)
+    conversation = working_set_conversation.bound({
+        "recent": [{"role": "user", "text": "Cargo Sled"}],
+    }) if with_prior else None
+    packet = working_set.compile_packet(
+        carry_vault, turn=turn, max_chars=4000, conversation=conversation,
+    )
 
     assert packet["generation"]["carried_by"] == "retrieval"
     assert _statuses(packet) == {CARRY_PAGE: "resolved"}  # Named by its own title (the 2026-10-05 ruling).

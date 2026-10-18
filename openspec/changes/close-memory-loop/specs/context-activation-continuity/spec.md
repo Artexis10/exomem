@@ -13,7 +13,11 @@ kind, a qualifier, to the anchors it names that still exist in the current index
 that kind SHALL never create a candidate, SHALL never resolve an anchor on its own or
 together with qualifiers only, and SHALL never override a current-turn `unresolved`
 outcome. An anchor carrying `continuity` together with at least one contact kind of
-either family SHALL resolve. This is a deliberate exception to the rule that retrieved
+either family SHALL resolve, except when prior naming supplies the only additional
+evidence for a candidate marked as a singleton partial-name contact. That candidate
+SHALL remain a visible partial lead until independent current contact, full-name focus
+or agent choice resolves it. Prior naming cannot distinguish its fragment from a
+different unindexed name. This is a deliberate exception to the rule that retrieved
 contact alone is at most `partial`: the token names only anchors an earlier turn of the
 same conversation resolved on sound evidence, so a follow-up turn that reaches such an
 anchor again, even by recall alone, is continuing a subject rather than discovering
@@ -85,10 +89,17 @@ SHALL hand a thread-bearing token back unchanged, so a conversation survives a w
 index or a spent request budget.
 
 #### Scenario: Continuity strengthens but does not resolve
-- **WHEN** a turn carries one contact kind for an anchor the previous packet resolved
+- **WHEN** a turn carries one contact kind, other than a singleton partial-name contact,
+  for an anchor the previous packet resolved
   and passes that packet's token
 - **THEN** the anchor resolves with evidence `[<contact kind>, continuity]`, and the
   same turn without the token yields `partial`
+
+#### Scenario: A prior name does not decide a shared fragment
+- **WHEN** a turn reaches an earlier resolved entity only by a singleton partial-name
+  contact and passes that packet's token
+- **THEN** the entity remains a visible partial lead and contributes no lane material
+- **AND** the agent can resolve that lead through the existing anchor choice or full-name focus
 
 #### Scenario: A listed candidate is not carried forward
 - **WHEN** a packet resolves one anchor and lists a second as `partial`

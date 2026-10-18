@@ -816,10 +816,8 @@ def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     Depot Ledger as `partial` (weak evidence, never a contact kind strong
     enough alone). A second turn that reaches Depot Ledger by that same weak
     evidence, carrying the first turn's token, must still leave it `partial`
-    -- and an anchor the first turn actually RESOLVED (Cargo Sled, via
-    `exact_alias`), reached by the second turn through only a single weak
-    contact kind that alone stays `partial`, must still gain `continuity` and
-    resolve, so the fix does not also break the feature.
+    An earlier resolved anchor still gains continuity, but a singleton
+    partial-name contact remains partial until the agent selects its lead.
 
     `turn1` is `TURN` plus one extra, free-standing "depot" (fix/activation-
     competing-senses, R2): "depot stock" is itself the Records collection
@@ -868,9 +866,8 @@ def test_a_listed_partial_candidate_is_not_promoted_on_the_next_turn(
     assert by_ref_with[ledger_ref]["status"] == "partial", by_ref_with[ledger_ref]
     assert "continuity" not in by_ref_with[ledger_ref]["evidence"]
 
-    # The feature: turn 1 actually RESOLVED Cargo Sled, so a single weak
-    # contact kind on turn 2 plus continuity still resolves it.
-    assert by_ref_with[sled_ref]["status"] == "resolved", by_ref_with[sled_ref]
+    # Historical naming qualifies the lead without deciding its shared fragment.
+    assert by_ref_with[sled_ref]["status"] == "partial", by_ref_with[sled_ref]
     assert "continuity" in by_ref_with[sled_ref]["evidence"]
 
 

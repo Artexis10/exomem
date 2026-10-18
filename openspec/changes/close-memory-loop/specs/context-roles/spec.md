@@ -34,14 +34,25 @@ other anchor kinds SHALL remain unchanged.
 ## ADDED Requirements
 
 ### Requirement: Explicit material lens for otherwise unowned knowledge
-The shipped registry SHALL add `material` after active plans and before methods,
-defaulting for project, hub and transient carried-page contexts, with no shipped cues.
+The shipped registry SHALL place `contact` after active plans and before `material`.
+Material SHALL precede methods and default for entity, project, hub and transient
+carried-page contexts, with no shipped cues.
 It SHALL share the six-role ceiling and existing owner-override rules. A recency-only
 context SHALL NOT select it. Existing categorical lanes SHALL remain unchanged.
 
 #### Scenario: Owner narrowing remains effective
 - **WHEN** an owner narrows material defaults to an empty set
 - **THEN** neither resolved nor carried contexts select material by default
+
+#### Scenario: An entity cue reaches linked open categories
+- **WHEN** a labelled conversation cue resolves an entity and its admitted neighbourhood
+  contains query-relevant knowledge outside the categorical roles
+- **THEN** material serves that knowledge with its qualifications and source references
+- **AND** unrelated pages and unrequested contact units remain excluded
+
+#### Scenario: Requested contact survives entity material defaults
+- **WHEN** an entity turn asks how to call the person or whether calling is allowed
+- **THEN** contact precedes material within the six-role limit and serves the contact units
 
 #### Scenario: A full role schedule stays bounded
 - **WHEN** six higher-priority roles already qualify

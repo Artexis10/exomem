@@ -31,6 +31,8 @@ from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
 from .working_set_index import (
     MAX_ANCHORS as _CATALOGUE_ANCHOR_CAP,
+)
+from .working_set_index import (
     RARE_TERM_MAX_ANCHORS,
     STOPWORDS,
     derived_short_name,
@@ -124,6 +126,7 @@ PRIOR_CONTACT_KINDS: frozenset[str] = frozenset({"recency"})
 #: this subject". Each resolves an anchor the current turn reached by one contact
 #: kind, never alone and never with qualifiers only, and the two together count
 #: once (`_status_for_evidence` reads the set, not a count).
+#: A singleton partial name still needs independent current contact or agent choice.
 NAMED_BEFORE_KINDS: frozenset[str] = frozenset({"continuity", "conversation"})
 
 #: Kinds that resolve an anchor by themselves. `exact_alias` because the turn
@@ -542,6 +545,8 @@ class ResolvedAnchor:
     entity_type: str = ""
     name_capitalised: bool = False
     name_lower_case: bool = False
+    #: Keep the current-name distinction for counterfactual evidence checks; never served.
+    partial_name_terms: frozenset[str] = frozenset()
     #: The carried page this anchor is listed through (`carried_link`), or
     #: `""`. Served, so the egress guard removes the anchor with that page.
     via: str = ""
@@ -2411,7 +2416,9 @@ def _candidate_order(candidate: CandidateFacts) -> tuple:
     )
 
 
-def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = False) -> str:
+def _status_for_evidence(
+    evidence: frozenset[str], *, recency_resolves: bool = False, partial_name: bool = False,
+) -> str:
     """The three-clause soundness rule (design.md decision 1), plus continuity.
 
     `resolved` iff: `exact_alias` or `agent_choice` (either decides alone —
@@ -2421,17 +2428,20 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
     reached the anchor); or `rare_term` plus at least one other CONTACT kind
     specifically (a qualifier alone is not enough — the weak worded kind
     needs a second, independent fact, not merely a strengthener of itself);
-    or `continuity` plus at least one CONTACT kind of either family (a
-    previous packet's resolution plus this turn's own contact — `continuity`
+    or prior naming plus at least one CONTACT kind of either family, unless
+    the candidate has a singleton partial-name contact. A prior name cannot
+    distinguish that fragment from a different name. `continuity`
     still never creates a candidate and never resolves alone or with
-    qualifiers only). Retrieved contact alone, however many retrieved kinds
-    and qualifiers co-occur, is never more than `partial`.
+    qualifiers only. Without prior naming, retrieved contact alone stays
+    `partial`, however many retrieved kinds and qualifiers co-occur.
 
     Takes the evidence set directly, not a `CandidateFacts`/`ResolvedAnchor`,
     so R1's same-kind subsumption rule (`resolve`) can re-run this same
     clause against a candidate's evidence with `exact_alias` removed, to ask
     "would this anchor still resolve on its OTHER evidence alone" — without
     building a throwaway `CandidateFacts` just to hold a modified set.
+    `partial_name` carries the candidate's existing name-contact distinction;
+    exact aliases never set it.
 
     `recency_resolves` is the FIFTH clause (close-memory-loop D2), and it is
     the caller's answer to a question about the WHOLE candidate set, not
@@ -2452,7 +2462,8 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
         return "resolved"
     if "rare_term" in deciding and (deciding & CONTACT_KINDS) - {"rare_term"}:
         return "resolved"
-    if deciding & NAMED_BEFORE_KINDS and deciding & CONTACT_KINDS:
+    # A prior name cannot distinguish its fragment from a different, unindexed name.
+    if not partial_name and deciding & NAMED_BEFORE_KINDS and deciding & CONTACT_KINDS:
         return "resolved"
     if recency_resolves and "recency" in evidence:
         return "resolved"
@@ -2470,9 +2481,16 @@ def _status_for_evidence(evidence: frozenset[str], *, recency_resolves: bool = F
     return activation_result.UNRESOLVED
 
 
-def _status_for(candidate: CandidateFacts, *, recency_resolves: bool = False) -> str:
+def _status_for(
+    candidate: CandidateFacts | ResolvedAnchor, *, recency_resolves: bool = False,
+    without: frozenset[str] = frozenset(),
+) -> str:
     """`_status_for_evidence`, applied to one candidate's own evidence."""
-    return _status_for_evidence(candidate.evidence, recency_resolves=recency_resolves)
+    return _status_for_evidence(
+        frozenset(candidate.evidence) - without,
+        recency_resolves=recency_resolves,
+        partial_name=bool(candidate.partial_name_terms),
+    )
 
 
 def band_yieldable_paths(resolution: Resolution) -> frozenset[str]:
@@ -2506,7 +2524,7 @@ def _band_yieldable(anchor: ResolvedAnchor) -> bool:
     evidence = frozenset(anchor.evidence)
     return (
         "vector_band" in evidence
-        and _status_for_evidence(evidence - {"vector_band"}) != "resolved"
+        and _status_for(anchor, without=frozenset({"vector_band"})) != "resolved"
         and anchor.name_lower_case
     )
 
@@ -2649,8 +2667,7 @@ def _demote_subsumed_same_kind_aliases(
         candidate = result[i]
         if not candidate.exact_alias_phrases:
             continue
-        without_alias = frozenset(candidate.evidence) - {"exact_alias"}
-        if _status_for_evidence(without_alias) == "resolved":
+        if _status_for(candidate, without=frozenset({"exact_alias"})) == "resolved":
             continue
         length = phrases_by_kind[candidate.kind][candidate.exact_alias_phrases]
         for other_phrases, other_length in phrases_by_kind[candidate.kind].items():
@@ -2738,6 +2755,7 @@ def resolve(
                 entity_type=candidate.entity_type,
                 name_capitalised=candidate.name_capitalised,
                 name_lower_case=candidate.name_lower_case,
+                partial_name_terms=candidate.partial_name_terms,
             )
         )
     if recency_resolves:
