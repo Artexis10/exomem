@@ -264,7 +264,7 @@ def _observation_entry(
     """This page's stored per-page entry for the collection, if the projection has one."""
     from . import due_state
 
-    categories = (due_state.load(Path(vault_root)) or {}).get("categories") or {}
+    categories = (due_state._load_shared(Path(vault_root)) or {}).get("categories") or {}
     pages = categories.get("unreflected_observations") or {}
     for entry in due_state._unbucket(pages.get(page_path) if isinstance(pages, Mapping) else None):
         component = entry.get("component")

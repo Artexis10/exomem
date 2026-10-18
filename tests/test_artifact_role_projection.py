@@ -76,6 +76,19 @@ def test_projection_delta_settles_and_reopens_destination_without_reconcile(tmp_
     assert due_state.served(tmp_path)["categories"]["artifact_role_promotion"] == 1
 
 
+def test_a_new_origin_does_not_change_the_previous_shared_projection(tmp_path):
+    due_state.reconcile(tmp_path)
+    snapshot = due_state._load_shared(tmp_path)
+    before = due_state.load(tmp_path)
+    assert before["role_state"]["has_origins"] is False
+    write(tmp_path, method())
+
+    due_state.apply_write_delta(tmp_path, ORIGIN)
+
+    assert due_state.load(tmp_path)["role_state"]["has_origins"] is True
+    assert snapshot == before
+
+
 def test_explicit_coverage_exists_even_without_findings(tmp_path):
     write(tmp_path, "## Claim\nOrdinary text.")
     assert report(tmp_path).as_dict()["meta"]["coverage"] == dict.fromkeys(FAMILIES, "complete")
