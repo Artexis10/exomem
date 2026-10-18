@@ -3012,7 +3012,8 @@ def precommit_authorize_mutation(
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
-    with egress.disclosure_boundary(root, "record_mutation_precommit", join_existing=True) as collector:
+    # Precommit owns its receipt so an ambient boundary cannot defer the publication gate.
+    with egress.disclosure_boundary(root, "record_mutation_precommit") as collector:
         with authorization_pass(root):
             for path in sorted(paths):
                 if not _authorize(root, path, receipt=True):

@@ -309,6 +309,7 @@ def _coverage_receipts(value):
                 "candidate_key", "leaf_id", "operation_id", "receipt_digest", "path", "readback"}
                 or any(type(receipt[name]) is not str or not receipt[name]
                        for name in ("candidate_key", "leaf_id", "operation_id", "receipt_digest"))
+                # nosemgrep: ep-word-membership -- episode_workflow.coverage fixes these wire readback tokens.
                 or receipt["readback"] not in ("verified", "changed", "unavailable")
                 or (receipt["path"] is None) != (receipt["readback"] == "unavailable")
                 or receipt["path"] is not None and type(receipt["path"]) is not str):

@@ -213,27 +213,38 @@ def test_ownership_rejection_keeps_credential_evidence_without_a_successful_rele
 
 
 def test_complete_negative_ownership_reads_no_row_or_projection_census(service, monkeypatch):
+    from contextvars import ContextVar
+
     root = service.root
     path = "Knowledge Base/Records/Work/Independent.md"
     (root / path).write_text("# Ordinary file\n\nordinary-body\n")
     opened = connection._open_read_only
     attempted = []
+    observed = set()
+    foreground = ContextVar("negative_ownership_foreground", default=False)
 
     def no_rows(*args, **kwargs):
         conn, version = opened(*args, **kwargs)
 
         def authorize(action, table, *_):
             # These store tables contain rows or publications, not declaration ownership.
-            if action == sqlite3.SQLITE_READ and table in ("items", "held_candidates", "projection_state"):
-                attempted.append(table)
-                return sqlite3.SQLITE_DENY
+            if foreground.get() and action == sqlite3.SQLITE_READ:
+                observed.add(table)
+                if table in ("items", "held_candidates", "projection_state"):
+                    attempted.append(table)
+                    return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
         conn.set_authorizer(authorize)
         return conn, version
 
     monkeypatch.setattr(connection, "_open_read_only", no_rows)
-    assert "ordinary-body" in call(root, "read_memory", path=path)["body"]
+    token = foreground.set(True)
+    try:
+        assert "ordinary-body" in call(root, "read_memory", path=path)["body"]
+    finally:
+        foreground.reset(token)
+    assert observed, "the foreground ownership proof did not reach the read observer"
     assert attempted == []
 
 

@@ -1566,6 +1566,15 @@ def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service,
         request_budget.reset_current(token)
         release.set()
     assert completed.wait(5), "the accepted mutation did not complete without a retry"
+    summary = service.root / manifest_path().replace("_collection.md", "Items/_summary.md")
+
+    def summary_is_current():
+        try:
+            return "2 committed rows" in summary.read_text()
+        except FileNotFoundError:
+            return False
+
+    _until(summary_is_current)
     first = call(service.root, "record_memory", **arguments)
     assert first["outcome"] == "committed"
     assert call(service.root, "record_memory", **arguments) == first
