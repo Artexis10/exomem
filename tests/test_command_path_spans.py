@@ -142,14 +142,18 @@ def test_an_encode_names_the_module_that_asked(token: str, monkeypatch: pytest.M
 
 
 def test_a_direct_read_names_its_phases(vault: Path, token: str) -> None:
+    from exomem import vault as vault_module
+
     found = commands.op_find(vault, query="metabolism")
     hit = (found["hits"] if isinstance(found, dict) else found)[0]
     _names(token)  # discard the find's spans
+    vault_module.evict_inbound_index(vault)
     out = commands.op_read_memory(vault, path=hit["path"], links=True, include_history=True)
     assert "links" in out and "history" in out
+    assert out["links"]["inbound"] is None
     names = _names(token)
     assert "read.page" in names
     assert set(names["read.links"]["fields"]) - {call_spans.THREAD_CPU_US} == {
-        "inbound", "outbound",
+        "outbound",
     }
     assert "entries" in names["read.history"]["fields"]

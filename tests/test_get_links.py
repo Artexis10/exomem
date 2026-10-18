@@ -76,7 +76,15 @@ def test_outbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_inbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import freshness
+    from exomem import vault as vault_module
+
     _seed(vault)
+    freshness.seed(vault, "vault", [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ])
+    vault_module.find_inbound_wikilinks(vault, TARGET_REL)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/read_memory",
@@ -100,10 +108,37 @@ def test_links_absent_when_flag_off(vault, monkeypatch: pytest.MonkeyPatch) -> N
     assert "links" not in r.json()["data"]
 
 
+def test_cold_links_release_the_page_without_building(vault, monkeypatch) -> None:
+    """Optional cold links must not withhold a page behind a vault-wide build."""
+    from exomem import vault as vault_module
+
+    _seed(vault)
+    vault_module.clear_inbound_index()
+
+    def forbid_build(_root):
+        raise AssertionError("a direct read started a whole-vault inbound build")
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", forbid_build)
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    response = client.post(
+        "/api/read_memory",
+        json={"path": SOURCE_REL, "links": True},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 200, response.text
+    page = response.json()["data"]
+    assert "This builds on" in page["body"]
+    assert page["links"] == {
+        "inbound": None,
+        "outbound": ["Knowledge Base/Notes/Insights/link-target"],
+    }
+
+
 def test_link_summary_helper_direct(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
     body = (vault / SOURCE_REL).read_text(encoding="utf-8").split("---\n", 2)[-1]
     out = server._link_summary(vault, SOURCE_REL, body)
     assert out["outbound"] == ["Knowledge Base/Notes/Insights/link-target"]
-    # Source has no inbound links of its own in this seed.
-    assert out["inbound"] == []
+    # Without a current background index, absence is unknown rather than empty.
+    assert out["inbound"] is None
