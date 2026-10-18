@@ -5,7 +5,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import context_roles, lexstore, working_set, working_set_index, working_set_runtime
+from exomem import (
+    commands,
+    context_roles,
+    lexstore,
+    working_set,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem.working_set_resolve import analyze_turn
 
 
@@ -50,6 +57,34 @@ def test_project_material_is_relevant_scoped_and_does_not_bypass_contact(materia
     assert [u["provenance"]["path"] for u in material] == ["Knowledge Base/Notes/older.md"]
     assert material[0]["provenance"]["category"] == "observation"
     assert not any(p["ref"].endswith("contact.md") for p in packet["pointers"])
+
+
+def test_entity_cue_serves_linked_open_category_material_with_its_qualifications(vault: Path):
+    supplier = "Knowledge Base/Entities/Organizations/Alder Workshop.md"
+    _write(vault, supplier,
+        "---\ntype: entity\nentity_type: organization\nstatus: active\n---\n"
+        "# Alder Workshop\n\nA workshop that supplies gauges.\n")
+    current = _note(vault, "gauge-dispatch",
+        "- [dispatch_update] The gauge dispatch remains proposed; collection is unconfirmed. ^dispatch\n"
+        "- [contact] The gauge dispatch phone is private. ^private\n\n"
+        f"Related: [[{supplier.removesuffix('.md')}]]")
+    unrelated = _note(vault, "other-gauge-dispatch",
+        "- [dispatch_update] Gauge dispatch elsewhere is complete. ^elsewhere")
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    packet = commands.op_activate_context(vault, turn="The gauge dispatch needs checking.",
+        conversation={"focus": "Attachment label: Alder Workshop."})
+
+    assert any(a["path"] == supplier and a["status"] == "resolved" for a in packet["anchors"])
+    material = [u for u in packet["units"] if u["role"] == "material"]
+    assert [(u["provenance"]["path"], u["provenance"]["category"]) for u in material] == [
+        (current, "dispatch_update"),
+    ]
+    assert "proposed" in material[0]["text"] and "unconfirmed" in material[0]["text"]
+    assert not any(u["provenance"]["path"] == unrelated for u in packet["units"])
+    assert not any(u["provenance"].get("category") == "contact" for u in packet["units"])
 
 
 def test_quoted_parent_names_do_not_bypass_category_ownership(material_vault: Path):

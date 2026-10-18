@@ -173,11 +173,18 @@ def test_the_reviews_probe_turns_get_no_contact_units_end_to_end(vault: Path, tu
     assert not any("555-0142" in t or "Example Lane" in t for t in _unit_texts(packet))
 
 
-def test_a_turn_asking_for_their_phone_gets_the_contact_units(vault: Path) -> None:
+@pytest.mark.parametrize("turn", [
+    "What is Maren Holt's phone number?",
+    "Can I call Maren Holt?",
+    "How do I call Maren Holt?",
+])
+def test_a_turn_asking_to_reach_the_person_gets_contact_within_the_role_limit(
+    vault: Path, turn: str,
+) -> None:
     _person(vault)
     _warm(vault)
 
-    packet = commands.op_activate_context(vault, turn="What is Maren Holt's phone number?")
+    packet = commands.op_activate_context(vault, turn=turn)
 
     assert packet["abstained"] is False, packet.get("abstention")
     assert any(role["id"] == "contact" and role["source"] == "turn_cue" for role in packet["roles"])

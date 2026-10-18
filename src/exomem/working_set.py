@@ -3534,9 +3534,8 @@ def _promoted_by_conversation(anchors: Sequence[Any]) -> tuple[list[Any], list[A
     promoted: list[Any] = []
     for anchor in anchors:
         evidence = frozenset(anchor.evidence)
-        alone = evidence - {"conversation"}
         if "conversation" in evidence and (
-            working_set_resolve._status_for_evidence(alone) != "resolved"
+            working_set_resolve._status_for(anchor, without=frozenset({"conversation"})) != "resolved"
         ):
             promoted.append(anchor)
         else:

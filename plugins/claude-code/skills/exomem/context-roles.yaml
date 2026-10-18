@@ -118,11 +118,21 @@ roles:
     evidence_cues: ["i'm planning", "im planning", "planning to", "how should i", "should i"]
     evidence_categories: [action]
 
+  contact:
+    description: How to reach this person or organisation, served only when the turn asks.
+    lane: units
+    categories: [contact]
+    anchor_defaults: []
+    # Requested contact must precede optional material within the shared role ceiling.
+    # Selected by an intent shape over whole turn tokens (a contact noun tied to the
+    # person, or a reach verb whose object is the person), never by a cue substring.
+    intent: contact
+
   material:
     description: Relevant knowledge beyond the categories owned by other roles.
     lane: material
     categories: []
-    anchor_defaults: [project, hub, page]
+    anchor_defaults: [entity, project, hub, page]
     cues: []
 
   methods:
@@ -186,12 +196,3 @@ roles:
     # it), which is why it does not also need to be added above.
     evidence_cues: ["?", "what about", "why does"]
     evidence_categories: [question, problem]
-
-  contact:
-    description: How to reach this person or organisation, served only when the turn asks.
-    lane: units
-    categories: [contact]
-    anchor_defaults: []
-    # Selected by an intent shape over whole turn tokens (a contact noun tied to the
-    # person, or a reach verb whose object is the person), never by a cue substring.
-    intent: contact

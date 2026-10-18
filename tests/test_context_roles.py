@@ -26,6 +26,7 @@ SHIPPED_VOCABULARY = (
     "current_state",
     "recent_change",
     "active_plans",
+    "contact",
     "material",
     "methods",
     "precedents",
@@ -34,7 +35,6 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
-    "contact",
 )
 
 
