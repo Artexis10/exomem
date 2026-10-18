@@ -251,37 +251,53 @@ def install(session, staged, token, check):
     return identity
 
 
-def replace_live(session, leaf, check, *, subdirectory=None):
+def replace_live(session, leaf, check, *, subdirectory=None, expected_identity=None, expected_version=None):
     """Rename a closed, journal-free store file into place as this host's live store.
 
     ``leaf`` lies in the state directory, or in its private ``subdirectory`` on the same
     volume. A live store it replaces is kept as the newest superseded store.
     """
-    if session.path.exists():
-        # Fold the superseded store's WAL into its own file; any open connection refuses this.
-        try:
-            with closing(sqlite3.connect(session.path, isolation_level=None, timeout=0)) as live:
-                if live.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
-                    raise sqlite3.OperationalError("journal mode unchanged")
-        except sqlite3.OperationalError as error:
-            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open") from error
-    for suffix in ("-wal", "-shm", "-journal"):
-        if (session.path.parent / (session.path.name + suffix)).exists():
-            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open")
     fs = session.state_fs
     check()
     with fs.parent(session.path.parent.name, access="mutate").require() as directory:
         if not held_fs._same_file_identity(directory.identity, session.state_directory.identity):
             raise connection.CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state directory changed")
-        superseded = None
-        if session.path.exists():
-            superseded = f"{session.path.name}{SUPERSEDED}{secrets.token_hex(8)}"
-            with fs.file(directory, session.path.name, access="mutate").require() as live:
-                fs.rename(live, directory, superseded, replace=False).require()
         with (nullcontext(directory) if subdirectory is None else fs.parent(
                 f"{session.path.parent.name}/{subdirectory}", access="mutate").require()) as source, \
                 fs.file(source, leaf, access="mutate").require() as adopted:
+            def require_source():
+                if expected_identity is not None and not held_fs._same_file_identity(adopted.identity, expected_identity):
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging store changed")
+                if expected_version is not None:
+                    if adopted.version() != expected_version:
+                        raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging bytes changed")
+                    for suffix in snapshot._COMPANIONS:
+                        companion = fs.file(source, leaf + suffix)
+                        if companion.ok:
+                            companion.require().close()
+                            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the sealed staging store has SQLite companions")
+                        if companion.error.code != "MISSING":
+                            raise companion.error
+            require_source()
+            if session.path.exists():
+                # Fold the superseded store's WAL into its own file; any open connection refuses this.
+                try:
+                    with closing(sqlite3.connect(session.path, isolation_level=None, timeout=0)) as live:
+                        if live.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                            raise sqlite3.OperationalError("journal mode unchanged")
+                except sqlite3.OperationalError as error:
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open") from error
+            for suffix in snapshot._COMPANIONS:
+                if (session.path.parent / (session.path.name + suffix)).exists():
+                    raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "the live store is still open")
+            check()
             os.fsync(adopted.descriptor)
+            require_source()
+            superseded = None
+            if session.path.exists():
+                superseded = f"{session.path.name}{SUPERSEDED}{secrets.token_hex(8)}"
+                with fs.file(directory, session.path.name, access="mutate").require() as live:
+                    fs.rename(live, directory, superseded, replace=False).require()
             fs.rename(adopted, directory, session.path.name, replace=False).require()
         fs.flush_directory(directory).require()
         if superseded is not None:

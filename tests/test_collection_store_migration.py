@@ -11,13 +11,17 @@ in this temporary state, as the GA release would.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
-from contextlib import closing, suppress
+import threading
+import time
+from contextlib import ExitStack, closing, suppress
+from pathlib import Path
 
 import pytest
 from record_fixtures import LEDGER_COLLECTION_PATH, copy_dataset_fixture, copy_x3_fixture
@@ -29,7 +33,15 @@ from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
 from exomem import __main__ as cli
-from exomem import record_formats, records, state_migration, state_paths, writer_lease
+from exomem import (
+    held_fs,
+    record_formats,
+    records,
+    reserved_paths,
+    state_migration,
+    state_paths,
+    writer_lease,
+)
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
@@ -43,6 +55,8 @@ from exomem.collection_store import (
     migration,
     preflight,
     runtime,
+    schema,
+    takeover,
 )
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
@@ -166,6 +180,7 @@ def start_service(root):
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """A lease-configured shell over the real coordinator, with the migration fence on."""
+    assert Path(connection.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv("EXOMEM_COLLECTION_STORE_PREVIEW", raising=False)
@@ -539,9 +554,23 @@ def write_from_another_state_dir(monkeypatch, tmp_path, module, name, title):
     def then_write(*args, **kwargs):
         found = step(*args, **kwargs)
         if not written:
-            with pytest.MonkeyPatch.context() as shell:
-                shell.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "other-lease-state"))
-                written.append(append_to_work(args[0], title))
+            errors = []
+
+            def write():
+                # Another process has its own authority context, as this thread's fresh context does.
+                with library_scope(), pytest.MonkeyPatch.context() as shell:
+                    shell.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "other-lease-state"))
+                    try:
+                        written.append(append_to_work(args[0], title))
+                    except Exception as error:  # noqa: BLE001 - the test thread re-raises the writer's error
+                        errors.append(error)
+
+            writer = threading.Thread(target=lambda: contextvars.Context().run(write))
+            writer.start()
+            writer.join(10)
+            assert not writer.is_alive()
+            if errors:
+                raise errors[0]
         return found
 
     monkeypatch.setattr(module, name, then_write)
@@ -622,6 +651,282 @@ def test_a_file_write_after_prepare_is_imported_at_apply(env, capsys):
         service.stop()
 
 
+@pytest.mark.parametrize("change", ["added", "removed", "identity", "audit"])
+def test_refresh_keeps_unchanged_history_when_the_collection_set_or_audit_changes(env, capsys, change):
+    """A changed collection set or relevant audit event must not mint another import of unchanged files."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    with closing(connection.open_reader(staging_directories(root)[0] / "staging.sqlite")) as donor:
+        history = donor.execute("SELECT receipt_json,legacy_event_json,event_hash FROM txns "
+                                "WHERE collection_id=? ORDER BY txn_id", (CID,)).fetchall()
+    extra_id = "77777777-7777-4777-8777-777777777777"
+    extra_path = "Knowledge Base/Records/Extra/_collection.md"
+    if change == "added":
+        path = root / extra_path
+        (path.parent / "Items").mkdir(parents=True)
+        path.write_text(manifest_text("records").replace(CID, extra_id))
+    elif change == "removed":
+        shutil.rmtree((root / PLANNING).parent)
+    elif change == "identity":
+        path = root / PLANNING
+        path.write_text(manifest_text("planning").replace(CID, extra_id))
+    else:
+        manifest = collections.load_manifest(root, root / LEDGER_COLLECTION_PATH)
+        _append_log(root, [_event(manifest, 40)])
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
+    expected = set(MIGRATED)
+    if change == "added":
+        expected.add(extra_id)
+    elif change == "removed":
+        expected.remove(OTHER)
+    elif change == "identity":
+        expected.remove(OTHER)
+        expected.add(extra_id)
+    with closing(connection.open_reader(connection.store_path(root))) as live:
+        assert {row[0] for row in live.execute("SELECT collection_id FROM collections")} == expected
+        assert live.execute("SELECT receipt_json,legacy_event_json,event_hash FROM txns "
+                            "WHERE collection_id=? ORDER BY txn_id", (CID,)).fetchall() == history
+        assert live.execute("PRAGMA foreign_key_check").fetchall() == []
+        chain.verify_store_chain(live)
+
+
+@pytest.mark.parametrize("alteration", ["old", "format", "material", "projection"])
+def test_refresh_reproves_ineligible_donors_instead_of_reusing_their_proof(env, capsys, alteration):
+    """Old proof formats and altered normalized state must lose eligibility, even with a valid chain."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    path = staging_directories(root)[0] / "staging.sqlite"
+    with closing(sqlite3.connect(path, isolation_level=None)) as donor:
+        before = dict(donor.execute("SELECT collection_id,receipt_json FROM txns WHERE legacy_event_json IS NULL"))
+        (raw,) = donor.execute("SELECT value FROM store_meta WHERE key='migration_basis'").fetchone()
+        basis = json.loads(raw)
+        if alteration == "old":
+            basis["version"] = 1
+        elif alteration == "format":
+            basis["collections"][LEDGER_ID]["material_version"] = 999
+        elif alteration == "material":
+            donor.execute("UPDATE items SET governance_json='[]' WHERE collection_id=?", (LEDGER_ID,))
+        else:
+            donor.execute("UPDATE projection_state SET stat_identity='changed' WHERE collection_id=?", (LEDGER_ID,))
+        donor.execute("UPDATE store_meta SET value=? WHERE key='migration_basis'", (json.dumps(basis),))
+        chain.verify_store_chain(donor)
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
+    with closing(connection.open_reader(connection.store_path(root))) as live:
+        after = dict(live.execute("SELECT collection_id,receipt_json FROM txns WHERE legacy_event_json IS NULL"))
+        assert after[LEDGER_ID] != before[LEDGER_ID]
+        assert (after[CID] == before[CID]) == (alteration != "old")
+        assert live.execute("SELECT 1 FROM items WHERE governance_json='[]'").fetchone() is None
+        assert live.execute("SELECT 1 FROM projection_state WHERE stat_identity='changed'").fetchone() is None
+
+
+@pytest.mark.parametrize("replacement", ["basis", "database", "directory", "body", "audit_status"])
+def test_seal_rejects_changed_staging_without_publishing_or_removing_evidence(env, capsys, monkeypatch, replacement):
+    """A staging replacement after final comparison must not supply new authority for the seal."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    seal = migration._seal
+    evidence = []
+
+    def replace(directory, *args, **kwargs):
+        path = directory / "staging.sqlite"
+        if replacement == "basis":
+            with closing(sqlite3.connect(path, isolation_level=None)) as stage:
+                stage.execute("UPDATE store_meta SET value=value || ' ' WHERE key='migration_basis'")
+            evidence.append(path)
+        elif replacement == "database":
+            saved = directory / "saved.sqlite"
+            path.rename(saved)
+            shutil.copyfile(saved, path)
+            evidence.extend((saved, path))
+        elif replacement == "directory":
+            saved = directory.with_name(directory.name + "-saved")
+            directory.rename(saved)
+            shutil.copytree(saved, directory)
+            evidence.extend((saved / "staging.sqlite", path))
+        else:
+            inode = path.stat().st_ino
+            with closing(sqlite3.connect(path, isolation_level=None)) as stage:
+                if replacement == "body":
+                    stage.execute("UPDATE items SET body='late material change' WHERE collection_id=?", (CID,))
+                else:
+                    stage.execute("UPDATE collections SET legacy_audit_status='ok' WHERE collection_id=?", (CID,))
+            assert path.stat().st_ino == inode
+            evidence.append(path)
+        return seal(directory, *args, **kwargs)
+
+    monkeypatch.setattr(migration, "_seal", replace)
+    assert migrate(root, "apply") == 1
+    assert "COLLECTION_STORE_BUSY" in capsys.readouterr().err
+    assert not connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert all(path.is_file() for path in evidence)
+    with closing(connection.open_reader(evidence[-1])) as stage:
+        assert authority.pending_create(stage) is None
+        assert stage.execute("SELECT 1 FROM store_meta WHERE key='migration_basis'").fetchone() is not None
+
+
+def test_prepare_stops_at_its_deadline_while_another_migration_holds_staging(env):
+    """A standby waiting for staging custody must not consume the finishing reserve or write after expiry."""
+    root = legacy_vault(env)
+    found = []
+
+    def prepare():
+        with library_scope():
+            try:
+                migration.prepare(root, deadline=time.monotonic() + 0.05)
+            except Exception as error:  # noqa: BLE001 - the test thread checks the deadline's error
+                found.append(error)
+
+    with reserved_paths._subsystem_authority_scope("collection_store.migration"), \
+            reserved_paths._identity_coordination_scope(root, descriptor_ids=(connection.MIGRATION_STAGING,)):
+        worker = threading.Thread(target=lambda: contextvars.Context().run(prepare))
+        worker.start()
+        worker.join(1)
+        assert not worker.is_alive()
+        assert len(found) == 1 and isinstance(found[0], TimeoutError)
+        assert staging_directories(root) == []
+
+
+@pytest.mark.parametrize("operation", ["prepare", "discard"])
+def test_prepare_and_discard_wait_until_the_current_staging_owner_releases_custody(env, capsys, operation):
+    """Another prepare or cleanup must not replace or remove a staging file while its owner holds custody."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    path = staging_directories(root)[0] / "staging.sqlite"
+    original = path.read_bytes()
+    entered, finished = threading.Event(), threading.Event()
+    errors = []
+
+    def act():
+        with library_scope():
+            entered.set()
+            try:
+                if operation == "prepare":
+                    migration.prepare(root)
+                else:
+                    migration.discard_staging(root)
+            except Exception as error:  # noqa: BLE001 - the test thread reports every worker error
+                errors.append(error)
+            finally:
+                finished.set()
+
+    with reserved_paths._subsystem_authority_scope("collection_store.migration"), \
+            reserved_paths._identity_coordination_scope(root, descriptor_ids=(connection.MIGRATION_STAGING,)):
+        worker = threading.Thread(target=lambda: contextvars.Context().run(act))
+        worker.start()
+        assert entered.wait(1)
+        assert not finished.wait(0.05)
+        assert path.read_bytes() == original
+    worker.join(5)
+    assert not worker.is_alive() and errors == []
+    assert not path.exists()
+
+
+def test_refresh_and_cleanup_preserve_unknown_bytes_from_an_interrupted_attempt(env, capsys):
+    """A leftover private file must neither block refresh nor disappear in a blanket directory removal."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    directory = staging_directories(root)[0]
+    unknown = directory / "refresh-interrupted.sqlite"
+    unknown.write_bytes(b"unrecognized interrupted bytes")
+    edit_by_hand(root)
+    assert migrate(root, "apply") == 0
+    assert printed(capsys)["status"] == "marker_admitted"
+    assert unknown.read_bytes() == b"unrecognized interrupted bytes"
+    assert migration.discard_staging(root) == 0
+    assert unknown.read_bytes() == b"unrecognized interrupted bytes"
+
+
+@pytest.mark.parametrize("damage", ["old_schema", "unreadable", "wal"])
+def test_unusable_staging_reimports_from_files_and_preserves_the_unknown_donor(env, capsys, damage):
+    """A stale schema, unreadable store or WAL donor must never become an input to retained assembly."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    donor = staging_directories(root)[0] / "staging.sqlite"
+    with ExitStack() as actors:
+        if damage == "unreadable":
+            donor.write_bytes(b"unreadable retained staging")
+        else:
+            stage = actors.enter_context(closing(sqlite3.connect(donor, isolation_level=None)))
+            if damage == "old_schema":
+                stage.execute("UPDATE store_meta SET value=? WHERE key=?",
+                              (str(schema.SCHEMA_VERSION - 1), schema.META_SCHEMA_VERSION))
+                stage.execute("UPDATE alembic_version SET version_num=?", (str(schema.SCHEMA_VERSION - 1),))
+            else:
+                assert stage.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+                with held_fs.acquire(donor.parent).require() as filesystem, \
+                        filesystem.parent(".").require() as parent, \
+                        filesystem.file(parent, donor.name).require() as database:
+                    version = database.version()
+                    stage.execute("INSERT INTO store_meta(key,value) VALUES('unverified_wal','external write')")
+                    assert database.version() == version
+                    assert donor.with_name(donor.name + "-wal").is_file()
+        damaged = donor.read_bytes()
+        assert migrate(root, "apply") == 0
+        applied = printed(capsys)
+        assert (applied["status"], applied["rebuilt_because"]) == ("marker_admitted", migration.NO_BASIS)
+        assert {entry["collection_id"] for entry in marker(root)["collections"]} == set(MIGRATED)
+        assert donor.read_bytes() == damaged
+
+
+@pytest.mark.parametrize("phase", ["commit", "close"])
+def test_seal_keeps_sqlite_writer_exclusion_until_the_committed_version_is_captured(env, capsys, monkeypatch, phase):
+    """An external write after COMMIT or close must never enter the version that authorizes installation."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0
+    capsys.readouterr()
+    path = staging_directories(root)[0] / "staging.sqlite"
+    connect = sqlite3.connect
+    blocked = []
+
+    class SealConnection(sqlite3.Connection):
+        def external_write(self):
+            with closing(connect(path, isolation_level=None, timeout=0)) as external:
+                try:
+                    external.execute("UPDATE items SET body='write after seal commit' WHERE collection_id=?", (CID,))
+                except sqlite3.OperationalError as error:
+                    assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                    blocked.append(True)
+                else:
+                    blocked.append(False)
+
+        def execute(self, statement, *args, **kwargs):
+            result = super().execute(statement, *args, **kwargs)
+            if statement == "COMMIT" and phase == "commit":
+                self.external_write()
+            return result
+
+        def close(self):
+            super().close()
+            if phase == "close":
+                self.external_write()
+
+    def seal_connection(database, *args, **kwargs):
+        if database == f"{path.as_uri()}?mode=rw":
+            kwargs["factory"] = SealConnection
+        return connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", seal_connection)
+    if phase == "commit":
+        assert migrate(root, "apply") == 0
+        assert printed(capsys)["status"] == "marker_admitted"
+        assert blocked and all(blocked)
+        with closing(connection.open_reader(connection.store_path(root))) as live:
+            assert live.execute("SELECT 1 FROM items WHERE body='write after seal commit'").fetchone() is None
+    else:
+        assert migrate(root, "apply") == 1
+        assert "COLLECTION_STORE_BUSY" in capsys.readouterr().err
+        assert blocked and not any(blocked)
+        assert path.exists() and not connection.store_path(root).exists() and authority.read_marker(root) is None
+
+
 @pytest.fixture
 def s1(env, tmp_path, monkeypatch, capsys):
     """The legacy vault after S1 enrolled a summary collection, with a row written by the service."""
@@ -664,6 +969,41 @@ def test_a_failed_proof_on_an_s1_vault_reports_it_and_leaves_the_store_marker_an
     assert authority.read_marker(root) == marked
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         assert chain.verify_store_chain(reader) == head
+
+
+@pytest.mark.parametrize("change", ["database", "body"])
+def test_installation_rejects_a_replaced_sealed_source_before_moving_the_live_store(s1, capsys, monkeypatch, change):
+    """A replaced or edited source after seal must not move the live store aside or acquire its authority."""
+    root = s1
+    marked = authority.read_marker(root)
+    with closing(connection.open_reader(connection.store_path(root))) as live:
+        head = chain.verify_store_chain(live)
+    install = takeover.replace_live
+    evidence = []
+
+    def replace_source(session, leaf, check, **kwargs):
+        directory = session.path.parent / kwargs["subdirectory"]
+        path = directory / leaf
+        if change == "database":
+            saved = directory / "sealed-source.sqlite"
+            path.rename(saved)
+            shutil.copyfile(saved, path)
+            evidence.append(saved)
+        else:
+            inode = path.stat().st_ino
+            with closing(sqlite3.connect(path, isolation_level=None)) as stage:
+                stage.execute("UPDATE items SET body='post-seal material change' WHERE collection_id=?", (CID,))
+            assert path.stat().st_ino == inode
+        evidence.append(path)
+        return install(session, leaf, check, **kwargs)
+
+    monkeypatch.setattr(takeover, "replace_live", replace_source)
+    assert migrate(root, "apply") == 1
+    assert "COLLECTION_STORE_BUSY" in capsys.readouterr().err
+    assert authority.read_marker(root) == marked
+    with closing(connection.open_reader(connection.store_path(root))) as live:
+        assert chain.verify_store_chain(live) == head
+    assert all(path.is_file() for path in evidence)
 
 
 def test_an_s1_store_keeps_its_summary_rows_head_and_fence(s1, capsys):

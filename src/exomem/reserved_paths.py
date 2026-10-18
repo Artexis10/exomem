@@ -331,6 +331,7 @@ def _identity_coordination_scope(
     *,
     descriptor_ids: Iterable[str] | None = None,
     identity_may_change: bool = True,
+    deadline: float | None = None,
 ) -> Iterator[str | None]:
     """Serialize private identity publication with generic held-leaf acquisition."""
 
@@ -360,6 +361,7 @@ def _identity_coordination_scope(
         advance_generation=identity_may_change,
         operation="reserved_identity",
         holder_kind="reserved-state",
+        deadline=deadline,
     ) as generation:
         token = _ACTIVE_IDENTITY_COORDINATION.set((*active, (key, domains)))
         try:
