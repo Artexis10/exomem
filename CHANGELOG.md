@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.2](https://github.com/Artexis10/exomem/compare/v0.127.1...v0.127.2) (2026-10-18)
+
+
+### Bug Fixes
+
+* create private owner locks and validate canary membership ([#1864](https://github.com/Artexis10/exomem/issues/1864)) ([d078f00](https://github.com/Artexis10/exomem/commit/d078f003ea47b7ac92dac1a8444e737d76b211d6))
+* **recall:** retain distinct admitted statistics across snapshots ([#1863](https://github.com/Artexis10/exomem/issues/1863)) ([08423fa](https://github.com/Artexis10/exomem/commit/08423fac0040848c5f6f03ae6493704a7d4d7503))
+
 ## [0.127.1](https://github.com/Artexis10/exomem/compare/v0.127.0...v0.127.1) (2026-10-18)
 
 
