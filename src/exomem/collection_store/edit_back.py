@@ -58,10 +58,9 @@ UNBOUND = "VIEW_UNBOUND"
 MOVED = "VIEW_MOVED"
 CONFLICT_COPY = "VIEW_CONFLICT_COPY"
 
-#: PROVISIONAL (operator choice O2, not yet ruled): an invalid item or manifest view keeps the
-#: owner's bytes at the view path, held in place, and re-renders only when the hold is
-#: discarded. Until then get_page answers that path as absent for every caller, because its
-#: bytes are not the current render. False re-renders at once, displacing the bytes into the hold.
+#: Invalid item and manifest views keep the edited bytes in place until a valid edit or discard.
+#: SQLite continues to serve the last valid record. get_page withholds the invalid file because
+#: its bytes are not the current render (design O2).
 KEEP_INVALID_IN_PLACE = True
 
 #: The view kinds edit-back reads; the others are generated read-only output.
