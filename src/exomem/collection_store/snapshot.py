@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths
-from . import connection, schema, tokens
+from . import authority, connection, schema, tokens
 
 _PREFIX = ".exomem-collection-snapshot-"
 _TOKEN = re.compile(r"[0-9a-f]{32}", re.ASCII)
@@ -188,6 +188,7 @@ class SnapshotArtifact:
     head_hash: str | None
     lineage_json: str
     lease_epoch: str | None
+    pending_create_raw: str | None
 
 
 @contextmanager
@@ -198,11 +199,12 @@ def staged_snapshot(
     deadline: float,
     cancelled: Callable[[], bool] | None = None,
     scratch_token: str | None = None,
+    cleanup: bool = True,
 ) -> Iterator[SnapshotArtifact]:
     """Stage the live vault store, requiring its current schema as before."""
     with staged_store_snapshot(
         connection.store_path(vault_root), directory=directory, deadline=deadline,
-        cancelled=cancelled, scratch_token=scratch_token,
+        cancelled=cancelled, scratch_token=scratch_token, cleanup=cleanup,
     ) as artifact:
         yield artifact
 
@@ -216,6 +218,7 @@ def staged_store_snapshot(
     cancelled: Callable[[], bool] | None = None,
     scratch_token: str | None = None,
     preserve_schema: bool = False,
+    cleanup: bool = True,
 ) -> Iterator[SnapshotArtifact]:
     """Yield a closed, fsynced copy in the caller's existing private directory.
 
@@ -227,6 +230,8 @@ def staged_store_snapshot(
     phase. A passed deadline raises ``TimeoutError`` (COLLECTION_SNAPSHOT_DEADLINE),
     never COLLECTION_SNAPSHOT_INVALID.
     The calling worker thread owns the source reader and closes it after backup.
+    Publication passes ``cleanup=False`` because its durable intent owns scratch;
+    context exit then closes handles and leaves retirement to witnessed recovery.
     """
     checked_at = 0.0
 
@@ -351,10 +356,11 @@ def staged_store_snapshot(
                     head_hash=metadata.get(schema.META_STORE_HEAD_HASH),
                     lineage_json=metadata[schema.META_LINEAGE],
                     lease_epoch=metadata.get(schema.META_LEASE_EPOCH),
+                    pending_create_raw=metadata.get(authority.PENDING_CREATE),
                 )
             finally:
                 try:
-                    if owned_file is not None:
+                    if owned_file is not None and cleanup:
                         for suffix in ("", *(_COMPANIONS if owns_companions else ())):
                             current = filesystem.file(parent, path.name + suffix, access="mutate")
                             if current.error is not None and current.error.code == "MISSING":

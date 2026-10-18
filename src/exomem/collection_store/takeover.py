@@ -41,7 +41,8 @@ SCHEMA_PENDING = "COLLECTION_STORE_SCHEMA_PENDING"
 # An unfinished reverse export owns the store: no host serves it until the owner finishes it.
 EXPORTING = "COLLECTION_STORE_EXPORT_PENDING"
 SUPERSEDED = ".superseded-"
-_DROPPED = (schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PENDING_REPLICA_PUBLICATION, authority.PENDING_CREATE)
+_DROPPED = (schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PUBLISHED_REPLICA_EPOCH,
+            schema.META_PENDING_REPLICA_PUBLICATION, authority.PENDING_CREATE)
 
 
 def _signature(found):

@@ -282,6 +282,140 @@ def test_warm_operations_reuse_cache_and_retained_bindings_expire(runtime, monke
     assert len(created) == 3  # normal cache, lifecycle cache, reopened normal cache
 
 
+def test_coalesced_publication_keeps_warm_release_work_bounded(runtime, monkeypatch):
+    """Publication must not make unchanged foreground authority scan every row again."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.collection_store import governance, snapshot
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "One"}, item_key=KEY, why="capture")
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+
+    full_catalogs = []
+    subjects = governance.subjects
+
+    def observed_subjects(conn, cid, logical_vault_id, **kwargs):
+        if cid == CID and kwargs.get("identity") is None:
+            full_catalogs.append(threading.get_ident())
+        return subjects(conn, cid, logical_vault_id, **kwargs)
+
+    monkeypatch.setattr(governance, "subjects", observed_subjects)
+    copying, resume = threading.Event(), threading.Event()
+    staged_snapshot = snapshot.staged_snapshot
+
+    @contextmanager
+    def paused_copy(*args, **kwargs):
+        copying.set()
+        assert resume.wait(5), "publication copy was not resumed"
+        with staged_snapshot(*args, **kwargs) as artifact:
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        try:
+            assert copying.wait(5), "publication did not reach its outside copy"
+            with preview_store(runtime.root, runtime):
+                assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+                record_memory(runtime.root, "append", collection=CID,
+                              item={"title": "Two"}, item_key=OTHER, why="capture")
+        finally:
+            resume.set()
+        assert published.result(timeout=10) is not None
+
+    with preview_store(runtime.root, runtime):
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 2
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+    assert not full_catalogs, "publication discarded an unchanged warm authorization catalogue"
+
+
+def test_external_sql_during_publication_invalidates_warm_data_without_a_head_change(runtime, monkeypatch):
+    """A trusted publication must not hide a foreign commit behind its metadata accounting."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.collection_store import snapshot
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "Initial"}, item_key=KEY, why="capture")
+        assert record_memory(runtime.root, "inspect", collection=CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
+    head = runtime.sample_head()
+    copying, resume = threading.Event(), threading.Event()
+    staged_snapshot = snapshot.staged_snapshot
+
+    @contextmanager
+    def paused_copy(*args, **kwargs):
+        copying.set()
+        assert resume.wait(5), "publication copy was not resumed"
+        with staged_snapshot(*args, **kwargs) as artifact:
+            yield artifact
+
+    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        try:
+            assert copying.wait(5), "publication did not reach its outside copy"
+            with closing(sqlite3.connect(runtime.path)) as external:
+                external.execute("UPDATE items SET values_json=? WHERE item_key=?",
+                                 ('{"title":"Changed elsewhere"}', KEY))
+                external.commit()
+            assert runtime.sample_head() == head
+        finally:
+            resume.set()
+        assert published.result(timeout=10) is not None
+
+    with preview_store(runtime.root, runtime):
+        current = record_memory(runtime.root, "inspect", collection=CID)
+    assert current["observed_values"]["title"]["values"][0]["value"] == "Changed elsewhere"
+
+
+def test_failed_publication_transaction_returns_foreground_ownership_and_keeps_rows(runtime, monkeypatch):
+    """A failed loan must not strand foreground requests on the publication thread's writer."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from exomem.record_memory import record_memory
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime):
+        record_memory(runtime.root, "append", collection=CID,
+                      item={"title": "Committed"}, item_key=KEY, why="capture")
+    foreground, injected = threading.get_ident(), []
+    transaction = connection.WriterConnection.transaction
+
+    @contextmanager
+    def fail_publication_commit(handle, **kwargs):
+        with transaction(handle, **kwargs) as conn:
+            yield conn
+            if threading.get_ident() != foreground and not injected:
+                injected.append(True)
+                raise sqlite3.OperationalError("synthetic publication transaction failure")
+
+    monkeypatch.setattr(connection.WriterConnection, "transaction", fail_publication_commit)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        published = pool.submit(runtime.manager._publish_collection_store,
+                                runtime.manager._fencing_token, deadline=time.monotonic() + 15)
+        with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_FLUSH_PENDING"):
+            published.result(timeout=10)
+    assert injected == [True]
+    with preview_store(runtime.root, runtime):
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 1
+        assert record_memory(runtime.root, "append", collection=CID,
+                             item={"title": "After failure"}, item_key=OTHER, why="capture")["outcome"] == "committed"
+        assert record_memory(runtime.root, "inspect", collection=CID)["coverage"]["committed"] == 2
+
+
 def test_fresh_head_sample_rejects_absent_or_inconsistent_enrolled_store(runtime):
     initial = runtime.sample_head()
     _create(runtime)

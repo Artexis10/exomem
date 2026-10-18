@@ -96,6 +96,15 @@ def preview_id(root, capsys):
     return previewed["plan_id"]
 
 
+def canonical_rows(root):
+    """Every canonical and history table; lease and replica bookkeeping live in store_meta."""
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        tables = [name for name, in reader.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name!='store_meta' ORDER BY name")]
+        return {name: sorted(reader.execute('SELECT * FROM "' + name.replace('"', '""') + '"'), key=repr)
+                for name in tables}
+
+
 @pytest.fixture
 def published_views(env, monkeypatch):  # noqa: F811 - imported fixture
     """Exercise real view publication through its existing release capability."""
@@ -581,25 +590,36 @@ def test_an_apply_whose_lease_lapsed_after_its_intent_refuses_behind_another_hos
     elsewhere = writer_lease.LeaseCoordinatorClient(
         replace(writer_lease.LeaseConfig.from_env(), replica_id="another-host"))
     begin = export._begin
+    before_rows = canonical_rows(root)
+    before_marker, before_fence = authority.read_marker(root), fence()
+    continuation = {}
 
     def pause_while_another_host_writes(*args, **kwargs):
         begun = begin(*args, **kwargs)
+        # Successful admission publishes its epoch before this continuation loses authority.
+        continuation.update(vault_bytes=vault_bytes(root), intent=begun[0])
         wait_out_the_lease()
         held = elsewhere.acquire(collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY)
         # What that host's renewal reports once it committed one row past this store's head.
         elsewhere.renew(held.fencing_token, collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY,
                         collection_store_head=writer_lease.CollectionStoreHead(
                             store_id, str(uuid.uuid4()), sequence + 1, "a" * 64))
+        continuation["recorded_head"] = elsewhere.status().collection_store_head
         elsewhere.release(held.fencing_token)
         return begun
 
     monkeypatch.setattr(export, "_begin", pause_while_another_host_writes)
-    before = vault_bytes(root)
 
     assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
 
     assert "COLLECTION_STORE_SYNC_PENDING" in capsys.readouterr().err
-    assert vault_bytes(root) == before
+    assert vault_bytes(root) == continuation["vault_bytes"]
+    assert canonical_rows(root) == before_rows
+    assert (authority.read_marker(root), fence()) == (before_marker, before_fence)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader) == continuation["intent"]
+        assert authority.pending_create(reader)["plan_id"] == plan_id
+    assert elsewhere.status().collection_store_head == continuation["recorded_head"]
 
 
 def test_a_rerun_after_a_hand_retired_fence_goes_forward_from_the_frozen_store(env, capsys, tmp_path):  # noqa: F811
@@ -900,6 +920,8 @@ def test_an_apply_refuses_while_a_service_holds_the_vault(env, capsys):  # noqa:
     plan_id = preview_id(root, capsys)
     store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
     before = vault_bytes(root)
+    before_rows = canonical_rows(root)
+    before_marker, before_fence = authority.read_marker(root), fence()
     elsewhere = writer_lease.LeaseCoordinatorClient(
         replace(writer_lease.LeaseConfig.from_env(), replica_id="another-host"))
     held = elsewhere.acquire(collection_store_capability=writer_lease.COLLECTION_STORE_CAPABILITY)
@@ -908,9 +930,13 @@ def test_an_apply_refuses_while_a_service_holds_the_vault(env, capsys):  # noqa:
     assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 1
 
     assert "COLLECTION_STORE_SERVICE_ACTIVE" in capsys.readouterr().err
+    nothing_changed(root, before, store_id)
     elsewhere.release(held.fencing_token)
     service = start_service(root)
     try:
+        # Startup publishes its new epoch independently of either refused export.
+        before = vault_bytes(root)
+        assert canonical_rows(root) == before_rows
         with pytest.raises((OpError, ValueError, CollectionStoreError)) as refused:
             call(root, "maintain_memory", mode="collections-store-export", apply=True, plan_id=plan_id,
                  why="roll back to files")
@@ -918,6 +944,8 @@ def test_an_apply_refuses_while_a_service_holds_the_vault(env, capsys):  # noqa:
     finally:
         service.stop()
     nothing_changed(root, before, store_id)
+    assert canonical_rows(root) == before_rows
+    assert (authority.read_marker(root), fence()) == (before_marker, before_fence)
 
 
 def test_a_vault_migrates_again_after_its_export_at_the_next_fence_generation(env, capsys):  # noqa: F811

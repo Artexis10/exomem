@@ -44,9 +44,9 @@ class _Publisher:
     """Coalesced replica publication and the `_Collections/` watch for one admitted store.
 
     Publication copies a pinned snapshot outside the vault-wide mutation boundary, so
-    writes, file-collection writes included, proceed during the copy. Only its two
-    brief steps hold the boundary, each taken at an idle instant: recording the intent,
-    and verifying and swapping the copy; a write arriving during one waits for it. The watch
+    writes, file-collection writes included, proceed during the copy and verification.
+    Brief steps hold the boundary at idle instants and compare held-file witnesses
+    before each effect; a write arriving during one waits for it. The watch
     hashes the replica against the digest this instance last published when its stat
     signature changes. A foreign rewrite that keeps inode, size and mtime is found by
     the next publication's check-then-swap, which records the divergence and preserves
@@ -352,10 +352,13 @@ class CollectionStoreRuntime:
         return [found.get(key) for key in keys]
 
     def replica_current(self):
-        """Whether the replica already carries the live committed head (a spurious commit note)."""
+        """Whether the replica already carries the live committed head and lease epoch."""
         head = self.sample_head()
-        (published,) = self._meta(schema.META_PUBLISHED_REPLICA_HEAD)
-        return published is not None and (
+        published, published_epoch, epoch = self._meta(
+            schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PUBLISHED_REPLICA_EPOCH,
+            schema.META_LEASE_EPOCH,
+        )
+        return published is not None and published_epoch == epoch and (
             json.loads(published)["commit_seq"], json.loads(published)["head_hash"]
         ) == (head.commit_seq, head.head_hash)
 
@@ -594,7 +597,8 @@ class CollectionStoreRuntime:
                 if changed and self._publisher is not None:
                     self._publisher.note_commit()
 
-    def _publication_writer(self, token):
+    @contextmanager
+    def _publication_writer(self, token, *, borrow_cached=False):
         """This store's writer for a publication step; the caller holds the boundary."""
         if not self._authority(token, progress=True):
             raise connection.CollectionStoreError(
@@ -604,17 +608,46 @@ class CollectionStoreRuntime:
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_CUSTODY_UNVERIFIED", "single-host custody no longer verifies; nothing was published"
             )
+        handle = self._handle if borrow_cached else None
+        if (handle is not None and not handle._closed and handle.path == self.path
+                and self._writer_token == token):
+            with self.manager._lock:
+                exclusive = (self.manager._store_publishing and self.manager._store_handoff
+                             and not self.manager._store_borrowers and not self.manager._active_mutations)
+            if not exclusive or handle.connection.in_transaction or handle.core.in_transaction():
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_BUSY", "the cached writer is not idle inside a publication window"
+                )
+            # A3: exclusive publication borrows the same connection, retaining its change witness and warm cache.
+            owner, reusable = handle._owner_thread, False
+            handle._owner_thread = threading.get_ident()
+            try:
+                yield handle
+                reusable = not (handle._closed or handle.connection.in_transaction or handle.core.in_transaction())
+                if not reusable:
+                    raise connection.CollectionStoreError(
+                        "COLLECTION_STORE_BUSY", "the publication writer did not return idle"
+                    )
+            finally:
+                try:
+                    if not reusable:
+                        self._handle = self._writer_token = None
+                        handle.close()
+                finally:
+                    handle._owner_thread = owner
+            return
         if not self._retire_handle():
             raise connection.CollectionStoreError(
                 "COLLECTION_STORE_BUSY", "the retired writer still has a transaction"
             )
-        return connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True),
-                                      schema_guard=lambda version: self._record_schema(token, version, progress=True))
+        with connection.open_writer(self.path, lease_check=lambda: self._authority(token, progress=True),
+                                    schema_guard=lambda version: self._record_schema(token, version, progress=True)) as writer:
+            yield writer
 
     def publish(self, token, *, deadline):
-        """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
+        """Coalesced publication (A9): verify outside exclusion and revalidate before effects.
 
-        Each boundary step is brief and taken at an idle instant. The swap step first
+        Each boundary step is brief and taken at an idle instant. Each resumed step first
         renews the lease with the coordinator, so a host that lost it while copying
         abandons the swap. Returns the published head (possibly older than the live
         one), or None when the store was busy before anything was recorded.
@@ -634,7 +667,7 @@ class CollectionStoreRuntime:
                         "COLLECTION_STORE_LEASE_REQUIRED", "the writer lease was lost during the copy"
                     ) from error
             with manager._store_publication_window(token, patience=patience, cancelled=cancelled):
-                with self._publication_writer(token) as writer:
+                with self._publication_writer(token, borrow_cached=True) as writer:
                     yield writer, lambda: self._authority(token, progress=True)
 
         try:

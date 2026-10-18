@@ -61,6 +61,8 @@ META_STORE_HEAD_HASH = "store_head_hash"
 META_LAST_PUBLISHED_REPLICA_SHA256 = "last_published_replica_sha256"
 META_PENDING_REPLICA_PUBLICATION = "pending_replica_publication"
 META_PUBLISHED_REPLICA_HEAD = "published_replica_head"
+# The lease epoch in the verified installed copy; business heads do not track lease changes.
+META_PUBLISHED_REPLICA_EPOCH = "published_replica_lease_epoch"
 # The digest of the pending intent row the last installed replica copy holds, absent when it held none.
 META_PUBLISHED_INTENT_SHA256 = "published_intent_sha256"
 META_REPLICA_DIVERGENCE = "replica_divergence"

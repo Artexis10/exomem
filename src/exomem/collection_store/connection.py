@@ -298,7 +298,7 @@ class WriterConnection:
     def require_owner_thread(self) -> None:
         if threading.get_ident() != self._owner_thread:
             raise CollectionStoreError(
-                "COLLECTION_STORE_WRITER_THREAD", "the opening thread owns the writer connection"
+                "COLLECTION_STORE_WRITER_THREAD", "only the current owner thread may use the writer connection"
             )
 
     def require_write_authority(self, *, allow_diverged: bool = False) -> None:
@@ -431,7 +431,8 @@ def open_writer(
 
     ``vault_root`` binds the default authority and store placement to the same
     vault. Opening (including schema repair/migration) and each transaction
-    require that boundary. The opening thread owns this connection until close.
+    require that boundary. The opening thread owns this connection except during
+    the runtime's exclusive coalesced-publication loan (design A3).
     ``lease_check`` is a trusted adapter/test seam: its caller must supply the
     exact store's scoped authority, never the process-wide scheduler predicate.
     ``schema_guard(version)`` runs under that authority around the migration of a
