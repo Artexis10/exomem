@@ -167,7 +167,7 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
-def test_crlf_sidecar_reconciliation_uses_text_hash_semantics(vault: Path) -> None:
+def test_crlf_sidecar_reconciliation_uses_stored_byte_identity(vault: Path) -> None:
     media_processing = _media_processing()
     binary = _drop_media(vault, "windows-lines.m4a")
     sidecar = binary.with_name(binary.name + ".md")
@@ -183,6 +183,45 @@ def test_crlf_sidecar_reconciliation_uses_text_hash_semantics(vault: Path) -> No
     assert "Keep the original cassette label: Side B." in sidecar.read_text(
         encoding="utf-8"
     )
+
+
+def test_reconciliation_refuses_a_newline_only_sidecar_edit_inside_the_commit_guard(
+    vault: Path,
+) -> None:
+    from contextlib import contextmanager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "newline-edit.m4a")
+    sidecar = binary.with_name(binary.name + ".md")
+    original = b"Waiting for transcription.\r\nPreserved label.\r\n"
+    changed = original.replace(b"\r\n", b"\n")
+    sidecar.write_bytes(original)
+
+    @contextmanager
+    def commit_guard():
+        sidecar.write_bytes(changed)
+        yield
+
+    with pytest.raises(media_processing.MediaProcessingError) as raised:
+        media_processing.reconcile_media(vault, binary, commit_guard=commit_guard)
+
+    assert raised.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
+    assert sidecar.read_bytes() == changed
+
+
+def test_reconciliation_keeps_unchanged_crlf_pending_sidecar_bytes(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "stable-newlines.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    assert first is not None
+    sidecar = first.sidecar_path
+    original = sidecar.read_bytes().replace(b"\n", b"\r\n")
+    sidecar.write_bytes(original)
+
+    second = media_processing.reconcile_media(vault, binary)
+
+    assert second is not None and second.state == "pending"
+    assert sidecar.read_bytes() == original
 
 
 def _handle_stat(path: Path) -> os.stat_result:
@@ -1607,20 +1646,20 @@ def test_targeted_retry_blocks_when_sidecar_is_replaced_after_initial_read(
     durable = store.get(reconciled.job_id)
     assert durable is not None and durable.last_error is not None
     original_error = durable.last_error
-    original_read_text = Path.read_text
+    original_read = media_processing.read_guarded_text
     replaced = False
 
-    def _replace_sidecar_after_read(path: Path, *args: object, **kwargs: object) -> str:
+    def _replace_sidecar_after_read(root: Path, path: Path):
         nonlocal replaced
-        content = original_read_text(path, *args, **kwargs)
+        content, guard = original_read(root, path)
         if path == sidecar and not replaced:
             replaced = True
             replacement = sidecar.with_name(sidecar.name + ".replacement")
             replacement.write_text(content + "\nmanual replacement\n", encoding="utf-8")
             os.replace(replacement, sidecar)
-        return content
+        return content, guard
 
-    monkeypatch.setattr(Path, "read_text", _replace_sidecar_after_read)
+    monkeypatch.setattr(media_processing, "read_guarded_text", _replace_sidecar_after_read)
 
     retried = media_processing.retry_media(vault, binary)
 

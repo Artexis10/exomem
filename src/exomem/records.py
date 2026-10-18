@@ -2182,6 +2182,7 @@ def create_collection(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
+        _refresh_manifest_due_state(root, manifest)
         return _result(
             operation="create",
             manifest=manifest,
@@ -2368,6 +2369,16 @@ def rebaseline_collection(
         why=why,
         semantic_profile="records",
     )
+
+
+def _refresh_manifest_due_state(root: Path, manifest: Any, *, snapshot: Any = None) -> None:
+    """A failed advisory refresh never changes a committed manifest outcome."""
+    try:
+        from . import due_state
+
+        due_state.apply_manifest_write_delta(root, manifest, snapshot=snapshot)
+    except Exception:  # noqa: BLE001 -- the canonical manifest is already committed
+        log.debug("manifest due-state refresh failed", exc_info=True)
 
 
 def export_checkpoint_payload_hash(
@@ -2708,6 +2719,7 @@ def _lifecycle_mutation(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
+        _refresh_manifest_due_state(root, after, snapshot=snapshot)
         return _lifecycle_result(
             operation=action,
             manifest=current,

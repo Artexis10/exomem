@@ -281,7 +281,8 @@ def test_public_bulk_advances_due_projection_only_after_commit(store):
         response = writer_lease.invoke_command(_command("record_memory"), store.root,
                                               rows=rows, response_detail="full", **kwargs)
         assert response["status"] == "committed"
-        assert response["due_state"]["total"] >= 1
+        assert "due_state" not in response
+        assert due_state.served(store.root)["total"] >= 1
         result = response["diagnostics"]
         projection = due_state.load(store.root)
         assert len(projection["claims"][RECORDS_PATH]["items"]) == 2

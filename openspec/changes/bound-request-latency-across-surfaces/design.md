@@ -1,5 +1,23 @@
 # Design
 
+The programme uses one packaged MCP observer. The existing recall script delegates its MCP mode and retains its other diagnostics. Private positive cases declare read arguments, expected state, required references and material. FastMCP measures each call through parsed response validation. The observer reuses `latency_watch`, the packaged contract and one report schema.
+
+The command selects availability or acceptance. Availability checks every configured case once and requires positive coverage for each represented tool. Its successful result can coexist with insufficient latency evidence. Acceptance retains the declared sample, warmth, contention and deployment requirements. Observer identity remains separate from deployment identity. A deployment change invalidates previous acceptance.
+
+A standard systemd user timer runs the availability check through an explicitly selected installed observer. The observer remains independent of the worker interpreter and upgrade path. One bounded oneshot unit prevents overlap; the application adds no scheduler or repair loop. Private configuration supplies existing credentials. Missing authorization leaves installation unconfigured; installation never issues a grant. The latest report is atomic and owner-only.
+
+A failed unit, structured warning and offline doctor status provide local visibility. They do not deliver a push notification. Doctor distinguishes missing configuration, disabled scheduling, failed execution, stale evidence and fresh results. An old successful report cannot conceal a later failed execution. Notification delivery remains open until an authorized channel exists and delivery is verified. Production probes stay read-only. Natural write observations and disposable write acceptance retain separate provenance.
+
+## Ordinary write follow-through
+
+Write advice reuses the page delta's projection and serves only affected paths. Its optional `scope` is `affected_paths`; omission preserves historical global meaning. Global and affected-path blocks retain separate emission history. Delivered rows already carry their category and fingerprint, so first-surfaced recording uses those identities without scanning the projection.
+
+Flush receipt proof and pending publication newest-first before the outermost matching vault hold releases. Re-prove earlier session receipts whose paths overlap newer commits. Keep component waits and terminal persistence outside the hold. Record handoff failure as derived work pending, without changing the committed outcome. Direct leaves without a matching hold retain the guarded post-terminal path.
+
+Prime the broad writer resolver from the proven structural corpus after semantic warmup, with existing freshness checks. Ordinary recall retains its separate projection. Blocked edits never warm shared writer state. The existing cache and receipt machinery supply these capabilities; no new scheduler or readiness gate is needed.
+
+Manifest revisions refresh the touched claims projection before its served view is reused. Egress retains its independent release checks. Existing spans carry content-free CPU measurements where wall time alone cannot distinguish work from waiting.
+
 ## Context
 
 See `proposal.md` for the problem and `specs/request-latency-contract/spec.md` for the new behavior.

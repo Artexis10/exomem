@@ -63,10 +63,12 @@ from .media_jobs import (
 from .vault import (
     MISSING_CONTENT_HASH,
     DeferredGraphCompletion,
+    PathGuardError,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     post_commit_batch_fanout,
+    read_guarded_text,
 )
 from .writer_lease import get_manager
 
@@ -510,15 +512,14 @@ class MediaWorker:
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return _ProcessOutcome(_COMPLETE)
         try:
-            claimed_content = job.sidecar_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            claimed_content = ""
+            claimed_content, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        except (OSError, UnicodeError, PathGuardError):
+            return _ProcessOutcome(_STALE, "input identity unavailable")
         if media_processing.has_completed_transcript(
             claimed_content, media_type=job.media_type
         ):
             return _ProcessOutcome(_COMPLETE)
-        expected_sidecar = _content_digest(job.sidecar_path)
-        expected_sidecar_text_hash = content_hash(claimed_content)
+        expected_sidecar = guard.expected_content_hash
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:
             log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
@@ -669,7 +670,7 @@ class MediaWorker:
                         self._vault_root,
                         job.sidecar_path,
                         attempts=max(1, job.attempts),
-                        expected_hash=expected_sidecar_text_hash,
+                        expected_hash=expected_sidecar,
                     )
             detail = ", ".join(stale_parts) or "commit precondition changed"
             return _ProcessOutcome(_STALE, f"stale extraction: {detail}")
@@ -1049,8 +1050,8 @@ class MediaWorker:
                 )
                 return False
             try:
-                current_content = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+                current_content, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
                 current_content = ""
             from . import media_processing
 
@@ -1722,7 +1723,7 @@ class MediaWorker:
             operation="background_media_parent_publication",
             holder_kind="background",
         ):
-            before = job.sidecar_path.read_text(encoding="utf-8")
+            before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
             if _content_digest(job.sidecar_path) != result.sidecar_before_hash:
                 return
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
@@ -1812,8 +1813,8 @@ class MediaWorker:
             holder_kind="background",
         ):
             try:
-                before = job.sidecar_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+                before, _guard = read_guarded_text(self._vault_root, job.sidecar_path)
+            except (OSError, UnicodeError, PathGuardError):
                 return False
             if _content_digest(job.sidecar_path) != expected_sidecar:
                 return False

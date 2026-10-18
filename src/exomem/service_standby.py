@@ -413,16 +413,17 @@ def _durable_generation(vault_root: Path) -> Any:
     return None if checkpoint is None else int(checkpoint.generation)
 
 
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
     """Stat signatures of the durable checkpoint and the sidecar. Opens nothing."""
     from . import epistemic_graph, graph_sync
-
-    def signature(path: Path) -> Any:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return None
-        return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     try:
         sidecar = epistemic_graph.sidecar_path(Path(vault_root))
@@ -433,7 +434,15 @@ def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
         )
     except Exception:  # noqa: BLE001 - an unresolvable state root never matches
         return (object(),)
-    return tuple(signature(path) for path in paths)
+    return tuple(_file_stat(path) for path in paths)
+
+
+def _catalogue_stat(vault_root: Path) -> tuple[Any, ...]:
+    """Observe atomic catalogue replacement and SQLite WAL publication."""
+    from . import lexstore
+
+    path = lexstore.lexical_path(vault_root)
+    return _file_stat(path), _file_stat(path.with_name(path.name + "-wal"))
 
 
 def _graph_snapshot_signal(vault_root: Path) -> tuple[Any, Any]:
@@ -501,21 +510,43 @@ def reprove_graph_snapshot_if_due(vault_root: Path) -> bool:
 def reprove_until_promoted(
     vault_root: Path, *, poll_seconds: float | None = None
 ) -> bool:
-    """Keep the graph proof current until promotion or discard.
+    """Keep cutover proofs current until promotion or discard.
 
     Returns whether a proof is held when it stops. Reads only, like the proof;
     the supervisor's warm budget still bounds how long a standby may wait.
     """
+    from . import freshness, readiness
+
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
+    catalogue_stat = None
+    catalogue_reseeded_at = None
     while True:
         with _lock:
             if not _standby or _promoting or _promoted or _discarded:
                 return _proved_token is not None
             stop = _discard_requested
+            catalogue_built = _detached_built
         try:
             reprove_graph_snapshot_if_due(vault_root)
         except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
+        if not catalogue_built and not readiness.is_ready("lexical"):
+            observed = _catalogue_stat(vault_root)
+            now = _clock()
+            if observed != catalogue_stat and (
+                catalogue_reseeded_at is None
+                or now - catalogue_reseeded_at >= REPROVE_INTERVAL_SECONDS
+            ):
+                # No watcher runs here. Refresh only after publication moves,
+                # at the existing proof interval, never on every polling pass.
+                try:
+                    freshness.rebaseline(vault_root)
+                    catalogue_stat = observed
+                except Exception:  # noqa: BLE001 - an unseeded scope stays waiting
+                    log.warning("standby recall registry reseed failed", exc_info=True)
+                catalogue_reseeded_at = _clock()
+            if prove_retrieval_catalog(vault_root):
+                _warm_proven_catalogue(vault_root)
         if stop.wait(interval):
             with _lock:
                 return _proved_token is not None
@@ -562,6 +593,22 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     except Exception:  # noqa: BLE001 - an unprovable catalog is a waiting component
         log.warning("standby retrieval catalog proof failed", exc_info=True)
         return False
+
+
+def _warm_proven_catalogue(vault_root: Path) -> None:
+    """Prime the same local caches after either initial or repeated proof."""
+    from . import mode, readiness
+
+    readiness.mark_ready("retrieval_catalog")
+    try:
+        warmup.warm_caches(
+            vault_root,
+            preload_models=_preload_allowed(),
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
+    except Exception:  # noqa: BLE001 - caches are rebuildable on demand
+        log.warning("standby cache warm-up failed", exc_info=True)
+    readiness.mark_ready("lexical")
 
 
 def prepare_detached_catalog(vault_root: Path) -> bool:
@@ -785,7 +832,7 @@ def warm(vault_root: Path) -> None:
     component stays ``waiting`` and the supervisor's warm budget decides what
     happens next.
     """
-    from . import freshness, mode, readiness
+    from . import freshness, readiness
     from .service_manager import standby_warm_budget
 
     vault_root = Path(vault_root)
@@ -802,16 +849,7 @@ def warm(vault_root: Path) -> None:
         except Exception:  # noqa: BLE001 - an unseeded scope only costs adoption
             log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
-            readiness.mark_ready("retrieval_catalog")
-            try:
-                warmup.warm_caches(
-                    vault_root,
-                    preload_models=_preload_allowed(),
-                    preload_cpu_caches=mode.preload_cpu_caches(),
-                )
-            except Exception:  # noqa: BLE001 - caches are rebuildable on demand
-                log.warning("standby cache warm-up failed", exc_info=True)
-            readiness.mark_ready("lexical")
+            _warm_proven_catalogue(vault_root)
         elif prepare_detached_catalog(vault_root):
             # No caches are warmed over rows promotion replaces. The build took
             # up to a minute, during which this unwatched registry went stale;

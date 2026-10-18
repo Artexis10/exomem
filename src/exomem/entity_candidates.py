@@ -11,7 +11,7 @@ from pathlib import Path
 from . import memory_refs
 from .entity_types import load_entity_types
 from .kbdir import kb_prefix
-from .vault import kb_root, parse_frontmatter, read_guarded_text
+from .vault import PathGuardError, kb_root, parse_frontmatter, read_guarded_text
 
 
 def identity_key(value: object) -> str:
@@ -73,8 +73,9 @@ def alias_claim_fingerprint(
     versions: list[list[str]] = []
     for path in claimants:
         try:
-            digest = content_hash((vault_root / path).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError):
+            source, _guard = read_guarded_text(vault_root, vault_root / path)
+            digest = content_hash(source)
+        except (OSError, UnicodeError, PathGuardError):
             digest = ""
         versions.append([path, digest])
     payload = {

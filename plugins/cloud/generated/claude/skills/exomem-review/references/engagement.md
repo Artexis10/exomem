@@ -197,6 +197,8 @@ Its `anchor` is the released parent reference or, for a current-state source wit
 Recent context, upkeep, ambiguous candidates and partial-only anchors do not trigger this advice.
 Missing advice does not mean nothing is due.
 
+Write advice with `scope: affected_paths` counts only affected pages. Bootstrap and review retain global counts. Treat the scopes separately.
+
 Judge whether the finding matters to the current work before raising it in the user's language.
 Raise at most one due item per maintained client conversation, including items received through the existing due-state block.
 Remember any prior due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal.

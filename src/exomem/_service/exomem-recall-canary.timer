@@ -1,0 +1,10 @@
+[Unit]
+Description=exomem read-only recall availability schedule
+
+[Timer]
+OnBootSec={interval}s
+OnUnitInactiveSec={interval}s
+Unit=exomem-recall-canary.service
+
+[Install]
+WantedBy=timers.target

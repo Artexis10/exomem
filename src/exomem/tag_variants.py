@@ -517,8 +517,8 @@ def _plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any
     unrewritable: list[str] = []
     for rel in sorted(path for path, spellings in rows if spellings & replaced):
         try:
-            text = (root / rel).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            text, _guard = vault.read_guarded_text(root, root / rel)
+        except (OSError, UnicodeDecodeError, vault.PathGuardError):
             unrewritable.append(rel)
             continue
         tags = _tags_of(vault.parse_frontmatter(text)[0])

@@ -627,3 +627,42 @@ that outlasts it is told explicitly that it was not dispatched and can be
 retried. Clients and intermediaries need timeouts longer than the queue budget
 to wait through an ordinary handoff; none of them should wait out a slow
 replacement's whole warm.
+
+## Independent read-only recall monitoring
+
+The installed `exomem.recall_canary` module runs public MCP cases without a source checkout.
+Its `--check availability` mode checks one response per case by default.
+Each configured tool needs a successful positive case with its declared references and material.
+An expected abstention checks only its declared negative case.
+The report retains latency results, even when the availability check passes with insufficient latency samples.
+
+The default `--check acceptance` mode retains the complete warm programme contract.
+It requires its sample count, warm proof, known contention and verified deployment identity.
+The observer package identity describes the caller, while the deployment identity comes from the operator.
+Neither identity proves the other.
+
+The `exomem.canary_systemd` adapter installs only `exomem-recall-canary.service` and `exomem-recall-canary.timer`.
+The oneshot has a finite timeout, and systemd prevents concurrent executions of that service.
+It has no runtime dependency, restart policy or repair action.
+An observer update requires an explicit install; worker upgrades never change its interpreter.
+
+1. Choose an independent interpreter with a noneditable observer wheel, so its version stays pinned through worker upgrades.
+2. Prepare owner-only environment and case files, so credentials and source truth stay outside repositories.
+3. Run the adapter's `install` command with its configuration options; the timer stays disabled.
+4. Run the adapter's `enable` command; systemd loads the named credential before it enables the timer.
+5. Read the adapter's `status` command or doctor's `recall.canary` check; the latest evidence appears with its state.
+
+The install options are `--observer-python`, `--environment-file`, `--mcp-url`, `--cases`, `--token-env` and `--report-file`.
+Paths must be absolute; the report directory must be owner-only.
+The adapter uses systemd's native loader for the existing environment file and never copies the credential.
+A missing credential leaves the timer unconfigured.
+An unavailable target or authentication failure becomes a failed observation while the timer stays scheduled.
+
+`status` reads the unit, execution properties and latest atomic report without probing the target.
+It distinguishes absent, disabled, unconfigured, failed, stale and healthy availability evidence.
+An old successful report cannot hide a later failed execution.
+Changing the endpoint or case truth invalidates the old report.
+The adapter's `uninstall` command removes only these units and retains the private configuration and report.
+
+Failures reach the failed unit, local journal and doctor.
+They do not send a push notification; delivery beyond those local surfaces remains open.

@@ -137,8 +137,7 @@ def test_grandfathered_missing_unit_allows_nonworsening_edit_with_visible_debt(
     assert path.read_text(encoding="utf-8") == after
 
 
-# Two producers record the boundary: init and migration build it from a universal-newline
-# read, and a first governed write installs it from the corpus census.
+# Init, migration, and the first governed write record the same stored-byte boundary.
 @pytest.mark.parametrize("built_up_front", [True, False], ids=["built-up-front", "installed-by-write"])
 def test_an_idless_crlf_legacy_page_stays_grandfathered_under_either_boundary_producer(
     tmp_path: Path, built_up_front: bool
@@ -382,7 +381,7 @@ def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
     assert deletes == [[old_path]]
 
 
-def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_preflight(
+def test_move_with_crlf_inbound_referrer_uses_stored_byte_identity_for_semantic_preflight(
     tmp_path: Path,
 ) -> None:
     new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
@@ -399,6 +398,8 @@ def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_prefligh
     activation_manifest.ensure_manifest(
         tmp_path, census=before_corpus.activation_census
     )
+    assert before_corpus.pages[_PAGE].source_hash == hashlib.sha256(old.read_bytes()).hexdigest()
+    assert before_corpus.pages[_OTHER_PAGE].source_hash == hashlib.sha256(inbound.read_bytes()).hexdigest()
 
     result = move_module.move_file(
         tmp_path,
@@ -412,6 +413,23 @@ def test_move_with_crlf_inbound_referrer_uses_logical_hash_for_semantic_prefligh
     assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in inbound.read_text(
         encoding="utf-8"
     )
+
+
+def test_existing_preflight_refuses_newline_only_drift_from_the_callers_hash(tmp_path: Path) -> None:
+    before = _source(_semantic_body("Keep the current decision."))
+    path = _write(tmp_path, _PAGE, before)
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    changed = before.replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(changed)
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as raised:
+        semantic_writes.preflight_existing(
+            tmp_path, path=_PAGE, after_source=before + "\nAdditional prose.\n",
+            operation="edit", expected_before_hash=expected,
+        )
+
+    assert raised.value.code == "STALE_SEMANTIC_WRITE"
+    assert path.read_bytes() == changed
 
 
 def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
