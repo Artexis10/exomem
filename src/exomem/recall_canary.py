@@ -121,7 +121,7 @@ def _at_path(data: Any, path: list[str | int]) -> Any:
     return data
 
 
-def _canary_result(result, expected) -> tuple[str, str | None]:
+def _canary_result(result, expected, *, diagnostics=None) -> tuple[str, str | None]:
     if result.is_error:
         return "error", "tool-error"
     # The SDK parses the published output schema and removes its transport wrapper.
@@ -141,9 +141,23 @@ def _canary_result(result, expected) -> tuple[str, str | None]:
         return outcome, "unexpected-outcome"
     if (validator := getattr(expected, "_response_validator", None)) is not None:
         try:
-            return outcome, None if validator.is_valid(data) else "unexpected-response"
+            error = next(validator.iter_errors(data), None)
         except Exception:  # noqa: BLE001 - schema failures can contain private case and response data
             return outcome, "invalid-expectation"
+        if error is None:
+            return outcome, None
+        if diagnostics is not None:
+            try:
+                # JSON Schema keywords are protocol tokens; paths can contain private field names.
+                diagnostics["schema_failure"] = {
+                    "keyword": error.validator,
+                    "schema_path_sha256": _digest(
+                        json.dumps(list(error.absolute_schema_path), separators=(",", ":"))
+                    ),
+                }
+            except Exception:  # noqa: BLE001 - optional diagnostics cannot change a proven mismatch
+                pass
+        return outcome, "unexpected-response"
     try:
         state = _at_path(data, expected.state_path)
         if state != expected.state or isinstance(state, bool) != isinstance(expected.state, bool):
@@ -303,6 +317,7 @@ async def run_mcp_canary(
                 for repetition in range(samples + int(warm_up)):
                     warming = warm_up and repetition == 0
                     call_start = time.perf_counter()
+                    diagnostics = {}
                     try:
                         async with asyncio.timeout(timeout_seconds):
                             result = await client.call_tool(
@@ -311,7 +326,9 @@ async def run_mcp_canary(
                                 raise_on_error=False,
                                 timeout=timeout_seconds,
                             )
-                            outcome, failure = _canary_result(result, case.expected)
+                            outcome, failure = _canary_result(
+                                result, case.expected, diagnostics=diagnostics
+                            )
                     except Exception:  # noqa: BLE001 - no remote exception text enters evidence
                         outcome, failure = "error", "call-failed"
                     elapsed = (time.perf_counter() - call_start) * 1000
@@ -321,6 +338,7 @@ async def run_mcp_canary(
                             "elapsed_ms": elapsed,
                             "outcome": outcome,
                             "failure": failure,
+                            **(diagnostics if failure == "unexpected-response" else {}),
                         }
                     )
                     if not warming:

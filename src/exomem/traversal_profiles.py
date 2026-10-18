@@ -214,7 +214,7 @@ def load_profiles(
         return ProfileRegistry(builtins, "none")
     path = profile_path(vault_root)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return ProfileRegistry(builtins, "none")
     digest = _hash(raw)
@@ -245,14 +245,20 @@ def save_profiles(
     path = profile_path(vault_root)
     previous: str | None = None
     if path.exists():
-        previous = _hash(path.read_text(encoding="utf-8"))
+        current, _guard = vault.read_guarded_text(vault_root, path)
+        previous = _hash(current)
         if expected_hash is None:
             raise ValueError("TRAVERSAL_PROFILES_EXIST: provide current expected_hash")
         if expected_hash != previous:
             raise ValueError("STALE_TRAVERSAL_PROFILES: expected_hash does not match current hash")
     rendered = yaml.safe_dump(proposal, sort_keys=False, allow_unicode=True)
     vault.batch_atomic_write(
-        [vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root
+        [vault.PlannedWrite(
+            path=path,
+            content=rendered,
+            expected_hash=previous if previous is not None else vault.MISSING_CONTENT_HASH,
+        )],
+        vault_root=vault_root,
     )
     _CACHE.pop(path, None)
     return {

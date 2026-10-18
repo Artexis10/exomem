@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import request_budget, reserved_paths, writer_lease
+from exomem import call_spans, request_budget, reserved_paths, writer_lease
 
 CALLERS = 8
 
@@ -130,12 +130,18 @@ def test_c1_concurrent_cold_callers_cause_exactly_one_build(
 
     results: list[reserved_paths.IdentityCatalogue] = []
     failures: list[BaseException] = []
+    timings: list[list[dict]] = []
 
     def call() -> None:
+        token = threading.current_thread().name
+        handle = call_spans.MCP_CALL_TOKEN.set(token)
         try:
             results.append(reserved_paths._baseline_identity_catalogue(vault_root))
         except BaseException as error:  # noqa: BLE001 - preserve worker failure
             failures.append(error)
+        finally:
+            timings.append(call_spans.pop_call_spans(token))
+            call_spans.MCP_CALL_TOKEN.reset(handle)
 
     threads = _run_callers(call)
     assert build_entered.wait(20)
@@ -150,6 +156,19 @@ def test_c1_concurrent_cold_callers_cause_exactly_one_build(
     assert len(results) == CALLERS
     first = results[0]
     assert all(result.identities == first.identities for result in results)
+    build_spans = [
+        row for call in timings for row in call
+        if row["name"] == "reserved.identity.baseline_build"
+    ]
+    wait_spans = [
+        row for call in timings for row in call
+        if row["name"] == "reserved.identity.baseline_wait"
+    ]
+    assert len(build_spans) == 1
+    assert len(wait_spans) == CALLERS - 1
+    for row in build_spans + wait_spans:
+        assert row["count"] == 1 and row["ms"] >= 0
+        assert set(row["fields"]) == {"thread_cpu_us"}
 
 
 def test_c2_generation_bump_rejects_the_stale_catalogue_and_rebuild_catches_the_alias(

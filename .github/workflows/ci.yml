@@ -25,6 +25,7 @@ jobs:
     env: &serial-core-modules
       EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
       EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
+      EXOMEM_SERIAL_GRAPH_MODULE: tests/test_graph_lane_perf.py
     if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -68,6 +69,7 @@ jobs:
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           "$EXOMEM_SERIAL_CORE_MODULE"
           "$EXOMEM_SERIAL_ANALYTICS_MODULE"
+          "$EXOMEM_SERIAL_GRAPH_MODULE"
           -o timeout=180
           --durations-path="$EXOMEM_DURATIONS_PATH"
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-serial.xml
@@ -187,6 +189,7 @@ jobs:
           -o timeout=180
           --ignore="$EXOMEM_SERIAL_CORE_MODULE"
           --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
+          --ignore="$EXOMEM_SERIAL_GRAPH_MODULE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path="$EXOMEM_DURATIONS_PATH"

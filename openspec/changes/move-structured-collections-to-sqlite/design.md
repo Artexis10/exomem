@@ -629,6 +629,34 @@ Report hashes: before-1k `4f49a8e32fac29b27dc7d954c4cab1276a60980e381e5a9305279d
 
 Append and inspection still miss the phase targets. Native Windows/NTFS, managed coordination, commit/fsync tracing, resources and publication overlap remain outside these diagnostics. P1a.15 stays open.
 
+**Serving publication reuse, 2026-10-18.** The next comparison uses normal item commands through the service dispatcher and a real loopback coordinator. Both arms use single-host HTTP, Python 3.13.14 and SQLite 3.53.1. The before source is `81ec35728`; the after source is `e56ffea5e`.
+
+The frozen probe hashes are `b55b22726885b4650c64ba635debd398adadb6663f81500987252247b3340883` at 1,000 rows and `298a488859b241b6c84af8f82502d1dc3d22615f7baef8c2275b85fc35dfee7f` at 10,000 rows. Each size uses the same probe in both arms. The larger probe adjusts only the existing source-version count limit.
+
+Each arm retains all 30 successive inspect/append positions, including the first position and every tail. P95 uses linear interpolation. The interval resamples paired differences at those positions 50,000 times. It is descriptive: the arms ran sequentially about one hour apart, without concurrent host control or independent run replication.
+
+| Initial rows | Operation | Service p95 before → after, ms | Median difference, after minus before, with descriptive 95% interval, ms |
+| ---: | --- | ---: | ---: |
+| 1,000 | Inspect | 40.30 → 40.16 | -0.18 [-1.03, 0.77] |
+| 1,000 | Append | 70.09 → 72.25 | +1.64 [0.20, 2.82] |
+| 10,000 | Inspect | 1,320.95 → 190.13 | +11.80 [9.45, 14.44] |
+| 10,000 | Append | 961.96 → 134.44 | +1.93 [0.16, 4.17] |
+
+The 1,000-row inspection interval includes zero: no change. The other median intervals are positive; typical requests are slower in these observations, while the large-collection tails shrink. The comparison establishes no causal or installed gain.
+
+Initial complete and partial inspections precede these 30 positions. After the correction, they take 88.71/49.23 ms at 1,000 rows and 414.72/286.95 ms at 10,000 rows. Bulk calls commit all 500 rows in 454.98 ms and 487.16 ms. Exact seeded values, complete/restricted counts and unchanged refusal fingerprints pass in all four arms.
+
+The fixture keeps item-view publication dark and disables due/capture carriers, embeddings, media and watchers. Worker timing excludes checkout entry and exit; inclusive call spans overlap. Native Windows performance, installed acceptance, resources and the strict phase targets remain open.
+
+The retained `measurement.json` hashes bind the observed values:
+
+| Arm | Rows | SHA-256 |
+| --- | ---: | --- |
+| Before | 1,000 | `816c0c08985415e1055f2692b5d065c766b9a52f95c5e409cb8bcd3a7f6c27f2` |
+| After | 1,000 | `52ea87ac32a626263ffbaa5aafe042d0625dd2d45584621325efb4b8cc5207d6` |
+| Before | 10,000 | `c6a859d93944c36139da2f8dcddc485b6fb30c0b2386cdfad2ad0d6e569a2777` |
+| After | 10,000 | `a5e903736438dd720c58973a3a4d2aa855570199a7d9e96b2452bc87558ad35f` |
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
