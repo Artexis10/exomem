@@ -820,6 +820,45 @@ def test_the_projection_resolves_twins_exactly_as_the_scan_does(
     }
 
 
+def test_artifact_redaction_borrows_the_current_identity_projection(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two release passes preserve redaction without reparsing the corpus per token."""
+    from exomem.governance import egress
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    visible, hidden, twin, absent = (memory_refs.new_id() for _ in range(4))
+    for path, identity in (
+        ("Notes/Open/shown.md", visible), ("Notes/Hidden/withheld.md", hidden),
+        ("Notes/Open/twin.md", twin), ("Notes/Hidden/twin.md", twin),
+    ):
+        _write_page(tmp_path, f"Knowledge Base/{path}", _page(identity))
+    _withhold_hidden_notes_from_external(tmp_path)
+    refs = [memory_refs.memory_ref(identity) for identity in (visible, hidden, twin, absent)]
+    payload = {"handoff_prompt": " ".join([*refs, "exomem://memory/invalid"])}
+    external = RequestPrincipal(audience_id="external", surface="mcp")
+    with request_scope(external):
+        through_scan = egress.postfilter(
+            "ask_memory", egress.postfilter("ask_memory", payload, tmp_path), tmp_path,
+        )
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(root: Path) -> list:
+        raise AssertionError("artifact release must borrow the current identity projection")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    with request_scope(external):
+        through_projection = egress.postfilter(
+            "ask_memory", egress.postfilter("ask_memory", payload, tmp_path), tmp_path,
+        )
+    assert through_projection == through_scan
+    assert refs[1] not in through_projection["handoff_prompt"]
+    assert all(ref in through_projection["handoff_prompt"] for ref in (refs[0], refs[2], refs[3]))
+    assert "exomem://memory/invalid" in through_projection["handoff_prompt"]
+
+
 def test_through_the_projection_a_hidden_only_id_reads_as_an_absent_one(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
