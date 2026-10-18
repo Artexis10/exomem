@@ -994,3 +994,61 @@ def test_a_vault_with_a_trash_directory_resolves_through_the_scan(
         trashed: ("Knowledge Base/trash/gone.md",),
     }
     assert len(scans) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("warm", None),
+        ("unobserved", "events_not_live"),
+        ("cold", "corpus_absent"),
+        ("pending", "external_pending"),
+        ("moved", "checkpoint_differs"),
+        ("namespace", "namespace_differs"),
+        ("revalidation", "snapshot_changed"),
+    ],
+)
+def test_identity_resolution_names_the_reason_for_a_full_scan(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
+    state: str, reason: str | None,
+) -> None:
+    """A slow reference read must distinguish why it could not reuse its snapshot."""
+    identity = memory_refs.new_id()
+    relative = "Knowledge Base/Notes/known.md"
+    page = tmp_path / relative
+    _write_page(tmp_path, relative, _page(identity))
+    if state != "unobserved":
+        freshness.rebaseline(tmp_path)
+    if state not in ("cold", "unobserved"):
+        semantic_contract.build_corpus_context(tmp_path)
+    if state == "pending":
+        freshness.mark_external_pending(tmp_path)
+    elif state == "moved":
+        page.write_text(_page(identity, "# Changed\n"), encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=(page,))
+    elif state == "namespace":
+        (tmp_path / "Knowledge Base/trash").mkdir()
+    elif state == "revalidation":
+        acquire = semantic_contract.current_reference_identity_snapshot
+
+        def changed_snapshot(root: Path, **kwargs):
+            snapshot = acquire(root, **kwargs)
+            freshness.mark_external_pending(root)
+            return snapshot
+
+        monkeypatch.setattr(semantic_contract, "current_reference_identity_snapshot", changed_snapshot)
+
+    token = "identity-scan-reason"
+    handle = call_spans.MCP_CALL_TOKEN.set(token)
+    try:
+        assert memory_refs.paths_for_ids_read_only(tmp_path, [identity]) == {
+            identity: (relative,),
+        }
+        rows = call_spans.pop_call_spans(token)
+        fields = next(row["fields"] for row in rows if row["name"] == "memory_refs.identity_census")
+        assert fields["snapshot"] == int(reason is None)
+        declines = {key: value for key, value in fields.items() if key.startswith("declined_")}
+        assert declines == ({} if reason is None else {f"declined_{reason}": 1})
+    finally:
+        call_spans.pop_call_spans(token)
+        call_spans.MCP_CALL_TOKEN.reset(handle)
