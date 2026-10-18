@@ -564,7 +564,7 @@ def _served(writer, cid) -> bool:
     """Whether this release serves the collection's views: eligible, and behind no closed route fence."""
     from . import authority, capability
 
-    if not authority.projection_eligible(writer, {"collection_id": cid}):
+    if not authority.collection_admitted(writer, cid):
         return False
     try:
         row = writer.connection.execute(

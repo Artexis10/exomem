@@ -846,6 +846,9 @@ class CollectionWriter:
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
         valid = mutation_terminal.valid_collection_receipt(receipt)
+        warnable = mutation_terminal.valid_collection_receipt({
+            **receipt, "warnings": [*receipt.get("warnings", []), "projection_pending"],
+        })
         if txn["operation"] == "view_frame_edit":
             # This private leaf has no item effect and cannot truthfully return a Records update receipt.
             valid = (set(receipt) == {"operation", "collection_id", "transition_id", "commit_seq",
@@ -874,6 +877,7 @@ class CollectionWriter:
                 and all(row.get("transition_id") == txn["transition_id"]
                         for row in receipt["rows"] if row["outcome"] in {"inserted", "updated"})
             )
+            warnable = valid  # The bulk receipt's existing envelope supports publication warnings.
         if not valid:
             raise RuntimeError("writer constructed an invalid collection receipt")
         data = {**txn, "receipt_json": _json(receipt)}
@@ -886,7 +890,7 @@ class CollectionWriter:
         manifest = self._collection_manifest(self._collection_row(txn["collection_id"]))[0]
         self._pending_basis(history.main_path(manifest), txn["collection_id"], "history", 0)
         self._execute(tables.INSERT_TXN, data)
-        if self._publication.deferred_create is None and txn["operation"] not in mutation_terminal.CONTROL_OPERATIONS:
+        if self._publication.deferred_create is None and warnable:
             self._publication.bind(receipt)
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
@@ -1536,7 +1540,8 @@ class CollectionWriter:
                         else:
                             batch.retire(projection)
                         continue
-                    if digest is not None and digest == projection["pending_sha256"]:
+                    current_render = projection["kind"] != "history" or digest == history_digest
+                    if digest is not None and digest == projection["pending_sha256"] and current_render:
                         if not preserved and not keep_history_pending:
                             if not batch.confirm_target(projection):
                                 batch.pending = True
@@ -1549,7 +1554,7 @@ class CollectionWriter:
                         continue
                     if (digest is not None and digest == projection["published_sha256"]
                             and (projection["state"] != "pending" or projection["kind"] == "history")
-                            and (projection["kind"] != "history" or digest == history_digest)):
+                            and current_render):
                         if projection["kind"] == "history" and projection["state"] == "pending" and not keep_history_pending:
                             self._execute("UPDATE projection_state SET state='current',pending_row_version=NULL,"
                                           "pending_sha256=NULL WHERE path=?", (projection["path"],))
@@ -3290,6 +3295,5 @@ class CollectionWriter:
                 "outcome": "discarded",
                 "audit_correlation": None,
             }
-            self._publication.bind(receipt)
         writer_lease.mark_active_mutation_committed()
         return receipt

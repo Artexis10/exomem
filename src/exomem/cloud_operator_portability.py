@@ -14,7 +14,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from . import cell_init, held_fs, reserved_paths, state_migration, state_paths, vault_portability
-from .collection_store import authority, chain, connection, replica, schema, snapshot
+from .collection_store import authority, chain, connection, ownership, replica, schema, snapshot
 
 
 def archive_members(vault: Path) -> list[Path]:
@@ -62,9 +62,8 @@ def prepare_export(
             or vault.resolve() != vault or host_root.resolve() != host_root):
         raise ValueError("backup root binding is invalid")
     raw_marker = authority.read_marker(vault)
-    if raw_marker is None:
-        return {"ok": True, "store": "absent"}
-    authority.parse_marker(vault, raw_marker)
+    if raw_marker is not None:
+        authority.parse_marker(vault, raw_marker)
     try:
         relative = state_paths.vault_state_dir(original_vault).relative_to(cell_init.account_home())
     except ValueError:
@@ -88,6 +87,24 @@ def prepare_export(
         state_migration._validate_manifest(Path(state_migration.MANIFEST_NAME), manifest, vault_root=original_vault)
         if manifest["state"] != "complete":
             raise ValueError("source state migration is incomplete")
+        source = source_fs.file(source_parent, connection.STORE_FILENAME)
+        if source.ok:
+            source.require().close()
+        elif source.error.code == "MISSING":
+            # A missing hint proves no absence; the reviewed family and enrollment must agree.
+            if (raw_marker is not None or os.path.lexists(target)
+                    or set(manifest["descriptors"]) & state_migration._store_owned_ids()):
+                raise ValueError("canonical source is unavailable")
+            for suffix in snapshot._COMPANIONS:
+                companion = source_fs.file(source_parent, connection.STORE_FILENAME + suffix)
+                if companion.ok:
+                    companion.require().close()
+                    raise ValueError("stopped source family is incomplete")
+                if companion.error.code != "MISSING":
+                    raise companion.error
+            return {"ok": True, "store": "absent"}
+        else:
+            raise source.error
         vault_fs = stack.enter_context(held_fs.acquire(vault).require())
         target_parent = stack.enter_context(vault_fs.parent(
             target.parent.relative_to(vault).as_posix(), access="mutate").require())
@@ -152,7 +169,8 @@ def prepare_export(
                 canonical = verified.connection
                 canonical_meta = dict(canonical.execute("SELECT key,value FROM store_meta"))
                 if previous is not None:
-                    ownership_marker = authority.parse_marker(vault, raw_marker)
+                    ownership_marker = (ownership.declarations(vault, canonical)[0] if raw_marker is None
+                                        else authority.parse_marker(vault, raw_marker))
                     if ownership_marker["version"] == 1:
                         ownership_marker = authority.upgraded_marker(vault, canonical, ownership_marker)
                     with vault_portability.checked_collection_replica(
@@ -166,7 +184,8 @@ def prepare_export(
                         old_lineage = json.loads(old_meta[schema.META_LINEAGE])
                         lineage = json.loads(canonical_meta[schema.META_LINEAGE])
                         # head_relation fixes these ancestry tokens; sequence alone proves nothing.
-                        if relation not in {"same", "ancestor"} or old_lineage != lineage[:len(old_lineage)]:
+                        if (old_meta[schema.META_STORE_ID] != canonical_meta[schema.META_STORE_ID]
+                                or relation not in {"same", "ancestor"} or old_lineage != lineage[:len(old_lineage)]):
                             raise ValueError("replica ancestry differs")
             unchanged()
 

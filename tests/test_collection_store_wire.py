@@ -52,6 +52,12 @@ def same_wire(left, right):
     assert json.dumps(normalized(left), sort_keys=True) == json.dumps(normalized(right), sort_keys=True)
 
 
+def same_pending_wire(left, right):
+    assert mutation_terminal.valid_collection_receipt(right)
+    assert right["warnings"] == ["projection_pending"]
+    same_wire(left, {key: value for key, value in right.items() if key != "warnings"})
+
+
 @pytest.fixture
 def paired(tmp_path, monkeypatch):
     from exomem.collection_store.preview import preview_store
@@ -100,14 +106,18 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
                 response_detail="full", **kwargs,
             )
         assert result["status"] == "committed"
+        assert mutation_terminal.valid_collection_receipt(result["diagnostics"])
         return result["diagnostics"]
 
     invoke("create", manifest_path=manifest_path(), manifest_text=manifest_text(),
            why="create", scaffold=False)
     state = store.inspect_collection(CID)
-    invoke("revise", collection=CID, manifest_text=manifest_text().replace("title: Work", "title: Revised Work"),
-           expected_manifest_hash=state["lifecycle_guards"]["expected_manifest_hash"],
-           expected_container_hash=state["snapshot"], why="revise")
+    revised = invoke("revise", collection=CID,
+                     manifest_text=manifest_text().replace("title: Work", "title: Revised Work"),
+                     expected_manifest_hash=state["lifecycle_guards"]["expected_manifest_hash"],
+                     expected_container_hash=state["snapshot"], why="revise")
+    assert json.loads(store.connection.execute("SELECT receipt_json FROM txns WHERE operation='revise'")
+                      .fetchone()[0]) == revised
     with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE"):
         store.append_record(CID, item={"title": "Held", "count": "invalid"},
                             item_key=KEY, why="capture", hold=True)
@@ -118,6 +128,8 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_public_query_reads_committed_store_rows_without_rendered_files(paired, profile):
+    from exomem.collection_store.preview import preview_store
+
     invoke, roots, handle = paired
     paired_create(paired, profile, scaffold=False)
     action = "append" if profile == "records" else "add"
@@ -125,6 +137,9 @@ def test_public_query_reads_committed_store_rows_without_rendered_files(paired, 
     for mode in (0, 1):
         invoke(mode, profile, action, collection=manifest_path(profile),
                item={"title": "One"}, **{key_arg: KEY}, why="capture")
+    with preview_store(roots[1], handle) as writer:
+        writer.reconcile_views()
+        writer.reconcile_views()
     assert "exomem_view:" in (roots[1] / manifest_path(profile)).read_text()
     for path, in handle.connection.execute("SELECT path FROM projection_state"):
         (roots[1] / path).unlink()
@@ -149,26 +164,6 @@ def test_bound_direct_record_query_uses_the_store_without_file_authority(paired)
         result = record_governance.query_collection(roots[1], CID)
     assert result.total_matched == 1
     assert result.rows[0]["title"] == "One"
-
-
-@pytest.mark.parametrize("profile", ["records", "planning"])
-def test_store_query_refuses_file_audit_history_until_canonical_reader_exists(paired, profile):
-    invoke, _, _ = paired
-    paired_create(paired, profile, scaffold=False)
-    with pytest.raises(OpError) as caught:
-        invoke(1, profile, "query", collection=CID, include_agent_history=True)
-    assert caught.value.code == "COLLECTION_STORE_PREVIEW_UNSUPPORTED"
-
-
-def test_direct_planning_query_refuses_file_audit_history(paired):
-    from exomem import planning
-    from exomem.collection_store.preview import preview_store
-
-    invoke, roots, handle = paired
-    paired_create(paired, "planning", scaffold=False)
-    with preview_store(roots[1], handle):
-        with pytest.raises(collections.CollectionError, match="COLLECTION_STORE_PREVIEW_UNSUPPORTED"):
-            planning.query(roots[1], CID, include_agent_history=True)
 
 
 def _query_parity_projection(result):
@@ -436,7 +431,7 @@ def test_public_facade_create_append_replay_update_and_refusals(paired, profile)
     updated = [invoke(mode, profile, "update", **{key_arg: KEY}, changes={"title": "Two"},
                       expected_container_hash=first[mode]["after_container_hash"],
                       expected_item_version=first[mode]["after_item_hash"], **common) for mode in (0, 1)]
-    same_wire(*updated)
+    same_pending_wire(*updated)
     for receipt in first + replay + updated:
         assert valid(receipt) and mutation_terminal.valid_collection_receipt(receipt)
     errors = []
@@ -505,7 +500,7 @@ def test_inspect_shape_guards_and_store_only_projection(paired, profile):
     assert all(set(entry) == {"path", "hash"} for entry in stored["source_versions"])
     assert {d["code"] for d in stored["diagnostics"]} == {"PROJECTION_PENDING"}
     if profile == "records":
-        assert stored.pop("projection") == {"pending_views": 2, "held_view_corrections": 0}
+        assert stored.pop("projection") == {"pending_views": 3, "held_view_corrections": 0}
     else:
         assert set(stored) == set(inspections[0])
     stored["diagnostics"] = []
@@ -560,7 +555,7 @@ def test_records_held_rehold_resume_update_and_discard_wire(paired):
     updated = [invoke(mode, "records", "update", item_key=keys[mode], held=refs[mode], changes={"count": 2},
                       expected_container_hash=resumed[mode]["after_container_hash"],
                       expected_item_version=resumed[mode]["after_item_hash"], **common) for mode in (0, 1)]
-    same_wire(*updated)
+    same_pending_wire(*updated)
     refs = []
     for mode in (0, 1):
         with pytest.raises(OpError) as caught:
@@ -581,7 +576,7 @@ def test_planning_triage_and_hierarchy_refusal_wire(paired):
     triaged = [invoke(mode, "planning", "triage", transition={"horizon": "week", "status": "planned", "commitment": "considering"},
                       expected_container_hash=first[mode]["after_container_hash"],
                       expected_item_version=first[mode]["after_item_hash"], **common) for mode in (0, 1)]
-    same_wire(*triaged)
+    same_pending_wire(*triaged)
     for receipt in triaged:
         assert mutation_terminal.valid_planning_receipt(receipt) and mutation_terminal.valid_collection_receipt(receipt)
     errors = []

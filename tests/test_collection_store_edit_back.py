@@ -584,6 +584,12 @@ def test_an_invalid_save_is_held_once_and_stays_in_place(store):
     store.reconcile_views()
     assert [(code, raw) for _, code, raw in holds(store)] == [("VIEW_INVALID", invalid)]
     assert path.read_bytes() == invalid  # PROVISIONAL O2: kept in place until discarded
+    from exomem import audit
+    from exomem.collection_store.preview import preview_store
+
+    with preview_store(store.root, store.handle):
+        report = audit.audit(store.root, categories=["collection_view_corrections"])
+    assert [finding.meta["code"] for finding in report.findings] == ["VIEW_INVALID"]
 
 
 def test_an_invalid_view_waiting_to_be_held_does_not_spin_the_store_thread(store):
@@ -988,6 +994,8 @@ def test_attention_for_a_withheld_view_correction_equals_attention_without_it(se
     """Defect: the attention queue names a held correction of a row the caller cannot see."""
     from test_governance_egress import _external, write_rule, write_scope
 
+    from exomem import audit
+    from exomem.collection_store import authority
     from exomem.governance.principal import owner_principal, request_scope
 
     root = served.root
@@ -1014,6 +1022,20 @@ def test_attention_for_a_withheld_view_correction_equals_attention_without_it(se
           ["held_view_corrections"] == 1)
     assert queue(_external()) == absent and absent[0] == ([], None)
     assert "VIEW_CONFLICT" in json.dumps(queue(owner_principal(surface="mcp"))[1])
+    with request_scope(owner_principal(surface="mcp")):
+        before = audit.audit(root, categories=["collection_view_corrections"])
+    assert len(before.findings) == 1
+    authority.marker_path(root).unlink()
+    with request_scope(owner_principal(surface="mcp")):
+        after = audit.audit(root, categories=["collection_view_corrections"])
+    assert after.findings == before.findings
+    assert "VIEW_CONFLICT" in json.dumps(queue(owner_principal(surface="mcp"))[1])
+    assert queue(_external()) == absent
+    served.stop()
+    with request_scope(owner_principal(surface="mcp")):
+        unavailable = audit.audit(root, categories=["collection_view_corrections"])
+    assert unavailable.findings == []
+    assert unavailable.metadata["coverage"]["collection_view_corrections"] == "unknown"
 
 
 def test_a_held_stale_buffer_save_resumes_as_the_owners_edit_over_the_current_row(store):
