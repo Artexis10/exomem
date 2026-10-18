@@ -34,6 +34,7 @@
 - [ ] 3.4 Select residency from measured RSS and cold/warm costs; verify encoder output identity, CPU-cap compliance and documented rollback.
 - [ ] 3.5 Localize overdue activation intervals through a bounded isolated reproduction; record the responsible work, including packet finalization. Reuse `RequestBudget` checks in controllable loops/waits and existing safe deferral paths; retain managed index rebuild deferral. Verify packet or existing budget abstention returns within the absolute deadline; classify every overrun as failed and unresolved. Preserve canonical mutation immunity and exact terminal/component custody; keep an unsafe-to-bound repair open while independent work continues.
 - [ ] 3.6 Establish pending bars from current measurements where justified; verify recorded choices and keep remaining thresholds null and pending.
+- [ ] 3.7 Keep optional direct-read links off the foreground build path. Verify cold and evicted reads release permitted bodies with unknown inbound links, existing watcher recovery restores exact links, and mutation safety remains complete.
 
 ## 4. Verify installed behavior and deliver
 

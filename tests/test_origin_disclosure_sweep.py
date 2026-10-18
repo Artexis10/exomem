@@ -178,6 +178,9 @@ def test_activation_never_quotes_an_unreleased_origin_carrier_as_an_entity_lede(
 
 
 def test_a_carrier_is_never_an_inbound_link_a_restricted_reader_is_shown(vault: Path) -> None:
+    from exomem import freshness
+    from exomem import vault as vault_module
+
     block, reference = _carrier(vault, reason=f"{REASON} [[Linked page]]")
     _write_source_rule(vault, ceiling=6)
     with request_scope(READER):
@@ -194,6 +197,11 @@ def test_a_carrier_is_never_an_inbound_link_a_restricted_reader_is_shown(vault: 
     _write_source_rule(vault, ceiling=0)
     find_module.clear_cache()
     byname = {command.name: command for command in commands.PRODUCT_COMMANDS}
+    freshness.seed(vault, "vault", [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ])
+    vault_module.find_inbound_wikilinks(vault, linked.path)
 
     with request_scope(READER):
         read = writer_lease.invoke_command(byname["read_memory"], vault, path=linked.path, links=True)

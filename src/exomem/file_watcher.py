@@ -1021,7 +1021,11 @@ class FileWatcher:
         self._seed_complete = threading.Event()
         self._seed_succeeded = False
         self._startup_recovery_started = False
+        self._optional_recovery_armed = False
         self._dispatch_waits_for_seed = False
+        from . import vault
+
+        vault.register_inbound_index(vault_root)
         with _WATCHERS_LOCK:
             _WATCHERS.setdefault(_canon_root(vault_root), weakref.WeakSet()).add(self)
 
@@ -1454,6 +1458,8 @@ class FileWatcher:
             index_sync.drain_deferred_work(self._vault_root, limit=drain_limit)
         except Exception:  # noqa: BLE001 - queued work remains retryable
             log.exception("file watcher: deferred index drain failed")
+        if baselines_current:
+            self._prime_inbound_if_needed()
         if not drifted:
             return baselines_current
         if policy.defer_expensive_indexes:
@@ -1467,6 +1473,29 @@ class FileWatcher:
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
         return baselines_current
+
+    def arm_optional_recovery(self) -> None:
+        """Permit optional metadata work only after runtime workers have started."""
+        self._optional_recovery_armed = True
+
+    def _prime_inbound_if_needed(self) -> None:
+        from . import foreground_priority, readiness, vault
+
+        if (
+            not self._optional_recovery_armed
+            or self._stop.is_set()
+            or readiness.is_warming()
+        ):
+            return
+        try:
+            with foreground_priority.bulk(stop=self._stop):
+                vault.prime_inbound_index(
+                    self._vault_root, eager=mode.preload_cpu_caches(),
+                )
+        except foreground_priority.BulkCancelled:
+            return
+        except Exception:  # noqa: BLE001 - optional links cannot stop recovery
+            log.exception("file watcher: optional inbound warm failed")
 
     def finish_startup_recovery(self) -> None:
         """Drain deferred whole-index work after required admission.

@@ -272,6 +272,8 @@ class LocalRuntimeActivation:
             if self._shutdown.is_set():
                 break
             self._start_component(label, starter)
+        if not self._shutdown.is_set() and self.file_watcher is not None:
+            self.file_watcher.arm_optional_recovery()
         if self._shutdown.is_set():
             self._stop_background_workers()
 

@@ -996,9 +996,15 @@ def test_the_owner_finds_prose_after_a_documented_opener(vault: Path) -> None:
 
 
 def test_a_link_after_a_documented_opener_stays_inbound(vault: Path) -> None:
-    from exomem import commands
+    from exomem import commands, freshness
+    from exomem import vault as vault_module
 
     _doc_note(vault)
+    freshness.seed(vault, "vault", [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ])
+    vault_module.find_inbound_wikilinks(vault, _DOC_TARGET + ".md")
 
     with request_scope(owner_principal(surface="mcp")):
         read = commands.op_read_memory(vault, path=_DOC_TARGET + ".md", links=True)
