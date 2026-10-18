@@ -1263,7 +1263,7 @@ class CollectionWriter:
             if (row["generation"] != observed[0] or not _renders_rows(manifest)
                     or (not outside and not path.startswith(manifest.storage.source + "/"))):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep basis changed")
-            if not self._publication.eligible({"collection_id": cid}):
+            if not self._publication.eligible({"collection_id": cid, "path": manifest.path}):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "collection route is closed")
             item = self._item(cid, facts["item_key"]) if facts["item_key"] is not None else None
             self._require_detached_path(manifest, path, item)
