@@ -449,16 +449,44 @@ def test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_
     monkeypatch.setattr(preserve, "preserve_stream", full_disk_once)
     commit = upload_sessions._commit
     retry_started, retry_visible, release = threading.Event(), threading.Event(), threading.Event()
+    snapshot_captured, first_finished = threading.Event(), threading.Event()
     workers = []
 
     def delayed_retry(*args):
         workers.append(threading.current_thread())
-        if calls:
+        retry = bool(calls)
+        if retry:
             retry_started.set()
             assert release.wait(30)
-        return commit(*args)
+        try:
+            return commit(*args)
+        finally:
+            if not retry:
+                first_finished.set()
 
     monkeypatch.setattr(upload_sessions, "_commit", delayed_retry)
+    write_record, start_commit = upload_sessions._write_record, upload_sessions.start_commit
+
+    def hold_failure_until_get(store, record):
+        if record["state"] == upload_sessions.RETRYABLE and len(calls) == 1:
+            assert snapshot_captured.wait(30)
+        return write_record(store, record)
+
+    def finish_failure_after_snapshot(session, committer):
+        if session.record["state"] == upload_sessions.COMMITTING and not snapshot_captured.is_set():
+            snapshot_captured.set()
+            assert first_finished.wait(30)
+        return start_commit(session, committer)
+
+    monkeypatch.setattr(upload_sessions, "_write_record", hold_failure_until_get)
+    monkeypatch.setattr(upload_sessions, "start_commit", finish_failure_after_snapshot)
+
+    class FailedAttemptTransport(_ServiceTransport):
+        def handle_request(self, request):
+            response = super().handle_request(request)
+            if request.method == "GET":
+                assert response.json()["state"] == upload_sessions.RETRYABLE
+            return response
 
     class ResumeTransport(_ServiceTransport):
         def handle_request(self, request):
@@ -474,7 +502,7 @@ def test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_
             "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
 
     try:
-        assert _attach_main(argv, transport=_ServiceTransport(app)) == 1
+        assert _attach_main(argv, transport=FailedAttemptTransport(app)) == 1
         assert "run the same command again" in capsys.readouterr().err
         resumed = ResumeTransport(app)
         assert _attach_main(argv, transport=resumed) == 0
