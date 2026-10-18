@@ -187,9 +187,13 @@ Use `review_item_context(ref, expected_fingerprint)` before one applicable write
 
 Only if needed to resolve the turn, pass relevant `conversation`: up to six
 recent excerpts and 2,400 characters total, `focus` up to 240 characters and
-`refs` up to twelve. Never send full history or unrelated personal data. If a
-hook missed the subject, retry with `conversation.focus`; on ambiguity, choose
-an `anchor`. See the engagement reference for entry bounds and attachment cues.
+`refs` up to twelve. Never send full history or unrelated personal data.
+Reuse held material before calling again. If the conversation establishes a
+follow-up's subject and another activation is needed, select its visible `anchor`.
+Otherwise, provide grounded subject cues through `conversation.focus` when exposed.
+Focus is an agent cue, not the user's words; it cannot settle ambiguity in the human turn.
+A continuity token alone does not select a subject. Keep `turn` verbatim.
+See the engagement reference for entry bounds and attachment cues.
 
 **`recent_context`** leads every packet, abstained ones included. Up to eight
 pages recently worked on (edited, read, captured as a session, recorded as a
@@ -233,9 +237,12 @@ abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
 
 **`continuity`.** Every packet returns one token (abstentions too) identifying
 the conversation; only a salted hash is stored and it lapses after six idle
-hours. `generation.continuity` is `applied`, `stale` (another vault index or role
-registry) or `absent`; `generation.continuity_thread` is `applied`, `stale`
-(answered as a new conversation, never refused) or `absent`.
+hours. `generation.continuity` reports whether prior refs qualified this
+activation: `applied`, `stale` or `absent`. `stale` can mean that the refs did not
+contribute, even while `generation.continuity_thread` is `applied`.
+`generation.continuity_thread` separately reports whether the token identifies
+the conversation: `applied`, `stale` (answered as a new conversation, never
+refused) or `absent`. Neither field alone proves that the subject resolved.
 `generation.hot_profile` reports the recent-work projection `state` (`current`,
 `partial`, `seeded`, `behind`, `empty`) and `session_start`. Only salted hashes of
 `session`/`workspace` are stored, locally.
