@@ -52,6 +52,7 @@ from epistemic.corpora.context_activation import (
 from membench.utility import context_activation as audit
 from membench.utility import context_activation_product as product
 
+from exomem import activation_result
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 pytestmark = [pytest.mark.timeout(1800), pytest.mark.reads_repository_docs]
@@ -847,6 +848,9 @@ def test_mechanism_removal_the_kill_switch_fails_every_positive_case(run: Run) -
 
 def test_every_mechanism_removal_changes_what_the_compiler_serves(run: Run) -> None:
     for mechanism, packets in run.removals.items():
+        # A failed compiler does not establish the effect of removing its mechanism.
+        for case, packet in packets.items():
+            assert packet.get("abstention", {}).get("reason") != activation_result.UNAVAILABLE, (mechanism, case)
         changed = {case for case in packets if _shape(packets[case]) != _shape(run.raw[case])}
         assert changed, (
             f"removing {mechanism} changed no packet: the patch did not reach the compiler"

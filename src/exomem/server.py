@@ -22,7 +22,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
-from .access_log import AccessLogMiddleware
+from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
@@ -90,6 +90,8 @@ class ExomemFastMCP(FastMCP):
             # This app serves `/upload/sessions`, so this process resumes their commits.
             activation.serves_upload_sessions = True
         app = super().http_app(*args, stateless_http=stateless_http, **kwargs)
+        # FastMCP prepends authentication to the supplied middleware list.
+        app.add_middleware(WorkerRequestTimingMiddleware)
         if stateless_http:
             endpoint_found = False
             for route in app.routes:

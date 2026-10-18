@@ -3,7 +3,8 @@
 The page must match two remaining content units without the partial name's
 stems. A word and an unspaced run each count once, under the lexical budget.
 Casing does not decide intent. A partial surname stays visible so the agent
-can choose it, name it in conversation focus, or use prior naming.
+can choose it or name it in conversation focus. Prior naming alone cannot
+distinguish that fragment from a different unindexed name.
 
 Invented names and a synthetic vault throughout.
 """
@@ -15,9 +16,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_connector_boundary import PRIVATE, configured_boundary as configured_boundary
+from test_connector_boundary import PRIVATE
+from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_egress import _external, write_rule, write_scope
-from test_working_set_carry import seed_ordinary_notes
+from test_working_set_carry import CARRY_PAGE, seed_ordinary_notes
+from test_working_set_carry import budget_free as budget_free
+from test_working_set_carry import carry_vault as carry_vault
 from test_working_set_topic_turns import workshop_vault as workshop_vault
 
 from exomem import (
@@ -396,7 +400,9 @@ def test_the_agent_can_resolve_a_visible_surname_lead_without_widening_the_audie
         assert NAMESAKE not in json.dumps(packet) and NAMESAKE_IDENTITY not in json.dumps(packet)
 
 
-def test_prior_naming_resolves_a_partial_surname_contact(garden_vault: Path) -> None:
+def test_prior_naming_keeps_a_partial_surname_selectable_without_serving_its_identity(
+    garden_vault: Path,
+) -> None:
     named = commands.op_activate_context(garden_vault, turn="What did Nora Hedge say?")
     continued = commands.op_activate_context(
         garden_vault,
@@ -410,8 +416,68 @@ def test_prior_naming_resolves_a_partial_surname_contact(garden_vault: Path) -> 
     )
 
     for packet in (continued, remembered):
-        assert _statuses(packet, PERSON) == ["resolved"], packet["anchors"]
-        assert IDENTITY in json.dumps(packet)
+        assert _statuses(packet, PERSON) == ["partial"], packet["anchors"]
+        assert IDENTITY not in json.dumps(packet)
+
+    chosen = commands.op_activate_context(
+        garden_vault, turn="What did hedge say about payments?", anchor=PERSON,
+        continuity=named["continuity"],
+    )
+    assert _statuses(chosen, PERSON) == ["resolved"], chosen["anchors"]
+    assert IDENTITY in json.dumps(chosen)
+
+
+@pytest.mark.parametrize("turn", [
+    "A separate parcel is from Vera Hedge. What do we know about its origin?",
+    "What did Vera Hedge say?",
+])
+def test_old_naming_does_not_resolve_a_fragment_of_an_unindexed_name(
+    garden_vault: Path, turn: str,
+) -> None:
+    named = commands.op_activate_context(garden_vault, turn="What did Nora Hedge say?")
+    packet = commands.op_activate_context(
+        garden_vault, turn=turn, continuity=named["continuity"],
+        conversation={"recent": [{"role": "user", "text": "Nora Hedge joined the call"}]},
+    )
+
+    assert _statuses(packet, PERSON) == ["partial"], packet["anchors"]
+    assert IDENTITY not in json.dumps(packet)
+
+
+def test_full_name_focus_beats_a_historical_subphrase(vault: Path) -> None:
+    seed_ordinary_notes(vault)
+    short = "Knowledge Base/Entities/Organizations/Short.md"
+    long = "Knowledge Base/Entities/Organizations/Long.md"
+    _entity(vault, short, "The Hedge", "The original supplier")
+    _entity(vault, long, "The Hedge Collective", "The replacement supplier")
+    _reindex(vault)
+
+    packet = commands.op_activate_context(vault, turn="Tell me about hedge.", conversation={
+        "focus": "The Hedge Collective",
+        "recent": [{"role": "user", "text": "The Hedge"}],
+    })
+
+    assert _statuses(packet, short) == ["partial"], packet["anchors"]
+    assert _statuses(packet, long) == ["resolved"], packet["anchors"]
+
+
+def test_prior_entity_fragment_does_not_hide_its_band_dependency(
+    carry_vault: Path, budget_free, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entity = "Knowledge Base/Entities/Organizations/Copper Hedge.md"
+    _entity(carry_vault, entity, "Copper Hedge", "The original supplier")
+    _reindex(carry_vault)
+    monkeypatch.setattr(working_set, "signature_evidence",
+        lambda _index, _turn: ({entity: True}, "ready"))
+
+    packet = commands.op_activate_context(carry_vault,
+        turn="What did we decide about the quillon vantry window for the hedge?",
+        conversation={"recent": [{"role": "user", "text": "Copper Hedge"}]})
+
+    assert packet["generation"].get("carried_by") == "retrieval", packet
+    assert _statuses(packet, CARRY_PAGE) == ["resolved"], packet["anchors"]
+    assert _statuses(packet, entity) != ["resolved"], packet["anchors"]
+    assert not any(u["provenance"]["path"] == entity for u in packet["units"])
 
 
 def test_a_registered_alias_still_resolves_a_surname(garden_vault: Path) -> None:
