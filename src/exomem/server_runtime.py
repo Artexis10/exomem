@@ -339,13 +339,8 @@ class LocalRuntimeActivation:
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
         with self._lock:
+            # The retry lock prevents any later repair scheduling after stop.
             self._catalogue_stop.set()
-            catalogue_recovery = self.catalogue_recovery
-        if (
-            catalogue_recovery is not None
-            and catalogue_recovery is not threading.current_thread()
-        ):
-            catalogue_recovery.join()
         if self.graph_drain is not None:
             from . import graph_drain
 

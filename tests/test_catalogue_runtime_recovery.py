@@ -149,7 +149,7 @@ def test_readiness_only_traffic_recovers_a_failed_catalogue_publication(
 def test_persistent_catalogue_failure_backs_off_without_duplicate_or_post_shutdown_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A blocked repair stays single-flight; failed retries wait and shutdown joins."""
+    """A blocked repair stays single-flight; shutdown prevents further retries."""
     attempts: queue.Queue[int] = queue.Queue()
     ticks: queue.Queue[None] = queue.Queue()
     delays: queue.Queue[float] = queue.Queue()
@@ -203,7 +203,6 @@ def test_persistent_catalogue_failure_backs_off_without_duplicate_or_post_shutdo
                 assert delays.get(timeout=1) == 4.0
                 assert lexstore.await_repairs_idle(tmp_path, timeout=1)
         assert activation.catalogue_recovery is not None
-        assert not activation.catalogue_recovery.is_alive()
         ticks.put(None)
         activation._start_catalogue_recovery(tmp_path)
         assert builds == 4, "shutdown scheduled another repair"
@@ -212,6 +211,10 @@ def test_persistent_catalogue_failure_backs_off_without_duplicate_or_post_shutdo
         asyncio.run(exercise())
     finally:
         release.set()
+        monitor = activation.catalogue_recovery
+        if monitor is not None:
+            monitor.join(timeout=1)
+            assert not monitor.is_alive()
         assert lexstore.await_repairs_idle(tmp_path, timeout=3)
         with lexstore._REPAIRS_LOCK:
             lexstore._FULL_REBUILD_REQUESTED.discard(tmp_path.resolve())
