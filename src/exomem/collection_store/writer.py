@@ -421,6 +421,33 @@ class CollectionWriter:
             return any(subject.basis.identity == identity and self._operation.decision(subject).level >= 6
                        for subject in self._operation.catalog(manifest.collection_id)[1:])
 
+    def admitted_item_metadata(self, cid, key, path):
+        """Admit one complete current item from canonical metadata, without reading its payload."""
+        from .preview import selected_writer
+
+        selected = selected_writer(self.root, cid)
+        if selected is None or selected.handle._inspection_identity is not self.handle._inspection_identity:
+            return None
+        with self.read_snapshot():
+            self._operation.require_complete_fields(cid)
+            row = self.connection.execute(
+                "SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (cid, key)
+            ).fetchone()
+            if row is None or row[0] != path:
+                return None
+            manifest_path = self.connection.execute(
+                "SELECT manifest_path FROM collections WHERE collection_id=?", (cid,)
+            ).fetchone()[0]
+            manifest = next(governance.iter_subjects(
+                self.connection, cid, self._operation.logical_vault_id,
+                identity=manifest_path, include_held=False), None)
+            item = next(governance.iter_subjects(
+                self.connection, cid, self._operation.logical_vault_id, row_key=key, include_held=False), None)
+            if manifest is None or item is None or any(
+                    self._operation.decision(subject).level < 6 for subject in (manifest, item)):
+                return None
+            return item
+
     def _projection_path_exists(self, path):
         """Canonical existence for delta pruning, without authorizing disclosure."""
         with self.read_snapshot():

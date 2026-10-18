@@ -295,7 +295,7 @@ class ReadScope:
 @contextmanager
 def read_scope(root, *, finalize=False):
     previous = _READ.get()
-    if previous is not None and previous.root == Path(root).resolve():
+    if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
     scope = ReadScope(root)
@@ -312,7 +312,7 @@ def read_scope(root, *, finalize=False):
 
 def current(root, *, conn=None, private=False):
     scope = _READ.get()
-    if scope is not None and scope.root == Path(root).resolve():
+    if scope is not None and scope.root == state_paths.resolved_vault_path(root, expanduser=False):
         return scope.proof()
     if conn is None and not private:
         return ReadScope(root).proof()
@@ -330,7 +330,8 @@ def file_only(root):
     """The global empty-policy shortcut requires a complete negative, recorded by the enclosing read."""
     try:
         scope = _READ.get()
-        if scope is not None and scope.root == Path(root).resolve() and scope.initial is not None:
+        if (scope is not None and scope.root == state_paths.resolved_vault_path(root, expanduser=False)
+                and scope.initial is not None):
             return scope.initial.marker is None
         _, recorded = enrollment(root)
         if "collections-store-v1" in recorded:
@@ -360,7 +361,7 @@ def reader(function=None, *, vault_root=None):
         if root is None:
             return function(*args, **kwargs)
         previous = _READ.get()
-        if previous is not None and previous.root == Path(root).resolve():
+        if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
             return function(*args, **kwargs)
         with read_scope(root) as scope:
             try:

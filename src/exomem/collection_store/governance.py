@@ -208,7 +208,7 @@ class _ReleaseSelection:
     notice_decisions: tuple[Decision, ...] | None
 
 
-_INSPECTION_SEAL = object()
+_METADATA_SEAL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,15 +231,33 @@ class _CanonicalInspectionEvidence:
         raise TypeError("canonical inspection evidence is process-local")
 
 
-class _CanonicalInspectionProjection(dict[str, Any]):
-    """JSON-compatible inspection with private canonical metadata provenance."""
+@dataclass(frozen=True, slots=True)
+class _CanonicalCoverageEvidence:
+    """Current contributors and stable receipt owners for one episode coverage result."""
 
-    def __init__(self, value, evidence: _CanonicalInspectionEvidence) -> None:
-        super().__init__(value)
-        self._canonical_inspection_evidence = evidence
+    root: Path
+    handle: object
+    store_identity: tuple[tuple[str, str], ...]
+    principal: RequestPrincipal
+    purpose: str | None
+    contributors: tuple[tuple[str, str, str, CanonicalSubject], ...]
+    references: tuple[tuple[tuple[str | int, ...], str], ...]
+    payload_hash: str
+    _seal: object
 
     def __reduce__(self) -> object:
-        raise TypeError("canonical inspection projection is process-local")
+        raise TypeError("canonical coverage evidence is process-local")
+
+
+class _CanonicalMetadataProjection(dict[str, Any]):
+    """JSON-compatible output with private canonical metadata provenance."""
+
+    def __init__(self, value, evidence) -> None:
+        super().__init__(value)
+        self._canonical_metadata_evidence = evidence
+
+    def __reduce__(self) -> object:
+        raise TypeError("canonical metadata projection is process-local")
 
     def __copy__(self):
         return dict(self)
@@ -251,13 +269,19 @@ class _CanonicalInspectionProjection(dict[str, Any]):
         return deepcopy(dict(self), memo)
 
 
-def _inspection_evidence(value: Any) -> _CanonicalInspectionEvidence | None:
-    if type(value) is not _CanonicalInspectionProjection:
+def _metadata_evidence(value: Any) -> _CanonicalInspectionEvidence | _CanonicalCoverageEvidence | None:
+    if type(value) is not _CanonicalMetadataProjection:
         return None
-    evidence = getattr(value, "_canonical_inspection_evidence", None)
-    if type(evidence) is not _CanonicalInspectionEvidence or evidence._seal is not _INSPECTION_SEAL:
+    evidence = getattr(value, "_canonical_metadata_evidence", None)
+    if (type(evidence) not in (_CanonicalInspectionEvidence, _CanonicalCoverageEvidence)
+            or evidence._seal is not _METADATA_SEAL):
         OperationAuthorization.refuse()
     return evidence
+
+
+def _inspection_evidence(value: Any) -> _CanonicalInspectionEvidence | None:
+    evidence = _metadata_evidence(value)
+    return evidence if type(evidence) is _CanonicalInspectionEvidence else None
 
 
 def _inspection_reference(value, location):
@@ -270,12 +294,50 @@ def _inspection_reference(value, location):
 
 
 def _seal_inspection_projection(value, evidence):
+    return _seal_metadata_projection(value, evidence)
+
+
+def _coverage_receipts(value):
+    """Validate the fixed receipt fields and readback tokens emitted by episode_workflow.coverage."""
+    if (not isinstance(value, Mapping) or value.get("action") != "coverage"
+            or type(value.get("receipts")) is not list
+            or value.get("coverage_current") not in ("verified", "changed")):
+        OperationAuthorization.refuse()
+    identities = set()
+    for receipt in value["receipts"]:
+        if (type(receipt) is not dict or receipt.keys() != {
+                "candidate_key", "leaf_id", "operation_id", "receipt_digest", "path", "readback"}
+                or any(type(receipt[name]) is not str or not receipt[name]
+                       for name in ("candidate_key", "leaf_id", "operation_id", "receipt_digest"))
+                or receipt["readback"] not in ("verified", "changed", "unavailable")
+                or (receipt["path"] is None) != (receipt["readback"] == "unavailable")
+                or receipt["path"] is not None and type(receipt["path"]) is not str):
+            OperationAuthorization.refuse()
+        identity = receipt["leaf_id"], receipt["operation_id"]
+        if identity in identities:
+            OperationAuthorization.refuse()
+        identities.add(identity)
+    return value["receipts"]
+
+
+def _coverage_references(value, contributors):
+    owners = {(leaf, operation, path) for leaf, operation, path, _subject in contributors}
+    return tuple((("receipts", index, "path"), receipt["path"])
+                 for index, receipt in enumerate(_coverage_receipts(value))
+                 if (receipt["leaf_id"], receipt["operation_id"], receipt["path"]) in owners)
+
+
+def _seal_metadata_projection(value, evidence):
     """Only the producer and trusted terminal transformations call this."""
-    references = tuple((location, path) for location, path in evidence.references
-                       if _inspection_reference(value, location) == path)
+    if type(evidence) is _CanonicalCoverageEvidence:
+        # File receipt removal can shift indexes; only the original sealed owners receive new slots.
+        references = _coverage_references(value, evidence.contributors)
+    else:
+        references = tuple((location, path) for location, path in evidence.references
+                           if _inspection_reference(value, location) == path)
     evidence = replace(evidence, references=references,
                        payload_hash=hashlib.sha256(_json(value).encode()).hexdigest())
-    return _CanonicalInspectionProjection(value, evidence)
+    return _CanonicalMetadataProjection(value, evidence)
 
 
 def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
@@ -1327,22 +1389,16 @@ class OperationAuthorization:
         return _CanonicalInspectionEvidence(
             self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
             self.who, self.purpose, selection.manifest, selection.contributors,
-            selection.snapshot, references, "", _INSPECTION_SEAL,
+            selection.snapshot, references, "", _METADATA_SEAL,
         )
 
     def validate_inspection_projection(self, payload, handle):
         """Fresh canonical admission; physical views cannot change this metadata."""
-        from . import views
-
         evidence = _inspection_evidence(payload)
         if evidence is None:
             return None
         try:
-            if (evidence.root != self.root.resolve() or evidence.handle is not handle._inspection_identity
-                    or evidence.principal != self.who or evidence.purpose != self.purpose
-                    or evidence.store_identity != tuple(sorted(views.store_identity(self.conn).items()))
-                    or evidence.payload_hash != hashlib.sha256(_json(payload).encode()).hexdigest()):
-                self.refuse()
+            self._validate_metadata_binding(payload, handle, evidence)
             cid = evidence.manifest.collection_id
             selection = self.inspection_selection(cid)
             contributors_match = (
@@ -1352,6 +1408,48 @@ class OperationAuthorization:
             if (selection.manifest != evidence.manifest or not contributors_match
                     or selection.snapshot != evidence.snapshot):
                 self.refuse()
+            return evidence
+        except (ValueError, TypeError, KeyError, sqlite3.Error):
+            self.refuse()
+
+    def _validate_metadata_binding(self, payload, handle, evidence):
+        from . import views
+
+        if (evidence.root != self.root.resolve() or evidence.handle is not handle._inspection_identity
+                or evidence.principal != self.who or evidence.purpose != self.purpose
+                or evidence.store_identity != tuple(sorted(views.store_identity(self.conn).items()))
+                or evidence.payload_hash != hashlib.sha256(_json(payload).encode()).hexdigest()):
+            self.refuse()
+
+    def coverage_evidence(self, payload, handle, contributors):
+        """Seal only authenticated coverage receipt paths; retain every current contributor."""
+        from . import views
+
+        contributors = tuple(contributors)
+        references = _coverage_references(payload, contributors)
+        if len(references) != len(contributors):
+            self.refuse()
+        return _CanonicalCoverageEvidence(
+            self.root.resolve(), handle._inspection_identity, tuple(sorted(views.store_identity(self.conn).items())),
+            self.who, self.purpose, contributors, references, "", _METADATA_SEAL,
+        )
+
+    def validate_coverage_projection(self, payload, writer):
+        """Recheck current contributor authority, including receipts removed by earlier filtering."""
+        evidence = _metadata_evidence(payload)
+        if type(evidence) is not _CanonicalCoverageEvidence:
+            self.refuse()
+        try:
+            self._validate_metadata_binding(payload, writer.handle, evidence)
+            _coverage_receipts(payload)
+            for _leaf, _operation, path, subject in evidence.contributors:
+                row = self.conn.execute(
+                    "SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
+                    (subject.row_id, subject.collection_id),
+                ).fetchone()
+                if (row is None
+                        or writer.admitted_item_metadata(subject.collection_id, row[0], path) != subject):
+                    self.refuse()
             return evidence
         except (ValueError, TypeError, KeyError, sqlite3.Error):
             self.refuse()

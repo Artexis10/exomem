@@ -840,7 +840,7 @@ def projection_route(vault_root, path):
         root = root.resolve()
     if not ownership.relevant(path):
         return None
-    canonical = root.resolve()
+    canonical = state_paths.resolved_vault_path(root, expanduser=False)
     if canonical != root:
         # Bind marker bytes to the canonical root, never to the earlier path spelling.
         # A root that is already canonical was just read there: recall routes every hit.

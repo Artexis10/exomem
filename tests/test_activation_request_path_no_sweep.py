@@ -442,16 +442,8 @@ def test_warm_activation_request_enumerates_no_directory(
 def test_warm_activation_request_resolves_the_state_location_once(
     vault: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell
 ) -> None:
-    """The request resolves where its state lives once, and spends a pinned
-    number of filesystem calls in total.
-
-    `vault_state_key` resolves the vault path, which costs one `lstat` per
-    component and was being paid by every caller that needed a state
-    directory — hundreds of times in one request. The answer cannot change
-    within a request: it is a placement decision about configuration, not an
-    observation of content. So it is computed once per request and reused,
-    and this pins that it is.
-    """
+    """Compute body placement once and sample it afresh at the ownership release boundary."""
+    from exomem.collection_store import ownership
     _seed_structure(vault)
     _seed_planning(vault)
     _write_collection(vault)
@@ -459,17 +451,28 @@ def test_warm_activation_request_resolves_the_state_location_once(
     _drain_background_walks()
 
     scheduled = _no_background_walks(monkeypatch)
-    key_calls: list[str] = []
-    real_key = state_paths.vault_state_key
+    computations = {"body": [], "release": []}
+    phase = "body"
+    real_compute = state_paths._compute_vault_state_dir
+    real_finish = ownership.ReadScope.finish
 
-    def counting_key(vault_root: Path) -> str:
+    def counting_compute(vault_root: Path) -> Path:
         # Own vault only: the patch is process-wide, and a background thread an
         # earlier test left running resolves ITS vault through this same hook.
         if str(vault_root) == str(vault):
-            key_calls.append(str(vault_root))
-        return real_key(vault_root)
+            computations[phase].append(str(vault_root))
+        return real_compute(vault_root)
 
-    monkeypatch.setattr(state_paths, "vault_state_key", counting_key)
+    def finish(scope):
+        nonlocal phase
+        previous, phase = phase, "release"
+        try:
+            return real_finish(scope)
+        finally:
+            phase = previous
+
+    monkeypatch.setattr(state_paths, "_compute_vault_state_dir", counting_compute)
+    monkeypatch.setattr(ownership.ReadScope, "finish", finish)
     calls = _FilesystemCalls(vault)
     calls.install(monkeypatch)
 
@@ -477,10 +480,8 @@ def test_warm_activation_request_resolves_the_state_location_once(
 
     assert scheduled == [], scheduled
     assert packet["abstained"] is False, packet.get("abstention")
-    assert len(key_calls) <= 1, (
-        "the vault's state location was resolved from scratch "
-        f"{len(key_calls)} times in one request: {sorted(set(key_calls))}"
-    )
+    assert len(computations["body"]) <= 1, computations
+    assert len(computations["release"]) <= 1, computations
     storage = str(vault / "Knowledge Base" / "Records" / "Depot Stock")
     outside = [
         path

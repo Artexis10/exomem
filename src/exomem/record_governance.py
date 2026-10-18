@@ -20,11 +20,12 @@ from . import (
     mutation_terminal,
     query_data,
     record_formats,
+    state_paths,
     structure_promotion,
     vault,
 )
 from . import structured_collections as collections
-from .collection_store import capability
+from .collection_store import capability, ownership
 from .collection_store.preview import (
     bound_writer,
     canonical_read,
@@ -989,13 +990,14 @@ def authorization_pass(vault_root: Path) -> Iterator[None]:
     if active is not None and active[0] == root:
         yield
         return
-    token = _AUTHORIZATION_PASS.set(
-        (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root), {})
-    )
-    try:
-        yield
-    finally:
-        _AUTHORIZATION_PASS.reset(token)
+    with state_paths.resolution_scope(), ownership.read_scope(root, finalize=True):
+        token = _AUTHORIZATION_PASS.set(
+            (root, egress.policy_module.load(root), egress.lifecycle.tombstoned_paths(root), {})
+        )
+        try:
+            yield
+        finally:
+            _AUTHORIZATION_PASS.reset(token)
 
 
 def _authorize(
@@ -1523,130 +1525,128 @@ def inspect_collection(
     # `records` already imports this governance boundary for mutations.
     from . import records
 
-    with (
-        authorization_pass(root),
-        egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector,
-    ):
-        manifest = _resolve_released_collection(root, collection, receipt=True)
-        if not _authorize(root, manifest.storage.source, receipt=True):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(root, manifest)
-        # One read serves the inspection, the audit-gap pass and the guard: they read
-        # through the same authorizer, and reading three times made a guard refresh
-        # cost three passes over every item.
-        refused = [False]
+    with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+        with authorization_pass(root):
+            manifest = _resolve_released_collection(root, collection, receipt=True)
+            if not _authorize(root, manifest.storage.source, receipt=True):
+                raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            links = _LinkProjector.create(root, manifest)
+            # One read serves the inspection, the audit-gap pass and the guard: they read
+            # through the same authorizer, and reading three times made a guard refresh
+            # cost three passes over every item.
+            refused = [False]
 
-        def authorize_path(path: str) -> bool:
-            allowed = _authorize(root, path, receipt=True)
-            if not allowed:
-                refused[0] = True
-            return allowed
+            def authorize_path(path: str) -> bool:
+                allowed = _authorize(root, path, receipt=True)
+                if not allowed:
+                    refused[0] = True
+                return allowed
 
-        try:
-            shared = record_formats.load_adapter(
-                root, manifest, authorize_path=authorize_path
-            ).read()
-        except collections.CollectionError:
-            shared = None
-        # Only the read's own refusals decide the audit chain, as before.
-        read_refused = refused[0]
-        try:
-            inspection = record_formats.inspect_collection(
-                root,
-                manifest,
-                authorize_path=authorize_path,
-                snapshot=shared,
-            )
-        except collections.CollectionError as error:
-            inspection = record_formats.CollectionInspection(
-                collection_id=manifest.collection_id,
-                snapshot=None,
-                source_versions=(manifest.manifest_version,),
-                source_hashes={manifest.path: manifest.manifest_version.hash},
-                diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
-            )
-        diagnostics = _inspection_diagnostics(inspection.diagnostics)
-        _inspection_templates(root, manifest, diagnostics)
-        saved_views = _inspection_saved_views(root, manifest, links, diagnostics)
-        try:
-            audit = records.inspect_audit_gap(
-                root,
-                manifest,
-                authorize_path=lambda path: _authorize(root, path, receipt=True),
-                snapshot=shared,
-                snapshot_denied=read_refused,
-            )
-        except collections.CollectionError:
-            audit = {"status": "history_incomplete", "gaps": []}
-        guards = None
-        if not diagnostics:
             try:
-                snapshot = (
-                    shared
-                    if shared is not None
-                    else record_formats.load_adapter(
-                        root,
-                        manifest,
-                        authorize_path=lambda path: _authorize(root, path, receipt=True),
-                    ).read()
-                )
-                if not snapshot.diagnostics and all(
-                    _authorize(root, version.path, receipt=True)
-                    for version in snapshot.source_versions
-                ):
-                    guards = records.lifecycle_guards(manifest, snapshot)
+                shared = record_formats.load_adapter(
+                    root, manifest, authorize_path=authorize_path
+                ).read()
             except collections.CollectionError:
-                pass
-        payload = _RecordEnvelope(
-            {
-                "kind": "collection",
-                "report_only": True,
-                "contract": {
-                    **_inspection_contract(manifest),
-                    "plans": [
-                        projected
-                        for plan in manifest.links.plans
-                        if (projected := _project_plan_link(root, manifest, plan, links=links))
-                        is not None
-                    ],
-                },
-                "legacy": None,
-                "snapshot": inspection.snapshot,
-                "source_versions": [
-                    {"path": version.path, "hash": version.hash}
-                    for version in inspection.source_versions[:_MAX_ITEM_ENTRIES]
-                ],
-                "diagnostics": diagnostics,
-                "audit": _inspection_audit(audit),
-                "saved_views": saved_views,
-                "lifecycle_guards": guards,
-                "coverage": _collection_coverage(
+                shared = None
+            # Only the read's own refusals decide the audit chain, as before.
+            read_refused = refused[0]
+            try:
+                inspection = record_formats.inspect_collection(
                     root,
                     manifest,
-                    committed=inspection.record_count,
-                    authorize=lambda path: _authorize(root, path, receipt=True),
-                    references=True,
-                ),
-                # Item-derived, so it rides the same authorized item pass the rest
-                # of this payload does; nothing recomputes it from unfiltered bytes.
-                **(
-                    {"observed_values": dict(inspection.observed_values)}
-                    if inspection.observed_values is not None
-                    else {}
-                ),
-                **(
-                    {"presentation": _presentation_inspection(inspection.presentation, manifest)}
-                    if (
-                        manifest.record_presentation is not None
-                        or manifest.item_presentation is not None
-                        or manifest.item_filename is not None
-                        or inspection.presentation
+                    authorize_path=authorize_path,
+                    snapshot=shared,
+                )
+            except collections.CollectionError as error:
+                inspection = record_formats.CollectionInspection(
+                    collection_id=manifest.collection_id,
+                    snapshot=None,
+                    source_versions=(manifest.manifest_version,),
+                    source_hashes={manifest.path: manifest.manifest_version.hash},
+                    diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
+                )
+            diagnostics = _inspection_diagnostics(inspection.diagnostics)
+            _inspection_templates(root, manifest, diagnostics)
+            saved_views = _inspection_saved_views(root, manifest, links, diagnostics)
+            try:
+                audit = records.inspect_audit_gap(
+                    root,
+                    manifest,
+                    authorize_path=lambda path: _authorize(root, path, receipt=True),
+                    snapshot=shared,
+                    snapshot_denied=read_refused,
+                )
+            except collections.CollectionError:
+                audit = {"status": "history_incomplete", "gaps": []}
+            guards = None
+            if not diagnostics:
+                try:
+                    snapshot = (
+                        shared
+                        if shared is not None
+                        else record_formats.load_adapter(
+                            root,
+                            manifest,
+                            authorize_path=lambda path: _authorize(root, path, receipt=True),
+                        ).read()
                     )
-                    else {}
-                ),
-            }
-        )
-        projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
+                    if not snapshot.diagnostics and all(
+                        _authorize(root, version.path, receipt=True)
+                        for version in snapshot.source_versions
+                    ):
+                        guards = records.lifecycle_guards(manifest, snapshot)
+                except collections.CollectionError:
+                    pass
+            payload = _RecordEnvelope(
+                {
+                    "kind": "collection",
+                    "report_only": True,
+                    "contract": {
+                        **_inspection_contract(manifest),
+                        "plans": [
+                            projected
+                            for plan in manifest.links.plans
+                            if (projected := _project_plan_link(root, manifest, plan, links=links))
+                            is not None
+                        ],
+                    },
+                    "legacy": None,
+                    "snapshot": inspection.snapshot,
+                    "source_versions": [
+                        {"path": version.path, "hash": version.hash}
+                        for version in inspection.source_versions[:_MAX_ITEM_ENTRIES]
+                    ],
+                    "diagnostics": diagnostics,
+                    "audit": _inspection_audit(audit),
+                    "saved_views": saved_views,
+                    "lifecycle_guards": guards,
+                    "coverage": _collection_coverage(
+                        root,
+                        manifest,
+                        committed=inspection.record_count,
+                        authorize=lambda path: _authorize(root, path, receipt=True),
+                        references=True,
+                    ),
+                    # Item-derived, so it rides the same authorized item pass the rest
+                    # of this payload does; nothing recomputes it from unfiltered bytes.
+                    **(
+                        {"observed_values": dict(inspection.observed_values)}
+                        if inspection.observed_values is not None
+                        else {}
+                    ),
+                    **(
+                        {"presentation": _presentation_inspection(inspection.presentation, manifest)}
+                        if (
+                            manifest.record_presentation is not None
+                            or manifest.item_presentation is not None
+                            or manifest.item_filename is not None
+                            or inspection.presentation
+                        )
+                        else {}
+                    ),
+                }
+            )
+            projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
         egress.emit_boundary_receipt(collector)
         return projected
 
@@ -3012,15 +3012,13 @@ def precommit_authorize_mutation(
     if snapshot is not None:
         paths.update(version.path for version in snapshot.source_versions)
         paths.update(path for path, kind, _digest in snapshot.source_inventory if kind == "file")
-    with (
-        authorization_pass(root),
-        egress.disclosure_boundary(root, "record_mutation_precommit") as collector,
-    ):
-        for path in sorted(paths):
-            if not _authorize(root, path, receipt=True):
-                raise collections.CollectionError(
-                    "COLLECTION_NOT_FOUND", "collection was not found"
-                )
+    with egress.disclosure_boundary(root, "record_mutation_precommit", join_existing=True) as collector:
+        with authorization_pass(root):
+            for path in sorted(paths):
+                if not _authorize(root, path, receipt=True):
+                    raise collections.CollectionError(
+                        "COLLECTION_NOT_FOUND", "collection was not found"
+                    )
         egress.emit_boundary_receipt(collector)
 
 

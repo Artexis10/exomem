@@ -2298,13 +2298,7 @@ def _records_item_visible(
         proof = ownership.current(vault_root)
         return False if proof.selected(vault_root, cid) is not None or proof.owner(vault_root, path) is not None else None
     try:
-        with writer.read_snapshot():
-            # Coverage attests the whole sealed effect; a partial-field reader cannot attest it.
-            writer._operation.require_complete_fields(cid)
-            item = writer.connection.execute(
-                "SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (cid, key)
-            ).fetchone()
-            return item is not None and item[0] == path and writer._allows_item(cid, key)
+        return writer.admitted_item_metadata(cid, key, path) is not None
     except collections.CollectionError:
         return False
 
