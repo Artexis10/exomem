@@ -60,15 +60,28 @@ def test_current_page_consumers_and_replacement_share_stored_byte_identity(
     assert path.read_bytes() == replacement.encode("utf-8")
 
 
-def test_incomplete_bom_frontmatter_remains_invalid(tmp_path: Path) -> None:
+@pytest.mark.parametrize("closing", ["", "---not-a-fence\nbody\n", "----\nbody\n"])
+def test_malformed_frontmatter_remains_invalid(tmp_path: Path, closing: str) -> None:
     path = tmp_path / "page.md"
-    raw = b"\xef\xbb\xbf---\r\ntype: insight\r\n"
+    raw = ("\ufeff---\r\ntype: insight\r\n" + closing).encode("utf-8")
     path.write_bytes(raw)
 
     parsed = find_module._parse_page(path, path.stat().st_mtime, tmp_path, content=raw)
 
     assert parsed is not None and not parsed.frontmatter_valid
+    assert vault_module.parse_frontmatter(raw.decode("utf-8"))[2] is None
     assert path.read_bytes() == raw
+
+
+def test_frontmatter_closing_fence_at_eof_remains_valid(tmp_path: Path) -> None:
+    path = tmp_path / "page.md"
+    raw = b"---\ntype: insight\n---"
+    path.write_bytes(raw)
+
+    parsed = find_module._parse_page(path, path.stat().st_mtime, tmp_path, content=raw)
+
+    assert parsed is not None and parsed.frontmatter_valid
+    assert parsed.page_type == vault_module.parse_frontmatter(raw.decode("utf-8"))[0]["type"]
 
 
 def test_newline_only_concurrent_edit_refuses_a_stale_replacement(tmp_path: Path) -> None:

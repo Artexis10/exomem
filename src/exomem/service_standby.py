@@ -413,16 +413,17 @@ def _durable_generation(vault_root: Path) -> Any:
     return None if checkpoint is None else int(checkpoint.generation)
 
 
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
     """Stat signatures of the durable checkpoint and the sidecar. Opens nothing."""
     from . import epistemic_graph, graph_sync
-
-    def signature(path: Path) -> Any:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return None
-        return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     try:
         sidecar = epistemic_graph.sidecar_path(Path(vault_root))
@@ -433,7 +434,15 @@ def _graph_stat(vault_root: Path) -> tuple[Any, ...]:
         )
     except Exception:  # noqa: BLE001 - an unresolvable state root never matches
         return (object(),)
-    return tuple(signature(path) for path in paths)
+    return tuple(_file_stat(path) for path in paths)
+
+
+def _catalogue_stat(vault_root: Path) -> tuple[Any, ...]:
+    """Observe atomic catalogue replacement and SQLite WAL publication."""
+    from . import lexstore
+
+    path = lexstore.lexical_path(vault_root)
+    return _file_stat(path), _file_stat(path.with_name(path.name + "-wal"))
 
 
 def _graph_snapshot_signal(vault_root: Path) -> tuple[Any, Any]:
@@ -506,9 +515,11 @@ def reprove_until_promoted(
     Returns whether a proof is held when it stops. Reads only, like the proof;
     the supervisor's warm budget still bounds how long a standby may wait.
     """
-    from . import readiness
+    from . import freshness, readiness
 
     interval = REPROVE_POLL_SECONDS if poll_seconds is None else poll_seconds
+    catalogue_stat = None
+    catalogue_reseeded_at = None
     while True:
         with _lock:
             if not _standby or _promoting or _promoted or _discarded:
@@ -520,6 +531,20 @@ def reprove_until_promoted(
         except Exception:  # noqa: BLE001 - a failed re-proof leaves the held proof
             log.warning("standby graph snapshot re-proof failed", exc_info=True)
         if not catalogue_built and not readiness.is_ready("lexical"):
+            observed = _catalogue_stat(vault_root)
+            now = _clock()
+            if observed != catalogue_stat and (
+                catalogue_reseeded_at is None
+                or now - catalogue_reseeded_at >= REPROVE_INTERVAL_SECONDS
+            ):
+                # No watcher runs here. Refresh only after publication moves,
+                # at the existing proof interval, never on every polling pass.
+                try:
+                    freshness.rebaseline(vault_root)
+                    catalogue_stat = observed
+                except Exception:  # noqa: BLE001 - an unseeded scope stays waiting
+                    log.warning("standby recall registry reseed failed", exc_info=True)
+                catalogue_reseeded_at = _clock()
             if prove_retrieval_catalog(vault_root):
                 _warm_proven_catalogue(vault_root)
         if stop.wait(interval):

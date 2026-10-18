@@ -391,6 +391,7 @@ def test_a_waiting_standby_recovers_after_the_serving_worker_repairs_its_catalog
     assert lexstore.live_catalog_compatible(root)
     assert service_standby.cutover_components()["lexical"] == "waiting"
 
+    path.write_text(path.read_text(encoding="utf-8") + "\nAnother owner write.\n", encoding="utf-8")
     subprocess.run(
         [sys.executable, "-c", "import sys; from pathlib import Path; "
          "from exomem import lexstore; lexstore.ensure_fresh(Path(sys.argv[1]))", str(root)],

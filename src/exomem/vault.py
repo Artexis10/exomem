@@ -358,7 +358,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 # Markdown fences delimit YAML; the optional UTF-8 BOM stays outside the YAML block.
-_FM_PATTERN = re.compile(r"^\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n)?(.*)", re.DOTALL)
+_FM_PATTERN = re.compile(r"^\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)(.*)", re.DOTALL)
 _LOCK_NAMESPACES = frozenset(
     {"activation-manifest", "semantic-creation", "lexical-catalog-publication"}
 )
