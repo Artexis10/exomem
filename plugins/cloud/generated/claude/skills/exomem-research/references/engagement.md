@@ -248,7 +248,7 @@ Its content must be licensed by subject titles or the shipped task vocabulary;
 words appearing earlier do not themselves license carry.
 The newest earlier user entry that resolves subjects supplies them; multiple
 subjects remain ambiguous. If this misses a grounded follow-up, use the
-explicit recovery in [recall](recall.md#context-activation-packets-activate_context).
+explicit recovery in [recall](recall.md).
 
 Activation reads no attachment itself and runs no media model: only the names
 you put into `focus` count. Conversation text is used for that one call and

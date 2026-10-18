@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 67cf4ae72f5bf07eddf5e06afa6c3837586e07269fc28f6e0fbf135338358c4b
+  skill_contract: 069af83faea1e78ccb3922cfbe6b0d3d238046840ed8f0a7643fbb1a7cd140a7
   version: "0.32.0"
 ---
 
@@ -153,7 +153,7 @@ Only when needed to resolve the current subject in a long thread or attachments,
 
 For a follow-up whose subject the conversation establishes, reuse held material first.
 If another activation is needed, select that subject's visible `anchor`.
-Otherwise, use supported `conversation.focus` for grounded subject cues; see [recall](references/recall.md#context-activation-packets-activate_context).
+Otherwise, use supported `conversation.focus` for grounded subject cues; see [recall](references/recall.md).
 
 When the user corrects which page they meant, call again with `anchor` set to it;
 a `learning` advisory on that packet is handled in [engagement](references/engagement.md).
