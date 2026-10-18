@@ -364,8 +364,15 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
             there.setenv(name, value)
         start_service(other).stop()  # it adopts the replica: this host now keeps a store of its own
         assert connection.store_path(other).exists()
-    # Sync carries the other host's last replica back, so the exporting host continues its tenure.
+    # Receiving the newer tenure does not yet admit the exporting host's older local SQL.
     shutil.copy2(other / COLLECTIONS / "collections.sqlite", root / COLLECTIONS / "collections.sqlite")
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        local_before = list(reader.execute("SELECT key,value FROM store_meta ORDER BY key"))
+    assert run_export(root, "--dry-run", operator=False) == 1
+    assert "COLLECTION_STORE_UNAVAILABLE" in capsys.readouterr().err
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert list(reader.execute("SELECT key,value FROM store_meta ORDER BY key")) == local_before
+    start_service(root).stop()
     assert run_export(root, "--plan-id", preview_id(root, capsys), "--why", "roll back to files") == 0
     at = printed(capsys)["exported_at"]
     for name, value in host.items():

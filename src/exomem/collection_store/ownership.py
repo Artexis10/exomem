@@ -111,10 +111,30 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
     active = False
     fence = None
     if recorded or restored is not None or intent is not None and intent["kind"] == authority.EXPORT and intent.get("verified"):
+        from ..writer_lease import CollectionStoreFenceState
+        from . import admission, snapshot
+
         manager = manager or _manager(root)
         if manager.client is None:
             raise unavailable()
-        fence = manager.client.collection_store_fence()
+        required = None
+        if private:
+            fence = manager.client.collection_store_fence()
+        else:
+            # Status replaces the fence read; its coordinator transaction can contend briefly.
+            status = manager.client.status()
+            required = status.collection_store_head
+            if required is not None:
+                fence = CollectionStoreFenceState(status.required_collection_store_capability, True,
+                                                  required.store_id, status.collection_store_fence_generation)
+            else:
+                fence = manager.client.collection_store_fence()
+                if ((status.required_collection_store_capability is not None
+                     and status.required_collection_store_capability != fence.capability)
+                        or (status.collection_store_fence_generation is not None
+                            and status.collection_store_fence_generation != fence.generation)
+                        or not fence.enrolled and status.required_collection_store_capability is not None):
+                    raise unavailable()
         active = fence.enrolled and fence.store_id == sid
         if not fence.enrolled:
             from .export import completed_retirement_binding
@@ -122,7 +142,20 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
             completed = completed_retirement_binding(root, manager.client, sid)
             if completed is not None:
                 return Proof((placement, sid, instance, "exported", completed), None)
+            if not private and intent is not None and intent["kind"] == authority.EXPORT:
+                retired = manager.client.retired_collection_store_fence()
+                expected = authority.parse_marker(root, intent["expected_marker"])
+                if (retired.store_id != sid or retired.generation != fence.generation
+                        or expected["store_id"] != sid
+                        or expected["collection_store_fence"]["generation"] != fence.generation):
+                    raise unavailable()
+                required = retired.collection_store_head
         if fence.enrolled and not active:
+            raise unavailable()
+        if required is not None and not admission.holds_head(
+                conn, required, sid, instance, lineage=snapshot.validated_lineage(meta)):
+            # Stale recovery declarations must not release a later collection as an ordinary file.
+            # Readers retry relevant reads until sufficient recovery state arrives.
             raise unavailable()
     if not active and not private and intent is None and not recorded and restored is None:
         # An incidental dark preview database cannot enroll a file-only vault.
@@ -198,7 +231,7 @@ def resolve(root, *, conn=None, private=False, path=None, manager=None):
         with closing(reader):
             reader.execute("BEGIN")
             return _canonical(root, reader, placement, recorded, private=private, manager=manager)
-    except (sqlite3.Error, OSError, ValueError, KeyError, collections.CollectionError,
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError, collections.CollectionError,
             connection.CollectionStoreError, held_fs.HeldFsError, RuntimeError):
         raise unavailable() from None
 

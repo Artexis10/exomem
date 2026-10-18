@@ -1038,11 +1038,18 @@ def _routed_store(session):
     """The marker this takeover serves, with the coordinator's store fence bound to it.
 
     A copied vault meeting a fresh coordinator cuts the fence over from its marker,
-    which revokes any earlier token, so this precedes the lease acquisition. It reads
-    only the store's head, which a store an earlier release wrote keeps unmigrated.
+    which revokes any earlier token, so this precedes the lease acquisition. Its
+    structural declarations do not establish public file authority or store admission.
     """
-    if session.path.exists():
-        with closing(connection.open_head_reader(session.path)) as reader:
+    from . import ownership
+
+    _, enrolled = ownership.enrollment(session.root)
+    local = session.path.exists()
+    marker = None
+    if local:
+        reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+        with closing(reader):
+            reader.execute("BEGIN")
             intent = authority.pending_create(reader)
             if intent is not None:
                 from .runtime import served
@@ -1058,12 +1065,12 @@ def _routed_store(session):
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
+            if enrolled:
+                # Recovery needs namespace facts before takeover can satisfy a public reader's head floor.
+                current_fence = session.fence_client.collection_store_fence()
+                marker, _ = ownership.declarations(session.root, reader, generation=max(1, current_fence.generation))
     raw = authority.read_marker(session.root)
-    from . import ownership
-
-    _, enrolled = ownership.enrollment(session.root)
-    if enrolled and session.path.exists():
-        marker = ownership.resolve(session.root, manager=session.manager).marker
+    if enrolled and local:
         if marker is None:
             raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no admitted collection store remains")
     else:
@@ -1328,12 +1335,14 @@ def _acquired(runtime, fence, code):
     return acquired
 
 
-def holds_head(conn, recorded, store_id, instance_id):
-    """Whether ``recorded``, a head the coordinator recorded, is this store's: its store, instance and chain."""
+def holds_head(conn, recorded, store_id, instance_id, *, lineage=None):
+    """Require this store's instance and chain; a validated lineage also accepts its recorded ancestors."""
     found = conn.execute(
         "SELECT store_head_hash FROM txns WHERE commit_seq=?", (recorded.commit_seq,),
     ).fetchone() if recorded.commit_seq else (None,)
-    return recorded.store_id == store_id and recorded.instance_id == instance_id and found == (recorded.head_hash,)
+    belongs = recorded.instance_id == instance_id or (lineage is not None and any(
+        entry["instance_id"] == recorded.instance_id for entry in lineage))
+    return recorded.store_id == store_id and belongs and found == (recorded.head_hash,)
 
 
 def _verify_acquisition(writer, runtime, fence, target):

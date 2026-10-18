@@ -21,7 +21,11 @@ Collection ownership SHALL derive from the complete admitted local store: collec
 
 Admission, import and restore SHALL validate full stored-path containment against complete canonical declarations. Routine ownership proofs SHALL validate declaration namespaces without a row-wide path census. Selected projection reads and publication SHALL require each path to belong to its canonical collection. Row writes SHALL keep generated paths within declared regions.
 
-The existing mode marker SHALL remain a compatibility hint and transition preimage. Missing or older marker membership SHALL NOT return a canonical collection to file authority. Trusted production enrollment, the current fence and the acquired head SHALL establish the binding. A completed export and verified retired fence SHALL take precedence over residual prior-enrollment metadata. A dark preview database SHALL NOT establish production enrollment.
+The existing mode marker SHALL remain a compatibility hint and transition preimage. Missing or older marker membership SHALL NOT return a canonical collection to file authority. Trusted production enrollment, the current fence and the coordinator's recorded head SHALL establish the binding. A completed export and verified retired fence SHALL take precedence over residual prior-enrollment metadata. A dark preview database SHALL NOT establish production enrollment.
+
+Every canonical ownership sample SHALL contain the coordinator's currently recorded head within the same store and a valid instance lineage. Initial and terminal samples SHALL each prove containment; their ownership bindings SHALL still exclude ordinary heads. A failed authority read SHALL NOT mean that no head exists. A genuinely unrecorded head SHALL preserve first-create and exact-retry behavior. Unfinished exports after retirement SHALL use the matching retired-fence head as their floor. This namespace proof SHALL NOT grant row admission.
+
+Admission MAY read complete declarations as structural recovery facts before its existing acquisition and takeover decisions. Those facts SHALL establish neither ordinary file authority nor canonical row admission.
 
 First production admission SHALL include only its complete verified intent cohort when no trusted active enrollment or verified restore exists. Unrelated preview rows SHALL remain private and unchanged. A valid interrupted first-create intent SHALL remain resumable.
 
@@ -62,6 +66,19 @@ The first schema-13 delivery SHALL include both repaired ownership and the new i
 - **WHEN** concurrent row writes preserve the complete ownership binding during a generic read
 - **THEN** those writes alone do not cause an ownership refusal
 - **AND** provider work does not hold the vault mutation boundary
+
+#### Scenario: A stale recovery snapshot cannot establish file authority
+- **GIVEN** the coordinator's recorded head includes collections A and B, while a structurally valid recovery snapshot contains only A
+- **WHEN** a read tries to establish file authority using that snapshot
+- **THEN** its ownership proof is unavailable even when its initial and terminal namespace declarations match
+- **AND** compatibility hints cannot substitute for required head containment
+- **AND** provably disjoint knowledge remains readable
+
+#### Scenario: A current recovery snapshot preserves ordinary files
+- **GIVEN** a verified recovery snapshot contains the recorded head within its store and valid instance lineage
+- **WHEN** a read targets an ordinary file outside its canonical namespaces but inside a possible collection layer
+- **THEN** that file remains readable through its ordinary policy
+- **AND** the namespace proof grants no canonical row admission
 
 #### Scenario: More rows do not add an ownership census
 - **WHEN** an ordinary sibling file read obtains complete ownership proofs for collections with many rows

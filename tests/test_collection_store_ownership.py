@@ -30,7 +30,7 @@ from test_governance_egress import _receipt_records
 
 from exomem import get_page, overview, state_migration, vault_portability, writer_lease
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, connection, owner, replica, schema
+from exomem.collection_store import authority, connection, owner, replica, runtime, schema
 from exomem.collection_store.preview import preview_store
 
 
@@ -224,6 +224,79 @@ def test_an_ordinary_row_save_does_not_invalidate_a_whole_overview(service, monk
     assert not reader.is_alive()
     assert len(result) == 1 and isinstance(result[0], dict), result
     assert titles(root, CID) == ["Canonical", "Concurrent row"]
+
+
+def test_recovery_must_cover_later_collections_before_and_after_a_whole_read(service, tmp_path, monkeypatch):
+    root = service.root
+    _published(SimpleNamespace(meta=lambda: store_meta(root)))
+    old = tmp_path / "only-first.sqlite"
+    owner.backup(root, destination=old)
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+         manifest_text=DAILY_TEXT, why="second collection")
+    call(root, "record_memory", action="append", collection=DAILY,
+         item={"title": "Second canonical"}, item_key=KEY, why="capture")
+    runtime.flush_for_export(root)
+    service.stop()
+    source = replica.replica_path(root)
+    current = source.read_bytes()
+    decoy = (root / DAILY_PATH).parent / "Items" / (KEY + ".md")
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("---\ntype: record\n---\n\nLater collection decoy.\n")
+    note = root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# Independent\n\nIndependent note.\n")
+    sibling = root / "Knowledge Base/Records/Independent.md"
+    sibling.write_text("# Ordinary sibling\n\nOrdinary sibling body.\n")
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "fresh-recovery-state"))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "fresh-recovery-lease"))
+    state_migration.reset_state_resolution_cache_for_tests()
+    authority.marker_path(root).unlink()
+    assert not connection.store_path(root).exists()
+
+    def receive(data):
+        staged = source.with_name("received-snapshot.sqlite")
+        staged.write_bytes(data)
+        staged.replace(source)
+
+    receive(old.read_bytes())
+    with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+        call(root, "read_memory", path=decoy.relative_to(root).as_posix())
+    assert "Independent note." in call(root, "read_memory", path=note.relative_to(root).as_posix())["body"]
+
+    receive(current)
+    relative = sibling.relative_to(root).as_posix()
+    assert "Ordinary sibling body." in call(root, "read_memory", path=relative)["body"]
+    captured, resume = threading.Event(), threading.Event()
+    original = get_page.get_page
+    result = []
+
+    def paused(*args, **kwargs):
+        page = original(*args, **kwargs)
+        if threading.current_thread().name == "recovery-page" and not captured.is_set():
+            captured.set()
+            assert resume.wait(15)
+        return page
+
+    monkeypatch.setattr(get_page, "get_page", paused)
+
+    def read():
+        try:
+            result.append(call(root, "read_memory", path=relative))
+        except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+            result.append(error)
+
+    reader = threading.Thread(target=read, name="recovery-page")
+    reader.start()
+    try:
+        assert captured.wait(10)
+        receive(old.read_bytes())
+    finally:
+        resume.set()
+        reader.join(15)
+    assert not reader.is_alive()
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert "Ordinary sibling body." not in str(result)
 
 
 def test_an_unrelated_dark_preview_cannot_join_first_production_admission(tmp_path, monkeypatch, capsys):
