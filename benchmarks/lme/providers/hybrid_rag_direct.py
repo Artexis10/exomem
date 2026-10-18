@@ -91,14 +91,15 @@ def pack_sentences(text: str, *, chunk_tokens: int, chunk_overlap: int) -> list[
     for sentence in (part.strip() for part in _SENTENCE_END.split(text)):
         if not sentence:
             continue
-        length = len(tokenize(sentence))
+        # Stemming preserves word count; pack with the shared matcher before stemming chunks.
+        length = len(_TOKEN.findall(sentence))
         if length <= chunk_tokens:
             units.append((sentence, length))
             continue
         words = sentence.split()
         for start in range(0, len(words), chunk_tokens):
             window = " ".join(words[start : start + chunk_tokens])
-            units.append((window, len(tokenize(window))))
+            units.append((window, len(_TOKEN.findall(window))))
     chunks: list[str] = []
     index = 0
     while index < len(units):
