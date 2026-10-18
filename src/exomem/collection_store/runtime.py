@@ -352,10 +352,13 @@ class CollectionStoreRuntime:
         return [found.get(key) for key in keys]
 
     def replica_current(self):
-        """Whether the replica already carries the live committed head (a spurious commit note)."""
+        """Whether the replica already carries the live committed head and lease epoch."""
         head = self.sample_head()
-        (published,) = self._meta(schema.META_PUBLISHED_REPLICA_HEAD)
-        return published is not None and (
+        published, published_epoch, epoch = self._meta(
+            schema.META_PUBLISHED_REPLICA_HEAD, schema.META_PUBLISHED_REPLICA_EPOCH,
+            schema.META_LEASE_EPOCH,
+        )
+        return published is not None and published_epoch == epoch and (
             json.loads(published)["commit_seq"], json.loads(published)["head_hash"]
         ) == (head.commit_seq, head.head_hash)
 

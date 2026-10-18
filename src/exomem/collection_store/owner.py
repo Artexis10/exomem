@@ -243,6 +243,7 @@ def record_fork(conn, preview: dict, *, why: str, token: int):
               schema.META_FORKS: _json(forks), schema.META_REPLICA_DIVERGENCE: None,
               schema.META_VIEW_DIVERGED: None, schema.META_PENDING_REPLICA_PUBLICATION: None,
               schema.META_PUBLISHED_REPLICA_HEAD: None,
+              schema.META_PUBLISHED_REPLICA_EPOCH: None,
               schema.META_ADOPTED_FOREIGN_REPLICA: None if shared is None or ours else shared["sha256"]}
     if not ours:
         values[schema.META_LAST_PUBLISHED_REPLICA_SHA256] = None

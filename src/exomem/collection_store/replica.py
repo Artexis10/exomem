@@ -26,6 +26,7 @@ _TOKEN = snapshot._TOKEN
 _PENDING = schema.META_PENDING_REPLICA_PUBLICATION
 _DIGEST = schema.META_LAST_PUBLISHED_REPLICA_SHA256
 _PUBLISHED = schema.META_PUBLISHED_REPLICA_HEAD
+_EPOCH = schema.META_PUBLISHED_REPLICA_EPOCH
 _INTENT = schema.META_PUBLISHED_INTENT_SHA256
 
 
@@ -187,7 +188,7 @@ class _Publisher:
         metadata = _metadata(self.writer)
         # Business commits and pending creates may advance while the copy is verified.
         fixed = {key: metadata.get(key) for key in (
-            _PENDING, _DIGEST, _PUBLISHED, _INTENT, schema.META_REPLICA_DIVERGENCE,
+            _PENDING, _DIGEST, _PUBLISHED, _EPOCH, _INTENT, schema.META_REPLICA_DIVERGENCE,
             schema.META_ADOPTED_FOREIGN_REPLICA,
         )}
         topology = [(parent, set(self.filesystem.iter_names(parent)))
@@ -664,7 +665,8 @@ class _Publisher:
         head = {key: pending[key] for key in self.identity}
         # A business commit can change the live intent while verification runs.
         # Only the installed copy proves which intent a successor will read.
-        self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head), _PENDING: None,
+        self.bookkeeping({_DIGEST: pending["sha256"], _PUBLISHED: _json(head),
+                          _EPOCH: pending["lease_epoch"], _PENDING: None,
                           _INTENT: self.copied_intent(pending, artifact)})
         return head
 
@@ -796,27 +798,28 @@ class _Publisher:
         self.flush()
         return None
 
-    def carries_intent(self):
-        """Whether the installed replica holds the store's pending intent row as it is now.
+    def carries_metadata(self):
+        """Whether the installed replica holds the current pending intent and lease epoch.
 
         An intent (an export's above all) can change without a commit, so a published head
         alone does not prove that a host adopting the replica reads it.
         """
         metadata = _metadata(self.writer)
-        return _intent_digest(metadata) == metadata.get(_INTENT)
+        return (_intent_digest(metadata) == metadata.get(_INTENT)
+                and metadata.get(_EPOCH) == metadata.get(schema.META_LEASE_EPOCH))
 
     def run(self, stage_new):
         """Orderly publication: settle, then copy and swap the head known at entry, all under the boundary.
 
-        It copies at a published head too when the store's intent changed since that copy.
+        It copies at a published head too when the intent or lease epoch changed since that copy.
         """
         self.check()
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
-            if head == requested and self.carries_intent() or not stage_new:
+            if head == requested and self.carries_metadata() or not stage_new:
                 return self.current(digest, head)
-            while head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_intent():
+            while head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_metadata():
                 pending = self.begin()
                 with ExitStack() as staging:
                     artifact = staging.enter_context(snapshot.staged_snapshot(
@@ -839,7 +842,7 @@ class _Publisher:
         requested = _head(_metadata(self.writer))
         with self.bound():
             digest, head = self.settle()
-            if head == requested and self.carries_intent():
+            if head == requested and self.carries_metadata():
                 return self.current(digest, head)
             return self.begin()
 

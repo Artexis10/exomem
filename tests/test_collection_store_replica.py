@@ -106,6 +106,34 @@ def test_first_and_successive_publish_are_reopenable_business_snapshots(store):
 
 
 @pytest.mark.parametrize("concurrent", [False, True])
+def test_a_new_lease_epoch_is_published_without_a_business_commit(store, concurrent):
+    root, writer = store
+    with writer.transaction() as conn:
+        conn.execute("INSERT INTO store_meta VALUES (?,?)", (schema.META_LEASE_EPOCH, "3"))
+    assert _publish(root, writer).status == "published"
+    with writer.transaction() as conn:
+        conn.execute("UPDATE store_meta SET value=? WHERE key=?", ("4", schema.META_LEASE_EPOCH))
+
+    if concurrent:
+        @contextmanager
+        def step(_patience, _cancelled):
+            yield writer, lambda: True
+
+        result = replica.publish_replica_concurrently(
+            root, step=step, deadline=time.monotonic() + 10
+        )
+    else:
+        result = _publish(root, writer)
+
+    assert result.status == "published"
+    assert (result.commit_seq, result.head_hash) == (0, None)
+    with closing(connection.open_reader(replica.replica_path(root))) as reader:
+        assert reader.execute(
+            "SELECT value FROM store_meta WHERE key=?", (schema.META_LEASE_EPOCH,)
+        ).fetchone() == ("4",)
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
 def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
     store, monkeypatch, concurrent
 ):
