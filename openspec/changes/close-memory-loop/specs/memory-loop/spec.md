@@ -4,6 +4,30 @@ Make ordinary conversation enrich durable knowledge and supply useful context la
 
 ## ADDED Requirements
 
+### Requirement: Epistemic commitments span supported knowledge workflows
+
+The system SHALL preserve distinctions between source material, attributed interpretation, exact structured state and subsequent explanation throughout supported public knowledge workflows. Relevant qualifications, uncertainty, competing explanations and authored revisions SHALL survive those transitions. Registered vocabulary and authored content SHALL determine their representation; these examples SHALL NOT define a closed ontology.
+
+Ordinary interaction MUST NOT require scientific terminology or a prescribed experimental sequence. Evidence, relationships and retained interpretations SHALL remain inspectable on demand through their supported authorized interfaces. A structured collection SHALL retain its declared canonical authority while participating in the same provenance and correction workflow as compiled knowledge.
+
+#### Scenario: An ordinary question benefits from disciplined inquiry
+
+- **WHEN** a user asks about unexpected equipment behaviour without proposing a formal experiment
+- **THEN** the supported workflow can preserve available observations and attributed explanations without requiring methodology education
+- **AND** any proposed test, collection or commitment remains subject to its existing authority and capture rules
+
+#### Scenario: A measurement informs a qualified interpretation
+
+- **WHEN** preserved original material and an exact collection row support a qualified compiled interpretation
+- **THEN** a later authorized answer can recover the relevant measurement, interpretation, qualification and available source binding
+- **AND** an extraction or repeated interpretation is not counted as another independent evidential origin
+
+#### Scenario: Later understanding changes one proposition
+
+- **WHEN** later evidence refines or refutes one unit within a note containing other valid units
+- **THEN** the supported correction workflow preserves unaffected propositions and distinguishes retained revisions from authored epistemic relationships
+- **AND** later context preserves the relevant qualification or refutation without loading every historical revision into ordinary retrieval
+
 ### Requirement: Ordinary use closes the capture and activation loop
 
 The system SHALL support pre-turn activation, active-agent reasoning, episode decomposition before destination selection, canonical resolution and permitted writes, projection publication and subsequent activation. Delivery SHALL demonstrate ordinary-agent initiation without user reminders as well as deterministic tool execution. The active agent SHALL remain the semantic decision maker; server code SHALL validate and execute bounded typed operations without authoring semantic conclusions.
@@ -1403,6 +1427,18 @@ The existing benchmark SHALL retain its thresholds and negative controls while e
 
 - **WHEN** a hand-built packet passes scoring while the corpus has not produced the expected entities, collections and graph state through the product path
 - **THEN** scorer correctness may pass but compiler and integrated-loop acceptance fail
+
+#### Scenario: Compact context omits a necessary qualification
+
+- **WHEN** a unit-level packet uses fewer tokens than full-note retrieval but omits a reasoning-critical qualification or dependency
+- **THEN** the useful-answer comparison records the omission against its source-authored expectation
+- **AND** token reduction cannot establish a successful context or storage change
+
+#### Scenario: Backend support has no observed client journey
+
+- **WHEN** a public tool proves retained history or a precise relationship but the claimed client or viewer has not exercised it
+- **THEN** acceptance records the supported tool behaviour separately from the unverified client journey
+- **AND** a forced call does not establish ordinary agent initiation
 
 ### Requirement: Cross-client activity is a deferred bounded context input
 
