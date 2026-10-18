@@ -2287,10 +2287,27 @@ def test_the_edge_reads_no_key_and_still_reaches_the_gateway(k3s: K3sCluster, ed
     print("[edge] scenario: a request through the public route reaches the gateway")
 
     def _routed() -> bool:
-        status, _ = _public_request(k3s, "/mcp")
-        return status == 200
+        status, body = _public_request(k3s, "/mcp")
+        assert status == 200, f"public /mcp returned HTTP {status}: {body[:1024]!r}"
+        return True
 
-    _wait_for(_routed, timeout=120, interval=3, description="Traefik to route the Cloud MCP path to the gateway")
+    try:
+        _wait_for(_routed, timeout=120, interval=3, description="Traefik to route the Cloud MCP path to the gateway")
+    except AssertionError:
+        try:
+            for args in (
+                ["logs", "--namespace", edge_platform.traefik_namespace,
+                 f"deployment/{EDGE_RELEASE}-traefik", "--all-containers", "--tail=100"],
+                ["get", "service", "exomem-cloud-gateway", "--namespace", "exomem-cloud", "--output=wide"],
+                ["get", "endpointslices", "--namespace", "exomem-cloud",
+                 "--selector=kubernetes.io/service-name=exomem-cloud-gateway", "--output=wide"],
+                ["get", "pod", "gateway-standin", "--namespace", "exomem-cloud", "--output=wide"],
+            ):
+                code, output = _kubectl_bounded(k3s.name, args, seconds=5)
+                print(f"[edge] route diagnostics {args!r}: exit={code}\n{output}")
+        except Exception as error:  # noqa: BLE001 - diagnostics must not replace the route failure
+            print(f"[edge] route diagnostics failed: {error}")
+        raise
     status, body = _public_request(k3s, "/mcp")
     assert status == 200, (status, body)
     echoed = json.loads(body)
