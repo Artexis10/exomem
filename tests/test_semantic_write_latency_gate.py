@@ -71,6 +71,20 @@ def load_module():
     return module
 
 
+def test_fast_ack_samples_leave_the_next_ordinary_write_visible(tmp_path, monkeypatch) -> None:
+    """Completed custody must not suppress the benchmark's later cold writes."""
+    module = load_module()
+    monkeypatch.setattr(module.tempfile, "tempdir", None)
+    root = tmp_path / "measurement"
+
+    # The real flow asserts each committed version in keyword and hybrid reads.
+    module.measure_all([12], samples=2, root=root)
+
+    vault_root = root / "vault-12"
+    assert module.derived_receipts.recoverable_batch_count(vault_root) == 0
+    assert module.derived_receipts.stranded_batch_count(vault_root) == 0
+
+
 def result(
     pages: int,
     *,
