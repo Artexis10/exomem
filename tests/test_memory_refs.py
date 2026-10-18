@@ -1036,7 +1036,9 @@ def test_identity_resolution_names_the_reason_for_a_full_scan(
             freshness.mark_external_pending(root)
             return snapshot
 
-        monkeypatch.setattr(semantic_contract, "current_reference_identity_snapshot", changed_snapshot)
+        monkeypatch.setattr(
+            semantic_contract, "current_reference_identity_snapshot", changed_snapshot
+        )
 
     token = "identity-scan-reason"
     handle = call_spans.MCP_CALL_TOKEN.set(token)

@@ -1012,7 +1012,9 @@ def _reference_owner_view_read_only(
                 if measured is not None:
                     measured["declined_namespace_differs"] = 1
             else:
-                snapshot = semantic_contract.current_reference_identity_snapshot(root, declined=measured)
+                snapshot = semantic_contract.current_reference_identity_snapshot(
+                    root, declined=measured
+                )
         if snapshot is not None:
             owners = snapshot.reference_owners
             answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
