@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from test_graph_post_handoff_writes import (
     _QUEUED_COVERAGE_CODES,
+    GENERATED,
     NOTE_COUNT,
     WRITE_COUNT,
     _assert_incremental_latency,
@@ -51,7 +52,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _STANDBY_CHILD = '''
-import json, sys, time
+import json, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, {tests_dir!r})
@@ -59,13 +60,16 @@ from test_graph_post_handoff_writes import (  # noqa: E402
     GENERATED,
     WRITE_COUNT,
     _governed_write,
+    _run_child,
 )
 
-from exomem import graph_sync, service_standby  # noqa: E402
+from exomem import graph_sync, lexstore, service_standby  # noqa: E402
 from exomem.epistemic_graph import EpistemicGraphIndex  # noqa: E402
 
 root = Path(sys.argv[1])
-watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] == "seed"
+retry_catalogue = len(sys.argv) > 2 and sys.argv[2] == "retry"
+reprove_graph = len(sys.argv) > 2 and sys.argv[2] == "reproof"
+watcher_boot_seed = len(sys.argv) > 2 and sys.argv[2] in ("seed", "retry", "reproof")
 generated = root / GENERATED
 
 passes = []
@@ -82,15 +86,48 @@ def counted(self, **kwargs):
 
 EpistemicGraphIndex._rebuild_all_off_boundary = counted
 
+if retry_catalogue:
+    assess = lexstore.assess_live_catalog
+    first = True
+
+    def transient_assessment(*args, **kwargs):
+        global first
+        if first:
+            first = False
+            return lexstore.CatalogAssessment("unknown")
+        return assess(*args, **kwargs)
+
+    lexstore.assess_live_catalog = transient_assessment
+
 # D7: warm as a standby. No lease, no publication, no scheduler, no watcher --
 # the old worker is still the one serving and still owns every repair.
 service_standby.enter_standby()
 service_standby.warm(root)
+if reprove_graph:
+    # A separate serving interpreter republishes after the candidate's proof.
+    assert _run_child(root, root.parent, ["outgoing"])["available"]
+    service_standby.REPROVE_INTERVAL_SECONDS = 0.0
+    assert service_standby.reprove_graph_snapshot_if_due(root)
+observer = None
+if retry_catalogue:
+    assert service_standby.cutover_components()["lexical"] == "waiting"
+    observer = threading.Thread(
+        target=service_standby.reprove_until_promoted,
+        args=(root,), kwargs={{"poll_seconds": 0.01}},
+    )
+    observer.start()
+    deadline = time.monotonic() + 20
+    while not service_standby.cutover_ready():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 readiness = service_standby.readiness_payload()
 warm_passes = len(passes)
 
 # D8: the previous worker and its descendants have exited; take ownership.
 promotion = service_standby.promote(root, migrated=False)
+if observer is not None:
+    observer.join(5)
+    assert not observer.is_alive()
 
 if watcher_boot_seed:
     # The production shape this harness used to omit. A standby's activation is
@@ -117,6 +154,13 @@ if watcher_boot_seed:
 
     for scope in freshness.SCOPES:
         freshness.seed(root, scope, _entries(scope))
+
+if retry_catalogue:
+    # This arm adopted a detached catalogue, so activation heals it after seed.
+    from exomem import readiness as service_readiness, warmup  # noqa: E402
+
+    service_readiness.manage_runtime()
+    assert warmup.warm_retrieval_catalog(root)
 
 acknowledgements = []
 per_write_rebuilds = []
@@ -165,7 +209,7 @@ def _run_standby(vault: Path, tmp_path: Path, arm: str = "noseed") -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("arm", ["noseed", "seed"])
+@pytest.mark.parametrize("arm", ["noseed", "seed", "retry", "reproof"])
 def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     handoff_vault: Path, tmp_path: Path, arm: str
 ) -> None:
@@ -178,9 +222,16 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     the adoption's floor. With `graph_handoff` carried forward nothing
     re-adopts, so the first governed write fell back on
     `recall_delta_incomplete` and rebuilt the whole vault: `[1, 0, 0, ...]` in
-    the production shape against `[0] * 10` here. Both arms now hold.
+    the production shape against `[0] * 10` here. The retry and reproof arms
+    also replace the recall lineage before promotion.
     """
     _run_child(handoff_vault, tmp_path, ["outgoing"])
+    if arm == "retry":
+        from exomem import lexstore
+
+        lexstore.ensure_fresh(handoff_vault)
+        path = handoff_vault / GENERATED / "generated-note-0001.md"
+        path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     report = _run_standby(handoff_vault, tmp_path, arm)
 
     cutover = report["readiness"]
@@ -193,7 +244,7 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
         f"were {report['per_write_rebuilds']} for {report['acknowledgements']}"
     )
     assert report["rebuilds"] == 0
-    assert report["available"] is True
+    assert report["available"] is True, report
     _assert_incremental_latency(report["acknowledgements"])
 
 
@@ -589,6 +640,7 @@ from exomem.vault import walk_vault_md  # noqa: E402
 
 root = Path(sys.argv[1])
 generated = root / GENERATED
+compatible_stale = len(sys.argv) > 2 and sys.argv[2] == "compatible-stale"
 
 calls = {{"rebuild_atomic": 0, "in_place_rebuild": 0, "heal_delta": 0}}
 heal_results = []
@@ -635,6 +687,35 @@ lexstore.LexicalStore._heal_delta = counted_heal
 lexstore.heal_adopted_catalog = timed_heal_adopted
 
 live = lexstore.lexical_path(root)
+live_before = live.read_bytes()
+
+def serving_writes():
+    edited = generated / "generated-note-0001.md"
+    newline = chr(10)
+    edited.write_text(
+        edited.read_text(encoding="utf-8") + newline + "quokkaeditedafterbuild" + newline,
+        encoding="utf-8",
+    )
+    created = generated / "generated-note-9999.md"
+    created.write_text(
+        newline.join(
+            ["---", "type: note", "---", "", "# Created after the build", "", "quokkacreatedafterbuild", ""]
+        ),
+        encoding="utf-8",
+    )
+    (generated / "generated-note-0002.md").unlink()
+
+
+if compatible_stale:
+    materialize = lexstore.LexicalStore._materialize_catalog
+
+    def materialize_with_edits(self, *args, **kwargs):
+        result = materialize(self, *args, **kwargs)
+        # The completed build survives source movement before its builder returns.
+        serving_writes()
+        return result
+
+    lexstore.LexicalStore._materialize_catalog = materialize_with_edits
 
 service_standby.enter_standby()
 warm_started = time.monotonic()
@@ -643,24 +724,18 @@ warm_seconds = round(time.monotonic() - warm_started, 3)
 cutover = service_standby.readiness_payload()
 temps_at_cutover = len(list(live.parent.glob(live.name + ".rebuild-*.tmp")))
 standby_calls = dict(calls)
+live_unchanged = live.read_bytes() == live_before
+prepared_admitted = readiness.is_ready("retrieval_catalog")
 
-# The worker still serving keeps writing between the detached build and the
-# promotion: an edit, a new note and a delete, none of which this process sees.
-edited = generated / "generated-note-0001.md"
-newline = chr(10)
-edited.write_text(
-    edited.read_text(encoding="utf-8") + newline + "quokkaeditedafterbuild" + newline,
-    encoding="utf-8",
-)
-created = generated / "generated-note-9999.md"
-created.write_text(
-    newline.join(
-        ["---", "type: note", "---", "", "# Created after the build", "", "quokkacreatedafterbuild", ""]
-    ),
-    encoding="utf-8",
-)
-(generated / "generated-note-0002.md").unlink()
+if compatible_stale:
+    # Access movement after preparation must remove formerly admitted material.
+    (root / "Knowledge Base" / "_access.yaml").write_text(
+        "excluded: [Notes/Generated/generated-note-0003.md]" + chr(10), encoding="utf-8"
+    )
+else:
+    serving_writes()
 
+promotion_started = time.monotonic()
 promotion = service_standby.promote(root, migrated=False)
 
 # `release()` starts the watcher, whose boot pass seeds both recall scopes
@@ -687,19 +762,32 @@ readiness.manage_runtime()
 thread = warmup.start_background(root)
 thread.join(timeout=300)
 lexstore.await_repairs_idle(root)
+promotion_to_admission_seconds = round(time.monotonic() - promotion_started, 3)
+admitted = readiness.is_ready("retrieval_catalog")
+catalogue_current = lexstore.runtime_retrieval_catalog_current(root, schedule_repair=False)
+
+public_edited = find_module.find(
+    root, query="quokkaeditedafterbuild", mode="keyword", graph=False, rerank=False
+)
+public_created = find_module.find(
+    root, query="quokkacreatedafterbuild", mode="keyword", graph=False, rerank=False
+)
 
 print(
     json.dumps(
         {{
             "cutover": cutover,
             "warm_seconds": warm_seconds,
+            "promotion_to_admission_seconds": promotion_to_admission_seconds,
+            "live_unchanged": live_unchanged,
+            "prepared_admitted": prepared_admitted,
             "temps_at_cutover": temps_at_cutover,
             "standby_calls": standby_calls,
             "promotion": promotion,
             "calls": calls,
             "heal_results": heal_results,
             "heal_ms": heal_ms,
-            "admitted": readiness.is_ready("retrieval_catalog"),
+            "admitted": admitted,
             "compatible": getattr(lexstore, "live_catalog_compatible", lambda _r: None)(root),
             "edited_found": bool(
                 lexstore.search_bm25(root, "quokkaeditedafterbuild", k=3, scope="kb")
@@ -707,8 +795,14 @@ print(
             "created_found": bool(
                 lexstore.search_bm25(root, "quokkacreatedafterbuild", k=3, scope="kb")
             ),
+            "public_edited": [hit.path for hit in public_edited],
+            "public_created": [hit.path for hit in public_created],
+            "current": catalogue_current,
             "deleted_rows": lexstore.get_store(root).page_content_hashes(
                 [str((generated / "generated-note-0002.md").relative_to(root).as_posix())]
+            ),
+            "excluded_rows": lexstore.get_store(root).page_content_hashes(
+                [str((generated / "generated-note-0003.md").relative_to(root).as_posix())]
             ),
             "temps_after": len(list(live.parent.glob(live.name + ".rebuild-*"))),
         }}
@@ -739,7 +833,9 @@ def _older_schema_live_catalogue(vault: Path) -> None:
         connection.close()
 
 
-def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
+def _run_catalogue_handoff(
+    vault: Path, tmp_path: Path, *, compatible_stale: bool = False
+) -> dict:
     script = tmp_path / "catalogue_handoff_child.py"
     script.write_text(
         _CATALOGUE_HANDOFF_CHILD.format(tests_dir=str(Path(__file__).parent)),
@@ -750,7 +846,7 @@ def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
         [str(Path(__file__).resolve().parents[1] / "src"), environment.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
     completed = subprocess.run(
-        [sys.executable, str(script), str(vault)],
+        [sys.executable, str(script), str(vault), "compatible-stale" if compatible_stale else "schema"],
         capture_output=True,
         text=True,
         env=environment,
@@ -761,8 +857,9 @@ def _run_catalogue_handoff(vault: Path, tmp_path: Path) -> dict:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.parametrize("compatible_stale", [False, True], ids=["schema", "compatible-stale"])
 def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
-    handoff_vault: Path, tmp_path: Path
+    handoff_vault: Path, tmp_path: Path, compatible_stale: bool
 ) -> None:
     """A schema-bump upgrade cuts over, and the writes it raced are not lost.
 
@@ -773,13 +870,22 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
     rebuild, and every one of them is searchable once retrieval is admitted.
     """
     _run_child(handoff_vault, tmp_path, ["outgoing"])
-    _older_schema_live_catalogue(handoff_vault)
-    report = _run_catalogue_handoff(handoff_vault, tmp_path)
+    if compatible_stale:
+        from exomem import lexstore
+
+        lexstore.ensure_fresh(handoff_vault)
+        path = handoff_vault / "Knowledge Base/Notes/Generated/generated-note-0000.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\nA later observation.\n", encoding="utf-8")
+    else:
+        _older_schema_live_catalogue(handoff_vault)
+    report = _run_catalogue_handoff(handoff_vault, tmp_path, compatible_stale=compatible_stale)
 
     cutover = report["cutover"]
     assert cutover["components"]["lexical"] == "ready", cutover
     assert cutover["cutover_ready"] is True, cutover
     assert report["temps_at_cutover"] == 1
+    assert report["live_unchanged"] is True
+    assert report["prepared_admitted"] is False
     assert report["standby_calls"] == {
         "rebuild_atomic": 0,
         "in_place_rebuild": 0,
@@ -795,5 +901,10 @@ def test_writes_between_the_detached_build_and_promotion_heal_without_a_rebuild(
     assert report["compatible"] is True
     assert report["edited_found"] is True
     assert report["created_found"] is True
+    assert report["public_edited"] == ["Knowledge Base/Notes/Generated/generated-note-0001.md"]
+    assert report["public_created"] == ["Knowledge Base/Notes/Generated/generated-note-9999.md"]
+    assert report["current"] is True
     assert list(report["deleted_rows"].values()) == [None]
+    if compatible_stale:
+        assert list(report["excluded_rows"].values()) == [None]
     assert report["temps_after"] == 0

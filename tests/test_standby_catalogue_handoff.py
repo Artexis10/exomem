@@ -386,6 +386,8 @@ def test_a_waiting_standby_recovers_after_the_serving_worker_repairs_its_catalog
     path = root / next(iter(NOTES))
     path.write_text(path.read_text(encoding="utf-8") + "\nA newer observation.\n", encoding="utf-8")
     _stub_graph_and_models(monkeypatch)
+    # An unknown first observation leaves time for the serving owner's repair.
+    monkeypatch.setattr(service_standby, "prepare_detached_catalog", lambda _root: False)
     service_standby.enter_standby()
     service_standby.warm(root)
     assert lexstore.live_catalog_compatible(root)
@@ -411,6 +413,182 @@ def test_a_waiting_standby_recovers_after_the_serving_worker_repairs_its_catalog
         service_standby.discard()
         observer.join(timeout=5)
     assert not observer.is_alive()
+
+
+@pytest.mark.parametrize("graph_recovers", [True, False])
+def test_a_transient_assessment_is_retried_without_a_live_publication(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch, graph_recovers: bool
+) -> None:
+    """A recovered read must permit preparation even if the old owner never repairs."""
+    import threading
+
+    root = older_catalogue
+    lexstore.ensure_fresh(root)
+    path = root / next(iter(NOTES))
+    path.write_text(path.read_text(encoding="utf-8") + "\nA newer observation.\n", encoding="utf-8")
+    _stub_graph_and_models(monkeypatch)
+    real_connect = lexstore._sqlite_connect_owned
+    locked = True
+
+    def connect(database, *args, **kwargs):
+        if locked and kwargs.get("uri"):
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore, "_sqlite_connect_owned", connect)
+    service_standby.enter_standby()
+    service_standby.warm(root)
+    assert service_standby.cutover_components()["lexical"] == "waiting"
+    before = lexstore.lexical_path(root).read_bytes()
+    locked = False
+    if not graph_recovers:
+        from exomem import epistemic_graph
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex,
+            "adopt_published_snapshot",
+            lambda self, **kwargs: epistemic_graph.SnapshotAdoption(False, reason="proof_declined"),
+        )
+    proof_finished = threading.Event()
+    prove_graph = service_standby.prove_graph_snapshot
+
+    def reprove(vault_root):
+        result = prove_graph(vault_root)
+        proof_finished.set()
+        return result
+
+    monkeypatch.setattr(service_standby, "prove_graph_snapshot", reprove)
+    observer = threading.Thread(
+        target=service_standby.reprove_until_promoted,
+        args=(root,), kwargs={"poll_seconds": 0.01},
+    )
+    observer.start()
+    try:
+        assert proof_finished.wait(5)
+        assert service_standby.cutover_components()["lexical"] == "ready"
+        assert service_standby.cutover_components()["graph_snapshot"] == (
+            "ready" if graph_recovers else "waiting"
+        )
+        assert readiness.is_ready("retrieval_catalog") is False
+        assert lexstore.lexical_path(root).read_bytes() == before
+    finally:
+        service_standby.discard()
+        observer.join(timeout=5)
+    assert not observer.is_alive()
+
+
+@pytest.mark.parametrize("observation", ["locked", "unreadable", "malformed", "unsampled"])
+def test_unknown_catalogue_observations_do_not_establish_compatible_staleness(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch, observation: str
+) -> None:
+    """A stale readiness result alone cannot authorize a detached build."""
+    root = older_catalogue
+    lexstore.ensure_fresh(root)
+    freshness.rebaseline(root)
+    if observation == "malformed":
+        with sqlite3.connect(lexstore.lexical_path(root)) as conn:
+            conn.execute("UPDATE meta SET value = 'broken' WHERE key = 'recall_checkpoint:kb'")
+    elif observation == "unsampled":
+        monkeypatch.setattr(freshness, "live_recall_checkpoint", lambda *_args: None)
+    else:
+        real_connect = lexstore._sqlite_connect_owned
+
+        def unavailable(database, *args, **kwargs):
+            if kwargs.get("uri"):
+                if observation == "locked":
+                    raise sqlite3.OperationalError("database is locked")
+                raise sqlite3.DatabaseError("file is not a database")
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(lexstore, "_sqlite_connect_owned", unavailable)
+    builds: list[Path] = []
+    monkeypatch.setattr(lexstore, "build_detached_catalog", lambda root, cancel=None: builds.append(root))
+
+    assessment = lexstore.assess_live_catalog(root)
+
+    assert assessment.compatibility == "unknown"
+    assert assessment.scopes == {}
+    assert service_standby.prepare_detached_catalog(root) is False
+    assert builds == []
+
+
+def test_compatible_assessment_compares_each_captured_projection(
+    older_catalogue: Path,
+) -> None:
+    """A vault-only change leaves the unchanged knowledge-base scope available."""
+    root = older_catalogue
+    lexstore.ensure_fresh(root)
+    (root / "outside.md").write_text("# New vault material\n", encoding="utf-8")
+    freshness.rebaseline(root)
+
+    assessment = lexstore.assess_live_catalog(root)
+
+    assert assessment.compatibility == "compatible"
+    assert assessment.scopes["kb"].complete is True
+    assert assessment.scopes["vault"].status == "stale"
+
+
+@pytest.mark.parametrize("movement", ["source", "access"])
+def test_assessment_discards_a_projection_or_access_identity_that_moves_during_read(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch, movement: str
+) -> None:
+    """A valid stored checkpoint cannot bless a candidate identity sampled earlier."""
+    root = older_catalogue
+    lexstore.ensure_fresh(root)
+    freshness.rebaseline(root)
+    read_checkpoint = lexstore.LexicalStore._meta_checkpoint
+
+    def move_after_read(self, conn, scope):
+        checkpoint = read_checkpoint(self, conn, scope)
+        if scope == "kb":
+            if movement == "source":
+                (root / "outside.md").write_text("# Later source\n", encoding="utf-8")
+                freshness.rebaseline(root)
+            else:
+                (root / "Knowledge Base/_access.yaml").write_text(
+                    "excluded: [Notes/Insights/handoff-0.md]\n", encoding="utf-8"
+                )
+        return checkpoint
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_meta_checkpoint", move_after_read)
+
+    assessment = lexstore.assess_live_catalog(root)
+
+    assert assessment.compatibility == "unknown"
+    assert assessment.scopes == {}
+
+
+def test_assessment_reads_committed_wal_without_rewriting_the_live_catalogue(
+    older_catalogue: Path,
+) -> None:
+    """The checkpointed main alone cannot describe the serving worker's catalogue."""
+    root = older_catalogue
+    freshness.rebaseline(root)
+    live = lexstore.lexical_path(root)
+    store = lexstore.get_store(root)
+    conn = store._connect_setup()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                (str(lexstore.SCHEMA_VERSION),),
+            )
+            conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'catalog_identity'",
+                (lexstore.catalog_semantic_identity(root),),
+            )
+        before_main = live.read_bytes()
+        wal = live.with_name(live.name + "-wal")
+        before_wal = wal.read_bytes()
+
+        assessment = lexstore.assess_live_catalog(root)
+
+        assert assessment.compatibility == "compatible"
+        assert all(scope.complete for scope in assessment.scopes.values())
+        assert live.read_bytes() == before_main
+        assert wal.read_bytes() == before_wal
+    finally:
+        conn.close()
 
 
 def test_a_discarded_standby_removes_its_detached_catalogue(

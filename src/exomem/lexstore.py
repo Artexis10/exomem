@@ -74,7 +74,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from . import call_spans, foreground_priority, reserved_paths
 from .kbdir import kb_dirname
@@ -978,6 +978,19 @@ class CatalogReadiness:
     backend: str
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogAssessment:
+    """Read-only compatibility and exact readiness at captured scope checkpoints.
+
+    Unknown observations cannot establish stale preparation. This assessment
+    never admits runtime retrieval or promises that a detached build is current.
+    """
+
+    # These are assessment outcomes, not configurable knowledge vocabulary.
+    compatibility: Literal["compatible", "incompatible", "unknown"]
+    scopes: Mapping[str, CatalogReadiness] = field(default_factory=dict)
+
+
 _CatalogValue = TypeVar("_CatalogValue")
 
 
@@ -1626,6 +1639,15 @@ def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> N
 def live_catalog_compatible(vault_root: Path) -> bool:
     """Whether the live catalogue carries this release's schema and identity."""
     return get_store(vault_root).live_catalog_compatible()
+
+
+def assess_live_catalog(
+    vault_root: Path, *, require_live_projection: bool = True
+) -> CatalogAssessment:
+    """Assess a live catalogue without repairing or publishing any state."""
+    return get_store(vault_root).assess_live_catalog(
+        require_live_projection=require_live_projection
+    )
 
 
 def build_detached_catalog(
@@ -4442,7 +4464,9 @@ class LexicalStore:
     )
 
     @staticmethod
-    def _pages_has_current_columns(conn: sqlite3.Connection) -> bool:
+    def _pages_has_current_columns(
+        conn: sqlite3.Connection, *, raise_errors: bool = False
+    ) -> bool:
         """Read-only: do `pages` and `semantic_units` carry every sentinel?"""
         try:
             return LexicalStore._CURRENT_PAGES_COLUMNS <= {
@@ -4451,9 +4475,14 @@ class LexicalStore:
                 row[1] for row in conn.execute("PRAGMA table_info(semantic_units)")
             }
         except sqlite3.OperationalError:
+            # Positive assessments must distinguish unreadable from legacy.
+            if raise_errors:
+                raise
             return False
 
-    def _schema_is_current(self, conn: sqlite3.Connection) -> bool:
+    def _schema_is_current(
+        self, conn: sqlite3.Connection, *, raise_errors: bool = False
+    ) -> bool:
         """Read-only probe: is the catalog schema at the current version AND the
         current mutation-safe shape? Emits NO DDL, so the ordinary read paths
         (`catalog_readiness`, the foreground delta apply) can consult it without
@@ -4465,10 +4494,12 @@ class LexicalStore:
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()
         except sqlite3.OperationalError:
+            if raise_errors:
+                raise
             return False  # no `meta` table yet
         if not (row and row[0] == str(SCHEMA_VERSION)):
             return False
-        return self._pages_has_current_columns(conn)
+        return self._pages_has_current_columns(conn, raise_errors=raise_errors)
 
     def _create_catalog_tables(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -6547,12 +6578,99 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
+    def assess_live_catalog(
+        self, *, require_live_projection: bool = True
+    ) -> CatalogAssessment:
+        """Distinguish positively stale compatible rows from an unknown read.
+
+        Capture both candidate projections before one SQLite read transaction.
+        Schema, semantic identity and stored checkpoints share that snapshot;
+        the candidate's identities and projections must still match afterwards.
+        Missing or malformed checkpoints never count as compatible staleness.
+        """
+        from . import freshness as freshness_module
+        from . import recall_policy
+
+        unknown = CatalogAssessment("unknown")
+        backend_name = backend()
+        if backend_name == "python" or self._failed or not self.path.exists():
+            return unknown
+        identity = catalog_semantic_identity(self.vault_root)
+        policy = recall_policy.recall_policy_identity(self.vault_root)
+        checkpoint_for = (
+            freshness_module.live_recall_checkpoint
+            if require_live_projection
+            else freshness_module.recall_checkpoint
+        )
+        targets = {
+            scope: checkpoint_for(self.vault_root, scope)
+            for scope in freshness_module.SCOPES
+        }
+        conn: sqlite3.Connection | None = None
+        try:
+            with reserved_paths._subsystem_authority_scope("lexstore"):
+                with reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=("lexical-store",),
+                    identity_may_change=False,
+                ):
+                    with reserved_paths._sqlite_owner_target_scope(
+                        self.vault_root, self.path, "lexical-store", create=False
+                    ) as retained_path:
+                        # Read the live WAL with normal locking; immutable is unsafe
+                        # for a changing database.
+                        conn = _sqlite_connect_owned(
+                            f"{retained_path.as_uri()}?mode=ro", uri=True
+                        )
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("BEGIN")
+            if not self._schema_is_current(conn, raise_errors=True):
+                assessment = CatalogAssessment("incompatible")
+            else:
+                stored_identity = self._meta_catalog_identity(conn)
+                if stored_identity is None:
+                    return unknown
+                if stored_identity != identity:
+                    assessment = CatalogAssessment("incompatible")
+                else:
+                    scopes: dict[str, CatalogReadiness] = {}
+                    for scope, target in targets.items():
+                        stored = self._meta_checkpoint(conn, scope)
+                        if (
+                            target is None
+                            or target.triple is None
+                            or (target.policy_version, target.access_policy_fingerprint) != policy
+                            or stored is None
+                            or stored.triple is None
+                        ):
+                            return unknown
+                        current = _checkpoint_state(stored) == _checkpoint_state(target)
+                        scopes[scope] = CatalogReadiness(
+                            "available" if current else "stale", current, backend_name
+                        )
+                    assessment = CatalogAssessment("compatible", scopes)
+            if (
+                catalog_semantic_identity(self.vault_root) != identity
+                or recall_policy.recall_policy_identity(self.vault_root) != policy
+                or any(
+                    checkpoint_for(self.vault_root, scope) != target
+                    for scope, target in targets.items()
+                )
+            ):
+                return unknown
+            return assessment
+        except (sqlite3.Error, OSError):
+            return unknown
+        finally:
+            if conn is not None:
+                conn.close()
+
     def build_detached_catalog(
         self, cancel: threading.Event | None = None
     ) -> DetachedCatalog | None:
         """Build this release's complete catalogue beside the live one.
 
-        For a standby whose serving worker keeps an incompatible catalogue: it
+        For a standby whose serving worker cannot supply a current catalogue: it
         takes no publication barrier and makes no source proof, so it contends
         with nothing that worker holds, and it never touches the live file. The
         temp stays held by its `_RebuildTempLock` until it is adopted or

@@ -44,7 +44,7 @@ Ordinary conversations can leave durable facts uncaptured, identities disconnect
 - `context-activation`: bounded, query-matched material, origin-aware task refresh within the same turn, and truthful project-registry freshness.
 - `retrieve-inject-hook`: supported lifecycle checkpoints with bounded refresh and truthful host coverage.
 - `context-roles`: one explicit material lens, preserving owner overrides and the existing six-role ceiling.
-- `managed-service-upgrades`: a release that changes the lexical catalogue schema cuts over through a catalogue its standby built instead of a cold start.
+- `managed-service-upgrades`: a standby prepares a replacement for an incompatible or proven compatible stale catalogue without waiting for the serving owner's repair. Promotion still proves current source and access state before runtime admission.
 
 The existing `activate-agent-led-vocabulary-evolution` change continues to own scoped additive authority; its artifacts are revised with this programme rather than introducing a competing authority delta. The existing `add-context-activation-benchmark` change retains its fixture/scoring ownership. The integration contract adds no second mutation executor or canonical storage engine.
 
