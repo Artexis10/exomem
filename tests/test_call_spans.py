@@ -159,6 +159,24 @@ def test_missing_read_keeps_its_refusal_and_failed_stage_timings(vault, token) -
         assert stages[name]["fields"]["thread_cpu_us"] >= 0
 
 
+def test_idempotency_claim_is_visible_without_repeating_the_write(tmp_path, token) -> None:
+    """A slow claim must not disappear into the command body or replay its write."""
+    from exomem.writer_lease import IdempotencyStore
+
+    store = IdempotencyStore(tmp_path / "claim-state" / "idempotency.sqlite")
+    result = {"saved": True}
+
+    assert store.run("capture", "digest", lambda: result) == result
+    assert store.run(
+        "capture", "digest", lambda: pytest.fail("a replay repeated the write")
+    ) == result
+
+    stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
+    claim = stages["mutation.idempotency_claim"]
+    assert claim["count"] == 2 and claim["ms"] >= 0
+    assert claim["fields"]["thread_cpu_us"] >= 0
+
+
 def test_span_measures_real_elapsed_time(token) -> None:
     with call_spans.span("phase.sleeps"):
         time.sleep(0.02)

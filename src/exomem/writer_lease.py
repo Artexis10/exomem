@@ -3202,13 +3202,14 @@ class IdempotencyStore:
                 return _derived_acknowledgement_pending(result, acknowledgement_error)
 
         while True:
-            disposition, stored = self._claim_or_inspect(
-                key,
-                digest,
-                expires_after,
-                commit_evidence=commit_evidence,
-                legacy_graph_pending_proof=legacy_graph_pending_proof,
-            )
+            with call_spans.span("mutation.idempotency_claim"):
+                disposition, stored = self._claim_or_inspect(
+                    key,
+                    digest,
+                    expires_after,
+                    commit_evidence=commit_evidence,
+                    legacy_graph_pending_proof=legacy_graph_pending_proof,
+                )
             if disposition == "owner":
                 break
             if disposition == "pending":
