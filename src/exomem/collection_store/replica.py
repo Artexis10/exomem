@@ -338,6 +338,7 @@ class _Publisher:
         with self.writer.transaction() as conn:
             self.check()
             for key, value in values.items():
+                before = conn.total_changes
                 if value is None:
                     conn.execute("DELETE FROM store_meta WHERE key=?", (key,))
                 else:
@@ -346,6 +347,8 @@ class _Publisher:
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         (key, value),
                     )
+                # Only this known metadata statement is managed; unrelated SQL must still invalidate reuse.
+                self.writer.release_cache.account(conn.total_changes - before)
         if _PENDING in values:
             self.pending_raw = values[_PENDING]
         self.metadata = _metadata(self.writer)

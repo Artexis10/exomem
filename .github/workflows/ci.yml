@@ -378,6 +378,9 @@ jobs:
           tests/test_collection_store_replica.py::test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_exit
           tests/test_collection_store_replica.py::test_unresolved_staging_preserves_workspace_without_allocating_again
           tests/test_collection_store_replica.py::test_abandoned_predecessor_aside_releases_owners_before_workspace_removal
+          tests/test_collection_store_runtime.py::test_coalesced_publication_keeps_warm_release_work_bounded
+          tests/test_collection_store_runtime.py::test_external_sql_during_publication_invalidates_warm_data_without_a_head_change
+          tests/test_collection_store_runtime.py::test_failed_publication_transaction_returns_foreground_ownership_and_keeps_rows
           --session-timeout=600
       - name: Native reserved-path compatibility gate
         env:
