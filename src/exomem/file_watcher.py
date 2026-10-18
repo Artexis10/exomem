@@ -1140,10 +1140,21 @@ class FileWatcher:
             return None
         return max(0.0, min(deadlines) - time.monotonic())
 
-    def _record(self, path: Path, *, deleted: bool) -> None:
+    def _notify_view_change(self, path: Path, *, destination=None, directory=False) -> None:
+        from .collection_store import runtime
+
+        try:
+            runtime.notify_view_change(self._vault_root, path, destination=destination, directory=directory)
+        except Exception:  # noqa: BLE001 - a failed hint must not stop the existing index publishers
+            log.debug("collection view notification failed", exc_info=True)
+
+    def _record(self, path: Path, *, deleted: bool, notify_views: bool = True) -> None:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
 
+        if notify_views:
+            # A same-stat external save can match index suppression; edit-back still needs its hint.
+            self._notify_view_change(path)
         rel = self._rel(path)
         if rel == f"{kb_prefix()}_access.yaml":
             # Access policy changes are a publication boundary despite not
@@ -2208,21 +2219,29 @@ class FileWatcher:
 
         class _Handler(FileSystemEventHandler):
             def on_created(self, event):  # noqa: ANN001
-                if not event.is_directory:
+                if event.is_directory:
+                    watcher._notify_view_change(Path(event.src_path), directory=True)
+                else:
                     watcher._record(Path(event.src_path), deleted=False)
 
             def on_modified(self, event):  # noqa: ANN001
-                if not event.is_directory:
+                if event.is_directory:
+                    watcher._notify_view_change(Path(event.src_path), directory=True)
+                else:
                     watcher._record(Path(event.src_path), deleted=False)
 
             def on_deleted(self, event):  # noqa: ANN001
-                if not event.is_directory:
+                if event.is_directory:
+                    watcher._notify_view_change(Path(event.src_path), directory=True)
+                else:
                     watcher._record(Path(event.src_path), deleted=True)
 
             def on_moved(self, event):  # noqa: ANN001
+                watcher._notify_view_change(Path(event.src_path), destination=Path(event.dest_path),
+                                            directory=event.is_directory)
                 if not event.is_directory:
-                    watcher._record(Path(event.src_path), deleted=True)
-                    watcher._record(Path(event.dest_path), deleted=False)
+                    watcher._record(Path(event.src_path), deleted=True, notify_views=False)
+                    watcher._record(Path(event.dest_path), deleted=False, notify_views=False)
 
         self._dispatch_waits_for_seed = freshness.event_indexes_enabled()
         self._thread = threading.Thread(

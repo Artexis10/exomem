@@ -764,12 +764,17 @@ class WindowsHeldFilesystem(HeldFilesystem):
         except OSError as error:
             return HeldResult(error=_error(error))
 
-    def read(self, file: HeldFile) -> HeldResult[bytes]:
+    def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         try:
             checked = self._check_file(file)
+            if max_bytes is not None and checked.version().size > max_bytes:
+                return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
-            chunks = []
+            chunks, size = [], 0
             while chunk := os.read(checked.descriptor, 65536):
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))
                 chunks.append(chunk)
             return HeldResult(value=b"".join(chunks))
         except OSError as error:

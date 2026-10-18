@@ -13,9 +13,9 @@ import json
 import sqlite3
 import uuid
 from collections import ChainMap
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from .. import (
     record_formats,
     records,
     state_paths,
+    sync_providers,
     vault,
     writer_lease,
 )
@@ -151,14 +152,18 @@ class CollectionWriter:
     def _recheck_guard(self, guard, *, publication=False):
         self._publication.guards[id(guard)] = (guard, publication)
         try:
-            guard.recheck(self.root)
+            if isinstance(guard, views._AliasInput):
+                with self._publication._boundary():
+                    guard.recheck(self.root)
+            else:
+                guard.recheck(self.root)
         except vault.PathGuardError as error:
             if publication:
                 raise records._publication_error(error) from error
             raise
 
     @contextmanager
-    def _mutation(self, *, reconcile=False):
+    def _mutation(self, *, reconcile=False, stop=None):
         batch = None
         recovery_only = False
         try:
@@ -169,14 +174,14 @@ class CollectionWriter:
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "collection store requires reconciliation"
                     )
-                batch = self._publication = views.PublicationBatch(self)
+                batch = self._publication = views.PublicationBatch(self, stop=stop)
                 self._row_counts = {}
-                if self._view_edit is not None:
+                if self._view_edit is not None and not self._view_edit.get("partial_log"):
                     # The edited bytes become canonical here, so displacing them loses nothing.
                     batch.accept(self._view_edit["path"], self._view_edit["digest"])
                 try:
                     yield
-                    if self._view_edit is not None and batch.business_started:
+                    if self._view_edit is not None and not self._view_edit.get("partial_log") and batch.business_started:
                         # A later valid edit of a view resolves the holds of its earlier bytes there.
                         self._resolve_in_place(self._view_edit["path"], self._view_edit["base"])
                 except _RecoveryOnly:
@@ -803,8 +808,8 @@ class CollectionWriter:
             after_manifest = before_manifest
         transition = records._transition_id()
         committed_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        view_edit = self._view_edit is not None and not control
-        recorded = edit_back.OPERATION if view_edit else operation
+        view_edit = (self._view_edit is not None or operation in {"view_move", "view_frame_edit"}) and not control
+        recorded = edit_back.OPERATION if self._view_edit is not None and not control else operation
         event = {
             "transition_id": transition,
             "collection_id": manifest.collection_id,
@@ -828,8 +833,8 @@ class CollectionWriter:
             "transition_id": transition,
             "collection_id": manifest.collection_id,
             "operation": recorded,
-            "profile_operation": f"plan_{'add' if operation == 'append' else operation}"
-            if manifest.semantic_profile == "planning" and not control
+            "profile_operation": f"plan_{'add' if operation == 'append' else 'update' if operation == 'view_move' else operation}"
+            if manifest.semantic_profile == "planning" and not control and operation != "view_frame_edit"
             else None,
             "generation_before": generation,
             "generation_after": generation + (not control),
@@ -849,7 +854,19 @@ class CollectionWriter:
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
         valid = mutation_terminal.valid_collection_receipt(receipt)
-        if txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
+        if txn["operation"] == "view_frame_edit":
+            # This private leaf has no item effect and cannot truthfully return a Records update receipt.
+            valid = (set(receipt) == {"operation", "collection_id", "transition_id", "commit_seq",
+                                      "before_container_hash", "after_container_hash"}
+                     and all(receipt[key] == txn[key] for key in
+                             ("operation", "collection_id", "transition_id", "commit_seq"))
+                     and receipt["before_container_hash"] == tokens.container_hash(
+                         txn["collection_id"], txn["generation_before"], txn["prev_event_hash"])
+                     and receipt["after_container_hash"] == tokens.container_hash(
+                         txn["collection_id"], txn["generation_after"], txn["event_hash"])
+                     and txn["generation_after"] == txn["generation_before"] + 1
+                     and txn["profile_operation"] is None)
+        elif txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
             valid = (
                 mutation_terminal.valid_control_receipt(receipt)
                 and receipt["operation"] == txn["operation"]
@@ -912,6 +929,16 @@ class CollectionWriter:
         Without the edit-back release, a valid or formatting-only edit waits in place, as
         before edit-back existed.
         """
+        if views.unresolved_target(projection, source):
+            _, manifest, _ = self._collection(projection["collection_id"])
+            _, text = self._render_view(projection, manifest)
+            if raw != text.encode():
+                item = self._item(projection["collection_id"], self.connection.execute(
+                    "SELECT item_key FROM items WHERE row_id=?", (projection["row_id"],)).fetchone()[0])
+                self._hold_detached(manifest, projection["path"], raw, edit_back.CONFLICT,
+                                    item=item, token=token, slot=slot)
+                self._publication.accept(projection["path"], hashlib.sha256(raw).hexdigest())
+                return True
         if projection["kind"] == "log":
             return self._register_log_input(projection, raw, token, slot, source=source)
         batch = self._publication
@@ -993,7 +1020,7 @@ class CollectionWriter:
             if found.code == edit_back.FOREIGN:
                 batch.foreign_discovered = True
             holds = [(found, raw, edit_back.held_id(path, raw=raw), edit_back.whole_log_candidate(), None)]
-        elif any(block.code is None for block in found.blocks):
+        elif (found.frame is not None and found.frame.code is None) or any(block.code is None for block in found.blocks):
             batch.pending = True  # edit-back applies the edited blocks once the view settles
             return False
         else:
@@ -1050,6 +1077,14 @@ class CollectionWriter:
             self._publication.pending = True
             return False
         metadata = metadata.pop()
+        return self._store_view_correction(projection, code, raw, reference, diagnostics, base,
+                                           metadata, candidate=candidate)
+
+    def _store_view_correction(self, projection, code, raw, reference, diagnostics, base, metadata,
+                               *, candidate=None, quarantined=False):
+        """Persist a correction after the caller derives its canonical authority."""
+        # Summary render bytes contain owner-only counts and basis; their held bytes retain that floor.
+        quarantined = quarantined or projection["kind"] == "summary"
         _, manifest, _ = self._collection(projection["collection_id"])
         path = f"{records._held_directory(manifest)}/{reference}.md"
         now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1063,14 +1098,14 @@ class CollectionWriter:
         diagnostics = _json([diagnostics])
         self._execute(
             "INSERT INTO held_candidates(held_id,collection_id,kind,code,candidate_json,held_bytes,"
-            "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash) "
-            "VALUES (?,?,'view-correction',?,?,?,?,?,?,?,?,?) ON CONFLICT(held_id) DO UPDATE SET "
+            "diagnostics_json,view_path,base_row_version,updated_at,governance_json,governance_hash,quarantined) "
+            "VALUES (?,?,'view-correction',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(held_id) DO UPDATE SET "
             "code=excluded.code,candidate_json=excluded.candidate_json,held_bytes=excluded.held_bytes,"
             "diagnostics_json=excluded.diagnostics_json,base_row_version=excluded.base_row_version,"
             "updated_at=excluded.updated_at,governance_json=excluded.governance_json,"
-            "governance_hash=excluded.governance_hash",
-            (reference, projection["collection_id"], code, _json(candidate), raw, diagnostics, path,
-             base if type(base) is int else None, now, metadata, hashlib.sha256(raw).hexdigest()),
+            "governance_hash=excluded.governance_hash,quarantined=excluded.quarantined",
+            (reference, projection["collection_id"], code, _json(records._encode_held_value(candidate)), raw, diagnostics, path,
+             base if type(base) is int else None, now, metadata, hashlib.sha256(raw).hexdigest(), int(quarantined)),
         )
         text = views.held_view({
             "collection_id": projection["collection_id"], "held_id": reference,
@@ -1097,6 +1132,195 @@ class CollectionWriter:
             "code": edit_back.DELETED, "path": projection["path"], "base_row_version": current,
             "current_row_version": current,
         }, current, source, candidate=candidate)
+
+    def _detached_values(self, manifest, path, raw):
+        """An unbound append proposal; only the guarded append leaf validates or adopts it."""
+        from .legacy_import import _body
+
+        values, body, key = {}, "", None
+        try:
+            frontmatter, body, _ = vault.parse_frontmatter(record_formats._decode_item_bytes(raw), strict=True)
+            if isinstance(frontmatter, Mapping):
+                profile = record_formats.profile_for(manifest.semantic_profile)
+                # These are the Markdown item protocol's system properties, not customer vocabulary.
+                system = {"type", "collection_id", "schema_version", "exomem_view", profile.item_id_property}
+                values = {name: record_formats._json_value(value) for name, value in frontmatter.items()
+                          if name not in system}
+                key = memory_refs.normalize_id(frontmatter.get(profile.item_id_property))
+                body = _body(manifest, values, body)
+        except (UnicodeError, ValueError, collections.CollectionError):
+            pass
+        return {"action": "append", "item": values, "body": body, "item_key": key, "source_path": path}
+
+    def _require_detached_path(self, manifest, path, item=None):
+        """Check the proposed path against canonical metadata, never detached frontmatter."""
+        subjects = governance.iter_subjects(self.connection, manifest.collection_id, "unbound",
+            **({"identity": manifest.path} if item is None else {"row_key": item["item_key"]}))
+        try:
+            subject = next(subjects)
+        finally:
+            subjects.close()
+        basis = replace(subject.basis, subject=replace(subject.basis.subject, path=path))
+        if self._operation.decision(replace(subject, basis=basis)).level < 6:
+            self._operation.refuse()
+
+    def _detached_path_occupied(self, cid, path, *, previous=None):
+        key = collections._portable_path_key(path)
+        occupied = self.handle.release_cache.state(cid).occupied_path_keys.get(key, 0)
+        if previous is not None and collections._portable_path_key(previous) == key:
+            occupied -= 1
+        return occupied > 0 or self.connection.execute(
+            "SELECT 1 FROM projection_state WHERE path=? UNION ALL SELECT 1 FROM items WHERE view_path=? LIMIT 1",
+            (path, path)).fetchone() is not None
+
+    def _hold_detached(self, manifest, path, raw, code, *, item=None, quarantined=True,
+                       token=None, slot=None):
+        """Detached input gets canonical policy plus an owner floor when provenance is unresolved."""
+        projection = {"path": path, "collection_id": manifest.collection_id, "kind": "item",
+                      "row_id": None if item is None else item["row_id"]}
+        metadata = (item["governance_json"] if item is not None else self.connection.execute(
+            "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version="
+            "(SELECT manifest_version FROM collections WHERE collection_id=?)",
+            (manifest.collection_id, manifest.collection_id)).fetchone()[0])
+        candidate = (self._detached_values(manifest, path, raw) if item is None else
+                     {"action": "view-edit", "item_key": item["item_key"], "source_path": path})
+        reference = edit_back.held_id(path, raw=raw)
+        existing = self.connection.execute(
+            "SELECT held_bytes,quarantined,governance_json FROM held_candidates WHERE held_id=?", (reference,)).fetchone()
+        if existing == (raw, int(quarantined), metadata):
+            return True
+        return self._store_view_correction(
+            projection, code, raw, reference,
+            {"code": code, "path": path, "sha256": hashlib.sha256(raw).hexdigest(),
+             **({"token": token, "slot": slot} if token is not None else {})},
+            None if item is None else item["row_version"], metadata,
+            candidate=candidate, quarantined=quarantined)
+
+    def reconcile_detached_candidate(self, facts, *, census):
+        """Recheck one completed sweep's candidate, then hold it or record one metadata-only move."""
+        path, cid = facts["path"], facts["collection_id"]
+        vault._safe_guard_target(path)
+        with held_fs.acquire(self.root).require() as fs, fs.parent(str(Path(path).parent)).require() as parent:
+            with fs.file(parent, Path(path).name).require() as file:
+                version = file.version()
+                raw = fs.read(file, max_bytes=record_formats._MAX_ITEM_BYTES).require()
+                if (file.version() != version or asdict(version) != facts["version"]
+                        or hashlib.sha256(raw).hexdigest() != facts["digest"]):
+                    raise held_fs.HeldFsError("INPUT_CHANGED", "detached candidate changed")
+            fs.validate_directory(parent).require()
+        observed = census.db.execute("SELECT generation,manifest FROM temp.roots WHERE cid=? AND complete=1", (cid,)).fetchone()
+        if observed is None:
+            raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep is incomplete")
+        result = {"moved": False}
+        with self._mutation(reconcile=True):
+            row, manifest, _ = self._collection(cid)
+            outside = facts.get("old_path") is not None
+            if (row["generation"] != observed[0] or not _renders_rows(manifest)
+                    or (not outside and not path.startswith(manifest.storage.source + "/"))):
+                raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep basis changed")
+            if not self._publication.eligible({"collection_id": cid}):
+                raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "collection route is closed")
+            item = self._item(cid, facts["item_key"]) if facts["item_key"] is not None else None
+            self._require_detached_path(manifest, path, item)
+            projection = (None if item is None else self._publication.previous(item["view_path"]))
+            if outside and (projection is None or projection["path"] != facts["old_path"]):
+                raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "moved source basis changed")
+            stamp, identity = facts["stamp"], self._publication.identity
+            lineage = {entry["instance_id"] for entry in json.loads(self.connection.execute(
+                "SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+            code = edit_back.MOVED if outside else edit_back.UNBOUND if item is None else edit_back.CONFLICT
+            current = bool(item is not None and projection is not None and stamp is not None
+                           and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
+                           and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
+            if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+                code = edit_back.FOREIGN
+            elif item is not None and not current:
+                code = edit_back.CONFLICT if stamp and stamp["v"] < item["row_version"] else edit_back.INVALID
+            elif sync_providers.is_conflict_copy(self.root, Path(path).name):
+                code = edit_back.CONFLICT_COPY
+            canonical = None
+            if projection is not None:
+                _version, text = self._render_view(projection, manifest)
+                canonical = text.encode()
+            # Persisted inode numbers can be reused; only complete canonical bytes prove detached release authority.
+            exact = canonical == raw
+            duplicate = len(census.db.execute(
+                "SELECT path FROM temp.candidates WHERE cid=? AND item_key=? AND conflict=0 "
+                "AND json_extract(stamp,'$.s')=? AND json_extract(stamp,'$.i')=? "
+                "AND json_extract(stamp,'$.v')=? AND json_extract(stamp,'$.h')=? LIMIT 2",
+                (cid, facts["item_key"], *(stamp[name] for name in ("s", "i", "v", "h")))
+            ).fetchall()) if current else 0
+            old_guard = None
+            if not outside and current and duplicate == 1 and not sync_providers.is_conflict_copy(self.root, Path(path).name):
+                try:
+                    old_guard = vault.PathGuard.capture(self.root, projection["path"], leaf_policy="absent")
+                except vault.PathGuardError:
+                    pass  # The canonical file is still present: this is a copy, never a move.
+            occupied = self._detached_path_occupied(cid, path, previous=item["view_path"] if item else None)
+            if old_guard is not None and not occupied:
+                guard = self._publication.retire_moved_inputs(
+                    projection, path,
+                    preserve=lambda data, token, slot: self._hold_detached(
+                        manifest, path, data, edit_back.CONFLICT, item=item, token=token, slot=slot))
+                if guard is None:
+                    fresh, guard = vault.read_bounded_guarded_bytes(self.root, path, limit=record_formats._MAX_ITEM_BYTES,
+                                                                   expected_hash=facts["digest"])
+                else:
+                    fresh = guard.raw
+                if fresh != raw or (guard.leaf_identity.device, guard.leaf_identity.inode) != (version.identity.device, version.identity.inode):
+                    raise held_fs.HeldFsError("INPUT_CHANGED", "moved candidate changed")
+                self._recheck_guard(old_guard)
+                self._recheck_guard(guard)
+                if not exact:
+                    self._hold_detached(manifest, path, raw, edit_back.CONFLICT, item=item)
+                arguments = {"old_path": projection["path"], "path": path, "generation": row["generation"],
+                             "version": item["row_version"], "digest": facts["digest"]}
+                request = hashlib.sha256(b"exomem-view-move:v1\0" + _json(arguments).encode()).hexdigest()
+                request, digest, replay = self._identity("view_move", cid, arguments, request)
+                if replay is not None:
+                    return result
+                # Immutable receipt/effect facts reconstruct audit; request identity still binds the discarded formatting digest.
+                effects = {name: arguments[name] for name in ("old_path", "path", "generation", "version")}
+                txn = self._txn(row, manifest, "view_move", edit_back.why(path), request, digest, effects=effects)
+                self._execute("UPDATE items SET view_path=? WHERE row_id=?", (path, item["row_id"]))
+                self._execute("UPDATE projection_state SET path=?,install_json=NULL,stat_identity=NULL WHERE path=?",
+                              (path, projection["path"]))
+                moved = self._publication.previous(path)
+                self._publication.captured[path] = moved
+                self._publication.recovered_inputs[path] = []
+                if exact:
+                    # This context describes a canonical render, never the observed detached bytes.
+                    descriptor = {"token": uuid.uuid4().hex, "render_context": self._publication._render_context(moved, manifest)}
+                    self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (_json(descriptor), path))
+                else:
+                    descriptor = {"token": uuid.uuid4().hex, "unresolved_target_provenance": True}
+                    moved["install_json"] = _json(descriptor)
+                    self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (moved["install_json"], path))
+                    self._publication.accept(path, facts["digest"])
+                    self._pending(path, cid, "item", item["row_version"], canonical.decode(), item["row_id"], manifest=manifest)
+                self._execute(tables.INSERT_EFFECT, {
+                    "txn_id": txn["txn_id"], "ordinal": 0, "row_id": item["row_id"], "item_key": item["item_key"],
+                    "effect": "update", "effect_label": "move", "version_before": item["row_version"],
+                    "version_after": item["row_version"], "hash_before": item["payload_hash"], "hash_after": item["payload_hash"]})
+                after = self._advance(txn)
+                receipt = records._result(operation="update", manifest=manifest, key=item["item_key"],
+                    before_item_hash=self._version(item), after_item_hash=self._version(item),
+                    before_container_hash=self._container(row), after_container_hash=after,
+                    affected_paths=[projection["path"], path], payload_hash=None,
+                    outcome="committed", audit_correlation=txn["transition_id"])
+                self.handle.release_cache.touch(cid, f"exomem://{types.type_for_manifest(manifest).item_type}/{cid}/{item['item_key']}")
+                self._precommit(manifest)
+                self._insert_txn(txn, receipt)
+                result = {"moved": True, "old_path": projection["path"],
+                          "generation": txn["generation_after"]}
+            else:
+                _fresh, guard = vault.read_bounded_guarded_bytes(self.root, path, limit=record_formats._MAX_ITEM_BYTES,
+                                                                expected_hash=facts["digest"])
+                self._recheck_guard(guard)
+                self._hold_detached(manifest, path, raw, code, item=item, quarantined=not exact)
+        if result["moved"]:
+            census.db.execute("UPDATE temp.roots SET generation=? WHERE cid=?", (result["generation"], cid))
+        return result
 
     def _resolve_in_place(self, path, base):
         """Release the holds of earlier bytes at a view path once that path is valid again."""
@@ -1149,7 +1373,8 @@ class CollectionWriter:
             raise result.error
         return preserved
 
-    def reconcile_views(self, *, limit=64, after=None, pending_only=False, paths=None):
+    def reconcile_views(self, *, limit=64, after=None, pending_only=False, paths=None, missing_ready=None,
+                        stop: Callable[[], bool] | None = None):
         """Recover one path window; inspect never writes or invokes this path.
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
@@ -1158,17 +1383,24 @@ class CollectionWriter:
         edit-back, which waits for the edit to settle.
         ``paths`` maps each view edit-back settled to its observation; only those are visited,
         and only while their bytes are still the observed ones.
+        ``stop`` leaves further optional work pending between complete recovery and publication units;
+        filesystem calls and transaction finalization still finish.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
             raise ValueError("reconcile limit must be between 1 and 1024")
         if after is not None and not isinstance(after, str):
             raise ValueError("reconcile continuation must be a path")
-        result = {"examined": 0, "warnings": [], "next_path": None}
-        with self._mutation(reconcile=True):
+        result = {"examined": 0, "warnings": [], "next_path": after or ""}
+        if stop is not None and stop():
+            result["warnings"].append("projection_pending")
+            return result
+        with self._mutation(reconcile=True, stop=stop):
             batch = self._publication
             batch.bind(result)
             batch.observed = paths if paths is not None else {} if pending_only and batch.edit_back else None
             result["recovered_stages"] = batch.recovered_stages
+            if batch.stopped():
+                return result
             if paths is not None:
                 cursor = self.connection.execute(
                     "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') "
@@ -1180,23 +1412,52 @@ class CollectionWriter:
                     (after or "", not pending_only, limit + 1),
                 )
             rows = [dict(zip((c[0] for c in cursor.description), row, strict=True)) for row in cursor.fetchall()]
-            if len(rows) > limit:
+            more = len(rows) > limit
+            if more:
                 rows = rows[:limit]
-                result["next_path"] = rows[-1]["path"]
             visited_parents = set()
+            consumed = after or ""
             for projection in rows:
+                if batch.stopped():
+                    result["next_path"] = consumed
+                    break
+                preceding, consumed = consumed, projection["path"]
                 if not batch.eligible(projection):
                     continue
                 _, manifest, _ = self._collection(projection["collection_id"])
                 batch.precommits[manifest.collection_id] = manifest
                 result["examined"] += 1
                 try:
+                    if projection["kind"] == "item" and missing_ready is not None \
+                            and not missing_ready(projection["collection_id"]):
+                        # A partial census cannot recreate an old path before finding an offline rename.
+                        try:
+                            parent = batch._parent(projection["path"])
+                            opened = batch._fs().file(parent, Path(projection["path"]).name)
+                            if opened.ok:
+                                opened.require().close()
+                            elif opened.error.code == "MISSING":
+                                batch.pending = True
+                                continue
+                            else:
+                                raise opened.error
+                        except held_fs.HeldFsError as error:
+                            if error.code != "MISSING":
+                                raise
+                            batch.pending = True
+                            continue
                     parent_path = Path(projection["path"]).parent
                     if parent_path not in visited_parents:
                         batch._parent(projection["path"], create=True)
                         batch.recover_orphans(projection["path"], limit=limit)
                         visited_parents.add(parent_path)
+                        if batch.stopped():
+                            result["next_path"] = preceding
+                            break
                     projection = batch.capture_previous(projection["path"])
+                    if batch.stopped():
+                        result["next_path"] = preceding
+                        break
                     preserved = batch.recovered_inputs[projection["path"]]
                     if preserved is None:
                         continue
@@ -1209,11 +1470,18 @@ class CollectionWriter:
                     elif opened.error.code != "MISSING":
                         raise opened.error
                     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
+                    if raw is None and projection["kind"] == "item" and missing_ready is not None \
+                            and not missing_ready(projection["collection_id"]):
+                        batch.pending = True
+                        continue
                     observed = None if paths is None else paths[projection["path"]]
                     if observed is not None and digest != observed.digest:
                         continue  # changed again since it settled; the next pass looks again
                     if digest is not None and digest == projection["pending_sha256"]:
                         if not preserved:
+                            if not batch.confirm_target(projection):
+                                batch.pending = True
+                                continue
                             self._execute(
                                 "UPDATE projection_state SET published_row_version=pending_row_version,"
                                 "published_sha256=pending_sha256,pending_row_version=NULL,pending_sha256=NULL,"
@@ -1227,8 +1495,8 @@ class CollectionWriter:
                             self._execute("UPDATE projection_state SET state='current' WHERE path=?", (projection["path"],))
                         continue
                     source = {
-                        "previous_published": views._pair(projection["published_row_version"], projection["published_sha256"]),
-                        "previous_pending": views._pair(projection["pending_row_version"], projection["pending_sha256"]),
+                        "previous_published": views.source_pair(projection, "published"),
+                        "previous_pending": views.source_pair(projection, "pending"),
                         "source_contexts": projection["source_contexts"],
                     }
                     own = {projection["published_sha256"], projection["pending_sha256"],
@@ -1274,6 +1542,8 @@ class CollectionWriter:
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
                     batch.pending = True
                 self._precommit(manifest)
+            else:
+                result["next_path"] = consumed if more else None
         return result
 
     def apply_view_edit(self, observation, found):
@@ -1294,7 +1564,8 @@ class CollectionWriter:
             change, base = {**change, "expected_container_hash": self._container(row)}, row["generation"]
         else:
             identity = edit_back.request_id(observation.path, found.base, observation.digest)
-        self._view_edit = {"path": observation.path, "digest": observation.digest, "base": base}
+        self._view_edit = {"path": observation.path, "digest": observation.digest, "base": base,
+                           "partial_log": projection["kind"] == "log"}
         try:
             if projection["kind"] == "manifest":
                 return self.revise_collection(
@@ -1312,6 +1583,32 @@ class CollectionWriter:
             )
         finally:
             self._view_edit = None
+
+    def apply_view_frame(self, observation, found):
+        """Commit only authenticated log prose; other buffer components still await their own leaves."""
+        identity = edit_back.frame_request_id(observation.path, found.stamp, found.change["frame_hash"])
+        with self._mutation():
+            row, manifest, _ = self._collection(observation.projection["collection_id"])
+            previous = self.request_receipt(identity)
+            if previous is not None:
+                return previous["receipt"]
+            frame = log_view.load(row["log_frame_json"], manifest)
+            if (manifest.storage.strategy != "markdown-log" or manifest.storage.source != observation.path
+                    or not edit_back.authentic_frame_base(self, observation.projection, found.stamp)
+                    or log_view.frame_hash(frame) != found.stamp["h"]):
+                raise collections.CollectionError("VIEW_FRAME_CHANGED", "the log frame base changed")
+            self._preflight_views([observation.path])
+            txn = self._txn(row, manifest, "view_frame_edit", edit_back.why(observation.path), identity, identity)
+            self._execute("UPDATE collections SET log_frame_json=? WHERE collection_id=?",
+                          (found.change["frame_json"], manifest.collection_id))
+            after = self._advance(txn)
+            self._pending_log(manifest, txn["generation_after"])
+            receipt = {key: txn[key] for key in ("operation", "collection_id", "transition_id", "commit_seq")}
+            receipt.update(before_container_hash=self._container(row), after_container_hash=after)
+            self._insert_txn(txn, receipt)
+            self.handle.release_cache.touch(manifest.collection_id)
+            self._precommit(manifest)
+        return receipt
 
     def record_view_observations(self, observations):
         """Record the stat identity of views found holding their own bytes; no transition.
@@ -1721,8 +2018,34 @@ class CollectionWriter:
         )
         if row is None:
             raise records._held_not_found()
+        subject = self.handle.release_cache.point(f"exomem://collection-held/{cid}/{reference}")
+        if subject is None or self._operation.decision(subject).level < 6:
+            self._operation.refuse()
         row["candidate"] = records._decode_held_value(json.loads(row["candidate_json"]))
         return row
+
+    def _detached_resume_path(self, manifest, resumed):
+        """An explicit unbound resume may adopt its observed filename after fresh custody checks."""
+        if resumed is None or resumed["kind"] != "view-correction" or resumed["code"] != edit_back.UNBOUND:
+            return None
+        if manifest.storage.strategy != "markdown-items":
+            return None  # A held log block has no filename to adopt.
+        candidate = resumed["candidate"]
+        path = candidate.get("source_path")
+        vault._safe_guard_target(path)
+        if (not _renders_rows(manifest) or not path.startswith(manifest.storage.source + "/")
+                or Path(path).suffix.lower() != ".md"):
+            raise records._held_not_found()
+        raw, guard = vault.read_bounded_guarded_bytes(self.root, path, limit=record_formats._MAX_ITEM_BYTES)
+        self._require_detached_path(manifest, path)
+        self._recheck_guard(guard)
+        if raw != resumed["held_bytes"]:
+            self._hold_detached(manifest, path, raw, edit_back.UNBOUND)
+            raise collections.CollectionError("VIEW_INPUT_CHANGED", "detached source changed; both observations remain held")
+        if self._detached_path_occupied(manifest.collection_id, path):
+            raise collections.CollectionError("RECORD_ID_CONFLICT", "detached filename is already owned")
+        self._publication.accept(path, hashlib.sha256(raw).hexdigest())
+        return path
 
     def _rerender_discarded(self, held, manifest):
         """O2: discarding a correction held in place re-renders its view over the discarded bytes."""
@@ -1898,6 +2221,19 @@ class CollectionWriter:
         """
         self._publication.pending = True
         self._confirm_installed(path)
+        if kind == "log":
+            previous = self._publication.previous(path)
+            if previous is not None and previous["install_json"]:
+                descriptor = json.loads(previous["install_json"])
+                for name in ("published", "pending"):
+                    descriptor["previous_" + name] = views.source_pair(previous, name)
+                pairs = {tuple(pair) for name in ("published", "pending")
+                         if (pair := views.source_pair(previous, name))}
+                known = [*descriptor.get("source_contexts", []), descriptor.get("render_context")]
+                # Retain recorded proof before clearing the digest; deriving it after a component write is too late.
+                descriptor["source_contexts"] = list({_json(context): context for context in known
+                    if isinstance(context, dict) and (context.get("row_version"), context.get("sha256")) in pairs}.values())
+                self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (_json(descriptor), path))
         self._execute(
             "INSERT INTO projection_state(path,collection_id,row_id,kind,pending_row_version,pending_sha256,state) "
             "VALUES (?,?,NULL,?,?,NULL,'pending') ON CONFLICT(path) DO UPDATE SET "
@@ -1921,10 +2257,8 @@ class CollectionWriter:
         otherwise clear the page's digest, so its bytes would match neither recorded digest
         and read as a foreign edit that never publishes again.
         """
-        row = self.connection.execute(
-            "SELECT pending_sha256 FROM projection_state WHERE path=? AND pending_sha256 IS NOT NULL", (path,)
-        ).fetchone()
-        if row is None:
+        row = self._publication.previous(path)
+        if row is None or row["pending_sha256"] is None:
             return
         batch = self._publication
         try:
@@ -1935,7 +2269,7 @@ class CollectionWriter:
                 raw = batch._fs().read(file).require()
         except (held_fs.HeldFsError, OSError):
             return
-        if views._digest(raw) == row[0]:
+        if views._digest(raw) == row["pending_sha256"] and batch.confirm_target(row):
             self._execute("UPDATE projection_state SET published_row_version=pending_row_version,"
                           "published_sha256=pending_sha256 WHERE path=?", (path,))
 
@@ -2277,7 +2611,10 @@ class CollectionWriter:
                 return replay
             row, manifest, declared = self._collection(collection)
             self._rows_writable(manifest, "append")
-            resumed = self._held(manifest.collection_id, held)
+            resumed = self._held(manifest.collection_id, held, corrections=True)
+            if (resumed and resumed["kind"] == "view-correction" and manifest.storage.strategy == "markdown-log"
+                    and resumed["candidate"].get("action") == "view-edit"):
+                resumed = {**resumed, "candidate": edit_back.resumed_append(self, resumed, manifest)}
             if (item is None and resumed is None) or (
                 item is not None and not isinstance(item, Mapping)
             ):
@@ -2291,6 +2628,10 @@ class CollectionWriter:
             )
             if resumed and resumed["candidate"]["action"] != "append":
                 raise records._held_not_found()
+            if resumed and resumed["kind"] == "view-correction" and resumed["code"] != edit_back.UNBOUND:
+                raise records._held_not_found()
+            if item_key is None and resumed and resumed["kind"] == "view-correction":
+                item_key = resumed["candidate"].get("item_key")
             if body is None and resumed:
                 body = resumed["candidate"].get("body")
             if body is None:
@@ -2315,8 +2656,10 @@ class CollectionWriter:
             )
             try:
                 values = self._validate(manifest, declared, key, values)
+                detached_path = self._detached_resume_path(manifest, resumed)
             except collections.CollectionError as error:
-                result = self._hold(
+                # A stale adoption commits its additional quarantine before returning the refusal.
+                result = error if error.code == "VIEW_INPUT_CHANGED" else self._hold(
                     manifest,
                     error,
                     {
@@ -2373,7 +2716,9 @@ class CollectionWriter:
                     self._release(resumed)
                     self._publication.bind(result)
                 else:
-                    if manifest.storage.strategy == "markdown-log":
+                    if detached_path is not None:
+                        path = detached_path
+                    elif manifest.storage.strategy == "markdown-log":
                         path = f"{manifest.storage.source}#{key}"
                     elif manifest.view_mode == summary.SUMMARY:
                         path = None

@@ -4,6 +4,8 @@
 
 When a collection declares `item_filename`, the view of a new item SHALL use the rendered human path. When it declares `item_presentation`, the view rendered after every successful create, add, append, update, triage, or applied view edit SHALL contain the item's canonical frontmatter values and current managed presentation in one atomically published file. The substrate SHALL validate that the committed values can be rendered under the active filename and presentation recipes before commit, and SHALL refuse a mutation whose values cannot be rendered, so that no committed item can lack a renderable view.
 
+Explicit resume of a held unbound item SHALL instead adopt its existing in-root filename after fresh byte, occupancy and authorization checks. The filename SHALL persist until explicit representation maintenance applies the recipe, as for a manually moved view. A source changed since holding SHALL remain untouched and make that adoption stale. Ordinary appends SHALL retain their existing filename rules.
+
 #### Scenario: New Planning item is readable immediately
 - **WHEN** an agent adds a valid item to a Planning collection with both recipes
 - **THEN** once the post-commit projection has run, the item's view has a human title-based filename and a current readable managed block
@@ -11,6 +13,11 @@ When a collection declares `item_filename`, the view of a new item SHALL use the
 #### Scenario: Presentation failure cannot leave frontmatter-only state
 - **WHEN** a changed value cannot be rendered under the active presentation recipe
 - **THEN** the whole mutation refuses, and neither the store nor any view changes
+
+#### Scenario: Resuming an unbound item preserves its authored filename
+- **WHEN** the owner resumes an unchanged unbound item through append or add
+- **THEN** the normal writer validates and commits it once at its existing source filename
+- **AND** the census does not rediscover the adopted file as another unbound proposal
 
 ### Requirement: Managed Markdown is meaningful without becoming canonical
 

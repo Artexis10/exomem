@@ -260,10 +260,10 @@ def test_publication_scratch_is_private_on_egress(store):
 
 
 @pytest.mark.parametrize("interruption", ["before_install", "stage_unlink"])
-def test_restart_recovers_committed_stage_and_removes_only_orphan_staging(
+def test_restart_recovers_committed_stage_and_preserves_unknown_orphan_bytes(
     store, monkeypatch, interruption
 ):
-    # Both a pre-install crash and an interrupted own link pair recover without deleting unknown asides.
+    # Both a pre-install crash and an interrupted own link pair recover without deleting unknown bytes.
     from exomem.collection_store import views
 
     create(store)
@@ -305,7 +305,7 @@ def test_restart_recovers_committed_stage_and_removes_only_orphan_staging(
         reopened = CollectionWriter(root, handle)
         result = reopened.reconcile_views()
         assert get_page.get_page(root, path=path).frontmatter["title"] == "One"
-        assert not orphan.exists()
+        assert orphan.read_bytes() == b"rolled-back staged render"
         assert unknown.read_bytes() == b"unknown preserved human edit"
         assert "projection_pending" in result["warnings"]
         if interruption == "stage_unlink":
@@ -750,3 +750,41 @@ def test_a_published_log_keeps_its_imported_newline_style(store, tmp_path):
     published = source.read_bytes()
     assert SESSION_HEADING in published
     assert b"\n" not in published.replace(b"\r\n", b"")
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_an_imported_log_at_eof_keeps_no_final_newline_through_append_and_export(store, tmp_path, monkeypatch, empty):
+    """An EOF log must keep its final-newline state and separate an empty heading from its first block."""
+    from exomem import record_formats
+    from exomem.collection_store import export, log_view
+
+    def at_eof(data):
+        headings = record_formats._headings_outside_fences(data)
+        section = next(heading for heading in headings if heading.level == 2)
+        end = section.end if empty else next(heading.start for heading in headings if heading.start > section.start
+                                             and heading.level == 2)
+        return data[:end].rstrip(b"\n")
+
+    source = imported_log(store, tmp_path, at_eof)
+    _, manifest, _ = store._collection(X3_ID)
+    original_count = len(record_formats.MarkdownLogAdapter(store.root, manifest).read_bytes(source.read_bytes()).records)
+    store.append_record(X3_ID, item=SESSION, why="append at EOF")
+    store.reconcile_views()
+    view = source.read_bytes()
+    frame = store.connection.execute("SELECT log_frame_json FROM collections WHERE collection_id=?", (X3_ID,)).fetchone()[0]
+    [(_, exported)] = export._render_log(store.root, store.connection, manifest, X3_ID, frame)
+    assert not view.endswith((b"\n", b"\r")) and not exported.endswith((b"\n", b"\r"))
+    assert len(record_formats.MarkdownLogAdapter(store.root, manifest).read_bytes(exported).records) == original_count + 1
+    authored, _ = log_view.split_frame_stamp(manifest, view)
+    unstamped = b"".join(line for line in authored.splitlines(keepends=True)
+                         if record_formats.read_log_block_stamp(line) is None)
+    assert unstamped == exported
+    from test_collection_store_edit_back import passes
+
+    from exomem.collection_store import capability
+
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
+    source.write_bytes(view.replace(b"Deadlift | grey | 22", b"Deadlift | grey | 23"))
+    passes(store, 0.0, 2.0)
+    assert store.connection.execute("SELECT COUNT(*) FROM txns WHERE operation='view_frame_edit'").fetchone() == (0,)
+    assert b"Deadlift | grey | 23" in source.read_bytes() and not source.read_bytes().endswith(b"\n")

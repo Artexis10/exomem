@@ -11,13 +11,15 @@ render through ``render``, so the projection rule lives here once.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from .. import record_formats, records
-from . import typed_storage
+from .. import memory_refs, record_formats, records
+from .. import structured_collections as collections
+from . import tokens, typed_storage
 from .connection import CollectionStoreError
 
 #: The version of the stored frame shape, ``collections.log_frame_json``.
@@ -45,11 +47,7 @@ class LogFrame:
 
 def bounds(manifest, data: bytes, parsed: Sequence) -> tuple[int, int]:
     """Where a log file's blocks start and its item section ends, from the adapter's records of ``data``."""
-    section = manifest.storage.descriptor["section"]
-    headings = record_formats._headings_outside_fences(data)
-    heading = next(item for item in headings if item.level == section["level"] and item.title == section["title"])
-    end = next((item.start for item in headings if item.start > heading.start and item.level <= heading.level),
-               len(data))
+    _, end = section_bounds(manifest, data)
     return (parsed[0].span.start if parsed else end), end
 
 
@@ -67,6 +65,69 @@ def empty(manifest) -> LogFrame:
     """The frame a create stores: the declared section heading alone, with LF newlines."""
     section = manifest.storage.descriptor["section"]
     return LogFrame(f"{'#' * section['level']} {section['title']}\n", "", False, "\n", True)
+
+
+def frame_hash(frame: LogFrame) -> str:
+    """The complete canonical frame, independent of the log's row generation."""
+    return hashlib.sha256(frame.as_json().encode()).hexdigest()
+
+
+def section_bounds(manifest, data: bytes) -> tuple[record_formats._Heading, int]:
+    section = manifest.storage.descriptor["section"]
+    headings = record_formats._headings_outside_fences(data)
+    heading = next((item for item in headings
+                    if item.level == section["level"] and item.title == section["title"]), None)
+    if heading is None:
+        raise collections.CollectionError("INVALID_RECORD_SOURCE", "the declared log section is missing")
+    end = next((item.start for item in headings if item.start > heading.start and item.level <= heading.level),
+               len(data))
+    return heading, end
+
+
+def decode_block(root, manifest, raw: bytes):
+    """Exactly one declared block, with no frame or stray prose to lose during resume."""
+    prefix = empty(manifest).text.encode()
+    parsed = record_formats.MarkdownLogAdapter(root, manifest).read_bytes(prefix + raw)
+    if (parsed.diagnostics or len(parsed.records) != 1 or parsed.records[0].span.start != len(prefix)
+            or parsed.records[0].span.end != len(prefix) + len(raw) or stray_lines(raw, parsed.records[0])):
+        raise records._held_not_found()
+    return parsed.records[0]
+
+
+def split_frame_stamp(manifest, data: bytes) -> tuple[bytes, dict | None]:
+    """Remove our one complete managed line before the declared section ends, never authored text."""
+    # Apply the adapter's existing byte bound before scanning managed metadata.
+    if len(data) > record_formats._MAX_LOG_BYTES:
+        raise collections.CollectionError("RECORD_SOURCE_TOO_LARGE", "markdown log exceeds the byte limit")
+    _, end = section_bounds(manifest, data)
+    offset, found, fence = 0, [], None
+    for line in data.splitlines(keepends=True):
+        if fence is not None:
+            if record_formats._closes_fence(line, fence):
+                fence = None
+        elif (opened := record_formats._opens_fence(line)) is not None:
+            fence = opened
+        elif line.strip().startswith(b"<!-- exomem-frame "):
+            found.append((offset, line))
+        offset += len(line)
+    if not found:
+        return data, None
+    try:
+        [(offset, line)] = found
+        text = line.strip()
+        if offset >= end or not text.endswith(b" -->"):
+            raise ValueError
+        stamp = json.loads(text[len(b"<!-- exomem-frame "):-len(b" -->")])
+        # The managed frame protocol fixes these keys; the digest binds the whole frame.
+        if (not isinstance(stamp, dict) or set(stamp) != {"s", "i", "v", "h"}
+                or any(memory_refs.normalize_id(stamp.get(key)) != stamp.get(key) for key in ("s", "i"))
+                or any(not isinstance(stamp.get(key), str) for key in ("s", "i"))
+                or type(stamp["v"]) is not int or stamp["v"] < 1):
+            raise ValueError
+        tokens._hex64(stamp["h"], "frame hash")
+    except (ValueError, TypeError, KeyError):
+        raise collections.CollectionError("VIEW_FRAME_STAMP_INVALID", "the log frame stamp is malformed or duplicated") from None
+    return data[:offset] + data[offset + len(line):], stamp
 
 
 def load(frame_json: str | None, manifest) -> LogFrame:
@@ -106,15 +167,37 @@ def render_block(manifest, row: Mapping, newline: str, *, stamp=None) -> str:
                                                    view_stamp=stamp)
 
 
-def render(manifest, frame: LogFrame, blocks: Iterable[Mapping], *, stamp=None) -> str:
+def frame_for_render(frame: LogFrame, *, has_blocks: bool) -> LogFrame:
+    """The frame representation, including the separator its first block needs."""
+    if has_blocks and frame.text and not frame.text.endswith(("\n", "\r")):
+        return replace(frame, text=frame.text + frame.newline)
+    return frame
+
+
+def render(manifest, frame: LogFrame, blocks: Iterable[Mapping], *, stamp=None, frame_stamp=None) -> str:
     """The log view: the frame, one block per row in order, then the frame's suffix.
 
     ``stamp(row)`` gives the view stamp of each block (§16 A2); the export passes none,
     because file mode has no store to name.
     """
-    return frame.text + "".join(
+    rendered = "".join(
         render_block(manifest, row, frame.newline, stamp=None if stamp is None else stamp(row)) for row in blocks
-    ) + frame.suffix
+    )
+    prefix = frame_for_render(frame, has_blocks=bool(rendered)).text
+    if rendered and not frame.suffix and not frame.final_newline:
+        # Remove only the renderer's final separator; authored suffix whitespace stays exact.
+        rendered = rendered.removesuffix(frame.newline * 2)
+    text = prefix + rendered + frame.suffix
+    if frame_stamp is not None:
+        data = text.encode()
+        heading, _ = section_bounds(manifest, data)
+        # A marker before an unterminated EOF heading needs no synthetic authored separator.
+        boundary = heading.start if heading.end == len(data) and not text.endswith(("\n", "\r")) else heading.end
+        before, after = data[:boundary], data[boundary:]
+        separator = b"" if not before or before.endswith((b"\n", b"\r")) else frame.newline.encode()
+        marker = "<!-- exomem-frame " + records._canonical_json(frame_stamp).decode() + " -->" + frame.newline
+        text = (before + separator + marker.encode() + after).decode()
+    return text
 
 
 def stray_lines(block: bytes, record) -> list[bytes]:

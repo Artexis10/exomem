@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 #: The first schema that the vault state manifest guards with an ID. Every release since the
 #: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
 #: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.
@@ -772,6 +772,12 @@ _TRIGGERS_V10 = (
     BEGIN SELECT RAISE(ABORT, 'a collection is derived only at creation and never converted'); END
     """,
 )
+
+
+def _migrate_to_12(conn: sqlite3.Connection) -> None:
+    # This protocol floor prevents detached bytes from inheriting authority from copied content.
+    conn.execute("ALTER TABLE held_candidates ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0 "
+                 "CHECK (quarantined IN (0,1))")
 
 
 def _migrate_to_11(conn: sqlite3.Connection) -> None:
