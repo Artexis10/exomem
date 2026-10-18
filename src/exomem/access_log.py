@@ -22,9 +22,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from . import local_ingress
+from .cloud_cell import cloud_mode_enabled
 from .command_surface import canonical_request_id
 from .log_events import log_event
-from .cloud_cell import cloud_mode_enabled
 from .privacy_log import content_private_logging_enabled, log_http_method, log_session_ref
 
 ASGIMessage = dict[str, Any]
@@ -37,6 +37,7 @@ _REQUEST_ID_HEADER = b"x-exomem-request-id"
 _SESSION_ID_HEADER = b"mcp-session-id"
 _CF_RAY_HEADER = b"cf-ray"
 _HOST_HEADER = b"host"
+_WORKER_ENTRY_TIME = "exomem.worker_entry_time"
 #: Cloudflare's own ray shape. Under content-private logging a `cf-ray` of any
 #: other shape is caller-chosen text, so it is dropped rather than logged. A
 #: cloud cell has no Cloudflare in front of it at all, so it never logs one.
@@ -74,6 +75,18 @@ def _header_value(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None
     return None
 
 
+class WorkerRequestTimingMiddleware:
+    """Stamp HTTP middleware entry before authentication and body handling."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: ASGIMessage, receive: Receive, send: Send) -> None:
+        if scope.get("type") == "http" and not access_log_disabled():
+            scope = {**scope, _WORKER_ENTRY_TIME: time.perf_counter()}
+        await self.app(scope, receive, send)
+
+
 class AccessLogMiddleware:
     """One structured `event=http_request` record per HTTP request."""
 
@@ -104,8 +117,10 @@ class AccessLogMiddleware:
         client_ip = client[0] if client else None
 
         response_status: dict[str, int] = {}
+        final_body_sent_at: float | None = None
 
         async def send_with_correlation(message: ASGIMessage) -> None:
+            nonlocal final_body_sent_at
             if message.get("type") == "http.response.start":
                 response_status["status"] = int(message.get("status", 0))
                 response_headers = [
@@ -114,7 +129,10 @@ class AccessLogMiddleware:
                 ]
                 message = {**message, "headers": response_headers}
             await send(message)
+            if message.get("type") == "http.response.body" and not message.get("more_body", False):
+                final_body_sent_at = time.perf_counter()
 
+        worker_entry_time = scope.get(_WORKER_ENTRY_TIME)
         t0 = time.perf_counter()
         try:
             await self.app(scope, receive, send_with_correlation)
@@ -125,6 +143,16 @@ class AccessLogMiddleware:
                 "status": response_status.get("status"),
                 "duration_ms": duration_ms,
                 "request_id": request_id,
+                "worker_pre_access_ms": (
+                    round((t0 - worker_entry_time) * 1000, 2)
+                    if worker_entry_time is not None
+                    else None
+                ),
+                "worker_to_final_body_ms": (
+                    round((final_body_sent_at - worker_entry_time) * 1000, 2)
+                    if worker_entry_time is not None and final_body_sent_at is not None
+                    else None
+                ),
             }
             session_ref = log_session_ref(session_id)
             if session_ref:

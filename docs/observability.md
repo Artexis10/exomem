@@ -166,6 +166,25 @@ access log (`event=http_request`), the tool trace
 `reads.jsonl` (additive `request_id` field), and `mutations.jsonl` all carry
 it, so one request id joins every source that touched that request.
 
+The access event keeps `duration_ms` as the inner ASGI application await.
+It excludes earlier authentication and body handling, plus its own logging and metrics.
+Two additive fields describe the worker boundary:
+
+- `worker_pre_access_ms` measures worker middleware entry through the existing access timer start.
+- `worker_to_final_body_ms` measures that entry through completion of the final body send await.
+  A successful final send remains known if later cleanup fails.
+
+The entry stamp precedes FastMCP authentication and carrier handling.
+The server error middleware and configured body limit can remain outside that stamp.
+Missing entry wiring or an unfinished final send produces `null`, never zero.
+Absent fields in older records also mean unknown.
+Early refusals before access still produce no access event.
+
+These intervals overlap; do not add them.
+Final body timing excludes trailers, later cleanup, managed forwarding and client receipt.
+A streaming response measures stream lifetime when its final send completes.
+Compare finite MCP calls separately from streaming responses.
+
 ## The call ledger (`ledger.jsonl`)
 
 One durable, structured row per **MCP tool call** — read or write, success or
