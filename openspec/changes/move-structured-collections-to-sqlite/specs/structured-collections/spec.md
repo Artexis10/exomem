@@ -269,6 +269,22 @@ A vault SHALL move from file-canonical collections to the store only through a d
 - **WHEN** an agent writes to a collection while the standby is pre-importing
 - **THEN** that collection is re-imported and re-verified at handoff
 
+#### Scenario: A handoff reuses unchanged import proofs
+- **GIVEN** the standby proved several collections beside a live store
+- **WHEN** one collection changes before handoff
+- **THEN** only changed or added collections receive a fresh import and proof
+- **AND** unchanged eligible imports keep their exact envelopes, source bindings and successful proof identity
+- **AND** the candidate preserves the live chain prefix, valid references and held governance
+
+#### Scenario: A refreshed candidate changes before seal
+- **WHEN** a collection, live base, selected database identity, contents, journaling or recorded proof changes after refresh
+- **THEN** the migration rechecks the current candidate within its deadline or abandons without publishing stale data
+- **AND** cleanup preserves unknown scratch bytes and another active migration's files
+
+#### Scenario: A sealed candidate changes before installation
+- **WHEN** the sealed database changes before installation
+- **THEN** the migration refuses that candidate and preserves the live store and changed staging bytes
+
 #### Scenario: A handoff that cannot finish its migration completes in file mode
 - **WHEN** a managed handoff's migration cannot finish within its budget
 - **THEN** the migrator publishes no store, marker or fence cut and exits successfully

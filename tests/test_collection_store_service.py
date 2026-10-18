@@ -11,6 +11,7 @@ state, as the release would.
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import json
 import os
@@ -380,6 +381,83 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     assert (DAILY_PATH, capability.UNAVAILABLE) in {
         (row["path"], row["error_code"]) for row in inventory["unreadable_manifests"]}
     assert titles(root, KEY) == ["File row"]
+
+
+def test_global_inspection_rechecks_canonical_support_and_permissions_without_a_projection_refresh(service):
+    """Shared inspection work must not retain a prior request's row or audience decisions."""
+    from test_collection_claims import _write_observation
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import due_state
+
+    root = service.root
+    observed = "77777777-7777-4777-8777-777777777777"
+    observed_path = manifest_path().replace("Work", "Observed")
+    observed_text = summary_text(manifest_text().replace(CID, observed).replace("title: Work", "title: Observed")
+                                 .replace("    count: {type: integer}\n",
+                                          "    count: {type: integer}\n    category: {type: string}\n"))
+    call(root, "record_memory", action="create", manifest_path=observed_path,
+         manifest_text=observed_text, why="observed routing")
+    for key, title in ((ROW, "First"), (OTHER, "Second")):
+        appended = call(root, "record_memory", action="append", collection=observed,
+                        item_key=key, item={"title": title, "category": "account subscriptions"}, why="support")
+    daily_text = DAILY_TEXT.replace("lifecycle: active\n",
+                                    "lifecycle: active\nclaims:\n  terms: [device, inventory]\n")
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+         manifest_text=daily_text, why="declared routing")
+    call(root, "record_memory", action="append", collection=KEY,
+         item={"title": "File row"}, item_key=ROW, why="coexisting file collection")
+    observation, observation_ref = _write_observation(root)
+    other_observation = observation.replace("account-observation", "device-observation")
+    (root / other_observation).write_text((root / observation).read_text()
+        .replace("44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555")
+        .replace("account", "device").replace("Account", "Device")
+        .replace("subscription", "inventory").replace("Subscription", "Inventory"))
+    server = runtime._SERVERS[root]
+    with request_scope(OWNER):
+        server.call(lambda: due_state.reconcile(root, now=dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)))
+    projection = due_state.state_path(root)
+    original_projection = projection.read_bytes()
+
+    inventory = call(root, "record_memory", action="inspect")
+    rows = {row["collection_id"]: row for row in inventory["collections"]}
+    assert set(rows) == {KEY, CID, DAILY, observed}
+    assert {key: (row["committed"], row["unreflected"]) for key, row in rows.items()} == {
+        KEY: (1, 0), CID: (1, 0), DAILY: (0, 1), observed: (2, 1),
+    }
+    coverage = call(root, "record_memory", action="inspect", collection=observed)["coverage"]
+    assert coverage["unreflected_refs"] == [observation_ref]
+
+    write_scope(root, paths="Unrelated/**")
+    scope = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{observed}/{OTHER}]\n")
+    write_rule(root, ceiling=0)
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    with request_scope(_external()):
+        hidden = writer_lease.invoke_command(command, root, action="inspect")
+    hidden_row = next(row for row in hidden["collections"] if row["collection_id"] == observed)
+    assert (hidden_row["committed"], hidden_row["unreflected"]) == (1, 0)
+    write_rule(root, ceiling=6)
+    with request_scope(_external()):
+        released = writer_lease.invoke_command(command, root, action="inspect")
+    released_row = next(row for row in released["collections"] if row["collection_id"] == observed)
+    assert (released_row["committed"], released_row["unreflected"]) == (2, 1)
+    assert projection.read_bytes() == original_projection
+
+    call(root, "record_memory", action="update", collection=observed, item_key=OTHER,
+         changes={"category": "different material"}, why="remove recurring support",
+         expected_container_hash=appended["after_container_hash"],
+         expected_item_version=appended["after_item_hash"])
+    current = call(root, "record_memory", action="inspect")
+    assert next(row for row in current["collections"] if row["collection_id"] == observed)["unreflected"] == 0
+    assert projection.read_bytes() == original_projection
+
+    (root / other_observation).unlink()
+    with request_scope(OWNER):
+        server.call(lambda: due_state.reconcile(root))
+    assert projection.read_bytes() != original_projection
+    replaced = call(root, "record_memory", action="inspect")
+    assert next(row for row in replaced["collections"] if row["collection_id"] == DAILY)["unreflected"] == 0
 
 
 def test_the_service_builds_a_revised_rollup_and_publishes_the_summary_page(service, monkeypatch):

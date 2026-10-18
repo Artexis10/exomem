@@ -1658,6 +1658,7 @@ def _collection_coverage(
     committed: int | None,
     authorize: Callable[[str], bool],
     references: bool,
+    observations: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Committed and held counts for one collection, under the item release filter.
 
@@ -1670,9 +1671,10 @@ def _collection_coverage(
     # A count-only surface opens nothing: it answers "how many", and a held
     # payload is the caller's own refused observation.
     census = records.held_census(root, manifest, authorize_path=authorize, load=references)
-    observations = due_state.collection_observation_coverage(
-        root, str(manifest.path), authorize_path=authorize
-    )
+    if observations is None:
+        observations = due_state.collection_observation_coverage(
+            root, str(manifest.path), authorize_path=authorize
+        )
     unreflected_refs = list(observations["unreflected"])
     pending_refs = list(observations["pending"])
     state = (
@@ -1729,6 +1731,8 @@ def _inventory_coverage(
     root: Path,
     manifest: collections.CollectionManifest,
     authorize: Callable[[str], bool],
+    *,
+    observations: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Inventory-grade coverage: counts only, and `None` when items are unreadable.
 
@@ -1760,9 +1764,10 @@ def _inventory_coverage(
             else:
                 items, _, held_ids = writer._operation.authorized_rows(manifest.collection_id)
                 committed, held = len(items), len(held_ids)
-        observations = due_state.collection_observation_coverage(
-            root, str(manifest.path), authorize_path=authorize
-        )
+        if observations is None:
+            observations = due_state.collection_observation_coverage(
+                root, str(manifest.path), authorize_path=authorize
+            )
         return {"committed": committed, "held": held,
                 "unreflected": len(observations["unreflected"])}
     try:
@@ -1771,7 +1776,8 @@ def _inventory_coverage(
     except collections.CollectionError:
         committed = None
     coverage = _collection_coverage(
-        root, manifest, committed=committed, authorize=authorize, references=False
+        root, manifest, committed=committed, authorize=authorize, references=False,
+        observations=observations,
     )
     return {
         key: coverage[key] for key in ("committed", "held", "unreflected")
@@ -1806,6 +1812,7 @@ def _presentation_inspection(
     }
 
 
+@canonical_read
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
 
@@ -1851,6 +1858,11 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             legacy, legacy_truncated = collections.discover_legacy_trackers(
                 root, authorize_path=authorize
             )
+        from . import due_state
+
+        observations = due_state._collection_observation_coverages(
+            root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
+        )
         payload = {
             "kind": f"{semantic_profile}_inventory",
             "report_only": True,
@@ -1863,7 +1875,8 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
                     "lifecycle": manifest.lifecycle,
                     "storage_strategy": manifest.storage.strategy,
                     "natural_key": list(manifest.schema.natural_key),
-                    **_inventory_coverage(root, manifest, authorize),
+                    **_inventory_coverage(root, manifest, authorize,
+                                          observations=observations[str(manifest.path)]),
                 }
                 for manifest in manifests
             ],

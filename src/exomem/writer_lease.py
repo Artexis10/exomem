@@ -4557,6 +4557,7 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "reserved-state",
+        deadline: float | None = None,
     ) -> Iterator[str]:
         """Coordinate one owner's identities without serializing other owners."""
 
@@ -4567,7 +4568,8 @@ class LeaseManager:
         ):
             raise ValueError("reserved identity domains must be registered labels")
         vault_identity = canonical_mutation_identity(vault_root)
-        deadline = time.monotonic() + self._mutation_timeout_seconds
+        manager_deadline = time.monotonic() + self._mutation_timeout_seconds
+        deadline = manager_deadline if deadline is None else min(deadline, manager_deadline)
         gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
         def enter(
