@@ -98,6 +98,60 @@ def test_rewriting_the_projection_rebuilds_once(
     assert len(calls) == 2
 
 
+def test_projection_reads_keep_persisted_state_separate_from_mutable_callers(
+    tmp_path: Path,
+) -> None:
+    _persist(tmp_path, "first")
+    snapshot = due_state._load_shared(tmp_path)
+    payload = due_state.load(tmp_path)
+    payload["categories"]["predictions"][PAGE]["open"].append({"path": PAGE, "id": "second"})
+    assert len(snapshot["categories"]["predictions"][PAGE]["open"]) == 1
+    due_state.save(tmp_path, payload)
+    payload["categories"]["predictions"][PAGE]["open"].clear()
+
+    assert len(due_state._load_shared(tmp_path)["categories"]["predictions"][PAGE]["open"]) == 2
+    assert len(due_state.load(tmp_path)["categories"]["predictions"][PAGE]["open"]) == 2
+
+
+def test_shared_projection_tracks_a_foreign_replacement_during_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault
+
+    _persist(tmp_path, "first")
+    due_state._load_shared(tmp_path)
+    replacement = tmp_path / "foreign.json"
+    replacement.write_text('{"version":2,"categories":{},"marker":"foreign"}\n')
+
+    def replace(operation):
+        operation()
+        replacement.replace(due_state.state_path(tmp_path))
+
+    monkeypatch.setattr(vault, "replace_tolerating_transient_sharing", replace)
+    _persist(tmp_path, "ours")
+
+    assert due_state._load_shared(tmp_path)["marker"] == "foreign"
+
+
+def test_failed_projection_save_preserves_the_last_shared_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import vault
+
+    _persist(tmp_path, "first")
+    before = due_state._load_shared(tmp_path)
+
+    def refuse(_operation):
+        raise OSError("replacement refused")
+
+    monkeypatch.setattr(vault, "replace_tolerating_transient_sharing", refuse)
+    _persist(tmp_path, "unsaved")
+
+    assert due_state._load_shared(tmp_path) == before
+    assert due_state.load(tmp_path)["marker"] == "first"
+    assert not list(due_state.state_path(tmp_path).parent.glob("*.tmp"))
+
+
 def test_a_write_that_only_ticks_the_emission_ledger_reuses_the_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

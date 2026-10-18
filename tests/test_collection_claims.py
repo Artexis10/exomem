@@ -878,6 +878,19 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
         observed_at=observed_at,
     )
 
+    projection = due_state.state_path(tmp_path)
+    before = projection.stat()
+    due_state.apply_observation_write_delta(
+        tmp_path,
+        path=path,
+        observation_ref=page_ref,
+        terms=["account", "subscriptions", "cancelled"],
+        routing=routing,
+        observed_at=observed_at,
+    )
+    after = projection.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
     stored = due_state.load(tmp_path)["categories"]["unreflected_observations"][path]
     assert stored["open"] == []
     assert stored["pending"][0]["due_at"] == "2026-09-02T15:30:00+00:00"
@@ -891,6 +904,32 @@ def test_observation_delta_opens_pending_then_serves_after_exact_grace(
     component = stored["pending"][0]["component"]
     assert component["collection_id"] == str(manifest.collection_id)
     assert component["observation_ref"] == page_ref
+
+
+def test_unrouted_observation_removes_its_stale_bucket_then_leaves_state_untouched(
+    tmp_path: Path,
+) -> None:
+    _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n")
+    path, page_ref = _write_observation(tmp_path)
+    now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
+    due_state.reconcile(tmp_path, now=now)
+    snapshot = due_state._load_shared(tmp_path)
+    before = due_state.load(tmp_path)
+    assert path in before["categories"]["unreflected_observations"]
+
+    due_state.apply_observation_write_delta(
+        tmp_path, path=path, observation_ref=page_ref, terms=[], routing=None, observed_at=now
+    )
+
+    assert path not in due_state.load(tmp_path)["categories"]["unreflected_observations"]
+    assert snapshot == before
+    projection = due_state.state_path(tmp_path)
+    emission = due_state.emission_path(tmp_path)
+    persisted = (projection.stat(), emission.stat())
+    due_state.apply_observation_write_delta(
+        tmp_path, path=path, observation_ref=page_ref, terms=[], routing=None, observed_at=now
+    )
+    assert (projection.stat(), emission.stat()) == persisted
 
 
 def test_observation_fingerprint_changes_when_matched_terms_grow() -> None:
