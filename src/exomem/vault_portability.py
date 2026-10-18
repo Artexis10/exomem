@@ -18,7 +18,7 @@ import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager, closing, nullcontext
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -1461,6 +1461,71 @@ def _verify_migrated_archive(vault_root: Path, manifest: Mapping[str, Any], stat
             )
 
 
+@contextmanager
+def checked_collection_replica(
+    vault_root: Path,
+    *,
+    source_path: Path | None = None,
+    ancestor_witness: bool = False,
+    check: Callable[[], None] = lambda: None,
+):
+    """Validate a standalone replica through a private copy, preserving the archived bytes.
+
+    ``ancestor_witness`` is only an old copy that the operator never adopts. The
+    operator must prove its head, lineage and projection ownership against the fully
+    validated canonical replacement. This grants no destination writer authority.
+    """
+    from .collection_store import authority, chain, connection, replica, schema, snapshot, takeover
+
+    raw_marker = authority.read_marker(vault_root)
+    if raw_marker is None:
+        yield None
+        return
+    marker = authority.parse_marker(vault_root, raw_marker)
+    source_path = replica.replica_path(vault_root) if source_path is None else Path(source_path)
+    # A published replica is a standalone SQLite file, never a database/WAL family.
+    if any(os.path.lexists(str(source_path) + suffix) for suffix in snapshot._COMPANIONS):
+        _fail("INVALID_ARCHIVE", "collection replica requires SQLite companions")
+    with tempfile.TemporaryDirectory(prefix="exomem-restore-replica-") as private:
+        path = Path(private) / connection.STORE_FILENAME
+        descriptor, signature = _open_regular_source(source_path)
+        try:
+            with path.open("xb") as output:
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    check()
+                    output.write(chunk)
+            if (_source_signature(os.fstat(descriptor)) != signature
+                    or _cross_source_signature(source_path.lstat()) != _cross_source_signature(os.fstat(descriptor))):
+                _fail("SOURCE_CHANGED_DURING_EXPORT", "collection replica changed during validation")
+        finally:
+            os.close(descriptor)
+        check()
+        snapshot.migrate_copy(path, check)
+        with closing(sqlite3.connect(path, isolation_level=None)) as reader:
+            metadata = snapshot._validate(reader, check)
+            chain.verify_store_chain(reader)
+            if metadata[schema.META_STORE_ID] != marker["store_id"]:
+                _fail("INVALID_ARCHIVE", "collection replica belongs to another store")
+            intent = authority.pending_create(reader)
+            refusal = takeover.replica_adoptability(metadata, raw_marker)
+            if ancestor_witness and intent is not None and intent["kind"] != authority.EXPORT:
+                # This old copy proves ancestry only; it cannot be adopted under its historical target.
+                authority.parse_marker(vault_root, intent["target_marker"].encode())
+                if refusal is not None and refusal[0] == takeover.SYNC_PENDING:
+                    refusal = None
+            if refusal is not None:
+                raise connection.CollectionStoreError(*refusal)
+            if ancestor_witness:
+                present = dict(reader.execute("SELECT collection_id,manifest_path FROM collections"))
+                for entry in marker["collections"]:
+                    if entry["collection_id"] in present:
+                        authority.require_selected(reader, marker, entry, root=vault_root)
+            else:
+                authority.require_marker(reader, marker, root=vault_root)
+            check()
+            yield reader
+
+
 def prepare_restore(
     archive_path: Path | str,
     staging_root: Path | str,
@@ -1494,21 +1559,13 @@ def prepare_restore(
         _extract_verified_archive(verified.archive_path, records, temporary)
         _verify_staged_files(temporary, verified.manifest)
         from . import structured_collections as collections
-        from .collection_store import authority, chain, connection, replica, snapshot
+        from .collection_store import authority, chain, connection
 
         try:
             raw_marker = authority.read_marker(temporary)
             marker = None if raw_marker is None else authority.parse_marker(temporary, raw_marker)
-            if marker is not None:
-                checked = replica.replica_path(temporary)
-                with tempfile.TemporaryDirectory(prefix=".exomem-restore-replica-", dir=destination.parent) as private:
-                    if connection.schema_pending(checked):
-                        # The restore keeps the archived bytes; a private copy at the current schema is checked.
-                        checked = Path(shutil.copyfile(checked, Path(private) / checked.name))
-                        snapshot.migrate_copy(checked)
-                    with closing(connection.open_reader(checked)) as reader:
-                        chain.verify_store_chain(reader)
-                        authority.require_marker(reader, marker, root=temporary)
+            with checked_collection_replica(temporary):
+                pass
         except (connection.CollectionStoreError, sqlite3.Error, chain.StoreChainError,
                 collections.CollectionError, ValueError):
             _fail("INVALID_ARCHIVE", "collection store structure is invalid")

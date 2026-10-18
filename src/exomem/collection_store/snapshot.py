@@ -178,6 +178,24 @@ def staged_snapshot(
     cancelled: Callable[[], bool] | None = None,
     scratch_token: str | None = None,
 ) -> Iterator[SnapshotArtifact]:
+    """Stage the live vault store, requiring its current schema as before."""
+    with staged_store_snapshot(
+        connection.store_path(vault_root), directory=directory, deadline=deadline,
+        cancelled=cancelled, scratch_token=scratch_token,
+    ) as artifact:
+        yield artifact
+
+
+@contextmanager
+def staged_store_snapshot(
+    source_path: Path,
+    *,
+    directory: Path,
+    deadline: float,
+    cancelled: Callable[[], bool] | None = None,
+    scratch_token: str | None = None,
+    preserve_schema: bool = False,
+) -> Iterator[SnapshotArtifact]:
     """Yield a closed, fsynced copy in the caller's existing private directory.
 
     This trusted internal API authorizes only its unique scratch family. The
@@ -244,11 +262,10 @@ def staged_snapshot(
                     sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
                 ) as destination:
                     check()
-                    with closing(
-                        connection.open_reader(
-                            connection.store_path(vault_root), busy_timeout_ms=_BUSY_TIMEOUT_MS
-                        )
-                    ) as source:
+                    source = (connection._open_read_only(source_path, _BUSY_TIMEOUT_MS)[0]
+                              if preserve_schema else connection.open_reader(
+                                  source_path, busy_timeout_ms=_BUSY_TIMEOUT_MS))
+                    with closing(source):
                         check()
                         source.execute("BEGIN")
                         source.execute("SELECT key,value FROM store_meta").fetchall()
@@ -276,7 +293,8 @@ def staged_snapshot(
 
                     destination.set_progress_handler(validation_progress, 1000)
                     try:
-                        metadata = _validate(destination, check)
+                        version = schema.schema_version(destination) if preserve_schema else None
+                        metadata = _validate(destination, check, version=version)
                     except connection.CollectionStoreError as error:
                         if interruption is not None:
                             raise interruption from error.__cause__
