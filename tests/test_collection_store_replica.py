@@ -892,6 +892,7 @@ def _complete_ready_in_another_process(root, *, advance=False):
 import hashlib, json, sys, time
 from pathlib import Path
 from exomem.collection_store import connection, replica
+sys.path.insert(0, sys.argv[3])
 from test_collection_store_replica import _commit
 root = Path(sys.argv[1])
 with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as writer:
@@ -908,7 +909,8 @@ with connection.open_writer(connection.store_path(root), lease_check=lambda: Tru
                       'sha256': hashlib.sha256(replica.replica_path(root).read_bytes()).hexdigest()}))
 """
     child = subprocess.run(
-        [sys.executable, "-c", script, str(root), "advance" if advance else "finish"],
+        [sys.executable, "-c", script, str(root), "advance" if advance else "finish",
+         str(Path(__file__).resolve().parent)],
         capture_output=True, text=True, timeout=15,
     )
     assert child.returncode == 0, child.stderr
