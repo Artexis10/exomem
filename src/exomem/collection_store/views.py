@@ -36,6 +36,33 @@ def source_pair(projection, name):
     return pair
 
 
+def source_pairs(descriptor):
+    """Possible pre-install sources; legacy pending renders may already have escaped."""
+    pairs = descriptor.get("source_pairs", [descriptor.get("previous_published"), descriptor.get("previous_pending")])
+    if not isinstance(pairs, list) or any(pair is not None and (
+            not isinstance(pair, (list, tuple)) or len(pair) != 2
+            or type(pair[0]) is not int or not isinstance(pair[1], str)) for pair in pairs):
+        return set()
+    return {tuple(pair) for pair in pairs if pair is not None}
+
+
+def target_pairs(projection, descriptor=None):
+    """Only a staged committed render can join a new descriptor's exposed sources."""
+    descriptor = descriptor if descriptor is not None else json.loads(projection["install_json"] or "{}")
+    pairs = source_pairs(descriptor)
+    if "source_pairs" not in descriptor:
+        # Schema 12 published before acknowledgement; its pending pair is conservatively exposed.
+        pairs.update(tuple(pair) for name in ("published", "pending") if (pair := source_pair(projection, name)))
+        context = descriptor.get("render_context", {})
+        if context.get("sha256") is not None:
+            pairs.add((context["row_version"], context["sha256"]))
+    elif (ready := descriptor.get("install_ready")) is not None:
+        if not (staged := source_pairs({"source_pairs": [ready]})):
+            return set()
+        pairs.update(staged)
+    return pairs
+
+
 def unresolved_target(projection, source=None):
     """A pending adoption cannot grant release authority to later saves or displaced inputs."""
     descriptor = json.loads(projection["install_json"]) if projection.get("install_json") else {}
@@ -153,7 +180,7 @@ class PublicationBatch:
                         "collection_id": row[4]}
                 row = (*row[:2], typed_storage.hydrate(conn, [item])[0]["values_json"])
         # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-        elif projection["kind"] in ("manifest", "summary", "log"):
+        elif projection["kind"] in ("manifest", "summary", "log", "history"):
             # A summary page and a log view are governed by their collection's current manifest.
             if manifest is not None and projection["kind"] == "manifest":
                 row = conn.execute("SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
@@ -204,7 +231,8 @@ class PublicationBatch:
                 if key not in self.source_manifests:
                     self.source_manifests[key] = self.writer._collection_manifest(current)[0]
                 manifest = self.source_manifests[key]
-            version, text = render_view(conn, self.identity, projection, manifest)
+            version, text = render_view(conn, self.identity, projection, manifest, root=self.writer.root,
+                                        cache=self.writer.handle.release_cache)
             digest = _digest(text.encode())
         context = {"path": projection["path"], "collection_id": cid, "kind": projection["kind"],
                 "row_id": projection.get("row_id"), "row_version": version,
@@ -232,7 +260,30 @@ class PublicationBatch:
             "previous_published": _pair(previous["published_row_version"], previous["published_sha256"]),
             "previous_pending": _pair(previous["pending_row_version"], previous["pending_sha256"]),
         }
-        pairs = {tuple(pair) for name in ("published", "pending") if (pair := source_pair(previous, name))}
+        pairs = target_pairs(previous, descriptor)
+        try:
+            parent = self._parent(path)
+            result = self._fs().file(parent, Path(path).name)
+            if result.ok:
+                with result.require() as file:
+                    raw = self._fs().read(file).require()
+                    digest = _digest(raw)
+                pair = next((pair for pair in pairs if pair[1] == digest), None)
+                if pair is not None:
+                    _, guard = vault.read_bounded_guarded_bytes(self.writer.root, path, limit=len(raw), expected_hash=digest)
+                    self.writer._recheck_guard(guard)
+                    # Only a guarded physical observation narrows possible historical authority.
+                    pairs = {pair}
+                    self.writer._execute(
+                        "UPDATE projection_state SET published_row_version=?,published_sha256=? WHERE path=?",
+                        (*pair, path),
+                    )
+                    previous["published_row_version"], previous["published_sha256"] = pair
+            elif result.error.code != "MISSING":
+                raise result.error
+        except (held_fs.HeldFsError, vault.PathGuardError, OSError):
+            self.pending = True
+        previous["source_pairs"] = sorted(pairs)
         known = [*descriptor.get("source_contexts", []), descriptor.get("render_context")]
         canonical = None
         backfilled = False
@@ -270,8 +321,7 @@ class PublicationBatch:
             if not invalid and len(matches) == 1:
                 contexts.append(next(iter(matches.values())))
         previous["source_contexts"] = contexts
-        displaced_pairs = {tuple(pair) for name in ("previous_published", "previous_pending")
-                           if (pair := descriptor.get(name)) is not None}
+        displaced_pairs = source_pairs(descriptor)
         if "source_contexts" not in descriptor:
             descriptor["source_contexts"] = [context for context in contexts
                                              if (context["row_version"], context["sha256"]) in displaced_pairs]
@@ -290,8 +340,7 @@ class PublicationBatch:
                     # An earlier transaction adopted or preserved these bytes; this install may displace them.
                     self.accept(path, digest)
                 elif digest not in {previous["published_sha256"], previous["pending_sha256"]}:
-                    source = {"previous_published": source_pair(previous, "published"),
-                              "previous_pending": source_pair(previous, "pending"),
+                    source = {"source_pairs": previous["source_pairs"],
                               "source_contexts": contexts}
                     if not self.writer._register_view_input(previous, raw, descriptor["token"], "offline", source=source):
                         self.pending = True
@@ -386,11 +435,11 @@ class PublicationBatch:
             preserved = self.recovered_inputs[path]
             if preserved is None:
                 self.pending = True
-                descriptor = json.loads(previous["install_json"])
-                descriptor["render_context"] = self._render_context(projection, manifest)
-                return json.dumps(descriptor, separators=(",", ":"))
+                # The old token still owns its stages/asides and their exact readiness and policy.
+                return previous["install_json"]
             descriptor = {
                 "token": secrets.token_hex(16),
+                "source_pairs": previous["source_pairs"] if previous else [],
                 "previous_published": source_pair(previous, "published")
                 if previous
                 else None,
@@ -485,13 +534,17 @@ class PublicationBatch:
                         fs.write(file, data).require()
                         self._record(str(Path(publication.path).parent / leaf), file.identity)
                     fs.flush_directory(publication.parent).require()
+                    publication.descriptor["install_ready"] = [version, _digest(data)]
+                    self.writer._execute("UPDATE projection_state SET install_json=? WHERE path=?",
+                        (json.dumps(publication.descriptor, separators=(",", ":")), publication.path))
                 except (held_fs.HeldFsError, OSError):
                     self.pending = True
 
     def _cleanup_stage_pair(self, path, parent, leaf, digest):
         proof = self.baselines[path]
         descriptor = json.loads(proof["install_json"])
-        if leaf != STAGE_PREFIX + descriptor["token"] or digest != proof["pending_sha256"]:
+        ready = descriptor.get("install_ready") or (source_pair(proof, "pending") if "source_pairs" not in descriptor else None)
+        if leaf != STAGE_PREFIX + descriptor["token"] or ready is None or digest != ready[1]:
             raise held_fs.HeldFsError("IDENTITY_CHANGED", "redundant stage lacks committed proof")
         fs = self._fs()
         fs.validate_directory(parent).require()
@@ -514,7 +567,7 @@ class PublicationBatch:
             {
                 "path": path,
                 "token": descriptor["token"],
-                "version": proof["pending_row_version"],
+                "version": ready[0],
                 "sha256": digest,
                 "provenance": "committed_baseline",
             }
@@ -526,41 +579,12 @@ class PublicationBatch:
             # BEGIN IMMEDIATE keeps this committed pre-UPSERT proof current until our COMMIT.
             self.baselines.setdefault(previous["path"], dict(previous))
             preserved = self.writer._recover_view_inputs(self, previous)
-            descriptor = json.loads(previous["install_json"])
-            parent = self._parent(previous["path"])
-            result = self._fs().file(parent, Path(previous["path"]).name)
-            if result.ok:
-                with result.require() as file:
-                    digest = _digest(self._fs().read(file).require())
-                for source in [descriptor, *descriptor.get("preserved", [])]:
-                    pair = next(
-                        (
-                            source.get(name)
-                            for name in ("previous_published", "previous_pending")
-                            if source.get(name) and source[name][1] == digest
-                        ),
-                        None,
-                    )
-                    if pair is not None:
-                        # A failed install may leave an older committed render at the target.
-                        self.writer._execute(
-                            "UPDATE projection_state SET published_row_version=?,published_sha256=? WHERE path=?",
-                            (*pair, previous["path"]),
-                        )
-                        previous["published_row_version"], previous["published_sha256"] = pair
-                        break
-            elif result.error.code != "MISSING":
-                raise result.error
             return preserved
         return []
 
     def _asides(self, publication):
         fs = self._fs()
-        expected = {
-            pair[1]
-            for name in ("previous_published", "previous_pending")
-            if (pair := publication.descriptor.get(name)) is not None
-        } | set(publication.descriptor.get("accepted", ()))
+        expected = {pair[1] for pair in source_pairs(publication.descriptor)} | set(publication.descriptor.get("accepted", ()))
         for slot in range(2):
             leaf = ASIDE_PREFIX + publication.descriptor["token"] + f"-{slot}"
             result = fs.file(publication.parent, leaf, access="mutate")
@@ -581,7 +605,7 @@ class PublicationBatch:
         if parent is None:
             raise held_fs.HeldFsError("MISSING", "projection parent is unavailable")
         committed = self.writer.connection.execute(
-            "SELECT install_json,pending_sha256 FROM projection_state WHERE path=?",
+            "SELECT install_json,pending_row_version,pending_sha256 FROM projection_state WHERE path=?",
             (publication.path,),
         ).fetchone()
         if (
@@ -593,11 +617,19 @@ class PublicationBatch:
         fs.validate_directory(parent).require()
         target = Path(publication.path).name
         retired = publication.descriptor.get("retired")
+        descriptor = json.loads(committed[0])
+        ready = descriptor.get("install_ready")
+        context = descriptor.get("render_context", {})
+        if not retired and (ready != list(committed[1:]) or ready is None
+                or ready != [context.get("row_version"), context.get("sha256")]
+                or any(context.get(name) != publication.projection.get(name)
+                       for name in ("path", "collection_id", "kind", "row_id"))):
+            raise held_fs.HeldFsError("IDENTITY_CHANGED", "projection lacks committed installation readiness")
         stage_leaf = STAGE_PREFIX + publication.descriptor["token"]
         with (
             nullcontext(None) if retired else fs.file(parent, stage_leaf, access="mutate").require()
         ) as stage:
-            if not retired and _digest(fs.read(stage).require()) != committed[1]:
+            if not retired and _digest(fs.read(stage).require()) != ready[1]:
                 raise held_fs.HeldFsError(
                     "IDENTITY_CHANGED", "projection staging does not match committed bytes"
                 )
@@ -708,6 +740,7 @@ class PublicationBatch:
         descriptor = {
             "token": secrets.token_hex(16),
             "retired": True,
+            "source_pairs": previous["source_pairs"],
             "previous_published": _pair(
                 previous["published_row_version"], previous["published_sha256"]
             ),
@@ -747,8 +780,7 @@ class PublicationBatch:
         witness = None
         with self._boundary():
             for source in (descriptor, *descriptor.get("preserved", [])):
-                expected = {pair[1] for name in ("previous_published", "previous_pending")
-                            if (pair := source.get(name)) is not None} | set(source.get("accepted", ()))
+                expected = {pair[1] for pair in source_pairs(source)} | set(source.get("accepted", ()))
                 for slot in range(3):  # The publication protocol has two asides and one stage.
                     leaf = (ASIDE_PREFIX + source["token"] + f"-{slot}" if slot < 2
                             else STAGE_PREFIX + source["token"])
@@ -759,7 +791,9 @@ class PublicationBatch:
                         version = file.version()
                         raw = fs.read(file, max_bytes=record_formats._MAX_ITEM_BYTES).require()
                         digest = _digest(raw)
-                        known = digest in expected or (slot == 2 and digest == previous["pending_sha256"])
+                        ready = source.get("install_ready") or (source_pair(previous, "pending")
+                                                               if "source_pairs" not in source else None)
+                        known = digest in expected or (slot == 2 and ready is not None and digest == ready[1])
                         if not known and not preserve(raw, source["token"], slot):
                             raise held_fs.HeldFsError("INPUT_UNPRESERVED", "moved publication input is not held")
                         if file.version() != version:
@@ -886,8 +920,12 @@ def manifest_view(text: str, view_stamp: Mapping[str, str | int]) -> str:
     )
 
 
-def render_view(conn, identity, projection, manifest):
+def render_view(conn, identity, projection, manifest, *, root=None, cache=None):
     """Render an indexed canonical reference; the caller owns its read snapshot and context."""
+    if projection["kind"] == "history":
+        from .history import render_page
+
+        return render_page(conn, root, manifest, projection["path"], cache=cache)
     if projection["kind"] == "item":
         version, payload, key, body = conn.execute(
             "SELECT row_version,payload_hash,item_key,body FROM items WHERE row_id=?",

@@ -2519,9 +2519,18 @@ def _valid_saved_view(value: Any, manifest: collections.CollectionManifest) -> b
     return dict(definition) == dict(expected.definition) and identity == expected.identity
 
 
-def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
+def _valid_agent_history(value: Mapping[str, Any] | None, *, semantic_profile="records") -> bool:
     if value is None:
         return True
+    if not isinstance(value, Mapping):
+        return False
+    # These are the implemented Records/Planning audit wire operations, not collection vocabulary.
+    if semantic_profile == "records":
+        operations = ("create", "append", "update", "revise", "rebaseline", "bulk_upsert", "view_move")
+    elif semantic_profile == "planning":
+        operations = ("plan_create", "plan_add", "plan_update", "plan_triage", "plan_revise", "plan_rebaseline")
+    else:
+        return False
     if set(value) - {
         "status",
         "complete",
@@ -2562,7 +2571,9 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
     for event in events:
         if not isinstance(event, Mapping) or (set(event) != allowed and set(event) != lifecycle):
             return False
-        if event["operation"] not in ("create", "append", "update", "revise", "rebaseline"):
+        # mutation_terminal owns the implemented control protocol; frame edits have no profile operation.
+        if (event["operation"] not in operations and event["operation"] != "view_frame_edit"
+                and event["operation"] not in mutation_terminal.CONTROL_OPERATIONS):
             return False
         if type(event["transition_id"]) is not str or not re.fullmatch(
             r"[0-9a-f]{24}", event["transition_id"]

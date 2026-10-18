@@ -11,14 +11,28 @@ from test_collection_store_typed_storage import bulk, create, migrate, row_ids
 from test_collection_store_writer import CID
 from test_collection_store_writer import store as store
 
-from exomem.collection_store import connection, governance, index_migrations, schema, tables, typed_storage
+from exomem.collection_store import (
+    connection,
+    governance,
+    history,
+    index_migrations,
+    schema,
+    tables,
+    typed_storage,
+)
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
 
 def previous_release(patch):
-    """Write as the schema-10 release did, through the maintained writer."""
+    """Seed the historical schema-10 identity and payload wire through the maintained writer."""
     patch.setattr(schema, "SCHEMA_VERSION", 10)
+
+    def historical_watermark(conn, cid, **_options):
+        # This producer predates the canonical verifier; only the current reader verifies after upgrade.
+        return conn.execute("SELECT verified_through_txn FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
+
+    patch.setattr(history, "verify", historical_watermark)
     current_subjects = governance.iter_subjects
 
     def historical_subjects(conn, cid, logical_vault_id, **options):

@@ -194,6 +194,8 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, monkeypat
 
 def test_unexplained_transaction_rollback_does_not_leave_released_subject_metadata(store):
     """Joining trusted SQL must not retain its proposed release after rollback."""
+    from exomem.collection_store import history
+
     text = manifest_text().replace("    count:", "    tags: {type: array, items: {type: string}}\n    count:")
     store.create_collection(manifest_path(), text, why="create")
     store.append_record(CID, item={"title": "One", "tags": ["secret"]}, item_key=KEY, why="capture")
@@ -202,16 +204,25 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
     path = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
     path.write_text(path.read_text() + "tags: [secret]\n")
     write_rule(store.root, ceiling=0)
+    manifest = store._projection_manifest(CID)
+    path = history.main_path(manifest)
+
+    def rendered():
+        return history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
+
     with request_scope(_external()), preview_store(store.root, store.handle):
         assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1
+        assert KEY not in rendered()
         store.connection.execute("BEGIN")
         try:
             store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
                                      ('{"classes":[],"projects":[],"tags":[]}', KEY))
             assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
+            assert KEY in rendered()
         finally:
             store.connection.execute("ROLLBACK")
         assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1
+        assert KEY not in rendered()
 
 
 def test_warm_complete_release_rechecks_lifecycle_even_without_a_row_change(store, monkeypatch):

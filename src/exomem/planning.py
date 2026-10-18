@@ -446,10 +446,6 @@ def query(
     from .collection_store.preview import selected_writer
 
     writer = selected_writer(vault_root, collection)
-    if writer is not None and include_agent_history:
-        raise CollectionError(
-            "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"
-        )
     if writer is not None and writer._operation is None:
         with writer.read_collection(collection, facade_profile="planning") as manifest:
             return query(
@@ -589,9 +585,7 @@ def query(
         "view": result.view,
         "hierarchy": hierarchy,
         "agent_history": (
-            records.agent_audit_history(
-                vault_root, manifest, authorize_path=adapter_authorize_path
-            )
+            records.agent_audit_history(vault_root, manifest, authorize_path=adapter_authorize_path)
             if include_agent_history
             else None
         ),
@@ -688,7 +682,7 @@ def _valid_query_payload(
         or not _valid_source_versions(payload["source_versions"])
         or not _valid_view(payload["view"])
         or not _valid_hierarchy(payload["hierarchy"], manifest)
-        or not _valid_agent_history(payload["agent_history"])
+        or not record_governance._valid_agent_history(payload["agent_history"], semantic_profile="planning")
         or not _json_value(payload)
     ):
         return False
@@ -866,66 +860,6 @@ def _valid_hierarchy_node(value: Any, manifest: collections.CollectionManifest) 
     except (CollectionError, TypeError, ValueError):
         return False
     return _json_value(value)
-
-
-def _valid_agent_history(value: Any) -> bool:
-    if value is None:
-        return True
-    if not isinstance(value, Mapping) or set(value) != {
-        "status",
-        "complete",
-        "truncated",
-        "events",
-    }:
-        return False
-    if value["status"] not in {"baseline", "ok", "gap", "history_incomplete"}:
-        return False
-    if type(value["complete"]) is not bool or type(value["truncated"]) is not bool:
-        return False
-    events = value["events"]
-    if not isinstance(events, list) or len(events) > 50:
-        return False
-    keys = {
-        "transition_id",
-        "parent_id",
-        "operation",
-        "item_key",
-        "canonical_path",
-        "before_manifest_hash",
-        "after_manifest_hash",
-        "before_item_hash",
-        "after_item_hash",
-        "before_container_hash",
-        "after_container_hash",
-        "rationale",
-    }
-    for event in events:
-        if not isinstance(event, Mapping) or set(event) != keys:
-            return False
-        if (
-            not isinstance(event["transition_id"], str)
-            or re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is None
-            or event["parent_id"] not in {"baseline", "absent"}
-            and (
-                not isinstance(event["parent_id"], str)
-                or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is None
-            )
-            or event["operation"] not in {"plan_create", "plan_add", "plan_update", "plan_triage"}
-            or (
-                event["item_key"] is not None
-                and memory_refs.normalize_id(event["item_key"]) != event["item_key"]
-            )
-            or not _safe_path(event["canonical_path"])
-            or not isinstance(event["rationale"], str)
-            or len(event["rationale"].encode("utf-8")) > 512
-            or any(
-                event[name] is not None and not _hash(event[name])
-                for name in keys
-                if name.endswith("hash")
-            )
-        ):
-            return False
-    return True
 
 
 def _safe_path(value: Any) -> bool:

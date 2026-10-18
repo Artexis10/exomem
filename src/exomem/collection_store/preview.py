@@ -333,16 +333,16 @@ def dispatch(
         from .. import planning, record_governance
 
         collection = args.pop("collection")
-        if args.pop("include_agent_history", False):
-            raise collections.CollectionError(
-                "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"
-            )
         with writer.read_collection(collection, facade_profile=profile) as manifest:
             if profile == "planning":
                 return True, planning.query(vault_root, manifest, **args)
+            include_history = args.pop("include_agent_history", False)
+            from .history import agent_history
+
             result = record_governance.query_collection(vault_root, manifest, **args)
             return True, record_governance.project_query_result(
                 result, manifest, output_format=args.get("output_format", "json"),
+                agent_history=agent_history(writer, manifest) if include_history else None,
             )
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
@@ -377,6 +377,8 @@ def dispatch(
                 if current.view_mode == SUMMARY:
                     require_summary_manifest(vault_root, current.path, args["manifest_text"])
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
+    if action == "rebaseline":
+        return True, _mutate(vault_root, writer.rebaseline_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
     if action == "history":
@@ -385,6 +387,9 @@ def dispatch(
                 from .derived_rows import refused
 
                 raise refused("row history")
+            from .history import row_history
+
+            return True, row_history(writer, manifest, **args)
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )

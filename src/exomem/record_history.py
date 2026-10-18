@@ -195,6 +195,21 @@ def _revision(text: str | None, version: str) -> dict[str, Any]:
     }
 
 
+def project_revision(root, policy, principal, revision):
+    """Release kept and canonical versions through the same origin and actor rules."""
+    from . import origin_bindings
+    from .governance.principal import OWNER_AUDIENCE
+
+    prior = revision.get("prior")
+    if (egress.projects_origin(root, policy, principal) and isinstance(prior, dict)
+            and isinstance(prior.get("body"), str)):
+        prior["body"] = origin_bindings.project_origin_text(root, prior["body"])
+    actor = revision.get("actor")
+    if isinstance(actor, dict) and principal.audience_id not in {OWNER_AUDIENCE, actor.get("audience")}:
+        revision["actor"] = {key: value for key, value in actor.items() if key != "audience"}
+    return revision
+
+
 def read(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -214,10 +229,17 @@ def read(
     (`unavailable` counts them), and `unverified` when the chain itself
     cannot be verified.
     """
-    from . import origin_bindings, record_formats, record_governance, records
-    from .governance.principal import OWNER_AUDIENCE, effective_principal
+    from . import record_formats, record_governance, records
+    from .collection_store.preview import selected_writer
+    from .governance.principal import effective_principal
 
     root = Path(vault_root)
+    writer = selected_writer(root, collection)
+    if writer is not None:
+        from .collection_store.history import row_history
+
+        with writer.read_collection(collection, facade_profile=semantic_profile) as manifest:
+            return row_history(writer, manifest, item_key=item_key, limit=limit, continuation=continuation)
     page_size, after = _page_bounds(limit, continuation)
     with egress.disclosure_boundary(root, "record_history", join_existing=True) as collector:
         policy = egress.policy_module.load(root)
@@ -248,20 +270,10 @@ def read(
         older = [version for version in versions if after is None or version < after]
         page = older[:page_size]
         principal = effective_principal()
-        reader = principal.audience_id
-        # The live row's gate: no configured audience, or the owner, sees it as kept.
-        project = egress.projects_origin(root, policy, principal)
         revisions = []
         for version in page:
             revision = _revision(registry_history.read_kept(root, relative, version + _SUFFIX), version)
-            prior = revision.get("prior")
-            if project and isinstance(prior, dict) and isinstance(prior.get("body"), str):
-                # The reader's own principal decides what of a kept origin it sees.
-                prior["body"] = origin_bindings.project_origin_text(root, prior["body"])
-            actor = revision.get("actor")
-            if isinstance(actor, dict) and reader not in {OWNER_AUDIENCE, actor.get("audience")}:
-                revision["actor"] = {k: v for k, v in actor.items() if k != "audience"}
-            revisions.append(revision)
+            revisions.append(project_revision(root, policy, principal, revision))
         chain = records._inspect_audit_chain(root, manifest, authorize_path=authorize)
         egress.emit_boundary_receipt(collector)
     kept_tags = {

@@ -170,20 +170,27 @@ class _CollectionState:
 class InspectionCache:
     """Reuse contributions only after fresh release selection by the caller."""
 
-    __slots__ = ("maximum_bytes", "states", "_bytes", "_rows")
+    __slots__ = ("maximum_bytes", "states", "_bytes", "_rows", "reserved_bytes")
 
     def __init__(self, maximum_bytes: int = 16 * 1024 * 1024):
         self.maximum_bytes = maximum_bytes
         self.states: OrderedDict[str, _CollectionState] = OrderedDict()
         self._bytes = 0
         self._rows = 0
+        self.reserved_bytes = 0
         self.clear()
 
     def clear(self) -> None:
         self.states.clear()
         self._bytes = sys.getsizeof(self) + sys.getsizeof(self.states)
         self._bytes += sys.getsizeof(self.maximum_bytes) + 2 * sys.getsizeof(0)
+        self._bytes += self.reserved_bytes
         self._rows = 0
+
+    def reserve(self, size):
+        """Charge handle-owned history windows to this same resident byte budget."""
+        self._bytes += size - self.reserved_bytes
+        self.reserved_bytes = size
 
     def discard(self, cid: str) -> None:
         before = sys.getsizeof(self.states)

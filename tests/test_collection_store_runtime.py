@@ -95,12 +95,12 @@ def _create(runtime):
 
 
 def test_a_cached_handle_cannot_bypass_an_older_reader_ceiling_or_leak_a_borrower(runtime, monkeypatch):
-    """A previously cached writer must refuse schema 12 when its simulated reader supports only 11."""
+    """A previously cached schema 12 writer must refuse schema 13 installation semantics."""
     _create(runtime)
     cached = runtime._handle
     assert cached is not None
     with monkeypatch.context() as older:
-        older.setattr(schema, "SCHEMA_VERSION", 11)
+        older.setattr(schema, "SCHEMA_VERSION", 12)
         with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
             with preview_store(runtime.root, runtime):
                 pytest.fail("an older cached handler entered the newer store")
@@ -145,7 +145,7 @@ def _pending_item_views(runtime, monkeypatch):
             writer.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
             writer.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
         paths = [row[0] for row in writer.connection.execute(
-            "SELECT path FROM projection_state WHERE state='pending' ORDER BY path")]
+            "SELECT path FROM projection_state WHERE kind='item' AND state='pending' ORDER BY path")]
     assert len(paths) == 2 and all(not (runtime.root / path).exists() for path in paths)
     return paths
 
@@ -208,7 +208,7 @@ def test_handoff_leaves_views_pending_when_batch_setup_uses_the_drain_share(runt
     assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
     with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
         assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
-        assert reader.execute("SELECT COUNT(*) FROM projection_state WHERE state='pending'").fetchone() == (2,)
+        assert reader.execute("SELECT COUNT(*) FROM projection_state WHERE kind='item' AND state='pending'").fetchone() == (2,)
     _resume_pending_views(runtime, paths, released)
 
 

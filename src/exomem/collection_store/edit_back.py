@@ -67,7 +67,7 @@ KEEP_INVALID_IN_PLACE = True
 # nosemgrep: ep-word-membership, ep-word-set -- The projection_state.kind CHECK fixes these kinds.
 EDITABLE_KINDS = ("item", "manifest", "log")
 # The projection_state.kind CHECK fixes these files; summary pages are observed but never edited back.
-OBSERVED_KINDS = (*EDITABLE_KINDS, "summary")
+OBSERVED_KINDS = (*EDITABLE_KINDS, "summary", "history")
 #: The kinds whose invalid edit stays at its view path (O2). A log view shows every row, so a hold
 #: kept there would keep every later row out of it; a log view's holds take its bytes aside instead.
 # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
@@ -607,6 +607,16 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         admitted = {cid: _served(writer, cid) for cid in {row["collection_id"] for row in rows}}
+        from . import history
+
+        for cid, served in admitted.items():
+            selected = [row for row in rows if row["kind"] == "history" and row["collection_id"] == cid]
+            if served and selected:
+                manifest = writer._collection(cid)[1]
+                context = history.PageContext(writer.connection, writer.root, manifest, cache=writer.handle.release_cache)
+                rendered = context.render_many(row["path"] for row in selected)
+                for row in selected:
+                    row["history_sha256"] = hashlib.sha256(rendered[row["path"]][1].encode()).hexdigest()
     found = []
     with ExitStack() as stack:
         fs = stack.enter_context(held_fs.acquire(writer.root).require())
@@ -633,7 +643,7 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     continue
                 with opened.require() as file:
                     before = file.version()
-                    if row["path"] not in force and _stat(before) == row["stat_identity"] \
+                    if row["kind"] != "history" and row["path"] not in force and _stat(before) == row["stat_identity"] \
                             and row["state"] in ("current", "held"):
                         continue
                     bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
@@ -739,6 +749,10 @@ class EditBack:
                 state.forget(path)
         own = []
         for observation in observations:
+            if (observation.projection["kind"] == "history"
+                    and observation.digest != observation.projection.get("history_sha256")):
+                mutate(writer.reconcile_views, paths={observation.path: observation})
+                continue
             if observation.own:
                 state.forget(observation.path)
                 own.append(observation)
