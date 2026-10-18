@@ -220,6 +220,12 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS pending_recall_visibility "
         "ON pending_recall_rows(state, canonical_generation)"
     )
+    # Readers scan active custody; publication callbacks seek only named paths.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS pending_recall_active "
+        "ON pending_recall_rows(rel_path, batch_id, component_revision, "
+        "canonical_generation, state) WHERE state != 'retired'"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS advisory_result_retention "
         "ON write_advisory_results(retention_deadline, terminal_replay_until)"

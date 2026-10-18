@@ -19,12 +19,14 @@ from __future__ import annotations
 import hashlib
 import importlib
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
 
 from exomem import (
+    deferred_index,
     derived_receipts,
     find_corpus,
     freshness,
@@ -803,7 +805,7 @@ def test_restart_hydrates_pending_before_ready(
     assert _hybrid(vault, marker) == [rel]
 
 
-def test_unprovable_pending_overflow_returns_warming(
+def test_pending_overflow_serves_unaffected_catalogue_with_coverage_warning(
     tmp_path: Path, managed_runtime: None
 ) -> None:
     vault = tmp_path
@@ -832,8 +834,8 @@ def test_unprovable_pending_overflow_returns_warming(
     sentinel_rel = "Knowledge Base/Notes/overflow-0000.md"
     assert _keyword(vault, "Bounded pending page 0000") == [sentinel_rel]
 
-    # One row past the bound the snapshot overflows and recall must fail closed
-    # rather than serve the last published catalogue as if it were complete.
+    # Past the body bound every pending identity stays suppressed, while the
+    # settled catalogue remains usable with incomplete coverage disclosed.
     overflow_rel = "Knowledge Base/Notes/overflow-past-bound.md"
     overflow_after = _page(
         title="Overflow past bound",
@@ -849,11 +851,11 @@ def test_unprovable_pending_overflow_returns_warming(
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
-    with pytest.raises(find_module.RetrievalIndexWarming) as warming:
-        _keyword(vault, "Bounded pending page 0000")
-    assert warming.value.complete is False
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _hybrid(vault, marker)
+    degraded: list[str] = []
+    assert _keyword(vault, "Bounded pending page 0000", degraded=degraded) == []
+    assert "pending_visibility" in degraded
+    assert _hybrid(vault, marker) == []
+    assert _keyword(vault, "ordinary operations")
 
 
 def test_corrupt_pending_row_returns_warming_before_catalogue_access(
@@ -879,13 +881,11 @@ def test_corrupt_pending_row_returns_warming_before_catalogue_access(
         changes=((rel, before, after, None),),
     )
 
-    # The canonical bytes no longer equal the intended after state the receipt
-    # recorded, so the pending row can no longer be proven.
-    _write(
-        vault,
-        rel,
-        _page(title="Corrupt pending", body="Unrelated bytes.", updated="2026-08-24"),
-    )
+    # Corrupt custody cannot establish a trustworthy suppression footprint.
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET canonical_generation = 'invalid-lineage'"
+        )
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
@@ -1409,10 +1409,8 @@ def test_out_of_band_supersession_recovers_after_persistent_publication(
     _reset_overlay()
     find_module.reset_page_and_result_caches()
 
-    # The receipt's intended after state is no longer on disk, so managed recall
-    # fails closed rather than serving an unprovable projection.
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _keyword(vault, marker)
+    # The page stays suppressed until its current bytes reach both lanes.
+    assert _keyword(vault, marker) == []
 
     # Once the persistent lanes publish the current canonical bytes, the row is
     # superseded out of band and retires; recall recovers instead of warming
@@ -1827,8 +1825,7 @@ def test_retirement_refuses_a_lane_pass_that_indexed_an_older_generation(
     )
     _reset_overlay()
     find_module.reset_page_and_result_caches()
-    with pytest.raises(find_module.RetrievalIndexWarming):
-        _keyword(vault, marker)
+    assert _keyword(vault, marker) == []
 
 
 def test_publication_notice_reprojects_only_the_published_batch(
