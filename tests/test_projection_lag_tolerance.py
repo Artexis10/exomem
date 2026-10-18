@@ -153,12 +153,81 @@ def test_find_at_an_exact_projection_discloses_nothing(
     assert "recall_projection" not in degraded
 
 
+@pytest.mark.parametrize("requires_source_proof", [False, True])
+def test_find_keeps_its_exact_admission_when_the_live_registry_advances(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, requires_source_proof: bool
+) -> None:
+    """An intervening event must neither refuse recall nor change its catalogue."""
+    from exomem import find as find_module
+
+    stable = vault / "Knowledge Base" / "Notes" / "checkpoint-stable.md"
+    stable.write_text("# Stable\n\ncheckpointmarker\n", encoding="utf-8")
+    _warm_catalog(vault)
+    _managed_runtime(monkeypatch)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_kw: None)
+    store = lexstore.get_store(vault)
+    admitted = store.published_recall_checkpoint("kb")
+    original = find_module._find_semantic
+    advanced = False
+
+    def advance_before_search(root: Path, **kwargs):
+        nonlocal advanced
+        assert kwargs["snapshot"].recall_checkpoint("kb") == admitted
+        later = vault / "Knowledge Base" / "Notes" / "checkpoint-later.md"
+        later.write_text("# Later\n\nunrelated content\n", encoding="utf-8")
+        if requires_source_proof:
+            for scope in freshness.SCOPES:
+                entries = freshness.live_entries(vault, scope)
+                assert entries is not None
+                entries[str(later)] = freshness.stat_signature(later)
+                assert freshness.reconcile(vault, scope, entries.items()).published
+        else:
+            freshness.on_files_changed(vault, changed=[later])
+        delta = freshness.recall_delta_since(vault, "kb", admitted)
+        assert delta.complete and delta.to != admitted
+        assert delta.requires_source_proof is requires_source_proof
+        advanced = True
+        return original(root, **kwargs)
+
+    monkeypatch.setattr(find_module, "_find_semantic", advance_before_search)
+    hits = find_module.find(
+        vault, query="checkpointmarker", scope="kb-only", mode="hybrid", graph=False
+    )
+
+    assert advanced
+    assert any(hit.path == "Knowledge Base/Notes/checkpoint-stable.md" for hit in hits)
+    assert store.published_recall_checkpoint("kb") == admitted
+
+
+def test_strict_catalogue_proof_does_not_reuse_a_request_checkpoint(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serving request's old proof must not bless strict readiness for a newer event."""
+    _warm_catalog(vault)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_kw: None)
+    admitted = lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False)
+    assert admitted is not None
+    later = vault / "Knowledge Base" / "Notes" / "checkpoint-later.md"
+    later.write_text("# Later\n", encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[later])
+
+    with lexstore.admitted_catalog_scope(vault):
+        lexstore.bind_admitted_catalog(vault, admitted)
+        assert lexstore.get_store(vault).catalog_readiness(
+            "kb", admitted["kb"].triple, allow_delta=False, schedule_repair=False
+        ).complete
+        assert lexstore.runtime_retrieval_catalog_proof(
+            vault, schedule_repair=False
+        ) is None
+
+
 @pytest.mark.parametrize("invalidate", ["repair", "health"])
 def test_find_rechecks_published_catalog_after_readiness_demotion(
     vault: Path, monkeypatch: pytest.MonkeyPatch, invalidate: str
 ) -> None:
     """A strict readiness demotion must not disable proven lag-tolerant recall."""
-    from exomem import find as find_module, readiness
+    from exomem import find as find_module
+    from exomem import readiness
 
     _warm_catalog(vault)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault.resolve()))
