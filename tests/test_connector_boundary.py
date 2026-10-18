@@ -118,6 +118,28 @@ def test_a_filter_built_in_a_request_scope_follows_a_change_after_the_scope_ends
     assert not keep(PRIVATE)
 
 
+def test_each_terminal_pass_sees_host_changes_despite_an_outer_request_memo(
+    configured_boundary, vault,
+):
+    """A body or earlier release decision cannot hide a changed connector ceiling."""
+    from exomem import state_paths
+    from exomem.governance import connector_boundary
+
+    config, authenticate = configured_boundary
+    who = authenticate("full")
+    payload = {"items": [{"path": PUBLIC}, {"path": PRIVATE}]}
+    data = json.loads(config.read_text())
+    with principal.request_scope(who), state_paths.resolution_scope():
+        assert connector_boundary.permits(vault, PRIVATE, who)
+        data["clients"][1]["denied_scope_ids"] = [SCOPE]
+        config.write_text(json.dumps(data))
+        restricted = egress.postfilter("activate_context", payload, vault)
+        assert restricted == {"items": [{"path": PUBLIC}]}
+        data["clients"][1]["denied_scope_ids"] = []
+        config.write_text(json.dumps(data))
+        assert egress.postfilter("activate_context", payload, vault) == payload
+
+
 def test_unknown_scope_never_turns_configuration_into_unrestricted_access(configured_boundary, vault):
     config, authenticate = configured_boundary
     who = authenticate("full")
