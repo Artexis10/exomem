@@ -1877,6 +1877,8 @@ def test_the_real_cold_readiness_loop_records_what_the_worker_is_waiting_on(
 
     module = _manager()
     monkeypatch.setattr(httpx, "AsyncClient", _WarmingClient)
+    # The fake client ignores its transport; keep SSL setup outside the loop budget.
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **kwargs: None)
 
     async def scenario():
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
