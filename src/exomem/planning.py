@@ -458,140 +458,145 @@ def query(
                 lifecycle=lifecycle, include_agent_history=include_agent_history,
                 authorize_path=authorize_path,
             )
-    if writer is not None:
-        manifest = writer._collection(collection, facade_profile="planning")[1]
-        adapter_authorize_path = writer._operation.allows_file
-    elif authorize_path is None:
-        manifest = record_governance.resolve_collection(vault_root, collection)
-        adapter_authorize_path = record_governance.full_release_filter(vault_root)
-    else:
-        selector = (
-            collection.path
-            if isinstance(collection, collections.CollectionManifest)
-            else collection
-        )
-        manifest = collections.resolve_collection(
-            vault_root, selector, authorize_path=authorize_path
-        )
-        adapter_authorize_path = authorize_path
-    require_planning_profile(manifest)
-    if lifecycle not in {"active", "archived", "all"}:
-        raise CollectionError("INVALID_PLAN_ARGUMENTS", "lifecycle selector is invalid")
-    if view is not None and (filters or lifecycle != "active"):
-        raise CollectionError(
-            "INVALID_PLAN_ARGUMENTS", "saved views cannot be combined with filters or lifecycle"
-        )
-    if hierarchy_mode != "none" and (aggregate is not None or output_format == "csv"):
-        raise CollectionError(
-            "INVALID_PLAN_ARGUMENTS", "hierarchy cannot be combined with aggregate or CSV"
-        )
-    _validate_authorized_snapshot(
-        vault_root,
-        manifest,
-        adapter_authorize_path,
-        validate_relationships=authorize_path is None and writer is None,
-    )
-    effective_filters = None if view is not None else list(filters or [])
-    if view is None and lifecycle != "all":
-        assert effective_filters is not None
-        effective_filters.append({"column": "lifecycle", "op": "eq", "value": lifecycle})
-    if authorize_path is None:
-        result = record_governance.query_collection(
-            vault_root,
-            manifest,
-            semantic_profile="planning",
-            filters=effective_filters,
-            columns=columns,
-            sort_by=sort_by,
-            descending=descending,
-            limit=limit,
-            aggregate=aggregate,
-            date_from=date_from,
-            date_to=date_to,
-            date_column=date_column,
-            continuation=continuation,
-            output_format=output_format,
-            view=view,
-            source_versions_for_rows=True,
-        )
-    else:
-        result = record_formats.query_collection(
-            vault_root,
-            manifest,
-            filters=effective_filters,
-            columns=columns,
-            sort_by=sort_by,
-            descending=descending,
-            limit=limit,
-            aggregate=aggregate,
-            date_from=date_from,
-            date_to=date_to,
-            date_column=date_column,
-            continuation=continuation,
-            output_format=output_format,
-            view=view,
-            authorize_path=authorize_path,
-            source_versions_for_rows=True,
-        )
-    hierarchy = _hierarchy(
-        vault_root,
-        manifest,
-        result.rows,
-        mode=hierarchy_mode,
-        depth=hierarchy_depth,
-        limit=hierarchy_limit,
-        authorize_path=adapter_authorize_path,
-    )
-    source_versions = list(result.source_versions)
-    if isinstance(hierarchy, Mapping) and isinstance(hierarchy.get("nodes"), list):
-        hierarchy_ids = {
-            node["plan_id"]
-            for node in hierarchy["nodes"]
-            if isinstance(node, Mapping) and isinstance(node.get("plan_id"), str)
-        }
-        snapshot = record_formats.load_adapter(
-            vault_root, manifest, authorize_path=adapter_authorize_path
-        ).read()
-        known_paths = {version.path for version in source_versions}
-        source_versions.extend(
-            record.source
-            for record in snapshot.records
-            if record.identity.key in hierarchy_ids and record.source.path not in known_paths
-        )
-    return _project_query(
-        {
-        "collection_id": result.collection_id,
-        "snapshot": result.snapshot,
-        "rows": result.rows,
-        "returned": result.returned,
-        "total_matched": result.total_matched,
-        "truncated": result.truncated,
-        "continuation": result.continuation,
-        "derived": result.derived,
-        "generated_at": dt.datetime.now(tz=dt.UTC).isoformat().replace("+00:00", "Z"),
-        "rendered": result.rendered,
-        "output_format": output_format,
-        "aggregate": result.aggregate,
-        "query": {
-            **result.query,
-            "lifecycle": lifecycle,
-            "hierarchy_mode": hierarchy_mode,
-            "hierarchy_depth": hierarchy_depth,
-            "hierarchy_limit": hierarchy_limit,
-        },
-        "source_versions": [
-            {"path": version.path, "hash": version.hash} for version in source_versions
-        ],
-        "view": result.view,
-        "hierarchy": hierarchy,
-        "agent_history": (
-            records.agent_audit_history(vault_root, manifest, authorize_path=adapter_authorize_path)
-            if include_agent_history
-            else None
-        ),
-        },
-        manifest,
-    )
+    # Share ownership through validation, evaluation and projection before the receipt.
+    with egress.disclosure_boundary(vault_root, "record_query", join_existing=True) as collector:
+        with record_governance.authorization_pass(vault_root):
+            if writer is not None:
+                manifest = writer._collection(collection, facade_profile="planning")[1]
+                adapter_authorize_path = writer._operation.allows_file
+            elif authorize_path is None:
+                manifest = record_governance.resolve_collection(vault_root, collection)
+                adapter_authorize_path = record_governance.full_release_filter(vault_root)
+            else:
+                selector = (
+                    collection.path
+                    if isinstance(collection, collections.CollectionManifest)
+                    else collection
+                )
+                manifest = collections.resolve_collection(
+                    vault_root, selector, authorize_path=authorize_path
+                )
+                adapter_authorize_path = authorize_path
+            require_planning_profile(manifest)
+            if lifecycle not in {"active", "archived", "all"}:
+                raise CollectionError("INVALID_PLAN_ARGUMENTS", "lifecycle selector is invalid")
+            if view is not None and (filters or lifecycle != "active"):
+                raise CollectionError(
+                    "INVALID_PLAN_ARGUMENTS", "saved views cannot be combined with filters or lifecycle"
+                )
+            if hierarchy_mode != "none" and (aggregate is not None or output_format == "csv"):
+                raise CollectionError(
+                    "INVALID_PLAN_ARGUMENTS", "hierarchy cannot be combined with aggregate or CSV"
+                )
+            _validate_authorized_snapshot(
+                vault_root,
+                manifest,
+                adapter_authorize_path,
+                validate_relationships=authorize_path is None and writer is None,
+            )
+            effective_filters = None if view is not None else list(filters or [])
+            if view is None and lifecycle != "all":
+                assert effective_filters is not None
+                effective_filters.append({"column": "lifecycle", "op": "eq", "value": lifecycle})
+            if authorize_path is None:
+                result = record_governance.query_collection(
+                    vault_root,
+                    manifest,
+                    semantic_profile="planning",
+                    filters=effective_filters,
+                    columns=columns,
+                    sort_by=sort_by,
+                    descending=descending,
+                    limit=limit,
+                    aggregate=aggregate,
+                    date_from=date_from,
+                    date_to=date_to,
+                    date_column=date_column,
+                    continuation=continuation,
+                    output_format=output_format,
+                    view=view,
+                    source_versions_for_rows=True,
+                )
+            else:
+                result = record_formats.query_collection(
+                    vault_root,
+                    manifest,
+                    filters=effective_filters,
+                    columns=columns,
+                    sort_by=sort_by,
+                    descending=descending,
+                    limit=limit,
+                    aggregate=aggregate,
+                    date_from=date_from,
+                    date_to=date_to,
+                    date_column=date_column,
+                    continuation=continuation,
+                    output_format=output_format,
+                    view=view,
+                    authorize_path=authorize_path,
+                    source_versions_for_rows=True,
+                )
+            hierarchy = _hierarchy(
+                vault_root,
+                manifest,
+                result.rows,
+                mode=hierarchy_mode,
+                depth=hierarchy_depth,
+                limit=hierarchy_limit,
+                authorize_path=adapter_authorize_path,
+            )
+            source_versions = list(result.source_versions)
+            if isinstance(hierarchy, Mapping) and isinstance(hierarchy.get("nodes"), list):
+                hierarchy_ids = {
+                    node["plan_id"]
+                    for node in hierarchy["nodes"]
+                    if isinstance(node, Mapping) and isinstance(node.get("plan_id"), str)
+                }
+                snapshot = record_formats.load_adapter(
+                    vault_root, manifest, authorize_path=adapter_authorize_path
+                ).read()
+                known_paths = {version.path for version in source_versions}
+                source_versions.extend(
+                    record.source
+                    for record in snapshot.records
+                    if record.identity.key in hierarchy_ids and record.source.path not in known_paths
+                )
+            projected = _project_query(
+                {
+                "collection_id": result.collection_id,
+                "snapshot": result.snapshot,
+                "rows": result.rows,
+                "returned": result.returned,
+                "total_matched": result.total_matched,
+                "truncated": result.truncated,
+                "continuation": result.continuation,
+                "derived": result.derived,
+                "generated_at": dt.datetime.now(tz=dt.UTC).isoformat().replace("+00:00", "Z"),
+                "rendered": result.rendered,
+                "output_format": output_format,
+                "aggregate": result.aggregate,
+                "query": {
+                    **result.query,
+                    "lifecycle": lifecycle,
+                    "hierarchy_mode": hierarchy_mode,
+                    "hierarchy_depth": hierarchy_depth,
+                    "hierarchy_limit": hierarchy_limit,
+                },
+                "source_versions": [
+                    {"path": version.path, "hash": version.hash} for version in source_versions
+                ],
+                "view": result.view,
+                "hierarchy": hierarchy,
+                "agent_history": (
+                    records.agent_audit_history(vault_root, manifest, authorize_path=adapter_authorize_path)
+                    if include_agent_history
+                    else None
+                ),
+                },
+                manifest,
+            )
+        egress.emit_boundary_receipt(collector)
+        return projected
 
 
 def _project_query(

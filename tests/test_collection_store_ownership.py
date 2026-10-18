@@ -160,6 +160,55 @@ def test_first_admission_invalidates_an_owner_listing_after_its_physical_snapsho
     assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("profile", ("records", "planning"))
+def test_first_admission_invalidates_a_standalone_query_before_its_receipt(tmp_path, monkeypatch, profile):
+    from test_collection_store_service import A_PATH, B_PATH
+
+    from exomem import planning, record_formats, record_governance
+    from exomem.governance.principal import owner_principal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    captured, resume = threading.Event(), threading.Event()
+    original = record_formats.query_collection
+    result = []
+
+    def paused(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if threading.current_thread().name == "ownership-query":
+            assert value.total_matched == 0
+            captured.set()
+            assert resume.wait(15)
+        return value
+
+    monkeypatch.setattr(record_formats, "query_collection", paused)
+
+    def read():
+        with request_scope(owner_principal(surface="cli")):
+            try:
+                value = (record_governance.query_collection(root, A_PATH) if profile == "records"
+                         else planning.query(root, B_PATH, lifecycle="all"))
+                result.append(value)
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-query")
+        reader.start()
+        try:
+            assert captured.wait(10)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
+    assert not any(outcome.get("command") == "record_query"
+                   and outcome["decision"] in ("released", "release_authorized")
+                   for event in _receipt_records(root) if event["event_type"] == "disclosure"
+                   for outcome in event["outcomes"])
+
+
 @pytest.mark.parametrize(("failed_read", "alias"), [(False, False), (False, True), (True, False)])
 def test_ownership_rejection_keeps_credential_evidence_without_a_successful_release(tmp_path, monkeypatch, failed_read, alias):
     root = _served_vault(tmp_path, monkeypatch)

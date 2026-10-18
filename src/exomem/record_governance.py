@@ -1347,42 +1347,44 @@ def query_collection(
                 late_link_projection=late_link_projection, **kwargs,
             )
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        if writer is None:
-            policy = egress.policy_module.load(root)
-            manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
-            authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
-        else:
-            manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
-            policy = writer._operation.policy
-            authorize_path = writer._operation.allows_file
-        if manifest.semantic_profile != semantic_profile:
-            error_code = (
-                "RECORDS_PROFILE_REQUIRED"
-                if semantic_profile == "records"
-                else "PLANNING_PROFILE_REQUIRED"
+        # Verify the whole query before its receipt can claim release.
+        with authorization_pass(root):
+            if writer is None:
+                policy = egress.policy_module.load(root)
+                manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
+                authorize_path = lambda path: _authorize(root, path, receipt=True, policy=policy)
+            else:
+                manifest = writer._collection(collection, facade_profile=semantic_profile)[1]
+                policy = writer._operation.policy
+                authorize_path = writer._operation.allows_file
+            if manifest.semantic_profile != semantic_profile:
+                error_code = (
+                    "RECORDS_PROFILE_REQUIRED"
+                    if semantic_profile == "records"
+                    else "PLANNING_PROFILE_REQUIRED"
+                )
+                raise collections.CollectionError(
+                    error_code,
+                    "collection profile is not available",
+                )
+            if writer is None and not authorize_path(manifest.storage.source):
+                raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            links = _LinkProjector.create(
+                root, manifest, policy=policy, allow_cold_index=not late_link_projection,
+                authorize_path=authorize_path,
             )
-            raise collections.CollectionError(
-                error_code,
-                "collection profile is not available",
+            view = kwargs.get("view")
+            if view is not None:
+                _authorize_saved_view(root, manifest, view, links)
+            result = record_formats.query_collection(
+                root,
+                manifest,
+                authorize_path=authorize_path,
+                project_values=links,
+                project_child_value=links.project_presentation_value,
+                late_link_projection=late_link_projection,
+                **kwargs,
             )
-        if writer is None and not authorize_path(manifest.storage.source):
-            raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(
-            root, manifest, policy=policy, allow_cold_index=not late_link_projection,
-            authorize_path=authorize_path,
-        )
-        view = kwargs.get("view")
-        if view is not None:
-            _authorize_saved_view(root, manifest, view, links)
-        result = record_formats.query_collection(
-            root,
-            manifest,
-            authorize_path=authorize_path,
-            project_values=links,
-            project_child_value=links.project_presentation_value,
-            late_link_projection=late_link_projection,
-            **kwargs,
-        )
         egress.emit_boundary_receipt(collector)
         return result
 
