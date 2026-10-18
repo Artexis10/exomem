@@ -13,7 +13,7 @@ import json
 import sqlite3
 import uuid
 from collections import ChainMap
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -163,7 +163,7 @@ class CollectionWriter:
             raise
 
     @contextmanager
-    def _mutation(self, *, reconcile=False):
+    def _mutation(self, *, reconcile=False, stop=None):
         batch = None
         recovery_only = False
         try:
@@ -174,7 +174,7 @@ class CollectionWriter:
                     raise connection.CollectionStoreError(
                         "COLLECTION_STORE_DIVERGED", "collection store requires reconciliation"
                     )
-                batch = self._publication = views.PublicationBatch(self)
+                batch = self._publication = views.PublicationBatch(self, stop=stop)
                 self._row_counts = {}
                 if self._view_edit is not None and not self._view_edit.get("partial_log"):
                     # The edited bytes become canonical here, so displacing them loses nothing.
@@ -1371,7 +1371,8 @@ class CollectionWriter:
             raise result.error
         return preserved
 
-    def reconcile_views(self, *, limit=64, after=None, pending_only=False, paths=None, missing_ready=None):
+    def reconcile_views(self, *, limit=64, after=None, pending_only=False, paths=None, missing_ready=None,
+                        stop: Callable[[], bool] | None = None):
         """Recover one path window; inspect never writes or invokes this path.
 
         The window does not bound file bytes, preserved inputs or directory enumeration.
@@ -1380,17 +1381,24 @@ class CollectionWriter:
         edit-back, which waits for the edit to settle.
         ``paths`` maps each view edit-back settled to its observation; only those are visited,
         and only while their bytes are still the observed ones.
+        ``stop`` leaves further optional work pending between complete recovery and publication units;
+        filesystem calls and transaction finalization still finish.
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
             raise ValueError("reconcile limit must be between 1 and 1024")
         if after is not None and not isinstance(after, str):
             raise ValueError("reconcile continuation must be a path")
-        result = {"examined": 0, "warnings": [], "next_path": None}
-        with self._mutation(reconcile=True):
+        result = {"examined": 0, "warnings": [], "next_path": after or ""}
+        if stop is not None and stop():
+            result["warnings"].append("projection_pending")
+            return result
+        with self._mutation(reconcile=True, stop=stop):
             batch = self._publication
             batch.bind(result)
             batch.observed = paths if paths is not None else {} if pending_only and batch.edit_back else None
             result["recovered_stages"] = batch.recovered_stages
+            if batch.stopped():
+                return result
             if paths is not None:
                 cursor = self.connection.execute(
                     "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') "
@@ -1402,11 +1410,16 @@ class CollectionWriter:
                     (after or "", not pending_only, limit + 1),
                 )
             rows = [dict(zip((c[0] for c in cursor.description), row, strict=True)) for row in cursor.fetchall()]
-            if len(rows) > limit:
+            more = len(rows) > limit
+            if more:
                 rows = rows[:limit]
-                result["next_path"] = rows[-1]["path"]
             visited_parents = set()
+            consumed = after or ""
             for projection in rows:
+                if batch.stopped():
+                    result["next_path"] = consumed
+                    break
+                preceding, consumed = consumed, projection["path"]
                 if not batch.eligible(projection):
                     continue
                 _, manifest, _ = self._collection(projection["collection_id"])
@@ -1436,7 +1449,13 @@ class CollectionWriter:
                         batch._parent(projection["path"], create=True)
                         batch.recover_orphans(projection["path"], limit=limit)
                         visited_parents.add(parent_path)
+                        if batch.stopped():
+                            result["next_path"] = preceding
+                            break
                     projection = batch.capture_previous(projection["path"])
+                    if batch.stopped():
+                        result["next_path"] = preceding
+                        break
                     preserved = batch.recovered_inputs[projection["path"]]
                     if preserved is None:
                         continue
@@ -1521,6 +1540,8 @@ class CollectionWriter:
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
                     batch.pending = True
                 self._precommit(manifest)
+            else:
+                result["next_path"] = consumed if more else None
         return result
 
     def apply_view_edit(self, observation, found):

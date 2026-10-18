@@ -78,6 +78,26 @@ def test_a_settled_valid_edit_is_one_view_edit_and_a_replay_commits_nothing(stor
     assert len(txns(store, "view_edit")) == 1 and holds(store) == [] and path.read_bytes() == rendered
 
 
+def test_an_item_save_without_its_stamp_is_held_without_changing_the_record(store):
+    """Removing generated metadata must not authorize an edit against an unknown base."""
+    from exomem import vault
+
+    _, path = appended(store, count=1)
+    frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
+    frontmatter.pop("exomem_view")
+    frontmatter["title"] = "Edited without a base"
+    edited = ("---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n" + body).encode()
+    path.write_bytes(edited)
+
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+
+    [(_, code, raw)] = holds(store)
+    assert (code, raw) == ("VIEW_INVALID", edited)
+    assert store.connection.execute("SELECT row_version,values_json FROM items").fetchone() == (
+        1, '{"count":1,"title":"One"}')
+    assert txns(store, "view_edit") == []
+
+
 def test_an_offline_cross_directory_move_keeps_the_filename_and_payload_version(store):
     """An offline rename must be found before the missing old view is recreated."""
     receipt, old = appended(store)

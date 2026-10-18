@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 PUBLISH_INTERVAL_SECONDS = 60.0
 #: A burst of commits shares one publication once writes pause this long.
 PUBLISH_SETTLE_SECONDS = 1.0
-#: The share of a handoff's remaining time that installing pending views may take. A view
-#: left pending costs only lag; a handoff past its deadline fails, so the replica gets the rest.
+#: The cutoff share for starting optional view work; an in-flight filesystem call or
+#: required finalization may finish later. Pending views leave time for replica publication.
 DRAIN_SHARE = 0.5
 #: The `_Collections/` watch (A4): stat the replica every tick; hash it only when that changes.
 WATCH_SECONDS = 1.0
@@ -651,10 +651,9 @@ class CollectionStoreRuntime:
         """Install the views that committed changes left pending, before a handoff or a stop (design §5).
 
         It publishes what the serving store thread would, under the release that lets that
-        thread publish, through the same reconcile. It takes at most half of the time left
-        before the handoff's deadline and leaves the rest to the replica publication and the
-        coordinator release. A view it cannot install in its share stays pending for the next
-        holder's startup pass, so a slow drain costs a lagging view, never the handoff.
+        thread publish, through the same reconcile. Half of the time left sets a cooperative
+        cutoff for starting optional work; in-flight filesystem calls and required finalization
+        still finish. Unfinished views stay pending for the next holder's startup pass.
         """
         from . import capability
 
@@ -665,16 +664,20 @@ class CollectionStoreRuntime:
 
         now = time.monotonic()
         deadline = now + max(0.0, deadline - now) * DRAIN_SHARE
+
+        def stopped():
+            return time.monotonic() >= deadline or (cancelled is not None and cancelled())
+
         writer, after, passes = CollectionWriter(self.root, handle), None, 0
         try:
             with principal.library_scope():
                 # One pass installs each view; the next confirms it current. Each pass is one window.
-                while passes < 2 and time.monotonic() < deadline and not (cancelled is not None and cancelled()):
+                while passes < 2 and not stopped():
                     if handle.connection.execute(
                             "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                         return
                     after = writer.reconcile_views(
-                        limit=VIEW_BATCH_PATHS, after=after, pending_only=True,
+                        limit=VIEW_BATCH_PATHS, after=after, pending_only=True, stop=stopped,
                         missing_ready=handle.census(self.root).missing_ready
                         if capability.collection_views_enabled(self.root) else None)["next_path"]
                     passes += after is None

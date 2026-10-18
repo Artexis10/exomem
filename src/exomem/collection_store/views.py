@@ -7,7 +7,7 @@ import json
 import os
 import secrets
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,8 +82,9 @@ class _AliasInput:
 class PublicationBatch:
     """Stage in one canonical transaction, then install after its COMMIT."""
 
-    def __init__(self, writer):
+    def __init__(self, writer, *, stop: Callable[[], bool] | None = None):
         self.writer = writer
+        self.stop = stop
         self.identity = store_identity(writer.connection)
         self.stack = ExitStack()
         self.filesystem = None
@@ -116,6 +117,12 @@ class PublicationBatch:
         self.observed = None
         # Whether the release runs edit-back; without it, view inputs are classified as before it.
         self.edit_back = capability.collection_views_enabled(conn=writer.connection)
+
+    def stopped(self):
+        if self.stop is not None and self.stop():
+            self.pending = True
+            return True
+        return False
 
     def accept(self, path, digest):
         self.accepted.setdefault(path, set()).add(digest)
@@ -449,11 +456,15 @@ class PublicationBatch:
             return
         with self._boundary():
             for path, (parent, leaf, digest) in pairs.items():
+                if self.stopped():
+                    break
                 try:
                     self._cleanup_stage_pair(path, parent, leaf, digest)
                 except (held_fs.HeldFsError, OSError):
                     self.pending = True
             for publication in publications:
+                if self.stopped():
+                    break
                 version, text = self.writer._render_view(
                     publication.projection, self.contexts[publication.context]
                 )
@@ -627,6 +638,8 @@ class PublicationBatch:
         if self.cleanup or self.alias_cleanup or publications:
             with self._boundary():
                 for projection, parent, leaf, destination, digest in self.alias_cleanup:
+                    if self.stopped():
+                        break
                     if not self.eligible(projection):
                         self.pending = True
                         continue
@@ -648,6 +661,8 @@ class PublicationBatch:
                     except (held_fs.HeldFsError, OSError):
                         self.pending = True
                 for projection, parent, leaf, digest in self.cleanup:
+                    if self.stopped():
+                        break
                     eligible = (self.eligible(projection) if projection is not None else
                                 authority.orphan_cleanup_eligible(self.writer, self.parent_paths[parent]))
                     if not eligible:
@@ -667,6 +682,8 @@ class PublicationBatch:
                     except (held_fs.HeldFsError, OSError):
                         self.pending = True
                 for publication in publications:
+                    if self.stopped():
+                        break
                     try:
                         self._install(publication)
                     except (held_fs.HeldFsError, OSError):
@@ -795,6 +812,8 @@ class PublicationBatch:
         parent = self._parent(path)
         processed = 0
         for child in self._fs().children(parent).require():
+            if self.stopped():
+                break
             leaf = child.relative_path
             if not leaf.startswith((STAGE_PREFIX, ASIDE_PREFIX)):
                 continue
