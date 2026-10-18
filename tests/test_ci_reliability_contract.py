@@ -48,6 +48,7 @@ NIGHTLY_OWNED_MODULE = "tests/test_latency_gate.py"
 #: wheel onboarding gate and release evidence still run on it; the full run at
 #: its base is its test proof.
 RELEASE_PR_SKIPPED_JOBS = {
+    "timing-tests",
     "core-tests",
     "harness-tests",
     "windows-held-filesystem",
@@ -199,7 +200,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
     store = " ".join(command.split())
     assert (
         "${{ (github.event_name == 'schedule' || "
-        "github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}"
+        "github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}"
     ) in store
 
     durations_step = next(
@@ -330,17 +331,28 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     full_items = _collect_items("full lean suite", None, [])
     workflow = _workflow()
     core_job = workflow["jobs"]["core-tests"]
+    timing_job = workflow["jobs"]["timing-tests"]
     # Job-level environment values select the timing modules; runtime defaults live on the steps.
+    assert timing_job["env"] == core_job["env"]
+    assert timing_job["strategy"]["matrix"] == {
+        "python-version": core_job["strategy"]["matrix"]["python-version"]
+    }
+    assert "needs" not in timing_job, "timing checks must overlap the worker pools"
     serial_modules = list(core_job["env"].values())
     for variable in core_job["env"]:
         assert f'--ignore="${variable}"' in _run_step(core_job)["run"]
-    serial_step = next(
-        step for step in core_job["steps"]
-        if all(f'"${variable}"' in step.get("run", "") for variable in core_job["env"])
-    )
-    assert serial_step["if"] == "matrix.shard == 1 && steps.scope.outputs.docs_only != 'true'"
+    serial_step = _run_step(timing_job)
+    assert all(f'"${variable}"' in serial_step["run"] for variable in timing_job["env"])
+    assert serial_step["if"] == "steps.scope.outputs.docs_only != 'true'"
     assert "--splits" not in serial_step["run"]
+    assert "-n " not in serial_step["run"]
     assert "-serial.xml" in serial_step["run"]
+    assert serial_step["env"] == _run_step(core_job)["env"]
+    assert any(
+        step.get("with", {}).get("name") == "core-py${{ matrix.python-version }}-serial-junit"
+        and step.get("if") == "always()"
+        for step in timing_job["steps"]
+    )
     core_items = _collect_items("pooled core tier", "core", [f"--ignore={module}" for module in serial_modules])
     serial_items = _collect_items("serial core checks", "core", serial_modules)
     serial = {item.nodeid for item in serial_items}
