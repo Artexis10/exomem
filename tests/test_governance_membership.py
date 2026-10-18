@@ -377,6 +377,60 @@ def test_path_only_non_markdown_membership_is_classified_empty(vault: Path) -> N
     assert outcome.scope_ids == frozenset()
 
 
+@pytest.mark.parametrize(
+    ("selectors", "expected"),
+    [
+        ({"paths": ["Notes/**"]}, "classified"),
+        ({"paths": ["Notes/**"], "exclude": {"tags": ["restricted"]}}, "unresolved"),
+        (
+            {
+                "paths": ["Notes/**"],
+                "exclude": {"refs": ["exomem://memory/12345678-1234-4234-8234-123456789012"]},
+            },
+            "unresolved",
+        ),
+        ({"refs": ["exomem://memory/12345678-1234-4234-8234-123456789012"]}, "unresolved"),
+        ({"tags": ["restricted"]}, "unresolved"),
+        ({"paths": ["Private/**"]}, "classified"),
+        (
+            {"paths": ["Notes/**"], "exclude": {"paths": ["Notes/**"]}, "tags": ["restricted"]},
+            "classified",
+        ),
+    ],
+)
+def test_no_byte_membership_retains_unknown_selectors_without_reading_artifact(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selectors: dict,
+    expected: str,
+) -> None:
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    _write_scope(
+        vault, "pending", yaml.safe_dump({"governance_version": 1, "id": scope_id, **selectors})
+    )
+    compiled = policy.load(vault)
+    path = "Knowledge Base/Notes/pending.md"
+    artifact = _write_page(vault, path, "type: insight")
+    original = Path.read_bytes
+
+    def read(target):
+        assert target != artifact, "metadata-only membership opened its artifact"
+        return original(target)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(
+        membership.companions,
+        "classify",
+        lambda *_args, **_kwargs: pytest.fail("no-byte membership tried companion hydration"),
+    )
+    outcome = membership.evaluate_path_only(vault, path, compiled, resolve_bytes=False)
+    assert outcome.state == expected
+    if expected == "classified":
+        assert outcome.scope_ids == (
+            frozenset((scope_id,)) if selectors == {"paths": ["Notes/**"]} else frozenset()
+        )
+
+
 def test_path_exclusion_proves_non_markdown_scope_is_excluded(vault: Path) -> None:
     _write_scope(
         vault,

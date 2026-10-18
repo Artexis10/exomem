@@ -472,6 +472,7 @@ def _converge(
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
+            retire_visibility=derived_drain.pending_visibility_retirer(),
             limit=limit,
         )
         completed += int(moved)

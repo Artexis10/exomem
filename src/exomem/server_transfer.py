@@ -862,7 +862,7 @@ def register_transfer_routes(
             return _tus_refusal(exc.code, exc.reason, 400)
         except upload_sessions.SessionError as exc:
             return _tus_refusal(exc.code, exc.reason, exc.status)
-        upload_sessions.start_commit(session, commit)
+        await run_in_threadpool(upload_sessions.start_commit, session, commit)
         return Response(
             status_code=201,
             headers=_tus_headers(
@@ -893,7 +893,7 @@ def register_transfer_routes(
         except upload_sessions.SessionError as exc:
             return _tus_refusal(exc.code, exc.reason, exc.status)
         # A commit that a stop interrupted, or that can be retried, resumes when its session is read.
-        upload_sessions.start_commit(session, commit)
+        await run_in_threadpool(upload_sessions.start_commit, session, commit)
         state = session.record["state"]
         if request.method == "GET":
             return JSONResponse(session.view(), headers=_tus_headers(session))
@@ -951,7 +951,7 @@ def register_transfer_routes(
                 refusal.code, refusal.reason, refusal.status, **{"Upload-Offset": str(new_offset)}
             )
         if complete:
-            upload_sessions.start_commit(session, commit)
+            await run_in_threadpool(upload_sessions.start_commit, session, commit)
         return Response(
             status_code=204, headers=_tus_headers(session, **{"Upload-Offset": str(new_offset)})
         )

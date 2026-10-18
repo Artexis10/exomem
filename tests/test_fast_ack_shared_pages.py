@@ -557,27 +557,16 @@ def test_an_older_batch_s_after_bytes_never_hand_on_a_newer_batch_s_revert(
     ).outcome == "reconcile_required"
 
 
-def test_an_out_of_band_move_heals_once_the_recall_lanes_hold_it(
+def test_service_repairs_a_committed_out_of_band_move(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
-    """A hand edit no receipt covers is held until both recall lanes hold it.
-
-    Owner ruling R2: the owner edits pages by hand, so an out-of-band move is
-    ordinary. While neither lane holds the edited bytes the batch stays in
-    `reconcile_required`; once they do -- as the watcher or a reconcile makes
-    them -- recovery hands the path on and the batch converges the rest.
-    """
+    """The worker converges a proven batch's current bytes without operator repair."""
     vault = live_catalogue
     page = _remember(tmp_path, vault, "Out of band probe")["path"]
     target = vault / page
     target.write_bytes(target.read_bytes() + b"\nEdited by hand in the editor.\n")
 
-    _drain_until_idle(vault)
-
-    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
-    assert pending_recall.overlay(vault).outcome == "warming"
-
-    index_sync.upsert_after_write(vault, [target], publish_corpus_change=True)
+    assert pending_recall.overlay(vault).outcome == "degraded"
     _drain_until_idle(vault)
 
     _assert_converged(vault, [page])
@@ -615,23 +604,20 @@ def test_a_new_page_deleted_by_hand_before_it_converges_heals_without_reconcile(
     assert _advisory_state(vault, terminal["advisory_result_ref"])[0] == "superseded"
 
 
-def test_a_new_page_deleted_by_hand_waits_until_the_lanes_lose_it(
+def test_service_removes_a_committed_page_deleted_before_index_removal(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
-    """While a lane still holds the deleted page, its absence is not yet visible."""
+    """The worker must publish a deletion before retiring stale indexed evidence."""
     vault = live_catalogue
     page = _remember(tmp_path, vault, "Deleted before removal probe")["path"]
     index_sync.upsert_after_write(vault, [vault / page], publish_corpus_change=True)
     (vault / page).unlink()
 
+    assert not pending_recall.recall_lanes_hold(vault, {page: None})
     _drain_until_idle(vault)
 
-    assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
-
-    index_sync.delete_after_remove(vault, [page])
-    _drain_until_idle(vault)
-
-    assert [state for _id, state, _paths in _batches(vault)] == ["completed"]
+    assert pending_recall.recall_lanes_hold(vault, {page: None})
+    assert [state for _id, state, _paths in _batches(vault)] == ["superseded"]
     assert pending_recall.overlay(vault).outcome == "ready"
 
 
@@ -787,7 +773,10 @@ def _strand_one(tmp_path: Path, vault: Path) -> tuple[str, Path]:
     page = _remember(tmp_path, vault, "Stranded operator probe")["path"]
     target = vault / page
     target.write_bytes(target.read_bytes() + b"\nEdited by hand, never indexed.\n")
-    _drain_until_idle(vault)
+    receipt = derived_receipts._load_receipt(vault, _batches(vault)[0][0])
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation,
+    ).outcome == "reconcile_required"
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
     return page, target
 
@@ -795,7 +784,7 @@ def _strand_one(tmp_path: Path, vault: Path) -> tuple[str, Path]:
 def test_a_stranded_batch_is_counted_apart_from_crash_cut_recovery(
     live_catalogue: Path, tmp_path: Path
 ) -> None:
-    """A stranded batch is not crash-cut work that a drain pass will finish."""
+    """Stranded custody has its own census until the worker proves its repair."""
     vault = live_catalogue
     _strand_one(tmp_path, vault)
 
@@ -904,7 +893,10 @@ def _strand_by_shared_page(tmp_path: Path, vault: Path) -> tuple[str, str]:
     assert terminal.get("advisory_sync") == "pending" and ref, terminal
     log_path = vault / "Knowledge Base/log.md"
     log_path.write_bytes(log_path.read_bytes() + b"\n- appended by hand\n")
-    _drain_until_idle(vault)
+    receipt = derived_receipts._load_receipt(vault, _batches(vault)[0][0])
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation,
+    ).outcome == "reconcile_required"
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
     return terminal["path"], ref
 
@@ -975,7 +967,10 @@ def test_a_pending_advisory_over_a_moved_page_is_superseded_by_reconcile(
     assert ref, terminal
     target = vault / terminal["path"]
     target.write_bytes(target.read_bytes() + b"\nEdited by hand, never indexed.\n")
-    _drain_until_idle(vault)
+    receipt = derived_receipts._load_receipt(vault, _batches(vault)[0][0])
+    assert derived_receipts.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation,
+    ).outcome == "reconcile_required"
     assert [state for _id, state, _paths in _batches(vault)] == ["reconcile_required"]
     _force_advisory_state(vault, ref, "pending")
 

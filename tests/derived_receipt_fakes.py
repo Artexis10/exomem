@@ -346,9 +346,16 @@ class DerivedReceiptProtocolFake:
         vault_root: Path,
         *,
         limit: int,
+        footprint_only: bool = False,
+        batch_ids: Collection[str] | None = None,
+        rel_paths: Collection[str] | None = None,
     ) -> PendingVisibilitySnapshot:
+        kwargs = {
+            "limit": limit, "footprint_only": footprint_only,
+            "batch_ids": batch_ids, "rel_paths": rel_paths,
+        }
         injected = self._record(
-            "snapshot_pending_visibility", (vault_root,), {"limit": limit}
+            "snapshot_pending_visibility", (vault_root,), kwargs
         )
         if injected is not None:
             return injected
@@ -358,20 +365,25 @@ class DerivedReceiptProtocolFake:
         batches = tuple(
             self._pending_batches[batch_id]
             for batch_id in sorted(self._pending_batches)
+            if batch_ids is None or batch_id in batch_ids
+            if rel_paths is None or any(row.rel_path in rel_paths for row in self._pending_batches[batch_id].rows)
             if any(row.state != "retired" for row in self._pending_batches[batch_id].rows)
         )
         row_count = sum(len(batch.rows) for batch in batches)
+        paths = frozenset(row.rel_path for batch in batches for row in batch.rows if row.state != "retired")
         if row_count > limit:
             return protocol.PendingVisibilitySnapshot(
                 outcome="overflow",
                 snapshot_generation=self._pending_generation,
                 batches=(),
                 failure_code="pending_visibility_overflow",
+                paths=paths,
             )
         return protocol.PendingVisibilitySnapshot(
             outcome="complete",
             snapshot_generation=self._pending_generation,
-            batches=batches,
+            batches=() if footprint_only else batches,
+            paths=paths,
         )
 
     def pending_visibility_snapshot_is_current(

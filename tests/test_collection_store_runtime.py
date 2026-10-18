@@ -518,6 +518,65 @@ def test_idle_boundary_wait_crossing_ttl_keeps_lease_until_publication(runtime, 
     assert time.monotonic() < expiry[0]
 
 
+def test_warm_read_revalidates_authority_without_acquire_or_write_activity(runtime, monkeypatch):
+    _create(runtime)
+    manager, client = runtime.manager, runtime.manager.client
+    manager._last_activity_monotonic -= 10
+    activity = manager._last_activity_monotonic
+    calls = []
+    acquire, status = client.acquire, client.status
+
+    def counted_acquire(**kwargs):
+        calls.append("acquire")
+        return acquire(**kwargs)
+
+    def counted_status():
+        calls.append("status")
+        return status()
+
+    monkeypatch.setattr(client, "acquire", counted_acquire)
+    monkeypatch.setattr(client, "status", counted_status)
+    with preview_store(runtime.root, runtime) as writer:
+        assert writer.inspect_collection(CID)["coverage"]["committed"] == 0
+    assert "status" in calls
+    assert "acquire" not in calls
+    assert manager._last_activity_monotonic == activity
+
+
+def test_read_after_schema_fence_cut_rechecks_acquisition_compatibility(runtime, monkeypatch):
+    _create(runtime)
+    client = runtime.manager.client
+    # The coordinator's schema CAS revokes the holder and advances its token.
+    client.holder = None
+    client.token += 1
+
+    def incompatible_acquire(**kwargs):
+        return LeaseRecord("local", time.time() + 30, client.token, True,
+                           governance_enrolled=True, required_schema_version=999)
+
+    monkeypatch.setattr(client, "acquire", incompatible_acquire)
+    with pytest.raises(OpError, match="WRITER_SCHEMA_FENCE_MISMATCH"):
+        with preview_store(runtime.root, runtime):
+            pytest.fail("read borrowed a store after the schema fence cut")
+
+
+def test_warm_read_propagates_coordinator_failure_without_acquisition(runtime, monkeypatch):
+    _create(runtime)
+    client = runtime.manager.client
+
+    def unavailable_status():
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "coordinator unavailable")
+
+    def unexpected_acquire(**kwargs):
+        pytest.fail("coordinator failure must not trigger acquisition")
+
+    monkeypatch.setattr(client, "status", unavailable_status)
+    monkeypatch.setattr(client, "acquire", unexpected_acquire)
+    with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+        with preview_store(runtime.root, runtime):
+            pytest.fail("read borrowed a store without current authority")
+
+
 def test_expired_cached_writer_reopens_on_new_owner_thread(runtime):
     from concurrent.futures import ThreadPoolExecutor
 

@@ -154,6 +154,7 @@ def _drain(root: Path, *, passes: int = 24, limit: int = 32) -> int:
             dispatch=dispatch,
             observe_current_generation=observe,
             visibility_publisher=pending_recall.publish,
+            retire_visibility=derived_drain.pending_visibility_retirer(),
             limit=limit,
             now=now,
         )
@@ -1604,9 +1605,10 @@ def test_a_burst_of_ordinary_writes_strands_no_custody(
     # cleared only once the catalogue actually holds the exact after
     # generation. The lexical component reports `deferred` -- its publication
     # belongs to the repair worker, not to the drain -- so the catalogue is
-    # driven here the way a running server's would be, and only then does the
-    # next hydration retire the custody.
+    # driven here the way a running server's would be. A bounded worker turn
+    # retires custody after that publication, independently of reader hydration.
     lexstore.ensure_fresh(vault)
+    _drain(vault)
     pending_recall.reset(vault)
     pending_recall.overlay(vault)
 

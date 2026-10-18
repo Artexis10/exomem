@@ -401,4 +401,3 @@ class Census:
             self._finish_after = 0
             self._finish_tail = self.db.execute("SELECT coalesce(max(rowid),0) FROM temp.settling").fetchone()[0]
         return [row[0] for row in rows]
-

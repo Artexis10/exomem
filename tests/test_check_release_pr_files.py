@@ -24,6 +24,7 @@ CONFIG = {
         ".": {
             "extra-files": [
                 {"type": "generic", "path": "pyproject.toml"},
+                {"type": "generic", "path": "uv.lock"},
                 "src/exomem/__init__.py",
                 {"type": "json", "path": "server.json", "jsonpath": "$.version"},
             ]
@@ -55,6 +56,14 @@ def test_a_release_please_pr_passes(tmp_path: Path, capsys: pytest.CaptureFixtur
         {"filename": ".release-please-manifest.json", "patch": "@@\n-1\n+2\n"},
         {"filename": "CHANGELOG.md", "patch": "@@\n+## 1.3.0\n"},
         {"filename": "pyproject.toml", "patch": VERSION_BUMP},
+        {"filename": "uv.lock", "patch": VERSION_BUMP},
+        {
+            "filename": "src/exomem/__init__.py",
+            "patch": (
+                '-__version__ = "1.2.3" # x-release-please-version\n'
+                '+__version__ = "1.3.0" # x-release-please-version\n'
+            ),
+        },
         {
             "filename": "server.json",
             "patch": '@@\n-  "version": "1.2.3",\n+  "version": "1.3.0",\n',
@@ -114,6 +123,40 @@ def test_a_versioned_file_without_a_diff_is_refused(
 
     assert status == 1
     assert "no diff to verify" in errors
+
+
+@pytest.mark.parametrize(
+    ("path", "patch"),
+    [
+        (
+            "src/exomem/__init__.py",
+            '-__version__ = "1.2.3" # x-release-please-version\n'
+            '+__version__ = "1.3.0"; raise RuntimeError("changed runtime") # x-release-please-version\n',
+        ),
+        (
+            "pyproject.toml",
+            VERSION_BUMP + '+dependencies = ["example>=2"] # x-release-please-version\n',
+        ),
+        (
+            "pyproject.toml",
+            '-version = "1.2.3" # x-release-please-version\n'
+            ' [tool.example]\n'
+            '+version = "1.3.0" # x-release-please-version\n',
+        ),
+    ],
+)
+def test_a_version_marker_cannot_hide_runtime_or_dependency_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture, path: str, patch: str
+) -> None:
+    files = [
+        {"filename": ".release-please-manifest.json", "patch": "@@\n-1\n+2\n"},
+        {"filename": path, "patch": patch},
+    ]
+
+    status, errors = _check(tmp_path, files, capsys)
+
+    assert status == 1
+    assert f"{path}: changes more than its version value" in errors
 
 
 def test_a_listing_without_the_manifest_bump_is_refused(

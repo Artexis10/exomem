@@ -10,8 +10,8 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -100,12 +100,9 @@ def _pending_reference_projection(vault_root: Path):
     None when no committed mutation is still awaiting derived convergence, so
     the settled path stays exactly as it was.
     """
-    try:
-        from . import pending_recall
+    from . import pending_recall
 
-        return pending_recall.reference_projection(Path(vault_root))
-    except Exception:  # noqa: BLE001 - identity resolution must not depend on it
-        return None
+    return pending_recall.reference_projection(Path(vault_root))
 
 
 def _note_pending_reference_publication(vault_root: Path, rel_paths: list[str]) -> None:
@@ -813,7 +810,7 @@ class ReferenceIndex:
 
 
 def _apply_pending_identity(
-    vault_root: Path, exomem_id: str, rows: list[str]
+    vault_root: Path, exomem_id: str, rows: list[str], *, projection=None,
 ) -> list[str]:
     """Resolve one identity against pending custody before the persistent rows.
 
@@ -822,10 +819,19 @@ def _apply_pending_identity(
     back a path the canonical tree no longer has. Both are exact: the projection
     only holds generations whose after state was proven.
     """
-    projection = _pending_reference_projection(vault_root)
+    projection = projection if projection is not None else _pending_reference_projection(vault_root)
     if projection is None or projection.empty:
         return rows
-    surviving = [path for path in rows if path not in projection.absent_paths]
+    if projection.blocked_paths:
+        # Unknown pending identities can conceal a duplicate of any identifier.
+        # Refusing exact resolution costs a retry; claiming uniqueness can send
+        # a governed mutation to the wrong page. Path-based recall stays usable.
+        from .find import RetrievalIndexWarming
+
+        raise RetrievalIndexWarming(
+            site="pending_visibility_incomplete", status="temporarily_unavailable"
+        )
+    surviving = [path for path in rows if path not in projection.refs_by_path]
     pending_paths = projection.paths_by_id.get(memory_ref(exomem_id), ())
     for path in pending_paths:
         if path not in surviving:
@@ -834,7 +840,8 @@ def _apply_pending_identity(
 
 
 def paths_for_ids_read_only(
-    vault_root: Path, ids: Iterable[Any]
+    vault_root: Path, ids: Iterable[Any], *,
+    admit_pending_paths: Callable[[Iterable[str]], Iterable[str]] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Resolve many memory ids to every page holding each, writing nothing.
 
@@ -851,6 +858,10 @@ def paths_for_ids_read_only(
     message states in how many pages the id appears, and a caller may hold no
     release decision over those pages, so a caller forbidden to disclose the
     count cannot afford to catch the exception and must see the shape instead.
+
+    Governed callers may exclude pending paths their release policy proves
+    hidden through `admit_pending_paths`. They must retain unresolved pages;
+    those pages can still hold an unknown visible duplicate.
 
     The answer comes from one of two sources, and the choice is made from
     vault-wide state alone, before any id is looked up: the server's current
@@ -930,6 +941,21 @@ def paths_for_ids_read_only(
                 measured["pages"] = len(pages)
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
+    projection = _pending_reference_projection(root)
+    if projection is not None:
+        if admit_pending_paths is not None and projection.blocked_paths:
+            # Hidden pages cannot affect governed uniqueness. Keep every
+            # footprint withdrawal, and exclude only proven hidden uncertainty.
+            projection = replace(
+                projection,
+                blocked_paths=frozenset(admit_pending_paths(projection.blocked_paths)),
+            )
+        resolved = {
+            identifier: tuple(
+                _apply_pending_identity(root, identifier, list(paths), projection=projection)
+            )
+            for identifier, paths in resolved.items()
+        }
     return resolved
 
 
