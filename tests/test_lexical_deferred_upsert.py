@@ -108,6 +108,43 @@ def test_a_contended_page_is_retried_not_rebuilt_around(
     assert store.rebuilds == 0, "a contended single page must not rebuild the corpus"
 
 
+def test_idle_recovery_neither_resolves_sources_nor_opens_a_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path.resolve()
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("idle recovery inspected the filesystem or opened a store")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", unexpected)
+        patch.setattr(lexstore, "get_store", unexpected)
+        patch.setattr(lexstore, "_live_repair_generation", unexpected)
+        assert lexstore.retry_pending_repair(key) is False
+
+
+def test_recovery_preserves_a_targeted_only_retry_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Store(_FakeStore):
+        def retry_deferred_upsert(self, paths):
+            self.retried.append(list(paths))
+            if len(self.retried) == 1:
+                raise OSError("transient targeted failure")
+            return True
+
+    store = Store()
+    _install(monkeypatch, store)
+    page = tmp_path / "Knowledge Base" / "one.md"
+    lexstore._schedule_repair(tmp_path, deferred_paths=[page])
+    assert _wait_for_flight_end(tmp_path)
+
+    assert lexstore.retry_pending_repair(tmp_path.resolve()) is True
+    assert _wait_for_flight_end(tmp_path)
+    assert store.retried == [[page], [page]]
+    assert store.rebuilds == 0, "recovery turned a targeted claim into a full rebuild"
+
+
 def test_a_targeted_retry_that_does_not_land_still_rebuilds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -192,6 +229,39 @@ def test_pending_request_after_published_pass_skips_a_redundant_current_rebuild(
     assert _quiesce()
 
     assert store.rebuilds == 0, "a current published catalogue was scanned again"
+
+
+def test_a_published_repair_reproves_after_another_proof_wins_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost admission CAS must not rebuild an already-published catalogue."""
+    from exomem import readiness
+
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    proof = lexstore.runtime_retrieval_catalog_proof
+    competing_proof = True
+
+    def prove(root, **kwargs):
+        nonlocal competing_proof
+        if competing_proof:
+            competing_proof = False
+            readiness.mark_ready("retrieval_catalog")
+        return proof(root, **kwargs)
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", prove)
+    readiness.reset()
+    try:
+        lexstore._schedule_repair(tmp_path)
+        assert _wait_for_flight_end(tmp_path)
+        assert readiness.is_ready("retrieval_catalog")
+
+        assert lexstore.retry_pending_repair(tmp_path.resolve()) is True
+        assert _wait_for_flight_end(tmp_path)
+        assert store.rebuilds == 1, "another proof's admission triggered a redundant rebuild"
+    finally:
+        readiness.reset()
 
 
 def test_pending_request_after_published_pass_rebuilds_when_proof_is_stale(
@@ -315,7 +385,7 @@ def test_newer_generation_observed_during_promotion_survives_for_next_flight(
     store = _FakeStore()
     _install(monkeypatch, store)
     key = tmp_path.resolve()
-    promotions = 0
+    newer_requested = False
 
     monkeypatch.setattr(lexstore, "_is_configured_runtime_vault", lambda _root: True)
 
@@ -324,20 +394,21 @@ def test_newer_generation_observed_during_promotion_survives_for_next_flight(
         *,
         proof_out: dict[str, object] | None = None,
     ) -> bool:
-        nonlocal promotions
-        promotions += 1
-        if promotions == 1:
+        nonlocal newer_requested
+        if store.rebuilds == 1:
             # The proof sees a newer projection while the published pass is
             # still active and requests repair for that uncovered generation.
-            lexstore._schedule_repair(tmp_path)
+            if not newer_requested:
+                newer_requested = True
+                lexstore._schedule_repair(tmp_path)
             return False
         if proof_out is not None:
             proof_out.update(
                 {
                     scope: freshness.RecallFreshnessCheckpoint(
                         "test-instance",
-                        promotions,
-                        (0, 0, f"digest-{promotions}"),
+                        store.rebuilds,
+                        (0, 0, f"digest-{store.rebuilds}"),
                         "test-policy",
                         "test-access",
                     )
@@ -359,7 +430,6 @@ def test_newer_generation_observed_during_promotion_survives_for_next_flight(
     lexstore._schedule_repair(tmp_path)
     assert _quiesce()
     assert store.rebuilds == 2
-    assert promotions == 2
 
 
 def test_post_promotion_new_generation_is_not_acknowledged_by_older_proof(

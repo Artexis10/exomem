@@ -11,6 +11,25 @@ Media extraction makes uploaded files searchable. The Cloud image carries two en
 
 Plain text, email and calendar files need no engine and are always read. Image vectors (CLIP) and speech are not in the Cloud image.
 
+## Check disk space before backfill
+
+Enabling an engine can process the existing media backlog. Memory brakes do not reserve disk space.
+A full volume can stop catalogue publication and leave the cell unready, even when the media child stays within its memory budget.
+
+The cell stores `/data` on its PVC and `/tmp` on a separate `emptyDir`. A free PVC does not prove scratch capacity.
+
+1. Resolve the vault, state, scratch and writable cache paths from runtime configuration. Expect each path's owning filesystem.
+2. Record each filesystem with `df -B1` and its resolved paths. Expect dated capacity and available-byte readings.
+3. Record the media backlog from resource status. Expect separate pending, blocked and failed counts.
+4. Record retained restore copies and current index sizes. Expect both in their filesystem's used-space baseline.
+5. Compare each filesystem's free bytes with its measured backfill, scratch, cache and catalogue replacement needs. Expect sourced estimates.
+6. If an estimate is unknown, record that gap in isolated qualification. Expect no estimate from upload size alone.
+7. Record disk usage during qualification and after backfill. Expect separate temporary peak use and retained growth.
+
+Model downloads and caches also use space when the selected engine needs them. Include those bytes in its qualification.
+Use the existing rollout procedure to select one cell first. Reuse its storage evidence only while its engine, backlog and volume conditions match.
+Removing a retained restore copy is a separate operator action under the restore runbook. A preflight does not authorize deletion or a volume change.
+
 ## Switch an engine on for a cell
 
 Every engine is off in a Cloud cell unless the platform values switch it on, for one cell or for the fleet. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`exomem status --resources`) and `exomem doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
