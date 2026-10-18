@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_pending_recall_delta as delta
+import yaml
 from test_pending_recall_delta import _lane2_state, managed_runtime  # noqa: F401
 
 from exomem import (
@@ -550,15 +552,19 @@ def test_slow_committed_repair_keeps_unrelated_canonical_write_available(
 
 
 @pytest.mark.usefixtures("managed_runtime")
-@pytest.mark.parametrize("ceiling", [0, 2, None])
+@pytest.mark.parametrize(
+    ("ceiling", "file_release"),
+    [(0, None), (2, None), (None, None), (0, "same"), (0, "other")],
+)
 def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
     tmp_path: Path,
     ceiling: int | None,
+    file_release: str | None,
 ) -> None:
     from test_derived_identifier_egress import _govern
 
     from exomem import commands, plan_progress
-    from exomem.governance import egress, principal
+    from exomem.governance import bridges, egress, policy, principal
 
     identity = "12345678-1234-4234-8234-123456789012"
     ref = memory_refs.memory_ref(identity)
@@ -583,6 +589,35 @@ def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
         if ceiling is not None:
             rule = tmp_path / "Knowledge Base/_Governance/rules/withheld.yaml"
             rule.write_text(rule.read_text().replace("ceiling: 0", f"ceiling: {ceiling}"))
+        if file_release is not None:
+            import test_governance_bridges as bridge_cases
+
+            source = "Knowledge Base/Notes/Withheld/source.md"
+            delta._write(tmp_path, source, bridge_cases._bridge_source_text())
+            delta._write(tmp_path, pending, bridge_cases._bridge_text(source_path=source))
+            bridge = tmp_path / pending
+            grant = yaml.safe_load(bridge_cases._release_document())
+            grant["path"] = pending
+            grant["content_hash"] = hashlib.sha256(bridge.read_bytes()).hexdigest()
+            if file_release == "same":
+                grant["to_audience"] = guest.audience_id
+            grant["bridge_of"][0].update(
+                path=source,
+                content_hash=hashlib.sha256((tmp_path / source).read_bytes()).hexdigest(),
+                restriction_signature=bridge_cases._restriction_signature(
+                    tmp_path, audience=grant["to_audience"]
+                ),
+            )
+            grant_path = tmp_path / "Knowledge Base/_Governance/grants/bridge-release.yaml"
+            grant_path.parent.mkdir(exist_ok=True)
+            grant_path.write_text(yaml.safe_dump(grant), encoding="utf-8")
+            compiled = policy.load(tmp_path)
+            assert not compiled.blocked
+            assert bridges.admit(
+                tmp_path, pending, bridge.read_bytes(),
+                policy=compiled, audience=guest.audience_id,
+            ).allowed is (file_release == "same")
+            assert egress.release_level_for(tmp_path, pending, principal=guest) == 0
         delta._prime(tmp_path)
     command = next(
         command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory"
@@ -629,7 +664,7 @@ def test_governed_identity_uncertainty_obeys_the_callers_release_floor(
 
 @pytest.mark.usefixtures("managed_runtime")
 @pytest.mark.parametrize(
-    "authority", ["no-grant", "session-grant", "unavailable", "standing", "bridge", "canonical"]
+    "authority", ["no-grant", "session-grant", "unavailable", "standing", "canonical"]
 )
 def test_pending_identity_admission_retains_unproved_byte_bound_authority(
     tmp_path: Path,
@@ -659,7 +694,6 @@ def test_pending_identity_admission_retains_unproved_byte_bound_authority(
         )
         if authority == "standing"
         else (),
-        release_grants=(SimpleNamespace(path=path),) if authority == "bridge" else (),
     )
     context = egress.authorization_session_lifecycle.AuthorizationSessionContext(
         session_id="session",
