@@ -42,7 +42,15 @@ from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_typed_history_generations import previous_release
 
 from exomem import __main__ as cli
-from exomem import commands, record_governance, records, state_migration, writer_lease
+from exomem import (
+    commands,
+    record_governance,
+    records,
+    reserved_paths,
+    state_migration,
+    vault,
+    writer_lease,
+)
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
@@ -52,6 +60,7 @@ from exomem.collection_store import (
     connection,
     custody,
     importer,
+    replica,
     runtime,
     schema,
 )
@@ -703,6 +712,324 @@ def test_file_collections_stay_writable_while_an_unreadable_store_is_unopened(se
             assert titles(root, KEY) == ["File row"]
         finally:
             replaced.stop()
+
+
+def test_lost_store_custody_keeps_file_writes_and_renewal_available(service, monkeypatch):
+    """A store custody refusal must not disable knowledge and file collections behind its enrolled fence."""
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before_marker = marker.read_bytes()
+    protected = {path: path.read_bytes() for path in (root / manifest_path()).parent.rglob("*") if path.is_file()}
+    before_head = service.manager.client.status().collection_store_head
+    (root / "Knowledge Base/.stfolder").mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_IDLE_SECONDS", "0")
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        assert call(root, "record_memory", action="append", collection=KEY,
+                    item={"title": "File row after custody loss"}, item_key=LATER,
+                    why="file authority remains available")["outcome"] == "committed"
+        assert titles(root, KEY) == ["File row after custody loss"]
+
+        note = {
+            "content": "# Restart observation\n\n- [review state] File knowledge remains available.\n",
+            "title": "Restart observation", "slug": "restart-observation", "suggestions": False,
+        }
+        draft = call(root, "remember", validate_only=True, **note)
+        saved = call(root, "remember", draft_id=draft["draft_id"], draft_hash=draft["draft_hash"],
+                     draft_token=draft["draft_token"], **note)
+        assert "File knowledge remains available." in call(root, "read_memory", path=saved["path"], include_raw=True)["content"]
+
+        acquired = restarted.manager.client.status()
+        _until(lambda: restarted.manager.status()["last_renew_age_seconds"] is not None)
+        renewed = restarted.manager.client.status()
+        assert renewed.holder == acquired.holder == restarted.manager.config.replica_id
+        assert renewed.fencing_token == acquired.fencing_token
+        assert renewed.collection_store_head == before_head
+        assert replica.file_writer_marker(root, renewed) is None  # GET is not an acquisition receipt.
+        refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                             item={"title": "Must remain uncommitted"}, why="store custody is unavailable"),
+                "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        summary = manifest_path().replace("_collection.md", "Items/_summary.md")
+        with pytest.raises((OpError, ValueError), match="COLLECTION_VIEW_PATH"):
+            call(root, "manage_memory_file", operation="create", path=summary, overwrite=True,
+                 content="# Generic overwrite\n\nDirect changes stay refused.\n")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            refused(lambda: vault.batch_atomic_write([
+                vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unowned.\n",
+                                   ensure_directories=((root / summary).parent / "nested",)),
+            ], vault_root=root, post_commit_fanout=False), "COLLECTION_VIEW_PATH")
+            refused(lambda: reserved_paths.move_generic_path(
+                root, "Knowledge Base/Records", "Knowledge Base/Archived", source_kind="directory",
+            ), "COLLECTION_VIEW_PATH")
+        assert not ((root / summary).parent / "nested").exists()
+        assert not (root / "Knowledge Base/Archived").exists()
+        assert {path: path.read_bytes() for path in protected} == protected
+        assert marker.read_bytes() == before_marker
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            prove = restarted.manager._collection_file_marker
+
+            def removed_after_proof(*args, **kwargs):
+                current = prove(*args, **kwargs)
+                marker.unlink()
+                return current
+
+            with monkeypatch.context() as gap:
+                gap.setattr(restarted.manager, "_collection_file_marker", removed_after_proof)
+                refused(lambda: vault.batch_atomic_write([
+                    vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unpublished.\n"),
+                ], vault_root=root, post_commit_fanout=False), "COLLECTION_STORE_MARKER_CONFLICT")
+        marker.write_bytes(before_marker)
+        assert not (root / "Knowledge Base/unowned.md").exists()
+        (root / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Records/Work/Items\n")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            with pytest.raises(ValueError, match="WRITE_REFUSED.*excluded"):
+                vault.batch_atomic_write([vault.PlannedWrite(root / summary, "Unpublished.\n")],
+                                         vault_root=root, post_commit_fanout=False)
+    finally:
+        marker.write_bytes(before_marker)
+        restarted.stop()
+    assert restarted.manager.client.status().collection_store_head == before_head
+
+
+@pytest.mark.parametrize("withdrawal", ["removed", "malformed", "legacy", "changed"])
+def test_a_file_publication_rechecks_its_acquired_marker_after_staging(service, monkeypatch, withdrawal):
+    """A fallback granted before staging cannot survive a withdrawn or changed routing basis."""
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    validate = vault._validate_batch_write_access
+    staged = []
+
+    def withdraw(*args, **kwargs):
+        validate(*args, **kwargs)
+        if not staged:
+            staged.append(True)
+            if withdrawal == "removed":
+                marker.unlink()
+            elif withdrawal == "malformed":
+                marker.write_bytes(b"{")
+            elif withdrawal == "legacy":
+                marker.write_text(json.dumps({**json.loads(before), "version": 1}))
+            else:
+                marker.write_bytes(before + b"\n")
+
+    target = root / "Knowledge Base/unpublished.md"
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
+            monkeypatch.setattr(vault, "_validate_batch_write_access", withdraw)
+            with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+                vault.batch_atomic_write([vault.PlannedWrite(target, "Unpublished.\n")],
+                                         vault_root=root, post_commit_fanout=False)
+        assert staged and not target.exists()
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_no_runtime_file_authority_requires_current_replica_bytes_and_intent_at_the_same_head(service, monkeypatch):
+    """Unpublished export metadata and replaced replicas do not change the business head but withdraw file authority."""
+    root = service.root
+    service.stop()
+    marker = authority.read_marker(root)
+    original = store_meta(root)
+    installed = replica.replica_path(root)
+    before_replica = installed.read_bytes()
+    before_head = service.manager.client.status().collection_store_head
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def append():
+        return call(root, "record_memory", action="append", collection=KEY,
+                    item={"title": "Unrelated file row"}, item_key=LATER, why="file authority")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        assert restarted.manager.ensure_writer().granted
+        intent = {"version": 2, "kind": authority.EXPORT, "request_id": "export:interrupted",
+                  "plan_id": "unpublished-export", "expected_marker": marker.decode(), "why": "return to files",
+                  "exported_at": "20261018T000000Z",
+                  "collections": [{name: entry[name] for name in ("collection_id", "manifest_path", "source_path")}
+                                  for entry in json.loads(marker)["collections"]]}
+        with closing(sqlite3.connect(connection.store_path(root))) as store:
+            store.execute("INSERT INTO store_meta(key,value) VALUES (?,?)", (authority.PENDING_CREATE, json.dumps(intent)))
+            store.commit()
+        assert store_meta(root)[schema.META_COMMIT_SEQ] == original[schema.META_COMMIT_SEQ]
+        assert replica._intent_digest(store_meta(root)) != original.get(schema.META_PUBLISHED_INTENT_SHA256)
+        refused(append, "WRITER_LEASE_REQUIRED")
+        with closing(sqlite3.connect(connection.store_path(root))) as store:
+            store.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
+            store.commit()
+        installed.write_bytes(before_replica + b"unpublished")
+        refused(append, "WRITER_LEASE_REQUIRED")
+        installed.write_bytes(before_replica)
+        assert append()["outcome"] == "committed"
+        assert restarted.manager.client.status().collection_store_head == before_head
+    finally:
+        installed.write_bytes(before_replica)
+        restarted.stop()
+
+
+def test_no_runtime_file_authority_requires_every_canonical_collection_and_its_actual_source(service):
+    """A syntactically valid marker cannot omit canonical ownership or move it away from the actual source."""
+    root = service.root
+    call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+         why="a second canonical collection")
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    complete = json.loads(before)
+    before_files = {path: path.read_bytes() for path in (root / A_PATH).parent.rglob("*") if path.is_file()}
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        omitted = {**complete, "collections": [entry for entry in complete["collections"] if entry["collection_id"] != CID]}
+        changed = json.loads(before)
+        changed["collections"][0]["source_path"] = "Knowledge Base/Records/OtherSource"
+        for invalid in (omitted, changed):
+            raw = json.dumps(invalid).encode()
+            assert authority.parse_marker(root, raw)["version"] == 2
+            marker.write_bytes(raw)
+            refused(lambda: call(root, "record_memory", action="append", collection=KEY,
+                                 item={"title": "Must stay uncommitted"}, item_key=LATER,
+                                 why="ownership is unverified"), "WRITER_LEASE_REQUIRED")
+        assert {path: path.read_bytes() for path in (root / A_PATH).parent.rglob("*") if path.is_file()} == before_files
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_the_file_ownership_reader_exposes_declarations_and_head_without_item_payloads(service):
+    """The fallback metadata reader must not turn custody refusal into general canonical row access."""
+    root = service.root
+    marker = authority.parse_marker(root, authority.read_marker(root))
+    with closing(connection.open_ownership_reader(connection.store_path(root))) as reader:
+        reader.execute("BEGIN")
+        assert {row[0] for row in reader.execute("SELECT collection_id FROM collections")} == {CID}
+        for entry in marker["collections"]:
+            authority.require_selected(reader, marker, entry, root=root)
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT body FROM items").fetchall()
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT created_txn FROM collections").fetchall()
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("UPDATE store_meta SET value='changed' WHERE key='store_id'")
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("SELECT collection_id FROM collections").fetchall()
+
+
+def test_a_direct_file_move_rechecks_fallback_authority_after_its_plan(service, monkeypatch):
+    """A binary move has no later Markdown batch to notice a marker withdrawn after its plan."""
+    from exomem import move_file
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source, destination = "Knowledge Base/ordinary.bin", "Knowledge Base/moved.bin"
+    (root / source).write_bytes(b"ordinary bytes")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    rename = move_file._held_rename
+
+    def withdraw(*args, **kwargs):
+        marker.unlink()
+        return rename(*args, **kwargs)
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(move_file, "_held_rename", withdraw)
+        with pytest.raises((OpError, ValueError), match="WRITER_LEASE_REQUIRED"):
+            call(root, "manage_memory_file", operation="move", old_path=source,
+                 new_path=destination, update_wikilinks=False)
+        assert (root / source).read_bytes() == b"ordinary bytes" and not (root / destination).exists()
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_a_failed_delete_restores_its_bytes_after_the_fallback_marker_is_withdrawn(service, monkeypatch):
+    """A checkpoint failure after the trash rename must not strand bytes when the forward grant disappears."""
+    from exomem import graph_sync
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source = "Knowledge Base/ordinary.bin"
+    (root / source).write_bytes(b"original bytes")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def fail_after_rename(transition):
+        assert transition.renamed and not (root / source).exists()
+        marker.unlink()
+        raise PermissionError("checkpoint unavailable")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(graph_sync.GraphLifecycleTransition, "publish_checkpoint", fail_after_rename)
+        with pytest.raises(ValueError, match="GRAPH_SYNC_CHECKPOINT_FAILED"):
+            call(root, "manage_memory_file", operation="delete", path=source, confirm=True)
+        assert (root / source).read_bytes() == b"original bytes"
+        assert not list((root / "Knowledge Base/_trash").rglob("ordinary.bin"))
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
+
+
+def test_a_failed_move_restores_its_bytes_after_the_fallback_marker_is_withdrawn(service, monkeypatch):
+    """A failed link publication must still undo its completed rename after fallback authority disappears."""
+    from exomem import move_file
+
+    root = service.root
+    service.stop()
+    marker = authority.marker_path(root)
+    before = marker.read_bytes()
+    source, destination = "Knowledge Base/ordinary.md", "Knowledge Base/moved.md"
+    original = "# Original\n\nOrdinary content.\n"
+    (root / source).write_text(original)
+    (root / "Knowledge Base/referrer.md").write_text("# Referrer\n\n[[ordinary]]\n")
+    (root / "Knowledge Base/.stfolder").mkdir()
+    runtime._SERVERS.pop(root, None)
+    runtime._SERVED.pop(root, None)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+
+    def fail_after_rename(*args, **kwargs):
+        assert not (root / source).exists() and (root / destination).read_text() == original
+        marker.unlink()
+        raise PermissionError("link publication unavailable")
+
+    try:
+        _until(lambda: runtime._SERVERS[root].refusal[0] == "COLLECTION_STORE_CUSTODY_UNVERIFIED")
+        monkeypatch.setattr(move_file, "batch_atomic_write", fail_after_rename)
+        with pytest.raises(PermissionError, match="link publication unavailable"):
+            call(root, "manage_memory_file", operation="move", old_path=source, new_path=destination)
+        assert (root / source).read_text() == original and not (root / destination).exists()
+        assert (root / "Knowledge Base/referrer.md").read_text() == "# Referrer\n\n[[ordinary]]\n"
+    finally:
+        marker.write_bytes(before)
+        restarted.stop()
 
 
 def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(service):

@@ -847,6 +847,7 @@ class GraphLifecycleTransition:
                     source=self.destination,
                     destination=self.source,
                     recovery=not self.recovery,
+                    rollback=True,
                 )
                 self.renamed = False
             if self.epoch is not None:

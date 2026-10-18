@@ -29,6 +29,7 @@ from .. import (
     reserved_paths,
     semantic_index,
 )
+from ..cli_ops import OpError
 from ..kbdir import kb_dirname
 from ..vault import parse_frontmatter
 from . import membership, receipts
@@ -608,6 +609,7 @@ def atomic_rename(
     *, source: Path,
     destination: Path,
     recovery: bool = False,
+    rollback: bool = False,
 ) -> None:
     try:
         if _device(source) != _device(destination.parent):
@@ -642,7 +644,10 @@ def atomic_rename(
             source.relative_to(operation.vault_root).as_posix(),
             destination.relative_to(operation.vault_root).as_posix(),
             source_kind=source_kind,
+            rollback=rollback,
         )
+    except OpError as error:
+        raise LifecycleError(error.code, error.message) from error
     except (ValueError, reserved_paths.ReservedPathLeafError) as error:
         code = getattr(error, "code", "IO_REFUSED")
         if code == "CROSS_DEVICE":

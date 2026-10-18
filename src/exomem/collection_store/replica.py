@@ -11,7 +11,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -73,6 +73,59 @@ def _intent_digest(metadata: dict[str, str]) -> str | None:
     """The digest of the store's pending intent row, or None when it has none."""
     raw = metadata.get(authority.PENDING_CREATE)
     return None if raw is None else hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def file_writer_marker(root, acquired=None):
+    """Prove current local publication and complete routing without admitting a store producer."""
+    from ..writer_lease import CollectionStoreHead
+
+    raw = authority.read_marker(root)
+    if raw is None:
+        return None
+    marker = authority.parse_marker(root, raw)
+    if marker["version"] != 2:
+        return None
+    with closing(connection.open_ownership_reader(connection.store_path(root))) as reader:
+        reader.execute("BEGIN")
+        metadata = dict(reader.execute("SELECT key,value FROM store_meta"))
+        head = CollectionStoreHead.from_json(_head(metadata))
+        tail = reader.execute(
+            "SELECT commit_seq,store_head_hash FROM txns ORDER BY commit_seq DESC LIMIT 1"
+        ).fetchone()
+        # Only current local published evidence relaxes the file fence; business heads omit intent changes.
+        if ((tail or (0, None)) != (head.commit_seq, head.head_hash)
+                or marker["store_id"] != head.store_id
+                or authority.PENDING_CREATE in metadata or _PENDING in metadata
+                or schema.META_REPLICA_DIVERGENCE in metadata
+                or _intent_digest(metadata) != metadata.get(_INTENT)):
+            return None
+        if {entry["collection_id"] for entry in marker["collections"]} != {
+                row[0] for row in reader.execute("SELECT collection_id FROM collections")}:
+            return None
+        for entry in marker["collections"]:
+            authority.require_selected(reader, marker, entry, root=root)
+        digest = metadata.get(_DIGEST)
+        tokens._hex64(digest, "published replica digest")
+        if CollectionStoreHead.from_json(json.loads(metadata[_PUBLISHED])) != head:
+            return None
+        if acquired is not None and (
+                not acquired.granted or acquired.collection_store_head != head
+                or acquired.required_collection_store_capability != marker["collection_store_fence"]["capability"]
+                or acquired.collection_store_fence_generation != marker["collection_store_fence"]["generation"]):
+            return None
+        relative = replica_path(root).relative_to(root)
+        with held_fs.acquire(root).require() as filesystem:
+            with filesystem.parent(relative.parent.as_posix()).require() as parent:
+                with filesystem.file(parent, relative.name).require() as file:
+                    version = file.version()
+                    if snapshot._file_sha256(file.descriptor) != digest or file.version() != version:
+                        return None
+                    filesystem.validate_directory(parent).require()
+                    with filesystem.file(parent, relative.name).require() as current:
+                        if (not held_fs._same_file_identity(file.identity, current.identity)
+                                or current.version() != version):
+                            return None
+        return raw if authority.read_marker(root) == raw else None
 
 
 class _Publisher:

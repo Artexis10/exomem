@@ -215,7 +215,7 @@ def owned_entry(root, marker, path):
 VIEW_PATH = "COLLECTION_VIEW_PATH"
 
 
-def refuse_view_paths(root, paths, refusal):
+def refuse_view_paths(root, paths, refusal, *, expected_marker=None):
     """Raise ``refusal(code, reason)`` when the vault's mode marker gives a store collection any of ``paths``.
 
     The file tools call this. Only the marker is read, so a vault without one opens no
@@ -223,7 +223,7 @@ def refuse_view_paths(root, paths, refusal):
     so a withheld view answers exactly as a missing path does.
     """
     try:
-        entry = _owning_entry(Path(root), paths)
+        entry = _owning_entry(Path(root), paths, expected_marker=expected_marker)
     except CollectionStoreError as error:
         raise refusal(error.code, error.reason) from None
     if entry is not None:
@@ -232,7 +232,7 @@ def refuse_view_paths(root, paths, refusal):
         raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
 
 
-def _owning_entry(root, paths):
+def _owning_entry(root, paths, *, expected_marker=None):
     # A malformed or legacy marker refuses every placed path here, as it already refuses reads.
     paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
              # Marker validation keeps every owned region under the knowledge base folder.
@@ -243,6 +243,9 @@ def _owning_entry(root, paths):
         raw = read_marker(root)
     except (held_fs.HeldFsError, OSError) as error:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+    if expected_marker is not None and raw != expected_marker:
+        # A file-only fallback classifies paths against the routing basis its acquisition proved.
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "mode marker changed after file authority was proved")
     if raw is None:
         return None
     marker = parse_marker(root, raw)

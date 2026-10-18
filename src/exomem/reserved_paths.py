@@ -1726,6 +1726,7 @@ def move_generic_path(
     source_kind: str,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    rollback: bool = False,
 ) -> None:
     """Move one generic file or directory through retained source/destination handles.
 
@@ -1746,6 +1747,7 @@ def move_generic_path(
             source_kind=source_kind,
             identities=current,
             physical=physical,
+            rollback=rollback,
         )
 
 
@@ -1757,10 +1759,14 @@ def _move_generic_path_held(
     source_kind: str,
     identities: IdentityCatalogue,
     physical: bool = False,
+    rollback: bool = False,
 ) -> None:
+    from . import writer_lease
 
     source_parent_path, source_leaf = _leaf_spelling(source, physical=physical)
     destination_parent_path, destination_leaf = _leaf_spelling(destination)
+    effects = [Path(vault_root) / source_parent_path / source_leaf,
+               Path(vault_root) / destination_parent_path / destination_leaf]
     if source_kind not in {"file", "directory"}:
         raise ReservedPathLeafError("UNSAFE_PATH")
     assert isinstance(source, (str, os.PathLike))
@@ -1787,6 +1793,9 @@ def _move_generic_path_held(
                 with source_result.require() as source_file:
                     _refuse_private_identity(source_file.identity, identities)
                     _require_current_generic_directory(filesystem, source_parent)
+                    # An exact inverse must remain possible after a completed move loses its forward authority.
+                    if not rollback:
+                        writer_lease.validate_active_collection_file_paths(vault_root, effects)
                     destination_parent_result = filesystem.parent(
                         destination_parent_path, create=True
                     )
@@ -1824,6 +1833,8 @@ def _move_generic_path_held(
                                 else "IO_REFUSED"
                             )
                             raise ReservedPathLeafError(code)
+                        if not rollback:
+                            writer_lease.validate_active_collection_file_paths(vault_root, effects)
                         moved = filesystem.rename(
                             source_file, destination_parent, destination_leaf
                         )
@@ -1852,6 +1863,9 @@ def _move_generic_path_held(
                 if classify_logical(child).blocked:
                     raise ReservedPathLeafError("RESERVED_PATH")
                 _refuse_private_identity(record.identity, identities)
+                effects.extend((effects[0] / record.relative_path, effects[1] / record.relative_path))
+            if not rollback:
+                writer_lease.validate_active_collection_file_paths(vault_root, effects)
             destination_parent_result = filesystem.parent(
                 destination_parent_path, create=True
             )
@@ -1866,6 +1880,8 @@ def _move_generic_path_held(
                 _refuse_private_identity(destination_parent.identity, identities)
                 _require_current_generic_directory(filesystem, source_directory)
                 _require_current_generic_directory(filesystem, destination_parent)
+                if not rollback:
+                    writer_lease.validate_active_collection_file_paths(vault_root, effects)
                 moved = filesystem.rename_directory(
                     source_directory, destination_parent, destination_leaf
                 )
