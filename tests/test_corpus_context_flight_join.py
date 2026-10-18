@@ -13,6 +13,7 @@ import ast
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,7 @@ import pytest
 
 from exomem import (
     freshness,
+    index_sync,
     relation_registry,
     relation_review,
     semantic_contract,
@@ -107,10 +109,117 @@ class _RecordingEvent(threading.Event):
     def __init__(self) -> None:
         super().__init__()
         self.wait_calls: list[float | None] = []
+        self.wait_started = threading.Event()
 
     def wait(self, timeout: float | None = None) -> bool:
         self.wait_calls.append(timeout)
+        self.wait_started.set()
         return super().wait(timeout)
+
+
+@pytest.mark.parametrize("first", ["warm", "publish"])
+def test_startup_and_publication_share_one_admitted_corpus_build(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    """Recovery and startup must not parse the same cold corpus concurrently."""
+    freshness.seed(
+        vault, "vault", [(str(vault / _PAGE), freshness.stat_signature(vault / _PAGE))]
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    competing_build = threading.Event()
+    builds: list[Path] = []
+    flights: list[_RecordingEvent] = []
+    real_build = semantic_contract._build_corpus_context_uncached
+    real_flight = semantic_contract._CorpusContextFlight
+
+    def flight(*args: Any, **kwargs: Any) -> Any:
+        done = _RecordingEvent()
+        flights.append(done)
+        return real_flight(*args, **kwargs, done=done)
+
+    def build(root: Path, **kwargs: Any) -> Any:
+        builds.append(root)
+        entered.set()
+        if len(builds) > 1:
+            competing_build.set()
+        assert release.wait(15), "the owner was not released"
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_CorpusContextFlight", flight)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", build)
+    calls = {
+        "warm": lambda: semantic_contract.warm_corpus_context(vault),
+        "publish": lambda: index_sync.publish_corpus_delta(vault, changed=[vault / _PAGE]),
+    }
+    second = "publish" if first == "warm" else "warm"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(calls[first])
+        try:
+            assert entered.wait(5)
+            contender = pool.submit(calls[second])
+            if second == "publish":
+                assert contender.result(timeout=5) is True
+            else:
+                assert flights[0].wait_started.wait(5)
+                assert flights[0].wait_calls == [None]
+                assert not contender.done()
+            assert not competing_build.is_set()
+        finally:
+            release.set()
+        owner.result(timeout=5)
+        contender.result(timeout=5)
+
+    assert builds == [vault]
+    entry = semantic_contract._CORPUS_CONTEXT_CACHE[semantic_contract._corpus_cache_key(vault)]
+    assert entry[1].pages[_PAGE].title == "One"
+    assert entry[0] == semantic_contract._corpus_census(vault)
+    assert semantic_contract.current_reference_identity_snapshot(vault) is not None
+
+
+def test_warm_rebuilds_after_a_shared_populate_discards_its_context(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raced publisher cannot make startup report an unretained corpus as warm."""
+    page = vault / _PAGE
+    freshness.seed(vault, "vault", [(str(page), freshness.stat_signature(page))])
+    entered = threading.Event()
+    release = threading.Event()
+    done = _RecordingEvent()
+    builds: list[Path] = []
+    real_build = semantic_contract._build_corpus_context_uncached
+    real_flight = semantic_contract._CorpusContextFlight
+
+    def flight(*args: Any, **kwargs: Any) -> Any:
+        return real_flight(*args, **kwargs, done=done if not builds else threading.Event())
+
+    def build(root: Path, **kwargs: Any) -> Any:
+        builds.append(root)
+        if len(builds) == 1:
+            entered.set()
+            assert release.wait(15), "the publisher was not released"
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(semantic_contract, "_CorpusContextFlight", flight)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        publisher = pool.submit(index_sync.publish_corpus_delta, vault, changed=[page])
+        try:
+            assert entered.wait(5)
+            warmer = pool.submit(semantic_contract.warm_corpus_context, vault)
+            assert done.wait_started.wait(5)
+            page.write_text(_page(title="Current"), encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[page])
+        finally:
+            release.set()
+        assert publisher.result(timeout=5) is True
+        warmer.result(timeout=5)
+
+    assert builds == [vault, vault]
+    entry = semantic_contract._CORPUS_CONTEXT_CACHE[semantic_contract._corpus_cache_key(vault)]
+    assert entry[1].pages[_PAGE].title == "Current"
+    assert entry[0] == semantic_contract._corpus_census(vault)
+    assert semantic_contract.current_reference_identity_snapshot(vault) is not None
 
 
 def _flight_inputs(vault: Path) -> tuple[Any, Any, tuple, tuple[str, str]]:
@@ -418,6 +527,11 @@ class _UnboundedJoinVisitor(ast.NodeVisitor):
 # wait_for/task race. Event.wait and Process.wait do not accept timeout themselves.
 # These declarations stay test-local and name the owning bound or lifetime.
 _DECLARED_UNBOUNDED_JOINS = {
+    (
+        "semantic_contract.py",
+        "_build_corpus_context_with_census",
+        "flight.done.wait",
+    ): "startup/standby warm joins its shared build lifetime; interactive joins retain two seconds",
     (
         "cloud_import_client.py",
         "_ciphertext",

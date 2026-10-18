@@ -1042,15 +1042,16 @@ def test_a_second_publisher_joins_no_second_whole_vault_build(
     """
     entered = threading.Event()
     release = threading.Event()
-    calls: list[tuple] = []
+    calls: list[Path] = []
+    real_build = semantic_contract._build_corpus_context_uncached
 
-    def blocking_build(root: Path, cache_key: tuple[str, str]) -> bool:
-        calls.append(cache_key)
+    def blocking_build(root: Path, **kwargs):
+        calls.append(root)
         entered.set()
         assert release.wait(_HOLD_SECONDS)
-        return False
+        return real_build(root, **kwargs)
 
-    monkeypatch.setattr(semantic_contract, "_build_and_admit_corpus_context", blocking_build)
+    monkeypatch.setattr(semantic_contract, "_build_corpus_context_uncached", blocking_build)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         first = pool.submit(semantic_contract._populate_corpus_context_after_miss, vault)
