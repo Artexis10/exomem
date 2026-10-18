@@ -2689,13 +2689,23 @@ def _acquire_own_owner_lock(state_dir: Path, owner: str) -> Any | None:
     (this process, still alive) or, once genuinely gone, lockable — and
     cleans it up itself."""
     path = _owner_lock_path(state_dir, owner)
+    handle = None
     try:
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         existed = path.exists()
-        handle = path.open("a+b")
+        if os.name == "nt":
+            handle = path.open("a+b")
+        else:
+            # Create privately without changing configured ancestor-path semantics.
+            handle = open(path, "a+b", opener=lambda name, flags: os.open(name, flags, 0o600))
         if not existed and os.name != "nt":
             os.chmod(path, 0o600)
     except OSError:
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
         return None
     try:
         if _try_owner_lock(handle):
@@ -2716,9 +2726,9 @@ def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     """
     path = _owner_lock_path(state_dir, owner)
     try:
-        if not path.exists():
-            return False
-        handle = path.open("a+b")
+        handle = path.open("r+b")
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
     try:
