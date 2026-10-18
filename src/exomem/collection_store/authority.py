@@ -218,10 +218,10 @@ def owned_entry(root, marker, path):
 VIEW_PATH = "COLLECTION_VIEW_PATH"
 
 
-def refuse_view_paths(root, paths, refusal):
+def refuse_view_paths(root, paths, refusal, *, expected_marker=None):
     """Protect canonical collection paths and their ancestors inside the caller's mutation boundary."""
     try:
-        entry = _owning_entry(Path(root), paths)
+        entry = _owning_entry(Path(root), paths, expected_marker=expected_marker)
     except CollectionStoreError as error:
         raise refusal(error.code, error.reason) from None
     if entry is not None:
@@ -230,7 +230,7 @@ def refuse_view_paths(root, paths, refusal):
         raise refusal(VIEW_PATH, f"this path holds the views of a store collection; change its items with {tool}")
 
 
-def _owning_entry(root, paths):
+def _owning_entry(root, paths, *, expected_marker=None):
     from . import ownership
 
     paths = [path for path in (_knowledge_base_spelling(root, path) for path in paths)
@@ -238,6 +238,14 @@ def _owning_entry(root, paths):
              if collections._reference_key(root, path) is not None]
     if not paths:
         return None
+    if expected_marker is not None:
+        try:
+            raw = read_marker(root)
+        except (held_fs.HeldFsError, OSError) as error:
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "unreadable mode marker") from error
+        if raw != expected_marker:
+            # A file-only fallback retains the routing basis its acquisition proved.
+            raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "mode marker changed after file authority was proved")
     return next((entry for path in paths if (entry := ownership.owned(root, path, ancestors=True)) is not None), None)
 
 

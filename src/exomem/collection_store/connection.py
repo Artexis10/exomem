@@ -533,6 +533,27 @@ def open_head_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> s
     return conn
 
 
+# These closed SQL columns let a file writer verify routing without reading canonical item payloads.
+_OWNERSHIP_COLUMNS = {
+    **_HEAD_COLUMNS,
+    "collections": frozenset({"collection_id", "manifest_path", "manifest_version", "source_path", "layout"}),
+    "collection_manifests": frozenset({"collection_id", "manifest_version", "manifest_text"}),
+}
+
+
+def _ownership_only(action: int, table: str | None, column: str | None, *_: object) -> int:
+    if action == sqlite3.SQLITE_READ:
+        return sqlite3.SQLITE_OK if column in _OWNERSHIP_COLUMNS.get(table, ()) else sqlite3.SQLITE_DENY
+    return _head_only(action, table, column)
+
+
+def open_ownership_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
+    """Read head and canonical ownership metadata at the supported schema ceiling, without migration."""
+    conn, _ = _open_read_only(path, busy_timeout_ms)
+    conn.set_authorizer(_ownership_only)
+    return conn
+
+
 def schema_pending(path: Path) -> bool:
     """Whether the store an earlier release wrote still awaits its writer's migration."""
     conn, found = _open_read_only(path, BUSY_TIMEOUT_MS)
