@@ -2303,6 +2303,10 @@ def _verify_records_receipt(
         # On the store thread the transaction row for the step's request id is the receipt.
         from .collection_store import curation_step
 
+        # A file witness predates the store's request rows. Its imported byte binding
+        # proves that historical postimage without treating an operation id as a commit.
+        if curation_step.verify_imported(writer, prepared, after[0], kind=kind):
+            return True
         if not curation_step.verify(
             writer,
             store_request_id(str(witness["run_id"]), str(witness["operation_id"])),
