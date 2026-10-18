@@ -19,6 +19,67 @@ env:
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
 
 jobs:
+  timing-tests:
+    name: serial timing checks (py${{ matrix.python-version }})
+    # Keep timing checks on an idle runner while every core worker pool starts.
+    env: &serial-core-modules
+      EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
+      EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
+    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: &test-python-versions ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select test scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_change_scope.py "serial timing checks on a docs-only change"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Run tests (serial timing checks)
+        if: steps.scope.outputs.docs_only != 'true'
+        env: &core-test-env
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          # Pytest workers own CPU parallelism; avoid a native math pool per interpreter.
+          OPENBLAS_NUM_THREADS: &native-math-threads "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          EXOMEM_TEST_TIER: core
+          FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+        run: >-
+          uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
+          "$EXOMEM_SERIAL_CORE_MODULE"
+          "$EXOMEM_SERIAL_ANALYTICS_MODULE"
+          -o timeout=180
+          --durations-path=.test_durations.json
+          --junitxml=test-results/junit-core-${{ matrix.python-version }}-serial.xml
+          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
+      - name: Upload test timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-py${{ matrix.python-version }}-serial-junit
+          path: test-results/junit-core-${{ matrix.python-version }}-serial.xml
+          if-no-files-found: warn
+      # Clean snapshots contain only measured cases, so cached values cannot overwrite another job's evidence.
+      - name: Upload refreshed test durations
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-core-py${{ matrix.python-version }}-serial
+          path: .test_durations.json
+
   # The PR suite runs as two independently sharded tiers so each job stays
   # bounded while four workers use each runner's four vCPUs. `core-tests` is the
   # suite minus the benchmark-harness modules minus the nightly-owned
@@ -32,16 +93,13 @@ jobs:
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
     name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/12)
-    env:
-      # These timing checks need the runner to themselves, before the worker pool.
-      EXOMEM_SERIAL_CORE_MODULE: tests/test_governance_overhead.py
-      EXOMEM_SERIAL_ANALYTICS_MODULE: tests/test_query_engine_analytics.py
+    env: *serial-core-modules
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
     # anything release-please does not manage. Lint, build (packages, Cloud
     # archives, privacy), specs, capabilities and the wheel onboarding gate,
     # which runs the packaged demo, still run.
-    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
+    if: *not-release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -52,7 +110,7 @@ jobs:
         # compatibility evidence is useful without doubling every feedback run.
         # The release PR runs this normal PR tier like any other PR; release
         # evidence is the documented dispatched full run (docs/release.md).
-        python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
+        python-version: *test-python-versions
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -107,24 +165,6 @@ jobs:
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
-      - name: Check timing budgets before the worker pool
-        if: matrix.shard == 1 && steps.scope.outputs.docs_only != 'true'
-        env: &core-test-env
-          # The suite runs without the embeddings/media extras; these mirror the
-          # conftest autouse defaults so a forgotten extra can't change behaviour.
-          KB_MCP_DISABLE_EMBEDDINGS: "1"
-          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-          EXOMEM_TEST_TIER: core
-          FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-        run: >-
-          uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
-          "$EXOMEM_SERIAL_CORE_MODULE"
-          "$EXOMEM_SERIAL_ANALYTICS_MODULE"
-          -o timeout=180
-          --durations-path=.test_durations.json
-          --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}-serial.xml
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
         # --store-durations only on nightly/dispatch full runs: each shard
@@ -149,7 +189,7 @@ jobs:
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ steps.scope.outputs.pytest_args }}
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
+          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -175,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
+        python-version: *test-python-versions
         shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +263,7 @@ jobs:
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          OPENBLAS_NUM_THREADS: *native-math-threads
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
@@ -243,7 +284,7 @@ jobs:
           --durations-min=1
           --junitxml=test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ steps.scope.outputs.pytest_args }}
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations' || '' }}
+          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -890,7 +931,7 @@ jobs:
   quality:
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     # The test jobs named in .github/quality.yml, so their runtime is known.
-    needs: [core-tests, harness-tests, windows-held-filesystem, tui, product-e2e]
+    needs: [timing-tests, core-tests, harness-tests, windows-held-filesystem, tui, product-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -913,6 +954,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs:
       - release-evidence
+      - timing-tests
       - core-tests
       - harness-tests
       - windows-held-filesystem

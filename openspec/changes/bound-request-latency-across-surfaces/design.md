@@ -171,6 +171,11 @@ Some corpus-sized work remains, all of it in SQLite rather than in the carry's o
 
 A request that ranks on admission reuses its statistics while the complete catalogue snapshot key holds. After that key changes, it reads every current admitted path and stem string in one SQL snapshot. A framed fingerprint of these complete inputs can authorize reuse for the same scope and admitted set. Changed inputs rebuild the statistics, including SQL-only repairs that leave canonical checkpoints unchanged. The existing four-entry bound remains. This saves token splitting and aggregation after an unrelated edit, but adds hashing and temporary raw strings on cache misses.
 
+Final cache installation replaces equivalent snapshot aliases under the cache lock.
+Aliases for one admitted corpus therefore do not evict another reader's unchanged statistics.
+Old snapshot readers retain their immutable statistics, but a later lookup may repeat the SQL read and hash.
+The four-entry bound can retain four distinct vocabulary maps; alias compaction adds no retained state.
+
 Under a governance policy its admission also decides every page on each request, which dominates its carry cost; this change leaves that cost as it was. The model-free gate in `tests/test_latency_gate.py` admits this growth and refuses whole-corpus work.
 
 ## Risks / Trade-offs

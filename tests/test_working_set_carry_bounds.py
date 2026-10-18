@@ -458,6 +458,37 @@ def test_a_reader_rebuilds_statistics_only_when_its_admitted_inputs_change(vault
     assert _statistics_rebuilt(vault, reader) == 0, "once per changed input, not per turn"
 
 
+def test_snapshot_aliases_do_not_evict_another_readers_unchanged_statistics(vault: Path) -> None:
+    held = _seed_ranked(vault)
+    common = f"{RESEARCH}/ranked-plimsett-0.md"
+    others = [f"{RESEARCH}/ranked-plimsett-{index}.md" for index in range(1, 4)]
+    views = [{common, *others[:index]} for index in range(4)]
+
+    def ranking(hidden: set[str]) -> tuple[list[tuple[str, float]], int]:
+        context = lexstore.RequestQueryContext(
+            vault, lambda path: path not in hidden, lifecycle_statuses.Basis(vault)
+        )
+        with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+            result = _ranked(vault, 1000, query_context=context)
+        assert result and all(path in held and path not in hidden for path, _score in result)
+        return result, int(measured[call_spans.STATS_REBUILT])
+
+    first, rebuilt = ranking(views[0])
+    assert rebuilt == 1
+    _research_page(vault, "ranked-plimsett-0", "A revision hidden from all four readers.")
+    _settle(vault)
+    assert ranking(views[0]) == (first, 0)
+    for view in views[1:]:
+        _result, rebuilt = ranking(view)
+        assert rebuilt == 1
+
+    _research_page(vault, "ranked-plimsett-0", "Another revision hidden from all readers.")
+    _settle(vault)
+    _result, rebuilt = ranking(views[1])
+    assert rebuilt == 0
+    assert ranking(views[0]) == (first, 0), "snapshot aliases must not crowd out a reader"
+
+
 def test_an_fts_only_correction_changes_warm_admitted_ranking(vault: Path) -> None:
     """A SQL repair can change scoring without a canonical checkpoint change."""
     held = _seed_ranked(vault)

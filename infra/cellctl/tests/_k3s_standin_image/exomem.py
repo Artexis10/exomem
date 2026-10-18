@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import http.server
 import os
+import signal
 import socketserver
 import sys
 
@@ -118,6 +119,8 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "cell-init":
         cell_init()
     else:
+        # PID 1 ignores default SIGTERM; this fixture must exit during the real pod grace period.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         serve()
 
 
