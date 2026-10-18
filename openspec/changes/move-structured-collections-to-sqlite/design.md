@@ -611,6 +611,24 @@ The same 30-sample workload at source `6f29fae7c` measured full-inspection p50/p
 
 Pairing the same 30 operation positions gives a median inspection difference of -479.56 ms. A paired bootstrap gives a descriptive 95% interval of -492.27 to -365.47 ms. Each arm has one sequential run, so this interval does not control temporal host effects or estimate variation between machines or runs. These results still miss the phase targets and establish no general scaling curve.
 
+**Pending-history inspection, 2026-10-18.** Source `00760a87a` reuses normalized configured selectors and counts admitted, never-published history pages without rendering their bytes. Published pages retain exact digest comparison. Inspection retains page authorization, existence and canonical integrity checks.
+
+The unchanged diagnostic script has SHA-256 `fa5dc69d089217faf017997ece60424f129246b839e8077c1788fc44f0ba4088`. Sequential Linux/WSL runs used Python 3.13.14, SQLite 3.53.1 and isolated store-preview dispatch. Each run measured 30 operation positions, a 10% ref-withheld audience and one bulk call.
+
+| Seeded rows | Guarded append p95, ms | Full inspect p95, ms | Bulk 500 elapsed, ms |
+| ---: | ---: | ---: | ---: |
+| 1,000, before both changes | 25.49 | 395.59 | 512.52 |
+| 1,000, after both changes | 20.97 | 41.32 | 444.35 |
+| 10,000, after both changes | 22.69 | 180.72 | 507.81 |
+
+Both sizes prove complete/partial row counts, unchanged state after refusal and exactly 500 stored bulk rows. At 1,000 rows, selector normalization alone measured inspection p95 335.35 ms. The subsequent shortcut removed the remaining unnecessary history render.
+
+The paired inspection median difference is -332.95 ms, with a descriptive bootstrap 95% interval of -334.50 to -330.95 ms. The append median difference is -4.08 ms, with an interval of -4.42 to -3.83 ms. Each arm has one sequential run. These intervals do not control host timing or estimate variation between runs; they establish no installed improvement or scaling curve.
+
+Report hashes: before-1k `4f49a8e32fac29b27dc7d954c4cab1276a60980e381e5a9305279d88e41a0736`; after-1k `5c8f7918e776445b141ae80c6e244aba84dcf50efc1d2409b492d5e4bd24b414`; after-10k `96c2473a0cd5dde3cce063e4625442b4bde19668fa557cee3416dfe9c4d73fae`.
+
+Append and inspection still miss the phase targets. Native Windows/NTFS, managed coordination, commit/fsync tracing, resources and publication overlap remain outside these diagnostics. P1a.15 stays open.
+
 The spike numbers come from a 4-core container with ext4, SQLite 3.45.1, WAL and `synchronous=FULL` (`benchmarks/collections_sqlite_spike/results-*.json`). They exclude the dispatcher, the idempotency ledger, governance resolution and receipt projection.
 
 **End-to-end append budget.** #1457's SQLite prototype confirms the storage layer is flat: 2.6–3.8 ms with synchronous projection at both 1,000 and 10,000 items. Its end-to-end estimate of about 93/100 ms p50/p95 is dominated by about 90 ms of shared cost outside storage, which that composite carried over unchanged from today's writer. That 90 ms is the real target of the 20 ms goal. The budget, per stage at p95:
