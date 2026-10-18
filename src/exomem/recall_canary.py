@@ -27,8 +27,27 @@ def _observer_identity(package_mode: str) -> dict[str, Any]:
     return package_identity(package_mode, role="observer-only")
 
 
+def _compile_response_schema(schema):
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+    from referencing.jsonschema import DRAFT202012, specification_with
+
+    Draft202012Validator.check_schema(schema)
+    resources = [Resource.from_contents(schema, default_specification=DRAFT202012)]
+    while resources:
+        resource = resources.pop()
+        contents = resource.contents
+        # The observer fixes the JSON Schema dialect, which is a technical format.
+        if isinstance(contents, dict) and "$schema" in contents:
+            if specification_with(contents["$schema"]) != DRAFT202012:
+                raise ValueError("unsupported schema dialect")
+        resources.extend(resource.subresources())
+    # Case files are self-contained; an empty registry has no external retrieval.
+    return Draft202012Validator(schema, registry=Registry())
+
+
 def _canary_cases(raw: bytes):
-    from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+    from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
     # These two tools are the canary protocol's closed read-only API, not vocabulary.
     class Reference(BaseModel):
@@ -61,12 +80,23 @@ def _canary_cases(raw: bytes):
                 raise ValueError("invalid result path")
             return self
 
+    class SchemaExpected(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        outcome: Literal["ok", "abstained"] = "ok"
+        response_schema: dict[str, JsonValue]
+        _response_validator: Any = PrivateAttr()
+
+        @model_validator(mode="after")
+        def compile_schema(self):
+            self._response_validator = _compile_response_schema(self.response_schema)
+            return self
+
     class Case(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         id: str = Field(min_length=1)
         tool: Literal["ask_memory", "activate_context"]
         arguments: dict[str, JsonValue]
-        expected: Expected
+        expected: Expected | SchemaExpected
 
     def reject_nonfinite(value):
         raise ValueError("non-finite JSON value")
@@ -109,6 +139,11 @@ def _canary_result(result, expected) -> tuple[str, str | None]:
     )
     if outcome != expected.outcome:
         return outcome, "unexpected-outcome"
+    if (validator := getattr(expected, "_response_validator", None)) is not None:
+        try:
+            return outcome, None if validator.is_valid(data) else "unexpected-response"
+        except Exception:  # noqa: BLE001 - schema failures can contain private case and response data
+            return outcome, "invalid-expectation"
     try:
         state = _at_path(data, expected.state_path)
         if state != expected.state or isinstance(state, bool) != isinstance(expected.state, bool):
@@ -306,7 +341,12 @@ async def run_mcp_canary(
                         )
                     elif failure is None:
                         series["warmth"] = "successful-case-proof"
-                    series["availability"] = "failed" if failure else "passed"
+                    # These are observer protocol codes, not service or vault vocabulary.
+                    if failure == "invalid-expectation":
+                        report["failure"] = failure
+                        series["availability"] = "incomplete"
+                    else:
+                        series["availability"] = "failed" if failure else "passed"
                     if failure:
                         break
                 series["latency"] = latency_watch.summarize(
@@ -315,7 +355,7 @@ async def run_mcp_canary(
                     contract=contract,
                     coverage={"population": "declared-series", "evictions": 0},
                 )
-                if series["availability"] == "failed":
+                if series["availability"] in ("failed", "incomplete"):
                     break
     except Exception:  # noqa: BLE001 - connection/session errors can contain credentials and targets
         report["failure"] = "session-failed"
@@ -323,7 +363,9 @@ async def run_mcp_canary(
             report["initialization_ms"] = (time.perf_counter() - initialization_start) * 1000
     report["ended_at"] = time.time()
     complete = all(
-        series["measured_attempts"] == samples and samples >= bar.min_samples
+        series["availability"] != "incomplete"
+        and series["measured_attempts"] == samples
+        and samples >= bar.min_samples
         for series in report["cases"]
     )
     positive_coverage = {}
@@ -346,6 +388,8 @@ async def run_mcp_canary(
     report["availability"] = (
         "failed"
         if "failed" in availability
+        else "incomplete"
+        if "incomplete" in availability
         else "unattempted"
         if "unattempted" in availability
         else "passed"

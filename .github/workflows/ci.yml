@@ -47,6 +47,12 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
+      # Workers can finish while the headroom check still reads the scheduling baseline.
+      - &prepare-duration-snapshot
+        name: Prepare isolated timing snapshot
+        env:
+          EXOMEM_DURATIONS_PATH: &duration-snapshot-path ${{ runner.temp }}/test-durations.json
+        run: cp .test_durations.json "$EXOMEM_DURATIONS_PATH"
       - name: Run tests (serial timing checks)
         if: steps.scope.outputs.docs_only != 'true'
         env: &core-test-env
@@ -54,6 +60,7 @@ jobs:
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           # Pytest workers own CPU parallelism; avoid a native math pool per interpreter.
           OPENBLAS_NUM_THREADS: &native-math-threads "1"
+          EXOMEM_DURATIONS_PATH: *duration-snapshot-path
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
@@ -62,7 +69,7 @@ jobs:
           "$EXOMEM_SERIAL_CORE_MODULE"
           "$EXOMEM_SERIAL_ANALYTICS_MODULE"
           -o timeout=180
-          --durations-path=.test_durations.json
+          --durations-path="$EXOMEM_DURATIONS_PATH"
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-serial.xml
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
@@ -78,7 +85,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-core-py${{ matrix.python-version }}-serial
-          path: .test_durations.json
+          path: *duration-snapshot-path
 
   # The PR suite runs as two independently sharded tiers so each job stays
   # bounded while four workers use each runner's four vCPUs. `core-tests` is the
@@ -165,13 +172,12 @@ jobs:
           uv venv "$RUNNER_TEMP/older-reader" --python 3.13
           uv pip install --python "$RUNNER_TEMP/older-reader/bin/python" "exomem==$EXOMEM_TEST_OLDER_READER_VERSION"
           echo "EXOMEM_TEST_OLDER_READER_PYTHON=$RUNNER_TEMP/older-reader/bin/python" >> "$GITHUB_ENV"
+      - *prepare-duration-snapshot
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
-        # --store-durations only on nightly/dispatch full runs: each shard
-        # merges its measured timings into the checked-in durations file and
-        # the step below uploads the result as an artifact. Refreshing the
-        # repository copy is a reviewed local change via
-        # scripts/refresh_test_durations.py — CI never commits durations.
+        # Full runs replace the scratch snapshot with measured cases and upload it.
+        # Refreshing the baseline stays a reviewed change through scripts/refresh_test_durations.py.
+        # Preserve thread stacks before a worker timeout can discard them.
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --splits=12
@@ -183,7 +189,8 @@ jobs:
           --ignore="$EXOMEM_SERIAL_ANALYTICS_MODULE"
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
-          --durations-path=.test_durations.json
+          --durations-path="$EXOMEM_DURATIONS_PATH"
+          -o faulthandler_timeout=150
           --session-timeout=1400
           --durations=50
           --durations-min=1
@@ -202,7 +209,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}
-          path: .test_durations.json
+          path: *duration-snapshot-path
       - name: Sample vault smoke (the exact command users run)
         if: matrix.shard == 1
         run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
@@ -259,11 +266,13 @@ jobs:
         run: >-
           uv run --frozen --compile-bytecode --python ${{ matrix.python-version }}
           python -m compileall -q src/exomem
+      - *prepare-duration-snapshot
       - name: Run tests (harness tier — benchmark-importing modules)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           OPENBLAS_NUM_THREADS: *native-math-threads
+          EXOMEM_DURATIONS_PATH: *duration-snapshot-path
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
@@ -278,7 +287,7 @@ jobs:
           -o timeout=180
           --group=${{ matrix.shard }}
           --splitting-algorithm=duration_based_chunks
-          --durations-path=.test_durations.json
+          --durations-path="$EXOMEM_DURATIONS_PATH"
           --session-timeout=900
           --durations=50
           --durations-min=1
@@ -297,7 +306,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}
-          path: .test_durations.json
+          path: *duration-snapshot-path
 
   windows-held-filesystem:
     name: Windows held filesystem (native NTFS)

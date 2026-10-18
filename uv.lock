@@ -655,7 +655,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.127.1" # x-release-please-version
+version = "0.127.2" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -673,6 +673,7 @@ dependencies = [
     { name = "python-slugify" },
     { name = "pyyaml" },
     { name = "rank-bm25" },
+    { name = "referencing" },
     { name = "snowballstemmer" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
@@ -778,6 +779,7 @@ requires-dist = [
     { name = "python-slugify", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
+    { name = "referencing", specifier = ">=0.37,<0.38" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
     { name = "sentence-transformers", marker = "extra == 'nli'", specifier = ">=3.0" },
     { name = "snowballstemmer", specifier = ">=2.2" },
