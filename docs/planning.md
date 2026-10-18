@@ -8,11 +8,13 @@ Product and command usage reference derived from the OpenSpec contract. It is
 not a repository task plan or a separate specification authority.
 
 Planning is human-authored intended future state. A collection lives under
-`Knowledge Base/Planning/` and stores one readable Markdown item per plan; no
-database, dashboard, or generated view is canonical.
+`Knowledge Base/Planning/`. File collections keep Markdown authority. An admitted
+store collection keeps canonical rows and history in SQLite, with readable
+Markdown views at the existing paths.
 
-Use `plan_memory` with exactly `inspect`, `create`, `query`, `add`, `update`,
-or `triage`. Minimal capture creates a candidate work item in the authored
+Use `plan_memory` with `describe`, `validate`, `inspect`, `create`, `query`, `add`,
+`update`, `triage`, `revise`, `rebaseline`, or `history`.
+Minimal capture creates a candidate work item in the authored
 `inbox` horizon. `triage` is the explicit path for kind, status, priority,
 commitment, horizon, area, and parent changes; time never moves an item.
 
@@ -30,9 +32,19 @@ opaque, and neither the declaration nor the pointer proves tool availability or
 external state.
 
 Queries are bounded derived output, tagged with their canonical snapshot and
-source versions. Direct editor changes are immediately visible; inspection
-reports audit gaps and never repairs human-owned files. Dashboards, charts,
+source versions. File collections expose direct editor changes immediately and
+report audit gaps. The service applies valid store-view edits as governed
+transitions and holds invalid or stale edits. Inspection never repairs files.
+Dashboards, charts,
 forms, and TUI workflows are intentionally deferred.
+
+Store collections share the [publication, history and backup contract](records.md#collections-in-the-store)
+with Records. SQLite commit acknowledges the save; item views, manifests and
+aggregate views publish asynchronously. Structured queries see the save immediately.
+`get_page` requires a valid physical view. `query(include_agent_history=true)` returns bounded audit
+events. `history(plan_id=...)` returns retained prior payloads for one authorized
+plan. Rebaseline acknowledges only an exact imported positive gap and preserves
+its discontinuity. The store supports one lease holder, not two independent writers.
 
 ## Planned versus recorded
 

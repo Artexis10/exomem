@@ -356,6 +356,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
 def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    readiness.reset()
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     managed_at_compute: list[bool] = []
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)

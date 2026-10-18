@@ -593,7 +593,7 @@ def test_real_issue_redeem_consume_without_projected_file(store, monkeypatch):
     who = session(store, monkeypatch)
     assert "exomem_view:" in (store.root / manifest_path()).read_text()
     for path, in store.connection.execute("SELECT path FROM projection_state"):
-        (store.root / path).unlink()
+        (store.root / path).unlink(missing_ok=True)
     assert not (store.root / manifest_path()).exists()
     with preview_store(store.root, store.handle):
         token = inspection_token(store, who)

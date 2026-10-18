@@ -295,16 +295,18 @@ def _prove_restore_collections(staging: Path) -> None:
     """Prove collection bytes in private staging before moving destination vault or state."""
     from . import structured_collections as collections
     from . import vault_portability
-    from .collection_store import chain, connection, preflight
+    from .collection_store import chain, connection, ownership, preflight
 
     try:
-        with vault_portability.checked_collection_replica(staging):
-            pass
-        rows, manifests, _store_ids = preflight.candidates(staging)
-        if manifests:
-            with tempfile.TemporaryDirectory(prefix="exomem-cloud-restore-proof-") as private:
-                with connection.staging_store(Path(private) / "staging.sqlite") as store:
-                    rows.extend(preflight.prove_into(staging, manifests, store, Path(private), preflight.import_context()))
+        with vault_portability.checked_collection_replica(staging) as verified:
+            marker = None if verified is None else ownership.declarations(staging, verified.connection)[0]
+            proof = ownership.Proof((), marker)
+            rows, manifests, _store_ids = preflight.candidates(staging, ownership_proof=proof)
+            if manifests:
+                with tempfile.TemporaryDirectory(prefix="exomem-cloud-restore-proof-") as private:
+                    with connection.staging_store(Path(private) / "staging.sqlite") as store:
+                        rows.extend(preflight.prove_into(
+                            staging, manifests, store, Path(private), preflight.import_context()))
         if any(row["status"] == "blocked" for row in rows):
             raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "collection_proof")
     except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.Error,

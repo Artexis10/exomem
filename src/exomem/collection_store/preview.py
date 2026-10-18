@@ -28,6 +28,10 @@ _BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
 )
 
 
+# Records and Planning share this disclosure protocol boundary.
+QUERY_RECEIPT_BOUNDARY = "record_query"
+
+
 @contextmanager
 def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
     """Bind a dark writer for this call context; ownership remains with the caller."""
@@ -77,18 +81,17 @@ def production_bound(vault_root: Path) -> bool:
 
 
 def selected_writer(vault_root, selector):
-    from . import authority
+    from . import ownership
 
     writer = bound_writer(vault_root)
     if writer is None:
         return None
-    marker = authority.routing_marker(writer)
-    if marker is None:
-        return writer
-    entry = authority.selected_entry(vault_root, marker, selector)
+    proof = ownership.current(vault_root, conn=writer.connection, private=not production_bound(vault_root))
+    entry = proof.selected(vault_root, selector)
     if entry is None:
         return None
-    authority.require_selected(writer.connection, marker, entry, root=vault_root)
+    if entry["collection_id"] not in proof.admitted:
+        raise ownership.unavailable()
     return writer
 
 
@@ -126,27 +129,28 @@ def require_file_collection(vault_root, selector, *, authorize_path, notice_path
     belongs to mutation resolution alone. ``notice_path`` is the manifest path a caller
     holds for a selector by identity; an unreadable marker decides the notice on it.
     """
-    from . import authority
+    from ..cli_ops import OpError
+    from . import ownership
 
     root = Path(vault_root)
     writer = bound_writer(root)
     if writer is not None:
-        marker = authority.routing_marker(writer)
-        if marker is not None and authority.selected_entry(root, marker, selector) is not None:
+        proof = ownership.current(root, conn=writer.connection, private=not production_bound(root))
+        if proof.selected(root, selector) is not None:
             # No production caller reaches this: route() sends a routed selector to the store thread, whose dispatch() writes it.
             raise collections.CollectionError(
                 "COLLECTION_STORE_ROUTE_REQUIRED", "a store collection is written only by its store writer")
         return
     try:
-        raw = authority.read_marker(root)
-        marker = None if raw is None else authority.parse_marker(root, raw)
-    except CollectionStoreError as error:
+        proof = ownership.current(root)
+    except (CollectionStoreError, RuntimeError, OpError) as error:
+        # The mutation boundary's typed busy result drives the existing capture retry.
+        if isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+            raise
         # Which collections the store owns is unknown, so none can be written as a file.
         path = notice_path if notice_path is not None else _selector_path(root, selector)
-        _refuse(root, path, authorize_path, error.code, MARKER_UNREADABLE)
-    if marker is None:
-        return
-    entry = authority.selected_entry(root, marker, selector)
+        _refuse(root, path, authorize_path, "COLLECTION_STORE_UNAVAILABLE", MARKER_UNREADABLE)
+    entry = proof.selected(root, selector)
     if entry is None:
         return
     from .runtime import served
@@ -172,21 +176,21 @@ def _refuse(root, path, authorize_path, code, message):
 
 
 def selected_projection_writer(vault_root, path):
-    from . import authority
-
     writer = bound_writer(vault_root)
-    if writer is None or authority.routing_marker(writer) is None:
+    if writer is None:
         return writer
     with writer.read_snapshot():
         return writer if writer._operation.projection_subjects(path) is not None else None
 
 
-def canonical_read(function=None, *, projection=False, unavailable=None):
+def canonical_read(function=None, *, projection=False, unavailable=None,
+                   receipt_boundary: str | None = None):
     """Keep a structured consumer's canonical reads under one request snapshot."""
     from ..cli_ops import OpError
 
     if function is None:
-        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable)
+        return lambda function: canonical_read(function, projection=projection, unavailable=unavailable,
+                                               receipt_boundary=receipt_boundary)
 
     @wraps(function)
     def read(vault_root, *args, **kwargs):
@@ -216,7 +220,23 @@ def canonical_read(function=None, *, projection=False, unavailable=None):
             if purpose is not None and purpose != writer._operation.purpose:
                 writer._operation.refuse()
             return function(vault_root, *args, **kwargs)
-    return read
+    from .ownership import reader
+
+    owned_read = reader(read)
+    if receipt_boundary is None:
+        return owned_read
+
+    @wraps(function)
+    def disclosed(vault_root, *args, **kwargs):
+        from ..governance import egress
+
+        # A composite owns its collector until the whole-result ownership proof finishes.
+        with egress.disclosure_boundary(vault_root, receipt_boundary, join_existing=True) as collector:
+            try:
+                return owned_read(vault_root, *args, **kwargs)
+            finally:
+                egress.emit_boundary_receipt(collector)
+    return disclosed
 
 
 def projection_decision(vault_root, path, *, policy, audience, purpose,
@@ -289,7 +309,7 @@ def dispatch(
         require_records_summary_route(vault_root, binding[1], action, values)
     writer = binding[1]
     args = {name: value for name, value in values.items() if value is not None}
-    from . import authority
+    from . import ownership
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -299,8 +319,8 @@ def dispatch(
         writer._require_operation_context()
         return True, {**parse_manifest_contract(store_mode=True), "import": contract(), "query": route.contract()}
 
-    marker = authority.routing_marker(writer)
-    if marker is not None:
+    proof = ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+    if proof.marker is not None:
         selector = args.get("collection", args.get("manifest_path"))
         if action == "create" and binding[2]:
             from .runtime import served_create
@@ -312,9 +332,6 @@ def dispatch(
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
-    elif action == "create" and binding[2]:
-        # Only admission writes a production store's marker; a create cannot stand in for it.
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the store's authority marker is missing")
     if action == "describe":
         return False, None
     writer._require_operation_context()
@@ -333,16 +350,16 @@ def dispatch(
         from .. import planning, record_governance
 
         collection = args.pop("collection")
-        if args.pop("include_agent_history", False):
-            raise collections.CollectionError(
-                "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "store audit history belongs to a later slice"
-            )
         with writer.read_collection(collection, facade_profile=profile) as manifest:
             if profile == "planning":
                 return True, planning.query(vault_root, manifest, **args)
+            include_history = args.pop("include_agent_history", False)
+            from .history import agent_history
+
             result = record_governance.query_collection(vault_root, manifest, **args)
             return True, record_governance.project_query_result(
                 result, manifest, output_format=args.get("output_format", "json"),
+                agent_history=agent_history(writer, manifest) if include_history else None,
             )
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
@@ -377,6 +394,8 @@ def dispatch(
                 if current.view_mode == SUMMARY:
                     require_summary_manifest(vault_root, current.path, args["manifest_text"])
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
+    if action == "rebaseline":
+        return True, _mutate(vault_root, writer.rebaseline_collection, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
     if action == "history":
@@ -385,6 +404,9 @@ def dispatch(
                 from .derived_rows import refused
 
                 raise refused("row history")
+            from .history import row_history
+
+            return True, row_history(writer, manifest, **args)
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )

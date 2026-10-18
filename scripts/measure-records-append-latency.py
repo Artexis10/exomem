@@ -23,8 +23,9 @@ the supported local-owner library scope for that invented vault; an omitted
 caller identity would otherwise strip the public inspection response.
 
 ``--storage store-preview`` exercises the dark store through the same public
-commands, vault-scoped lease and synchronous item-view publication protocol.
-It does not lift file-mode caps and refuses to time a pending-only append.
+commands and vault-scoped lease. It times durable SQLite acknowledgement;
+item-view publication runs later, and the final inspection reports pending views.
+It does not lift file-mode caps or measure background publication latency.
 Native Windows and mixed-authority acceptance remain outside this diagnostic;
 these numbers cannot retire the store's phase-acceptance gate.
 ``--phase-probes`` adds a synthetic 10% ref-withheld audience split and one
@@ -566,8 +567,6 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         wall, cpu, result, spans = invoke(**kwargs)
         if not isinstance(result, dict) or result.get("outcome") != "committed":
             raise RuntimeError(f"append did not commit: {str(result)[:300]}")
-        if handle is not None and "projection_pending" in result.get("warnings", []):
-            raise RuntimeError("store append left its projection pending; synchronous timing refused")
         row = dict(stages.total)
         row["total"] = wall
         row["thread_cpu"] = cpu
@@ -604,7 +603,8 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         "storage_mode": args.storage, "phase_acceptance": False,
         "command_path": {"lease": "vault-scoped", "coordinator": "disabled in isolated diagnostic",
                          "inspect": "full public",
-                         "projection": "synchronous item-view protocol" if handle is not None else "file publication"},
+                         "projection": "deferred item-view publication" if handle is not None else "file publication",
+                         "acknowledgement": "durable SQLite commit" if handle is not None else "file publication"},
         "timing_clocks": {
             "elapsed": "perf_counter", "cpu": "thread_time", "cpu_scope": "invoking thread",
             "profile": "thread_time",
@@ -620,6 +620,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             "complete 1000 and 10000 row acceptance runs", "native Windows/NTFS run",
             "filesystem identification", "commit/fsync trace", "query/resource phase evidence",
             "managed coordinated-store request path",
+            "background publication latency and backup overlap",
         ],
         "budget_accounting": {
             "kind": "main-thread exclusive elapsed", "budgets_ms": BUDGETS_MS,
@@ -772,8 +773,6 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         bulk_budget_sample = stages.last_sample
         if not isinstance(bulk, dict) or bulk.get("state") != "committed":
             raise RuntimeError(f"bulk diagnostic did not commit: {str(bulk)[:500]}")
-        if "projection_pending" in bulk.get("warnings", []):
-            raise RuntimeError("bulk diagnostic left synchronous views pending")
         stored_delta = handle.connection.execute("SELECT count(*) FROM items").fetchone()[0] - after["rows"]
         if stored_delta != 500:
             raise RuntimeError("bulk diagnostic did not store exactly 500 unique rows")
@@ -794,6 +793,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             "refusal_state_unchanged": after == before,
             "bulk_500": {"elapsed_ms": wall * 1000, "thread_cpu_ms": cpu * 1000,
                          "stored_count_delta": stored_delta, "call_spans": spans,
+                         "warnings": bulk.get("warnings", []),
                          "inclusive_stage_ms": {name: value * 1000 for name, value in bulk_stages.items()},
                          "stage_calls": bulk_stage_calls, "exclusive_budget_sample": bulk_budget_sample},
         }

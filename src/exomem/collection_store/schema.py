@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 #: The first schema that the vault state manifest guards with an ID. Every release since the
 #: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
 #: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.

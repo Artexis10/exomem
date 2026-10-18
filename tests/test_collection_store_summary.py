@@ -240,7 +240,10 @@ def test_summary_acknowledgement_writes_no_row_files_and_publishes_bounded_label
     declared = pages(store)
     held = refused.value.details["held"]["path"]
     owned = {path: data for path, data in files(store).items() if path not in {EVIDENCE, "Knowledge Base/log.md"}}
-    assert set(owned) == {manifest_path(), held, *declared}
+    history_path = Path(manifest_path()).with_name("_history.md").as_posix()
+    assert store.connection.execute(
+        "SELECT path FROM projection_state WHERE kind='history'").fetchall() == [(history_path,)]
+    assert set(owned) == {manifest_path(), held, history_path, *declared}
     assert 1 <= len(declared) <= PAGE_CAP
     assert all(len(owned[path]) <= PAGE_BYTES for path in declared)
     assert sum(len(owned[path]) for path in declared) <= PAGES_TOTAL
@@ -370,6 +373,12 @@ def test_file_collections_refuse_summary_on_create_and_revise(tmp_path):
 def test_empty_collection_changes_mode_only_without_outstanding_state(store, outstanding):
     """An empty collection refused a guarded mode change, or allowed one over held, unclassified or unpublished state."""
     create(store, summary=outstanding == "pending-publication")
+    if outstanding in {"none", "offline-edit"}:
+        store.reconcile_views()
+    if outstanding == "none":
+        store.reconcile_views()
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM projection_state WHERE state<>'current'").fetchone()[0] == 0
     if outstanding == "held":
         with pytest.raises(collections.CollectionError):
             store.append_record(CID, item={"title": "Refused", "count": "many"}, why="observe")
@@ -433,6 +442,7 @@ def test_summary_rows_live_only_in_the_external_store_while_items_stays_default(
     assert collections.parse_manifest_bytes(store.root, COPY_PATH, items_text.encode()).view_mode == "items"
     store.create_collection(COPY_PATH, items_text, why="items default", scaffold=False)
     receipt = store.append_record(COPY_CID, item={"title": "zq-items-8"}, why="observe")
+    store.reconcile_views()
     assert b"zq-items-8" in (store.root / receipt["affected_paths"][0]).read_bytes()
     assert store.connection.execute("SELECT view_mode FROM collections WHERE collection_id=?",
                                     (COPY_CID,)).fetchone() == ("items",)

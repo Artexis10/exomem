@@ -35,6 +35,7 @@ from . import (
     handoff_state,
     legacy_import,
     owner,
+    ownership,
     preflight,
     replica,
     schema,
@@ -265,9 +266,9 @@ def _require_stageable(root):
     return intent
 
 
-def _stage(root, *, base=True, deadline=None, donor=None):
+def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
     """Assemble a fresh candidate, retaining only eligible, unchanged proved legacy material."""
-    rows, pending, store_ids = preflight.candidates(root)
+    rows, pending, store_ids = preflight.candidates(root, ownership_proof=ownership_proof)
     if not pending:
         return preflight.report(rows, store_ids), None
     directory = (state_paths.ensure_vault_state_dir(root) / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
@@ -395,7 +396,7 @@ SET_CHANGED, AUDIT_UNREADABLE, BASIS_CHANGED = "collection_set_changed", "audit_
 LIVE_REWRITTEN = "live_store_rewritten"
 
 
-def _carried(root, directory, *, supersede=False, deadline=None, verified=None):
+def _carried(root, directory, *, supersede=False, deadline=None, verified=None, ownership_proof=None):
     """The report for staging that still matches every input it was built from, or why it does not.
 
     Each collection is compared by its own basis, so an unrelated activity-log write does
@@ -430,7 +431,7 @@ def _carried(root, directory, *, supersede=False, deadline=None, verified=None):
             return None, LIVE_CHANGED, []
         if copied["snapshot_sha256"] != basis["live"]["snapshot_sha256"]:
             return None, LIVE_REWRITTEN, []
-    rows, pending, store_ids = preflight.candidates(root)
+    rows, pending, store_ids = preflight.candidates(root, ownership_proof=ownership_proof)
     recorded = basis["collections"]
     if rows and any(row["status"] == "blocked" for row in rows) or {
             manifest.collection_id: manifest.path for manifest in pending} != {
@@ -869,6 +870,40 @@ def _abandoned(coordinator, reason, changed=()):
             "abandoned_because": reason, **({"changed": list(changed)} if changed else {})}
 
 
+@contextmanager
+def _supersede_ownership(session, fence_client, pending):
+    """Prove that the first import's entire namespace is its own pending file input."""
+    reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+    with closing(reader):
+        reader.execute("BEGIN")
+        intent = authority.pending_create(reader)
+        if (intent != pending or intent is None or intent["kind"] != authority.MIGRATE
+                or intent["expected_marker"] is not None or "base_head" in intent):
+            raise CollectionStoreError(takeover.BUSY, "the first import changed before its replacement")
+        authority.require_intent_binding(reader, intent)
+        canonical, declared = ownership.declarations(session.root, reader)
+        participants = authority.intent_collection_ids(intent)
+        # Replacing an unproved base could lose stored rows; a refusal costs recovery or a retry.
+        if canonical is None or {entry["collection_id"] for entry in canonical["collections"]} != participants:
+            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "the pending import does not own the whole store")
+        target = authority.parse_marker(session.root, intent["target_marker"])
+        if {entry["collection_id"] for entry in target["collections"]} != participants:
+            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "the import target differs from its cohort")
+        for entry in target["collections"]:
+            authority.require_selected(reader, target, entry, root=session.root)
+        status = authority.intent_status(session.root, reader, intent)
+        if status != "pending":
+            raise CollectionStoreError(takeover.BUSY, "the import's marker preimage changed")
+        fence = fence_client.collection_store_fence()
+        if not authority.first_import_fence_matches(intent, target, fence):
+            raise CollectionStoreError(takeover.BUSY, "the import's collection fence changed")
+        sid, instance = (reader.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
+                         for key in (schema.META_STORE_ID, schema.META_INSTANCE_ID))
+        binding = (str(session.path), sid, instance, declared, json.dumps(intent, sort_keys=True), status,
+                   (fence.capability, fence.enrolled, fence.store_id, fence.generation))
+        yield ownership.Proof(binding, None)
+
+
 def cutover(session, manager, fence_client, *, deadline=None) -> dict:
     """Make verified staging the live store and admit it, inside the owner's offline session.
 
@@ -938,7 +973,7 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             # cutover's checks read; the route migrates again under a new acquisition.
             return {"mode": "collections-store", "step": "apply", "coordinator": coordinator,
                     "status": RESTORED, "restored": restored}
-        with _migration_scope(root, deadline):
+        with _migration_scope(root, deadline), ExitStack() as inputs:
             supersede = pending is not None
             # Staging runs under the mutation boundary alone, which keeps the files and the live
             # store still only for processes that share this lease state directory. The lease waits
@@ -946,12 +981,14 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
             current_pending = _require_stageable(root)
             if current_pending != pending:
                 raise CollectionStoreError("COLLECTION_STORE_BUSY", "the live migration changed during coordination")
+            ownership_proof = inputs.enter_context(_supersede_ownership(session, fence_client, pending)) if supersede else None
             directories = _staging_directories(root)
             if supersede:
                 # Nothing fences or routes the published store yet: fresh staging supersedes it.
                 report, reason, directory = None, BASIS_CHANGED, None
             else:
-                report, reason, changed = _carried(root, directories[0], deadline=deadline) if len(directories) == 1 else (
+                report, reason, changed = _carried(root, directories[0], deadline=deadline,
+                                                   ownership_proof=ownership_proof) if len(directories) == 1 else (
                     None, NO_STAGING if not directories else SEVERAL_STAGINGS, [])
                 directory = directories[0] if len(directories) == 1 else None
             if report is None:
@@ -959,7 +996,7 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                     # Copying the moved store again is the owner's offline apply (D4).
                     return _abandoned(coordinator, reason)
                 report, directory = _stage(root, base=not supersede, deadline=deadline,
-                                           donor=directory if not supersede and reason not in (
+                                           ownership_proof=ownership_proof, donor=directory if not supersede and reason not in (
                                                INTERRUPTED, STAGING_MISSING, NO_BASIS) else None)
             if directory is None:
                 if _expired(deadline):
@@ -976,13 +1013,13 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                     proved_version = _proved_version(directory, staged_file)
                     verified = {}
                     rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline,
-                                                       verified=verified)
+                                                       verified=verified, ownership_proof=ownership_proof)
                     if rechecked is None:
                         final.close()
                         if deadline is not None and why == LIVE_CHANGED:
                             return _abandoned(coordinator, why)
                         report, directory = _stage(root, base=not supersede, deadline=deadline,
-                                                   donor=None if why == NO_BASIS else directory)
+                                                   ownership_proof=ownership_proof, donor=None if why == NO_BASIS else directory)
                         reason, changed = why, rechanged
                         if directory is None:
                             if _expired(deadline):
@@ -991,7 +1028,7 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                         _filesystem, _parent, staged_file, staging_check = final.enter_context(_held_staging(directory))
                         proved_version = _proved_version(directory, staged_file)
                         rechecked, why, rechanged = _carried(root, directory, supersede=supersede, deadline=deadline,
-                                                           verified=verified)
+                                                           verified=verified, ownership_proof=ownership_proof)
                         if rechecked is None:
                             if deadline is not None:
                                 return _abandoned(coordinator, DEADLINE if _expired(deadline) else why, rechanged)
@@ -1010,6 +1047,11 @@ def cutover(session, manager, fence_client, *, deadline=None) -> dict:
                     if _expired(deadline):
                         # The last point before a live change: from the seal on, the cutover finishes.
                         return _abandoned(coordinator, DEADLINE, changed)
+                    if ownership_proof is not None:
+                        with _supersede_ownership(session, fence_client, pending) as current:
+                            if current.binding != ownership_proof.binding:
+                                raise CollectionStoreError(takeover.BUSY, "the import source changed before replacement")
+                    inputs.close()  # No source reader may survive installation of its replacement.
                     sealed_version = _seal(directory, intent, _adopted_replica(root, session.path) if supersede else None,
                                            expected_identity=staged_file.identity, expected_version=proved_version,
                                            basis_text=basis_text, check=staging_check, deadline=deadline)

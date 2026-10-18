@@ -38,6 +38,7 @@ def passes(store, *times):
     runner.hints(store, (), True)
     for now in times:
         until(lambda now=now: runner.run(store, now=now) > 0)
+        store.reconcile_views(pending_only=True, missing_ready=runner._state(store).missing_ready)
     return runner
 
 
@@ -55,6 +56,7 @@ def holds(store):
 def appended(store, **values):
     create(store)
     receipt = store.append_record(CID, item={"title": "One", **values}, item_key=KEY, why="observe")
+    store.reconcile_views()
     return receipt, store.root / receipt["affected_paths"][0]
 
 
@@ -420,6 +422,7 @@ def test_a_directory_rename_with_a_pending_install_and_changed_cleanup_input_pre
     monkeypatch.setattr(views.PublicationBatch, "_install", blocked)
     update = store.update_record(CID, item_key=KEY, changes={"count": 2}, why="update during edit",
         expected_container_hash=store.current_guards(CID)[0], expected_item_version=receipt["after_item_hash"])
+    store.reconcile_views()
     monkeypatch.setattr(views.PublicationBatch, "_install", original)
     descriptor = json.loads(store.connection.execute("SELECT install_json FROM projection_state WHERE kind='item'").fetchone()[0])
     stage = nested.parent / (views.STAGE_PREFIX + descriptor["token"])
@@ -477,6 +480,7 @@ def test_a_refused_move_commit_keeps_unknown_stage_aliases_until_the_hold_is_dur
         store.update_record(CID, item_key=KEY, changes={"count": 2}, why="agent",
                             expected_container_hash=store.current_guards(CID)[0],
                             expected_item_version=store.current_guards(CID, KEY)[1])
+        store.reconcile_views()
     descriptor = json.loads(store.connection.execute("SELECT install_json FROM projection_state WHERE kind='item'").fetchone()[0])
     stage = source.parent / (views.STAGE_PREFIX + descriptor["token"])
     unknown = stage.read_bytes().replace(b"title: One", b"title: Unknown")
@@ -580,6 +584,12 @@ def test_an_invalid_save_is_held_once_and_stays_in_place(store):
     store.reconcile_views()
     assert [(code, raw) for _, code, raw in holds(store)] == [("VIEW_INVALID", invalid)]
     assert path.read_bytes() == invalid  # PROVISIONAL O2: kept in place until discarded
+    from exomem import audit
+    from exomem.collection_store.preview import preview_store
+
+    with preview_store(store.root, store.handle):
+        report = audit.audit(store.root, categories=["collection_view_corrections"])
+    assert [finding.meta["code"] for finding in report.findings] == ["VIEW_INVALID"]
 
 
 def test_an_invalid_view_waiting_to_be_held_does_not_spin_the_store_thread(store):
@@ -612,6 +622,7 @@ def test_discard_resolves_a_view_correction_and_renders_over_its_bytes(store):
     assert code == "VIEW_INVALID"
     discarded = store.discard_held(CID, held=held, why="drop the broken edit")
     assert discarded["outcome"] == "discarded" and holds(store) == []
+    store.reconcile_views()
     assert path.read_bytes() == rendered and not list(path.parent.glob(".exomem-collection-aside-*"))
     with pytest.raises(collections.CollectionError, match="HELD_NOT_FOUND"):
         store.discard_held(CID, held=held, why="again")
@@ -623,6 +634,7 @@ def test_a_planning_hierarchy_violation_is_held_not_applied(store):
 
     create(store, "planning")
     receipt = store.append_record(CID, item={"title": "Child"}, item_key=KEY, why="capture")
+    store.reconcile_views()
     path = store.root / receipt["affected_paths"][0]
     frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
     # A committed work item needs a parent; this one has none.
@@ -653,6 +665,7 @@ def test_without_the_edit_back_release_a_hierarchy_violation_waits_on_disk(store
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {VIEWS})
     create(store, "planning")
     receipt = store.append_record(CID, item={"title": "Child"}, item_key=KEY, why="capture")
+    store.reconcile_views()
     path = store.root / receipt["affected_paths"][0]
     frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
     frontmatter.update(status="planned", commitment="committed", horizon="week")  # committed, with no parent
@@ -981,6 +994,8 @@ def test_attention_for_a_withheld_view_correction_equals_attention_without_it(se
     """Defect: the attention queue names a held correction of a row the caller cannot see."""
     from test_governance_egress import _external, write_rule, write_scope
 
+    from exomem import audit
+    from exomem.collection_store import authority
     from exomem.governance.principal import owner_principal, request_scope
 
     root = served.root
@@ -1007,6 +1022,20 @@ def test_attention_for_a_withheld_view_correction_equals_attention_without_it(se
           ["held_view_corrections"] == 1)
     assert queue(_external()) == absent and absent[0] == ([], None)
     assert "VIEW_CONFLICT" in json.dumps(queue(owner_principal(surface="mcp"))[1])
+    with request_scope(owner_principal(surface="mcp")):
+        before = audit.audit(root, categories=["collection_view_corrections"])
+    assert len(before.findings) == 1
+    authority.marker_path(root).unlink()
+    with request_scope(owner_principal(surface="mcp")):
+        after = audit.audit(root, categories=["collection_view_corrections"])
+    assert after.findings == before.findings
+    assert "VIEW_CONFLICT" in json.dumps(queue(owner_principal(surface="mcp"))[1])
+    assert queue(_external()) == absent
+    served.stop()
+    with request_scope(owner_principal(surface="mcp")):
+        unavailable = audit.audit(root, categories=["collection_view_corrections"])
+    assert unavailable.findings == []
+    assert unavailable.metadata["coverage"]["collection_view_corrections"] == "unknown"
 
 
 def test_a_held_stale_buffer_save_resumes_as_the_owners_edit_over_the_current_row(store):
@@ -1041,6 +1070,7 @@ def test_an_edit_inside_the_managed_presentation_block_is_not_adopted(store):
     store.create_collection(manifest_path(), text, why="create", scaffold=False)
     receipt = store.append_record(CID, item={"title": "One", "count": 1}, item_key=KEY, why="capture",
                                   body="Authored line\n")
+    store.reconcile_views()
     path = store.root / receipt["affected_paths"][0]
     rendered = path.read_bytes()
     assert b"- **Count:** 1\n" in rendered
@@ -1062,7 +1092,12 @@ def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store,
         platform = type(fs)
     reads = []
     read = platform.read
-    monkeypatch.setattr(platform, "read", lambda fs, file, **kwargs: reads.append(file) or read(fs, file, **kwargs))
+    def observe_read(fs, file, **kwargs):
+        if file.name != "_history.md":
+            reads.append(file)
+        return read(fs, file, **kwargs)
+
+    monkeypatch.setattr(platform, "read", observe_read)
     runner = passes(store, 0.0)
     assert len(reads) == 2  # the first pass reads the manifest and item views
     until(lambda: runner.run(store, now=60.0) > 0)
@@ -1080,6 +1115,7 @@ def test_views_render_no_file_mode_audit_marker_or_head(store):
     assert "record_audit" in legacy
     store.create_collection(manifest_path(), legacy, why="a migrated manifest", scaffold=False)
     receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     assert b"exomem-record-audit" not in (store.root / receipt["affected_paths"][0]).read_bytes()
     manifest = get_page.get_page(store.root, path=manifest_path()).frontmatter
     assert "record_audit" not in manifest and manifest["exomem_view"]["v"] == 1

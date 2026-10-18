@@ -593,7 +593,9 @@ def test_resume_refuses_foreign_acquired_head_without_replacing_it(producer, mon
 
 
 @pytest.fixture
-def mixed(store):
+def mixed(store, monkeypatch):
+    # The private writer fixture is this isolated vault's canonical store location.
+    monkeypatch.setattr(connection, "store_path", lambda _root: store.handle.path)
     for profile, cid in (
         ("records", "11111111-1111-4111-8111-111111111111"),
         ("planning", "22222222-2222-4222-8222-222222222222"),
@@ -730,14 +732,14 @@ def test_exact_marker_target_allows_existing_no_clobber_projection(mixed):
     store.reconcile_views()
     assert (store.root / manifest_path()).is_file()
     store.reconcile_views()
-    assert store.connection.execute("SELECT state FROM projection_state").fetchall() == [("current",)]
+    assert set(store.connection.execute("SELECT state FROM projection_state")) == {("current",)}
     assert store.connection.execute("SELECT COUNT(*) FROM txns").fetchone() == (1,)
     assert admission._recover_create(store)["receipt"] == first["receipt"]
     assert all((store.root / path).read_bytes() == raw for path, raw in before.items())
 
 
-def test_removed_membership_blocks_projection_after_intent_cleanup(mixed):
-    # Removing routing membership must not let recovery republish a retired collection.
+def test_hint_membership_cannot_revoke_canonical_projection_after_intent_cleanup(mixed):
+    # An editable hint cannot retire canonical ownership or appoint another collection.
     store, target, _ = mixed
     prepare(store, target)
     marker = authority.marker_path(store.root)
@@ -755,7 +757,7 @@ def test_removed_membership_blocks_projection_after_intent_cleanup(mixed):
     )
     marker.write_text(json.dumps(replacement))
     store.reconcile_views()
-    assert not (store.root / manifest_path()).exists()
+    assert (store.root / manifest_path()).is_file()
     assert orphan.read_bytes() == b"unadmitted recovery input"
 
 
@@ -766,12 +768,11 @@ def test_pending_create_preserves_shared_orphans_but_recovers_admitted_views(mix
     earlier_id = "33333333-3333-4333-8333-333333333333"
     earlier_key = "44444444-4444-4444-8444-444444444444"
     earlier_path = manifest_path().replace("Work", "Earlier")
-    earlier_text = manifest_text().replace(CID, earlier_id).replace(
-        "source: Items", "source: Knowledge Base/Records/Work"
-    )
+    earlier_text = manifest_text().replace(CID, earlier_id)
     store.create_collection(earlier_path, earlier_text,
                             why="earlier preview", scaffold=False)
     store.append_record(earlier_id, item={"title": "Earlier row"}, item_key=earlier_key, why="earlier row")
+    store.reconcile_views()
     old = json.loads(target)
     old["collections"][0].update(collection_id=earlier_id, manifest_path=earlier_path)
     old_bytes = json.dumps(old).encode()
@@ -784,9 +785,10 @@ def test_pending_create_preserves_shared_orphans_but_recovers_admitted_views(mix
     new_bytes = json.dumps(new).encode()
     prepare(store, new_bytes, expected_marker=old_bytes)
     orphan = (store.root / manifest_path()).parent / (".exomem-collection-stage-" + "c" * 32)
+    orphan.parent.mkdir(parents=True, exist_ok=True)
     orphan.write_bytes(b"C pending orphan; marker has not admitted C")
     (store.root / earlier_path).unlink()
-    earlier_item = (store.root / manifest_path()).parent / f"{earlier_key}.md"
+    earlier_item = (store.root / earlier_path).parent / "Items" / f"{earlier_key}.md"
     earlier_item.unlink()
     if admitted_before_commit:
         marker.write_bytes(new_bytes)
