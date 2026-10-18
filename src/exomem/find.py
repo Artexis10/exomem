@@ -1175,7 +1175,10 @@ def _with_catalog_scope(function):
         from . import lexstore, readiness
 
         with lexstore.admitted_catalog_scope(vault_root):
-            if not readiness.runtime_managed() or not freshness.event_indexes_enabled():
+            if (
+                not readiness.runtime_managed() or not freshness.event_indexes_enabled()
+                or lexstore.backend() == "python"
+            ):
                 return function(vault_root, *args, **kwargs)
             bound = request_signature.bind(vault_root, *args, **kwargs)
             bound.apply_defaults()
@@ -2816,6 +2819,7 @@ def _vector_unit_candidates(
             if prepared is None:
                 raise recall_space.ServingEncoderCold("unit query was not prepared")
             encoded_for, query_vector = prepared.encoded()
+            prepared_queries.require_current_serving(vault_root)
             index = prepared.index
             if timings is not None:
                 timings.skipped("vector.unit.embed")
@@ -5301,7 +5305,9 @@ def _find_semantic(
                             passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
                     scores = emb.rerank_pairs(query, passages)
                     if len(scores) != len(rerank_prefix):
-                        raise ValueError("reranker returned a score count that does not match its inputs")
+                        raise ValueError(
+                            "reranker returned a score count that does not match its inputs"
+                        )
                     score_updates: list[
                         tuple[
                             Hit,
@@ -5311,7 +5317,9 @@ def _find_semantic(
                             list[dict[str, float | str]] | None,
                         ]
                     ] = []
-                    for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
+                    for input_rank, (h, s) in enumerate(
+                        zip(rerank_prefix, scores, strict=True), start=1
+                    ):
                         raw_score = float(s)
                         adjusted = raw_score
                         chain: list[dict[str, float | str]] | None = (

@@ -10,6 +10,161 @@ from exomem import freshness, lexstore
 from exomem.governance.principal import library_scope
 
 
+@library_scope()
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_explicit_python_backend_keeps_managed_recall_available(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """The supported kill switch must keep serving through the Python fallback."""
+    from exomem import find as find_module
+
+    page = vault / "Knowledge Base/Notes/python-fallback.md"
+    page.write_text("# Fallback\n\npythonfallbackmarker\n", encoding="utf-8")
+    warm_managed_cell(vault)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+
+    hits = find_module.find(
+        vault,
+        query="pythonfallbackmarker",
+        scope="kb-only",
+        mode=mode,
+        graph=False,
+        rerank=False,
+    )
+
+    assert [hit.path for hit in hits] == ["Knowledge Base/Notes/python-fallback.md"]
+
+
+@library_scope()
+def test_fts5_absence_keeps_the_normal_table_catalogue_available(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing content ranking must not disable maintained unit metadata."""
+    from exomem import find as find_module
+
+    page = vault / "Knowledge Base/Notes/normal-table.md"
+    page.write_text(
+        "---\ntype: insight\nexomem_id: 8483e916-87d0-41a6-a0d7-f8c5f390dc02\n---\n\n"
+        "# Metadata\n\n- [config] ordinary table evidence ^normal-table-unit\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    warm_managed_cell(vault)
+
+    hits = find_module.find(
+        vault,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        result_level="unit",
+        filters={"unit.category": {"$eq": "config"}},
+    )
+
+    assert [hit.source_anchor for hit in hits] == ["normal-table-unit"]
+
+
+def test_stale_selection_keeps_existing_recovery_after_releasing_its_view(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serving a valid stale projection must still trigger convergence."""
+    from exomem import find as find_module
+
+    page = vault / "Knowledge Base/Notes/stale-recovery.md"
+    page.write_text("# Recovery\n\nstalerecoverymarker\n", encoding="utf-8")
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+    freshness.clear()
+    rebuilt: list[bool] = []
+
+    def recover(root):
+        from exomem import file_watcher
+
+        assert root == vault.resolve()
+        assert lexstore._admitted_catalog_view(vault) is None
+        file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+        rebuilt.append(store.rebuild_atomic())
+
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", recover)
+    degraded: list[str] = []
+    hits = find_module.find(
+        vault,
+        query="stalerecoverymarker",
+        scope="kb-only",
+        mode="keyword",
+        degraded_out=degraded,
+    )
+
+    assert [hit.path for hit in hits] == ["Knowledge Base/Notes/stale-recovery.md"]
+    assert "recall_projection" in degraded
+    assert rebuilt == [True]
+    assert lexstore.runtime_retrieval_catalog_proof(vault, schedule_repair=False) is not None
+
+
+@library_scope()
+@pytest.mark.parametrize("result_level", ["unit", "page"])
+def test_encoder_cutover_cannot_cache_old_serving_results_under_the_new_key(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, result_level: str
+) -> None:
+    """A pointer switch during encoding must degrade and leave the answer uncached."""
+    from exomem import embeddings, find_types, index_paths
+    from exomem import find as find_module
+
+    page = vault / "Knowledge Base/Notes/encoding-cutover.md"
+    page.write_text(
+        "---\ntype: insight\nexomem_id: 24219f8c-8ac7-4e6a-905b-54663351f79c\n---\n\n"
+        "# Cutover\n\n- [config] encodingcutovermarker ^cutover-unit\n",
+        encoding="utf-8",
+    )
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
+    old_path = index_paths.sidecar_path(vault)
+    encodings: list[bool] = []
+    searched: list[Path] = []
+
+    def encode(_texts, *, is_query):
+        assert is_query and lexstore._admitted_catalog_view(vault) is None
+        encodings.append(True)
+        index_paths.publish_active_sidecar(vault, index_paths.space_sidecar_name("next-space"))
+        return [[1.0, 0.0]]
+
+    def search(index, *_args, **_kwargs):
+        searched.append(index.path)
+        return []
+
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "search", search)
+    monkeypatch.setattr(embeddings.EmbeddingIndex, "search_semantic_units", search)
+    degraded: list[str] = []
+    hits = find_module.find(
+        vault,
+        query="encodingcutovermarker",
+        scope="kb-only",
+        result_level=result_level,
+        graph=False,
+        temporal=False,
+        rerank=False,
+        degraded_out=degraded,
+    )
+
+    assert hits
+    assert index_paths.sidecar_path(vault) != old_path
+    assert "embeddings" in degraded
+    assert old_path not in searched
+    timings = find_types.FindTimings()
+    assert find_module.find(
+        vault,
+        query="encodingcutovermarker",
+        scope="kb-only",
+        result_level=result_level,
+        graph=False,
+        temporal=False,
+        rerank=False,
+        timings=timings,
+    )
+    assert encodings == [True, True]
+    assert timings.cache["hit"] is False
+
+
 @pytest.mark.parametrize("mode", ["keyword", "hybrid"])
 def test_data_publication_preserves_an_admitted_recall(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, mode: str

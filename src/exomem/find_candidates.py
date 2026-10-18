@@ -52,6 +52,14 @@ class PreparedQueryInputs:
     embeddings_deferred: bool = False
     clip_deferred: bool = False
 
+    def require_current_serving(self, vault_root: Path) -> None:
+        """Keep prepared rankings out of a cache for another serving sidecar."""
+        from . import index_paths, recall_space
+
+        path = getattr(self.serving, "path", None)
+        if path is not None and path != index_paths.sidecar_path(vault_root):
+            raise recall_space.VectorSpaceMismatch("serving sidecar changed after preparation")
+
 
 def prepare_query_inputs(
     vault_root: Path, query: str, *, unit: bool, page: bool, timings: Any = None,
@@ -397,6 +405,7 @@ def collect_candidates(
                     if prepared is None:
                         raise recall_space.ServingEncoderCold("page query was not prepared")
                     encoded_for, query_vec = prepared.encoded()
+                    prepared_queries.require_current_serving(vault_root)
                     idx, serving, building = (
                         prepared.index, prepared_queries.serving, prepared_queries.building
                     )

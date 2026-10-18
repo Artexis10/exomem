@@ -59,11 +59,14 @@ Prepare required query encodings and cold independent indexes before opening the
 Preserve hot cache hits through a short lookup view before encoding.
 On a miss, discard its request evidence, prepare encodings after closing, then select under a newly admitted view using the original arguments.
 Give the discarded lookup private warnings and catalogue output; retain its actual cost in request timings.
+Recheck the serving sidecar before using prepared vectors; a cutover keeps the existing degraded outcome and prevents caching.
 Admit both scope checkpoints, schema, semantic identity, and policy identity from the same connection.
 Reuse existing query bodies for scope membership, filters, ordering, parent hints, lexical candidates, unit candidates, statistics, and selected page hashes.
 Exact and lagging scopes both read their membership from that admitted view.
 Do not apply a foreground delta through the retained connection.
 Strict readiness uses independent connections and explicit current checkpoints.
+After a lagging selection closes, request the existing background repair so stale admission still converges.
+The explicit Python backend keeps its fallback; FTS5 absence alone does not disable normal catalogue tables.
 
 Materialize page and unit selections before closing, including requested widening candidates and their ordering.
 Apply widening exclusions after primary reranking without increasing its existing candidate depth.

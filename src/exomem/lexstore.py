@@ -171,6 +171,7 @@ def catalog_selection_scope(vault_root: Path):
         yield None
         return
     token = _ADMITTED_CATALOG.set((root, view.checkpoints, view))
+    lagging: tuple[str, ...] = ()
     try:
         lagging = tuple(
             scope for scope, checkpoint in view.checkpoints.items()
@@ -182,6 +183,9 @@ def catalog_selection_scope(vault_root: Path):
             view.close()
         finally:
             _ADMITTED_CATALOG.reset(token)
+        if lagging:
+            # Preserve convergence without handing repair an active SQL reader.
+            _schedule_runtime_catalog_repair(root)
 
 
 def _checkpoint_policy_current(vault_root: Path, checkpoint: object) -> bool:
