@@ -53,6 +53,27 @@ def _head(commit_seq: int, head: str | None) -> None:
         tokens._hex64(head, "store head")
 
 
+def validated_lineage(metadata, check: Callable[[], None] = lambda: None):
+    """Read the maintained lineage wire without scanning stored payloads."""
+    sequence = int(metadata[schema.META_COMMIT_SEQ])
+    lineage = json.loads(metadata[schema.META_LINEAGE])
+    if not isinstance(lineage, list) or not lineage:
+        raise ValueError("invalid lineage")
+    current_found = False
+    for entry in lineage:
+        check()
+        _uuid(entry["instance_id"])
+        if entry["adopted_from"] is not None:
+            _uuid(entry["adopted_from"])
+        _head(entry["adopted_at_commit_seq"], entry["head_hash"])
+        if entry["adopted_at_commit_seq"] > sequence:
+            raise ValueError("lineage is ahead of the store")
+        current_found |= entry["instance_id"] == metadata[schema.META_INSTANCE_ID]
+    if not current_found:
+        raise ValueError("current instance is absent from lineage")
+    return lineage
+
+
 def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None], *,
               version: int | None = None) -> dict[str, str]:
     """The copy's ``store_meta``, once its bytes, head and lineage check out at ``version``.
@@ -106,21 +127,7 @@ def _validate(conn: sqlite3.Connection, raw_check: Callable[[], None], *,
             if tail is None or tail[:2] != (sequence, head):
                 raise ValueError("metadata disagrees with transaction tail")
             tokens._hex64(tail[2], "transaction event hash")
-        lineage = json.loads(metadata[schema.META_LINEAGE])
-        if not isinstance(lineage, list) or not lineage:
-            raise ValueError("invalid lineage")
-        current_found = False
-        for entry in lineage:
-            check()
-            _uuid(entry["instance_id"])
-            if entry["adopted_from"] is not None:
-                _uuid(entry["adopted_from"])
-            _head(entry["adopted_at_commit_seq"], entry["head_hash"])
-            if entry["adopted_at_commit_seq"] > sequence:
-                raise ValueError("lineage is ahead of the store")
-            current_found |= entry["instance_id"] == metadata[schema.META_INSTANCE_ID]
-        if not current_found:
-            raise ValueError("current instance is absent from lineage")
+        validated_lineage(metadata, check)
         return metadata
     except (KeyError, TypeError, ValueError, AttributeError, sqlite3.DatabaseError) as error:
         if stopped and error is stopped[-1]:

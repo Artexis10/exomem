@@ -235,7 +235,7 @@ class Census:
             "AND m.manifest_version=c.manifest_version WHERE c.collection_id>? ORDER BY c.collection_id LIMIT ?",
             (self.after, limit)).fetchall()
         for cid, generation, path, text, mode, layout in rows:
-            if not authority.projection_eligible(writer, {"collection_id": cid}):
+            if not authority.collection_admitted(writer, cid):
                 continue
             manifest = collections.parse_manifest_bytes(writer.root, path, text.encode())
             if not capability.summary_route_open(writer.root, manifest):

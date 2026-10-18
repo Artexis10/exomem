@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 
 from . import __version__, install_info, process_memory
 from .cli_ops import OpError
+from .collection_store.ownership import reader as ownership_reader
 from .kbdir import kb_dirname, kb_prefix
 
 if TYPE_CHECKING:
@@ -971,20 +972,17 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
 def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
     """State the collection store's unsupported writer setup for a vault that has a store.
 
-    A vault without the store's routing marker has only file collections, so it gets no line, and
-    a missing vault root is another check's finding.
+    Trusted host enrollment establishes this check. A missing vault root is another check's finding.
     """
     if vault_root is None or not vault_root.is_dir():
         return None
-    from . import held_fs
-    from .collection_store import authority, connection
+    from .collection_store import connection, ownership
 
     try:
-        marker = authority.read_marker(vault_root)
-    except (OSError, held_fs.HeldFsError):
-        return _check("collection_store", "warn", "The collection store's routing marker could not be read.",
-                      f"Check that this user can read {authority.marker_path(vault_root)}.")
-    if marker is None:
+        _, enrolled = ownership.enrollment(vault_root)
+    except (OSError, RuntimeError):
+        return _check("collection_store", "warn", "Collection store enrollment is unavailable.")
+    if "collections-store-v1" not in enrolled:
         return None
     return _check("collection_store", "pass", f"This vault has store collections. {connection.UNSUPPORTED_WRITERS}")
 
@@ -3777,6 +3775,12 @@ def doctor(
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
     vault_root, vault_check = _resolve_vault(vault)
+    return _doctor_report(vault_root, vault_check, profile=profile, probe=probe, replica_urls=replica_urls)
+
+
+# The resolved vault must cover the complete report, including nested census reads.
+@ownership_reader
+def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     lock_parity = _check_editable_lock_parity(profile)
     checks: list[DoctorCheck] = [
         _check_python(),

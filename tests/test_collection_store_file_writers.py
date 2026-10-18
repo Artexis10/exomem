@@ -546,6 +546,8 @@ def test_a_pre_migration_seal_refuses_when_a_published_view_was_deleted_by_hand(
                        why="A row the seal never saw.", expected_container_hash=container_of(root))
         view = written["paths"][0]
         publish_pending(service, root)
+        # Installation finishes after commit; the next pass acknowledges its hash.
+        publish_pending(service, root)
         assert view_state(root, view) == "current" and (root / view).is_file()
         (root / view).unlink()
         before = store_head(root)

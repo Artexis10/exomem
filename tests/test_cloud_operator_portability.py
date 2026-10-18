@@ -75,6 +75,25 @@ def _sentinel(root):
     path.write_text("# Invented schema\n")
 
 
+def test_operator_absence_requires_a_complete_file_only_source(tmp_path):
+    original = tmp_path / "original"
+    _sentinel(original)
+    state_migration.require_vault_state_ready(original)
+    vault, host = tmp_path / "vault", tmp_path / "host"
+    vault.mkdir()
+    state = host / "reviewed-state"
+    state.mkdir(parents=True)
+    shutil.copyfile(state_paths.vault_state_dir(original) / state_migration.MANIFEST_NAME,
+                    state / state_migration.MANIFEST_NAME)
+    before = {path.name: path.read_bytes() for path in state.iterdir()}
+    assert operator.prepare_export(vault, host, original, source_state_directory=state,
+                                   timeout_seconds=20) == {"ok": True, "store": "absent"}
+    assert {path.name: path.read_bytes() for path in state.iterdir()} == before
+    (state / (connection.STORE_FILENAME + "-wal")).write_bytes(b"orphaned source WAL")
+    with pytest.raises(ValueError, match="source family is incomplete"):
+        operator.prepare_export(vault, host, original, source_state_directory=state, timeout_seconds=20)
+
+
 def test_offline_cli_tar_and_cloud_restore_keep_a_wal_only_row(abc, tmp_path, monkeypatch):
     """A lagging replica must not drop an acknowledged row committed only in stopped WAL bytes."""
     vault, host, state = _backup_roots(abc, tmp_path)
@@ -110,6 +129,8 @@ os._exit(0)
     publication = replica.replica_path(vault).parent / (".exomem-collection-replica-work-" + "a" * 32)
     publication.mkdir()
     (publication / "uncommitted.md").write_text("private publication work")
+    marker_bytes = authority.read_marker(vault)
+    authority.marker_path(vault).unlink()
     args = ["--vault", str(vault), "--host-root", str(host), "--original-vault", str(abc.root),
             "--source-state-directory", str(state), "--timeout-seconds", "20"]
     completed = subprocess.run([sys.executable, "-m", "exomem.cloud_operator_portability", *args],
@@ -117,9 +138,11 @@ os._exit(0)
     receipt = json.loads(completed.stdout)
     assert receipt["ok"] and receipt["store"] == "prepared"
     assert original_bytes == {path.name: path.read_bytes() for path in state.iterdir()}
+    assert authority.read_marker(vault) is None
+    # Restore the exact hint preimage for the remaining Cloud restore workflow.
+    authority.marker_path(vault).write_bytes(marker_bytes)
     assert operator.prepare_export(vault, host, abc.root, source_state_directory=state,
                                    timeout_seconds=20)["head_hash"] == receipt["head_hash"]
-    marker_bytes = authority.read_marker(vault)
     with closing(connection.open_reader(replica.replica_path(vault))) as reader:
         expected_meta = dict(reader.execute("SELECT key,value FROM store_meta"))
         expected_history = reader.execute("SELECT * FROM txns ORDER BY commit_seq").fetchall()
@@ -184,7 +207,7 @@ os._exit(0)
     assert original_bytes == {path.name: path.read_bytes() for path in state.iterdir()}
 
 
-@pytest.mark.parametrize("damage", ["binding", "chain", "ahead", "stale-target"])
+@pytest.mark.parametrize("damage", ["binding", "chain", "ahead", "stale-target", "foreign-target"])
 def test_bad_source_refuses_without_replacing_replica(abc, tmp_path, damage):
     """Wrong original identity or corrupt history must not publish a plausible source database."""
     vault, host, state = _backup_roots(abc, tmp_path)
@@ -202,6 +225,10 @@ def test_bad_source_refuses_without_replacing_replica(abc, tmp_path, damage):
         assert abc.write_c(LATER, "ahead of selected source")["outcome"] == "committed"
         abc.release()
         replica.replica_path(vault).write_bytes(replica.replica_path(abc.root).read_bytes())
+    elif damage == "foreign-target":
+        with sqlite3.connect(replica.replica_path(vault)) as reader:
+            reader.execute("UPDATE store_meta SET value=? WHERE key=?", (str(uuid.uuid4()), schema.META_STORE_ID))
+        authority.marker_path(vault).unlink()
     else:
         target = authority.parse_marker(vault, authority.read_marker(vault))
         target["authority_epoch"] += 1
@@ -280,9 +307,11 @@ def test_old_schema_validation_preserves_archived_replica(ab, tmp_path):
     """Checking a supported earlier schema must migrate only the disposable checking copy."""
     _earlier_c(ab)
     before = replica.replica_path(ab.root).read_bytes()
-    with vault_portability.checked_collection_replica(ab.root) as reader:
+    with vault_portability.checked_collection_replica(ab.root) as verified:
+        reader = verified.connection
         assert schema.schema_version(reader) == schema.SCHEMA_VERSION
         chain.verify_store_chain(reader)
+        assert verified.source_sha256 == hashlib.sha256(before).hexdigest()
     assert replica.replica_path(ab.root).read_bytes() == before
     vault, host_root, state = _backup_roots(ab, tmp_path)
     source_before = {path.name: path.read_bytes() for path in state.iterdir()}
@@ -383,7 +412,8 @@ print(json.dumps(result))
                                 str(abc.root), str(state)], env=env, capture_output=True, text=True, timeout=150)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert json.loads(completed.stdout)["ok"]
-    with vault_portability.checked_collection_replica(vault) as reader:
+    with vault_portability.checked_collection_replica(vault) as verified:
+        reader = verified.connection
         assert reader.execute("SELECT collection_id FROM collections").fetchall() == [(CID,)]
     assert source_before == {path.name: path.read_bytes() for path in state.iterdir()}
     assert not list(vault.parent.glob(".exomem-operator-store-*"))
@@ -459,7 +489,8 @@ def test_canonical_snapshot_can_extend_the_lagging_replicas_marker(abc, tmp_path
         authority.marker_path(vault).write_text(json.dumps(marker))
     assert operator.prepare_export(vault, host_root, abc.root, source_state_directory=state,
                                    timeout_seconds=20)["ok"]
-    with vault_portability.checked_collection_replica(vault) as reader:
+    with vault_portability.checked_collection_replica(vault) as verified:
+        reader = verified.connection
         assert {row[0] for row in reader.execute("SELECT collection_id FROM collections")} == {CID, second}
 
 
@@ -488,7 +519,8 @@ def test_shared_replica_validation_keeps_pure_adoptability_conditions(abc, tmp_p
         writer.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (key, value))
     before = replica.replica_path(vault).read_bytes()
     if condition == "matching-create":
-        with vault_portability.checked_collection_replica(vault) as reader:
+        with vault_portability.checked_collection_replica(vault) as verified:
+            reader = verified.connection
             assert authority.pending_create(reader)["target_marker"] == raw
     else:
         with pytest.raises(connection.CollectionStoreError):
@@ -503,6 +535,10 @@ def test_shared_replica_validation_keeps_pure_adoptability_conditions(abc, tmp_p
 
 def test_restored_generation_two_keeps_fresh_coordinator_refusal(abc, tmp_path, monkeypatch):
     """Byte restoration cannot reset a generation-2 marker to manufacture destination authority."""
+    from conftest import _drain_background_threads
+
+    abc.release()
+    _drain_background_threads()
     target = shutil.copytree(abc.root, tmp_path / "generation-two")
     marker = authority.parse_marker(target, authority.read_marker(target))
     marker["collection_store_fence"]["generation"] = 2

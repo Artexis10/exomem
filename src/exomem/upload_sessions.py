@@ -582,6 +582,9 @@ def start_commit(session: Session, committer: Committer) -> None:
         if record is None or record.get("state") not in _COMMITTABLE:
             lock.release()
             return
+        # Report a failure found under the lock even when GET captured the preceding attempt.
+        if record["state"] == RETRYABLE:
+            session.record = record
         accepted = {**record, "state": COMMITTING}
         accepted.pop("code", None)
         accepted.pop("reason", None)

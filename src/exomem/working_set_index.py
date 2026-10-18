@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find_corpus, freshness, sidecar_store
-from .collection_store.preview import bound_writer, canonical_read, selected_writer
+from .collection_store.preview import QUERY_RECEIPT_BOUNDARY, bound_writer, canonical_read, selected_writer
 from .kbdir import kb_dirname
 from .state_paths import vault_state_dir
 
@@ -1531,7 +1531,7 @@ def _page_anchor_kind(
     return None
 
 
-@canonical_read
+@canonical_read(receipt_boundary=QUERY_RECEIPT_BOUNDARY)
 def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
     """Records manifests (+ their claims) and active Planning items.
 
