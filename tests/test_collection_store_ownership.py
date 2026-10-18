@@ -28,7 +28,14 @@ from test_collection_store_service import (
 from test_collection_store_writer import KEY, manifest_path, manifest_text
 from test_governance_egress import _receipt_records
 
-from exomem import get_page, overview, state_migration, vault_portability, writer_lease
+from exomem import (
+    get_page,
+    list_directory,
+    overview,
+    state_migration,
+    vault_portability,
+    writer_lease,
+)
 from exomem.cli_ops import OpError
 from exomem.collection_store import authority, connection, owner, replica, runtime, schema
 from exomem.collection_store.preview import preview_store
@@ -113,6 +120,44 @@ def test_first_admission_invalidates_a_whole_overview_without_holding_its_creato
         assert len(result) == 1 and isinstance(result[0], OpError), result
         assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
         assert "Canonical" not in str(result[0])
+
+
+def test_first_admission_invalidates_an_owner_listing_after_its_physical_snapshot(tmp_path, monkeypatch):
+    from exomem.governance.principal import owner_principal, request_scope
+
+    root = _served_vault(tmp_path, monkeypatch)
+    captured, resume = threading.Event(), threading.Event()
+    original = list_directory._entry_for_held
+    result = []
+
+    def paused(*args, **kwargs):
+        entry = original(*args, **kwargs)
+        if threading.current_thread().name == "ownership-listing" and not captured.is_set():
+            captured.set()
+            assert resume.wait(15)
+        return entry
+
+    monkeypatch.setattr(list_directory, "_entry_for_held", paused)
+
+    def read():
+        with request_scope(owner_principal(surface="cli")):
+            try:
+                result.append(list_directory.list_directory(root, path="Knowledge Base/Records", recursive=True))
+            except Exception as error:  # noqa: BLE001 - transfer the public result to the asserting thread
+                result.append(error)
+
+    with coordinator(tmp_path / "coordinator.sqlite"):
+        reader = threading.Thread(target=read, name="ownership-listing")
+        reader.start()
+        try:
+            assert captured.wait(10)
+            assert offline_create(root, tmp_path / "c.md", manifest_path(), why="first collection") == 0
+        finally:
+            resume.set()
+            reader.join(15)
+    assert not reader.is_alive()
+    assert len(result) == 1 and isinstance(result[0], OpError), result
+    assert result[0].code == "COLLECTION_STORE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(("failed_read", "alias"), [(False, False), (False, True), (True, False)])

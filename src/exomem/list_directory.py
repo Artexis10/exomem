@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import access, privacy_log, reserved_paths
-from .collection_store.ownership import reader
+from .collection_store import ownership
 from .vault import (
     VaultPathError,
+    VaultPathResolution,
     parse_frontmatter,
     resolve_under_vault,
 )
@@ -64,7 +65,7 @@ class ListDirectoryError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
-@reader
+@ownership.reader
 def list_directory(
     vault_root: Path,
     *,
@@ -77,24 +78,33 @@ def list_directory(
     # A caller other than the owner lists what it may see: a withheld file is
     # not an entry, and a folder holding only withheld files reads as a folder
     # that is not there. The owner's listing is unchanged (`keep` is None).
-    keep = egress.restricted_release_filter(vault_root)
     collapsed: dict[str, bool] = {}
     # Empty string means vault root.
     if path is None or not str(path).strip():
         rel_path = ""
+        resolved_path = ""
     else:
         try:
-            _, rel_path = resolve_under_vault(vault_root, path, must_exist=True)
+            resolution = resolve_under_vault(vault_root, path, must_exist=True, return_details=True)
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
+        assert isinstance(resolution, VaultPathResolution)
+        rel_path, resolved_path = resolution.relative, resolution.resolved_relative
         # Scoped-probe refusal: an excluded dir OR an excluded file probed as
         # `path` reads as missing — byte-identical to resolve_under_vault's own
         # must_exist failure — before the must_be_dir check below can leak an
         # excluded file's existence via NOT_A_DIR.
-        if access.refuse_if_excluded(vault_root, rel_path) or (
-            keep is not None
-            and _withheld_target(vault_root, rel_path, keep, include_hidden, collapsed)
-        ):
+        if access.refuse_if_excluded(vault_root, rel_path) or access.refuse_if_excluded(vault_root, resolved_path):
+            raise ListDirectoryError(
+                code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
+            )
+    # Capture both spellings and their ancestors before any tree read can outlive a namespace change.
+    if any(ownership.relevant("" if relative == "." else relative, ancestors=True)
+           for relative in (rel_path, resolved_path)):
+        ownership.current(vault_root)
+    keep = egress.restricted_release_filter(vault_root)
+    if rel_path:
+        if keep is not None and _withheld_target(vault_root, rel_path, keep, include_hidden, collapsed):
             raise ListDirectoryError(
                 code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
             )
