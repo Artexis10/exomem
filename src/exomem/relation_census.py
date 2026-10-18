@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from . import __version__, audit, entity_types, relation_registry
+from .collection_store.ownership import reader
 from .kbdir import kb_prefix
 
 CENSUS_VERSION = 1
@@ -102,6 +103,7 @@ class ServiceKeyRefused(Exception):
         self.status = status
 
 
+@reader
 def census(
     vault_root: Path,
     *,
@@ -968,6 +970,7 @@ def _eligible_cohort(
 # ---------------------------------------------------------------------------
 
 
+@reader
 def sample(
     vault_root: Path,
     *,

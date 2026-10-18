@@ -697,6 +697,39 @@ def _unlisted_equivalence_class(existing: set[str], label: str) -> str:
         index += 1
 
 
+def equivalence_domains(policy: Policy):
+    """The compiled audience and purpose representatives, including unlisted values."""
+    audiences = {rule.audience for rule in policy.rules}
+    audiences.update(grant.audience for grant in policy.grants)
+    audiences.add(OWNER_AUDIENCE)
+    audiences.add(_unlisted_equivalence_class(audiences, "audience"))
+    authored = {rule.purpose for rule in policy.rules if rule.purpose is not None}
+    purposes = (None, *sorted(authored), _unlisted_equivalence_class(authored, "purpose"))
+    return tuple(sorted(audiences)), purposes
+
+
+def synthetic_scope_grant(scope_id, audience, index, ceiling):
+    """A representative exact-scope session grant for the compiled decision domain."""
+    return StandingGrant(id=f"projection-session-{index}-{ceiling}",
+                         source="authorization-projection-enumerator", scope_ids=(scope_id,),
+                         audience=audience, ceiling=ceiling)
+
+
+def page_reader_states(policy: Policy, scope_ids):
+    """Every audience/purpose that can read a page, including page-only session grants.
+
+    Grants only raise a standing floor. Full grants on the page's own scopes
+    therefore cover every possible page reader without granting its linked items.
+    """
+    audiences, purposes = equivalence_domains(policy)
+    for audience in audiences:
+        grants = (*policy.grants, *(synthetic_scope_grant(scope, audience, index, 6)
+                                   for index, scope in enumerate(scope_ids)))
+        for purpose in purposes:
+            if decide(scope_ids, audience=audience, purpose=purpose, policy=policy, active_grants=grants).level >= 6:
+                yield audience, purpose
+
+
 def _resolved_variant(
     *,
     audience: str,
@@ -754,16 +787,7 @@ def enumerate_projection_variants(
     if unknown_scopes:
         raise ProjectionCanonicalizationError("item membership names an unknown scope")
 
-    audience_values = {rule.audience for rule in policy.rules}
-    audience_values.update(grant.audience for grant in policy.grants)
-    audience_values.add(OWNER_AUDIENCE)
-    audience_values.add(_unlisted_equivalence_class(audience_values, "audience"))
-
-    authored_purposes = {
-        rule.purpose for rule in policy.rules if rule.purpose is not None
-    }
-    other_purpose = _unlisted_equivalence_class(authored_purposes, "purpose")
-    purposes: tuple[str | None, ...] = (None, *sorted(authored_purposes), other_purpose)
+    audience_values, purposes = equivalence_domains(policy)
 
     variants: list[ProjectionVariant] = []
     for audience in sorted(audience_values):
@@ -780,13 +804,7 @@ def enumerate_projection_variants(
                         if ceiling is not None:
                             synthetic = (
                                 *grants,
-                                StandingGrant(
-                                    id=f"projection-session-{index}-{ceiling}",
-                                    source="authorization-projection-enumerator",
-                                    scope_ids=(scope_id,),
-                                    audience=audience,
-                                    ceiling=ceiling,
-                                ),
+                                synthetic_scope_grant(scope_id, audience, index, ceiling),
                             )
                         current = decide(
                             prefix,

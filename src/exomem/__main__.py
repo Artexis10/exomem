@@ -1683,27 +1683,31 @@ def _relations_main(argv: list[str]) -> int:
             served_by = "local-snapshot"
             # A terminal on the owner's machine reading its own sidecar is the
             # owner-local caller, the one audience a governed vault serves.
-            with library_scope():
+            from .collection_store import ownership
+
+            with ownership.read_scope(vault_root) as ownership_scope, library_scope():
                 result = relation_census.census(vault_root, detail=detail)
                 if args.sample is not None and result.get("available"):
                     sample = relation_census.sample(
                         vault_root, size=args.sample, seed=args.seed
                     )
-            if sample is not None:
-                if args.sample_out is not None:
-                    sample_out = Path(args.sample_out).expanduser()
-                else:
-                    from . import state_paths
+                if sample is not None:
+                    if args.sample_out is not None:
+                        sample_out = Path(args.sample_out).expanduser()
+                    else:
+                        from . import state_paths
 
-                    sample_out = (
-                        state_paths.ensure_vault_state_dir(vault_root)
-                        / "relation-census"
-                        / "sample.json"
+                        sample_out = (
+                            state_paths.ensure_vault_state_dir(vault_root)
+                            / "relation-census"
+                            / "sample.json"
+                        )
+                        sample_out.parent.mkdir(mode=0o700, exist_ok=True)
+                    ownership_scope.finish()
+                    sample_out.write_text(
+                        json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
                     )
-                    sample_out.parent.mkdir(mode=0o700, exist_ok=True)
-                sample_out.write_text(
-                    json.dumps(sample, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-                )
+                ownership_scope.finish()
     except (OSError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2

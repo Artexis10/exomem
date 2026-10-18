@@ -81,9 +81,11 @@ def store(tmp_path, monkeypatch):
 
 
 def create(store, profile="records"):
-    return store.create_collection(
+    receipt = store.create_collection(
         manifest_path(profile), manifest_text(profile), why="capture", scaffold=False
     )
+    store.reconcile_views()
+    return receipt
 
 
 @pytest.mark.parametrize("profile", ["records", "planning"])
@@ -315,6 +317,9 @@ def test_acknowledged_item_is_readable_with_sources_and_exact_body(store, profil
         and len(digest) == 64
         and state == "pending"
     )
+    with store.read_snapshot():
+        assert store._item(CID, store.connection.execute("SELECT item_key FROM items").fetchone()[0])["body"] == body
+    store.reconcile_views()
     page = get_page.get_page(store.root, path=path)
     assert page.frontmatter["title"] == "One"
     assert page.body == body

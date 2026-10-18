@@ -116,6 +116,7 @@ from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
 from . import vault as vault_module
+from .collection_store import ownership
 from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
@@ -493,6 +494,7 @@ def _one_log_parse(function: Callable[..., AuditReport]) -> Callable[..., AuditR
     return wrapped
 
 
+@ownership.reader
 @_one_log_parse
 def audit(
     vault_root: Path,
@@ -668,16 +670,13 @@ def audit(
 def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFinding], str | None]:
     """Held corrections of store collection views (OpenSpec move-structured-collections-to-sqlite §6).
 
-    Each is an owner edit of a view that edit-back could not apply. A vault without the
-    collection-store mode marker has none and loads no store library; a store that cannot
-    answer reports its coverage as unknown rather than as no corrections.
+    Each is an owner edit of a view that edit-back could not apply. Complete canonical
+    ownership proves absence; unavailable evidence leaves the queue's coverage unknown.
     """
-    from .collection_store import authority
-
     try:
-        if authority.read_marker(vault_root) is None:
+        if ownership.current(vault_root).marker is None:
             return [], None
-    except Exception:  # noqa: BLE001 - an unreadable marker leaves the queue's coverage unknown
+    except Exception:  # noqa: BLE001 - unavailable ownership leaves the queue's coverage unknown
         return [], "unknown"
     from .collection_store import edit_back
 

@@ -774,8 +774,9 @@ def test_a_failure_after_publication_that_persists_serves_the_vault_and_the_next
         with pytest.raises(OpError) as refused:
             call(root, "record_memory", action="append", collection=CID, item={"title": "While pending"},
                  why="a write while the store is pending")
-        assert refused.value.code == "WRITER_LEASE_REQUIRED"
-        assert KEY in rows(root, WORK)
+        assert refused.value.code == "COLLECTION_STORE_UNAVAILABLE"
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+            rows(root, WORK)
     finally:
         serving.stop()
     edit_by_hand(root)
@@ -875,6 +876,9 @@ def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_s
     larger than the finishing reserve, that fails the upgrade into recovery; every resume then meets
     the same wall until the owner applies offline."""
     root = service
+    note = root / "Knowledge Base/Notes/Independent.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntitle: Independent\n---\nIndependent knowledge\n")
     operator_file(tmp_path)
     # Short, so the lease each stopped migrator keeps expires within the test.
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_TTL", "3")
@@ -896,6 +900,22 @@ def test_a_migrator_the_supervisor_stopped_after_it_published_leaves_the_vault_s
     assert authority.read_marker(root) is None and (fence().enrolled, fence().generation) == (True, 1)
     serving = Service(root, writer_lease.start_server_lifecycle())
     try:
-        assert KEY in rows(root, WORK)
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+            rows(root, WORK)
+        assert serving.manager.status()["collection_store"]["status"] == "sync_pending"
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+            call(root, "record_memory", action="append", collection=CID,
+                 item={"title": "While pending"}, why="an unadmitted write")
+        assert "Independent knowledge" in call(root, "read_memory", path="Knowledge Base/Notes/Independent.md")["body"]
+    finally:
+        serving.stop()
+    assert lease().holder is None
+    result = upgrade(tmp_path, Handoff(tmp_path, root), candidate(tmp_path, MIGRATE))
+    assert result["ok"], result
+    serving = start_service(root)
+    try:
+        assert call(root, "record_memory", action="append", collection=CID, item_key=OTHER,
+                    item={"title": "After recovery"}, why="a recovered write")["outcome"] == "committed"
+        assert OTHER in rows(root, WORK)
     finally:
         serving.stop()

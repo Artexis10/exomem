@@ -1013,19 +1013,13 @@ def _collections_migration_pending(vault: Path) -> bool:
 def _require_store_schema(vault: Path, ceiling: int | None) -> None:
     """Refuse a candidate whose newest store schema is older than the vault's live store.
 
-    Such a release's reader refuses the store, so its writer gets no lease and every write
-    on the host refuses. Only a vault whose marker routes collections to the store, or whose
-    store records a pending intent, needs it. A first enrolment cuts the fence before it
-    installs the marker, so its intent alone binds the store then. After an export to files
-    nothing routes to the store, and an earlier release is the documented way back. A store
-    whose schema cannot be read refuses nothing here: the candidate meets it as any release
-    would, and refusing would also block the release that repairs it. The reads load no
-    store libraries.
+    Trusted enrollment or a verified restore supplies the required format boundary.
+    An incidental private store does not enroll a file-only vault.
     """
     from .collection_store import authority, connection
 
     store = connection.store_path(vault)
-    if authority.read_marker(vault) is None and connection.recorded_meta(store, authority.PENDING_CREATE) is None:
+    if not authority.required_state_compatibility_ids(vault):
         return
     live = connection.recorded_schema(store)
     if live is not None and (ceiling is None or ceiling < live):

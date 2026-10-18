@@ -174,13 +174,15 @@ def test_routing_read_cannot_reuse_a_snapshot_for_an_explicit_different_principa
             assert len(record_governance.inventory_collections(store.root)["collections"]) == 1
 
 
-def test_bound_manifest_resolution_never_falls_back_to_a_file_collection(store):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_bound_resolution_keeps_file_only_and_canonical_authority_distinct(store, canonical):
+    if canonical:
+        create(store)
     path = store.root / manifest_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(manifest_text())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(manifest_text().replace(CID, OTHER))
     with preview_store(store.root, store.handle):
-        with pytest.raises(collections.CollectionError):
-            collections.load_manifest(store.root, path)
+        assert collections.load_manifest(store.root, path).collection_id == (CID if canonical else OTHER)
 
 
 def test_claims_census_reads_canonical_rows_without_views(store):

@@ -30,6 +30,7 @@ def test_failed_commit_does_not_publish_proposed_view(store):
     # An SQLite COMMIT rejection must leave the acknowledged view and row intact.
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     before = path.read_bytes()
     store.connection.set_authorizer(
@@ -53,8 +54,10 @@ def test_successive_installs_accept_previous_pending_view(store):
     # Lazy bookkeeping must not misclassify our previous successful install.
     create(store)
     result = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     for title in ("Two", "Three"):
         result = update(store, result, title)
+        store.reconcile_views()
         page = get_page.get_page(store.root, path=result["affected_paths"][0])
         assert page.frontmatter["title"] == title
     assert store.connection.execute("SELECT COUNT(*) FROM held_candidates").fetchone() == (0,)
@@ -78,7 +81,7 @@ def test_blocked_install_warns_without_changing_canonical_receipt(store, monkeyp
     receipt = store.append_record(
         CID, item={"title": "One"}, item_key=KEY, why="observe", request_id="blocked"
     )
-    assert "projection_pending" in receipt["warnings"]
+    assert "projection_pending" in store.reconcile_views()["warnings"]
     canonical = json.loads(
         store.connection.execute(
             "SELECT receipt_json FROM txns WHERE request_id='blocked'"
@@ -94,8 +97,8 @@ def test_blocked_install_warns_without_changing_canonical_receipt(store, monkeyp
     )
 
 
-def test_manifest_and_held_are_readable_before_acknowledgement(store):
-    # A manifest and refused candidate are useful immediately to ordinary readers.
+def test_manifest_publishes_on_drain_and_held_is_readable_before_acknowledgement(store):
+    # A pending manifest uses the projector; a refused candidate remains useful immediately.
     receipt = create(store)
     manifest = get_page.get_page(store.root, path=receipt["affected_paths"][0])
     assert manifest.frontmatter["exomem_view"]["v"] == 1
@@ -109,6 +112,7 @@ def test_human_edit_survives_reopen_and_is_registered_on_reconcile(store):
     # Deferred bytes must remain owned by the committed descriptor across restart.
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     human = path.read_bytes().replace(b"title: One", b"title: Human")
     path.write_bytes(human)
@@ -137,6 +141,7 @@ def test_destination_created_in_install_gap_is_preserved(store, monkeypatch, col
     # Neither the public install target nor the private displacement target may clobber late bytes.
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     human = b"human bytes created in the gap\n"
     from exomem import _held_fs_posix as backend
@@ -160,8 +165,8 @@ def test_destination_created_in_install_gap_is_preserved(store, monkeypatch, col
 
     monkeypatch.setattr(backend, "_link", racing(backend._link))
     monkeypatch.setattr(backend, "_rename", racing(backend._rename))
-    receipt = update(store, first, "Two")
-    assert "projection_pending" in receipt["warnings"]
+    update(store, first, "Two")
+    assert "projection_pending" in store.reconcile_views()["warnings"]
     assert any(p.read_bytes() == human for p in path.parent.glob(".exomem-collection-aside-*"))
     if collision == "aside":
         assert (
@@ -183,6 +188,7 @@ def test_reconcile_defers_valid_current_edit_but_holds_invalid_values(store):
     receipt = store.append_record(
         CID, item={"title": "One", "count": 2}, item_key=KEY, why="observe"
     )
+    store.reconcile_views()
     path = store.root / receipt["affected_paths"][0]
     original = path.read_bytes()
     human = original.replace(b"title: One", b"title: Human")
@@ -213,6 +219,7 @@ def test_reconcile_stamp_precedence(store, field, value, code):
 
     create(store)
     receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / receipt["affected_paths"][0]
     fm, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
     fm["exomem_view"][field] = value
@@ -240,16 +247,28 @@ def test_held_retirement_removes_the_view_after_commit(store):
     assert not path.exists()
 
 
-def test_publication_scratch_is_private_on_egress(store):
+def test_publication_scratch_is_private_on_egress(store, monkeypatch):
     # A preserved human aside must not be exposed as a regular vault page.
     from exomem import reserved_paths
     from exomem.list_directory import list_directory
 
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     path.write_bytes(path.read_bytes().replace(b"title: One", b"title: Private"))
     update(store, first, "Two")
+    with held_fs.acquire(store.root).require() as fs:
+        filesystem = type(fs)
+    unlink = filesystem.unlink
+
+    def keep_aside(self, file):
+        if file.name.startswith(".exomem-collection-aside-"):
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "blocked cleanup"))
+        return unlink(self, file)
+
+    monkeypatch.setattr(filesystem, "unlink", keep_aside)
+    store.reconcile_views()
     aside = next(path.parent.glob(".exomem-collection-aside-*"))
     rel = aside.relative_to(store.root).as_posix()
     assert reserved_paths.classify_logical(rel).descriptor_id == "collection-publication"
@@ -267,6 +286,7 @@ def test_restart_recovers_committed_stage_and_preserves_unknown_orphan_bytes(
     from exomem.collection_store import views
 
     create(store)
+    receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
     if interruption == "before_install":
         original = views.PublicationBatch.publish
         monkeypatch.setattr(
@@ -275,7 +295,7 @@ def test_restart_recovers_committed_stage_and_preserves_unknown_orphan_bytes(
             lambda self: (_ for _ in ()).throw(SystemExit("crash")),
         )
         with pytest.raises(SystemExit, match="crash"):
-            store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+            store.reconcile_views()
         monkeypatch.setattr(views.PublicationBatch, "publish", original)
     else:
         if os.name == "nt":
@@ -290,8 +310,7 @@ def test_restart_recovers_committed_stage_and_preserves_unknown_orphan_bytes(
             return original(self, file)
 
         monkeypatch.setattr(PosixHeldFilesystem, "unlink", blocked)
-        receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
-        assert "projection_pending" in receipt["warnings"]
+        assert "projection_pending" in store.reconcile_views()["warnings"]
         monkeypatch.setattr(PosixHeldFilesystem, "unlink", original)
     path = store.connection.execute("SELECT view_path FROM items").fetchone()[0]
     parent = (store.root / path).parent
@@ -318,6 +337,7 @@ def test_restart_recovers_committed_stage_and_preserves_unknown_orphan_bytes(
                 expected_container_hash=receipt["after_container_hash"],
                 expected_item_version=receipt["after_item_hash"],
             )
+            reopened.reconcile_views()
             assert (
                 get_page.get_page(root, path=second["affected_paths"][0]).frontmatter["title"]
                 == "Two"
@@ -329,6 +349,7 @@ def test_repeated_install_contention_preserves_every_displaced_sequence(store, m
     # A second racing destination ends the retry instead of looping against an editor.
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     from exomem._held_fs_posix import PosixHeldFilesystem
 
@@ -344,9 +365,10 @@ def test_repeated_install_contention_preserves_every_displaced_sequence(store, m
         return original(self, source, parent, leaf)
 
     monkeypatch.setattr(PosixHeldFilesystem, "link", racing)
-    receipt = update(store, first, "Two")
+    update(store, first, "Two")
+    published = store.reconcile_views()
     assert attempts == 2 and path.read_bytes() == sequences[-1]
-    assert "projection_pending" in receipt["warnings"]
+    assert "projection_pending" in published["warnings"]
     monkeypatch.setattr(PosixHeldFilesystem, "link", original)
     store.reconcile_views()
     assert {
@@ -358,16 +380,25 @@ def test_reconcile_continuation_visits_views_beyond_the_first_window(store):
     # A bounded recovery window must not starve later paths behind quiet first rows.
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
-    first = store.reconcile_views(limit=1)
-    second = store.reconcile_views(limit=1, after=first["next_path"])
-    assert first["examined"] == second["examined"] == 1
-    assert first["next_path"] is not None and second["next_path"] is None
+    store.reconcile_views()
+    expected = len(store.published_views(CID))
+    examined, after = 0, None
+    while True:
+        result = store.reconcile_views(limit=1, after=after)
+        assert result["examined"] == 1
+        examined += result["examined"]
+        if result["next_path"] is None:
+            break
+        assert after is None or result["next_path"] > after
+        after = result["next_path"]
+    assert examined == expected
 
 
 def test_displaced_hard_link_alias_is_private_and_cannot_fail_a_commit(store):
     # Moving a human inode aside must also reserve an already-existing hard-link alias.
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     path.write_bytes(path.read_bytes().replace(b"title: One", b"title: Human"))
     assert (
@@ -377,8 +408,8 @@ def test_displaced_hard_link_alias_is_private_and_cannot_fail_a_commit(store):
     alias = path.parent / "alias.md"
     os.link(path, alias)
     relative = alias.relative_to(store.root).as_posix()
-    receipt = update(store, first, "Two")
-    assert "projection_pending" in receipt["warnings"]
+    update(store, first, "Two")
+    assert "projection_pending" in store.reconcile_views()["warnings"]
     assert any(
         b"title: Human" in aside.read_bytes()
         for aside in path.parent.glob(".exomem-collection-aside-*")
@@ -408,6 +439,7 @@ def test_retired_held_displacement_retains_restricted_candidate_policy(store):
         "    count:", "    tags: {type: array, items: {type: string}}\n    count:"
     )
     store.create_collection(manifest_path(), text, why="create")
+    store.reconcile_views()
     with pytest.raises(collections.CollectionError) as error:
         store.append_record(
             CID, item={"title": "Private", "tags": ["secret"], "count": "bad"}, why="capture"
@@ -449,10 +481,12 @@ def test_manifest_revision_preserves_restricted_view_correction_policy(store):
         "    classes: {type: array, items: {type: string}}\n    count:",
     )
     store.create_collection(manifest_path(), text, why="create")
+    store.reconcile_views()
     first = store.append_record(
         CID, item={"title": "One", "tags": ["secret"], "classes": ["restricted"]},
         item_key=KEY, why="capture",
     )
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     human = path.read_bytes().replace(b"title: One", b"title: Human")
     path.write_bytes(human)
@@ -514,6 +548,7 @@ def test_failed_rehold_cannot_downgrade_displaced_held_policy(store):
         "    count:", "    tags: {type: array, items: {type: string}}\n    count:"
     )
     store.create_collection(manifest_path(), text, why="create")
+    store.reconcile_views()
     with pytest.raises(collections.CollectionError) as original:
         store.append_record(CID, item={"title": "Private", "tags": ["secret"], "count": "bad"}, why="capture")
     held = original.value.details["held"]
@@ -557,7 +592,9 @@ def test_displaced_render_keeps_policy_before_item_or_manifest_revision(store, k
     if kind == "manifest":
         text = text.replace("title: Work", "title: Work\ntags: [secret]")
     store.create_collection(manifest_path(), text, why="create")
+    store.reconcile_views()
     first = store.append_record(CID, item={"title": "One", "tags": ["secret"]}, item_key=KEY, why="observe") if kind == "item" else None
+    store.reconcile_views()
     path = store.root / (first["affected_paths"][0] if first else manifest_path())
     human = path.read_bytes().replace(b"title: One" if first else b"title: Work", b"title: Private edit")
     path.write_bytes(human)
@@ -596,6 +633,7 @@ def test_foreign_preflight_commits_recovery_without_requested_update(store, monk
 
     create(store)
     first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="observe")
+    store.reconcile_views()
     path = store.root / first["affected_paths"][0]
     fm, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
     fm["exomem_view"]["i"] = "00000000-0000-4000-8000-000000000001"
@@ -612,8 +650,9 @@ def test_foreign_preflight_commits_recovery_without_requested_update(store, monk
 
     monkeypatch.setattr(PosixHeldFilesystem, "link", late_foreign)
     second = update(store, first, "Two")
+    published = store.reconcile_views()
     monkeypatch.setattr(PosixHeldFilesystem, "link", link)
-    assert "projection_pending" in second["warnings"]
+    assert "projection_pending" in published["warnings"]
     before = tuple(store.connection.execute("SELECT generation,audit_head FROM collections").fetchone())
     audit_count = store.connection.execute("SELECT COUNT(*) FROM audit_effects").fetchone()[0]
     receipts = store.connection.execute("SELECT request_id,request_hash,receipt_json FROM txns ORDER BY txn_id").fetchall()
@@ -658,11 +697,9 @@ def test_public_alias_read_waits_for_staging_identity_publication(store, monkeyp
     def mutate():
         try:
             with connection.open_writer(db, lease_check=lambda: True) as handle:
-                outcomes.append(
-                    CollectionWriter(store.root, handle).append_record(
-                        CID, item={"title": "Private stage"}, item_key=KEY, why="capture"
-                    )
-                )
+                writer = CollectionWriter(store.root, handle)
+                writer.append_record(CID, item={"title": "Private stage"}, item_key=KEY, why="capture")
+                outcomes.append(writer.reconcile_views())
         except BaseException as error:  # noqa: BLE001 - thread outcome assertion
             outcomes.append(error)
 
@@ -736,6 +773,7 @@ def test_a_published_log_keeps_the_prose_after_its_item_section(store, tmp_path)
     suffix = original[original.index(b"## Current bands"):]
     store.append_record(X3_ID, item=SESSION, why="a store-mode session")
     store.reconcile_views()
+    store.reconcile_views()
     published = source.read_bytes()
     assert SESSION_HEADING in published
     assert published.endswith(suffix)
@@ -746,6 +784,7 @@ def test_a_published_log_keeps_its_imported_newline_style(store, tmp_path):
     editor saved changes and the file mixes two newline styles."""
     source = imported_log(store, tmp_path, lambda data: data.replace(b"\n", b"\r\n"))
     store.append_record(X3_ID, item=SESSION, why="a store-mode session")
+    store.reconcile_views()
     store.reconcile_views()
     published = source.read_bytes()
     assert SESSION_HEADING in published
@@ -769,6 +808,7 @@ def test_an_imported_log_at_eof_keeps_no_final_newline_through_append_and_export
     _, manifest, _ = store._collection(X3_ID)
     original_count = len(record_formats.MarkdownLogAdapter(store.root, manifest).read_bytes(source.read_bytes()).records)
     store.append_record(X3_ID, item=SESSION, why="append at EOF")
+    store.reconcile_views()
     store.reconcile_views()
     view = source.read_bytes()
     frame = store.connection.execute("SELECT log_frame_json FROM collections WHERE collection_id=?", (X3_ID,)).fetchone()[0]
