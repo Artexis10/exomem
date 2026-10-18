@@ -684,29 +684,59 @@ def test_a_lease_handback_that_raises_after_admission_reports_the_migration(serv
     assert (fence().enrolled, fence().generation) == (True, 1)
 
 
-def test_a_swap_that_stops_after_it_set_the_live_s1_store_aside_fails_the_handoff(s1, tmp_path):
-    """A migrator that reports a vault whose marker routes a store that is no longer in place as
-    abandoned, so the replacement serves a vault whose store is set aside under another name."""
+@pytest.mark.parametrize("boundary", ["before_aside", "after_aside"])
+def test_a_swap_failure_keeps_a_safe_store_serving_or_stops_the_handoff(s1, tmp_path, boundary):
+    """A failure before moving the live store can abandon; a failure after moving it must stop."""
     root = s1
+    head, original_marker = live_head(root), authority.read_marker(root)
     operator_file(tmp_path)
-    swap = candidate(tmp_path, S1_RELEASED, name="-failed-swap", fault=(
-        "import os, types\n"
-        "from exomem.collection_store import takeover\n"
-        "replaced = takeover.replace_live\n"
-        "def failing(descriptor):\n"
-        "    raise OSError(5, 'an I/O error after the live store was set aside')\n"
-        "def replace_live(*arguments, **options):\n"
-        "    takeover.os = types.SimpleNamespace(**{**vars(os), 'fsync': failing})\n"
-        "    try:\n"
-        "        return replaced(*arguments, **options)\n"
-        "    finally:\n"
-        "        takeover.os = os\n"
-        "takeover.replace_live = replace_live\n"))
+    if boundary == "before_aside":
+        fault = (
+            "import os, types\n"
+            "from exomem.collection_store import takeover\n"
+            "replaced = takeover.replace_live\n"
+            "def failing(descriptor):\n"
+            "    raise OSError(5, 'an I/O error before moving the live store')\n"
+            "def replace_live(*arguments, **options):\n"
+            "    takeover.os = types.SimpleNamespace(**{**vars(os), 'fsync': failing})\n"
+            "    try:\n"
+            "        return replaced(*arguments, **options)\n"
+            "    finally:\n"
+            "        takeover.os = os\n"
+            "takeover.replace_live = replace_live\n")
+    else:
+        fault = (
+            "from exomem.collection_store import takeover\n"
+            "replaced = takeover.replace_live\n"
+            "def replace_live(session, *arguments, **options):\n"
+            "    filesystem = session.state_fs\n"
+            "    class FailingInstall:\n"
+            "        def __getattr__(self, name):\n"
+            "            return getattr(filesystem, name)\n"
+            "        def rename(self, source, parent, leaf, **kwargs):\n"
+            "            if leaf == session.path.name:\n"
+            "                raise OSError(5, 'an I/O error after moving the live store')\n"
+            "            return filesystem.rename(source, parent, leaf, **kwargs)\n"
+            "    session.state_fs = FailingInstall()\n"
+            "    try:\n"
+            "        return replaced(session, *arguments, **options)\n"
+            "    finally:\n"
+            "        session.state_fs = filesystem\n"
+            "takeover.replace_live = replace_live\n")
+    swap = candidate(tmp_path, S1_RELEASED, name="-failed-swap", fault=fault)
     result = upgrade(tmp_path, Handoff(tmp_path, root), swap)
-    assert not result["ok"]
-    assert result["error"] == "upgrade failed after shutdown; worker is stopped; resume required"
-    assert result["handoff"]["migration"]["collections"] == {"state": "ran", "outcome": "unsafe", "code": "OSError"}
-    assert not connection.store_path(root).exists()
+
+    if boundary == "before_aside":
+        assert result["ok"], result
+        assert result["handoff"]["migration"]["collections"] == {
+            "state": "ran", "outcome": "abandoned", "code": "OSError"}
+        assert live_head(root) == head and authority.read_marker(root) == original_marker
+    else:
+        assert not result["ok"]
+        assert result["error"] == "upgrade failed after shutdown; worker is stopped; resume required"
+        assert result["handoff"]["migration"]["collections"] == {
+            "state": "ran", "outcome": "unsafe", "code": "OSError"}
+        assert not connection.store_path(root).exists()
 
 
 def test_a_failure_after_publication_that_persists_serves_the_vault_and_the_next_handoff_finishes_it(
