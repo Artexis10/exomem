@@ -4255,9 +4255,9 @@ def op_get(
             this note changed / what was the old version / show its history"
             and to verify an edit's rationale. `[]` when the page has no
             recorded edits.
-        links: If true, attach a `links` summary —
-            `{inbound: [...], outbound: [...]}`. `inbound` lists files whose
-            wikilinks resolve to this page (each
+        links: If true, attach `{inbound: [...] | null, outbound: [...]}`.
+            `inbound` is null while its index recovers; the page still returns.
+            A list contains files whose wikilinks resolve to this page (each
             `{path, line_number, context, raw_target}`); `outbound` lists
             the distinct wikilink targets in this page's body. Use it to
             see a note's graph neighbourhood in one call. Default off (no
@@ -4356,7 +4356,8 @@ def op_get(
         with call_spans_module.span("read.links", {}) as measured:
             out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
             if measured is not None:
-                measured["inbound"] = len((out["links"] or {}).get("inbound") or [])
+                inbound = (out["links"] or {}).get("inbound")
+                measured["inbound"] = None if inbound is None else len(inbound)
                 measured["outbound"] = len((out["links"] or {}).get("outbound") or [])
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a

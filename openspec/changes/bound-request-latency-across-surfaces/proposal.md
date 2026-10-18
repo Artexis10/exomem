@@ -14,6 +14,7 @@ Existing latency checks measure different boundaries, populations and percentile
 - Keep unmeasured read, browse, deep, cold and background-freshness thresholds pending until current measurements support a recorded engineering choice.
 - Require attribution before runtime fixes and compare installed before/after arms on the same inputs, with data, authorization and packet identity checks.
 - Repair read-only deadline overruns through existing budget and deferral paths, including packet finalization; keep unsafe-to-bound repairs open.
+- Keep direct page reads available during optional link recovery. Serve unknown inbound links explicitly instead of building a vault index before releasing the page.
 - Preserve canonical mutation immunity, exact terminal custody and pending-read visibility. Optional heavy paths keep their existing default-off and soft-fail behavior.
 
 ## Capabilities
@@ -26,6 +27,7 @@ Existing latency checks measure different boundaries, populations and percentile
 
 - `agent-bootstrap-contract`: Keep compact and session latency advisories within existing budgets while full and diagnostics profiles retain spans and coverage.
 - `attention-queue`: Scope write advice to affected pages while preserving global bootstrap and review counts.
+- `get-payload-shape`: Distinguish complete inbound links from unknown inbound links without blocking the permitted page body.
 
 Existing latency capabilities retain their numerical bars and lifecycle contracts; this change references them without replacing their requirements.
 

@@ -1094,7 +1094,11 @@ def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
     _quiet_starters(monkeypatch, [])
     # `fx.build` seeded freshness as the watcher does; a stand-in that says so
     # keeps activation from revoking it.
-    watcher = SimpleNamespace(wait_until_seeded=lambda timeout: True, stop=lambda: None)
+    watcher = SimpleNamespace(
+        wait_until_seeded=lambda timeout: True,
+        arm_optional_recovery=lambda: None,
+        stop=lambda: None,
+    )
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: watcher)
     # The compute runtime's own config poll, at a test interval.
     monkeypatch.setattr(

@@ -1007,13 +1007,21 @@ def _reference_owner_view_read_only(
         started = time.thread_time_ns()
         resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
         snapshot = None
-        if wanted and not semantic_contract.identity_census_omits_scanned_pages(root):
-            snapshot = semantic_contract.current_reference_identity_snapshot(root)
+        if wanted:
+            if semantic_contract.identity_census_omits_scanned_pages(root):
+                if measured is not None:
+                    measured["declined_namespace_differs"] = 1
+            else:
+                snapshot = semantic_contract.current_reference_identity_snapshot(
+                    root, declined=measured
+                )
         if snapshot is not None:
             owners = snapshot.reference_owners
             answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
             if semantic_contract.reference_identity_snapshot_is_current(root, snapshot):
                 resolved = answered
+            elif measured is not None:
+                measured["declined_snapshot_changed"] = 1
         if measured is not None:
             measured["snapshot"] = int(bool(wanted) and resolved is not None)
         if resolved is None:
