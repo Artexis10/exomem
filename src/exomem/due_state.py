@@ -1304,13 +1304,41 @@ def collection_observation_coverage(
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Count and name claimed observations after audience recomposition."""
+    return _collection_observation_coverages(
+        vault_root, (manifest_path,), authorize_path=authorize_path, now=now
+    )[manifest_path]
+
+
+@canonical_read
+def _collection_observation_coverages(
+    vault_root: Path,
+    manifest_paths: Iterable[str],
+    *,
+    authorize_path: Any,
+    now: dt.datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Share immutable projection data and lazy routing within one canonical read operation."""
+    paths = tuple(manifest_paths)
+    if not paths:
+        return {}
     effective_now = now or dt.datetime.now(dt.UTC)
     if effective_now.tzinfo is None:
         effective_now = effective_now.replace(tzinfo=dt.UTC)
     effective_now = effective_now.astimezone(dt.UTC)
-    payload = load(vault_root)
+    payload = _load_shared(vault_root)
     if payload is None:
-        return {"complete": False, "unreflected": [], "pending": []}
+        return {path: {"complete": False, "unreflected": [], "pending": []} for path in paths}
+    routing = _routing_snapshot(vault_root, payload, authorize_path)
+    return {
+        path: _observation_coverage(
+            vault_root, path, payload, authorize_path, routing, effective_now
+        )
+        for path in paths
+    }
+
+
+def _observation_coverage(vault_root, manifest_path, payload, authorize_path, routing, effective_now):
+    """Compose one collection using the batch's current operation and decoded projection."""
     categories = payload.get("categories")
     claims = payload.get("claims")
     manifest = _load_manifest(Path(vault_root), manifest_path)
@@ -1334,7 +1362,6 @@ def collection_observation_coverage(
         return {"complete": False, "unreflected": [], "pending": []}
     open_refs: set[str] = set()
     pending_refs: set[str] = set()
-    routing = _routing_snapshot(vault_root, payload, authorize_path)
     for bucket in pages.values():
         for entry in _unbucket(bucket):
             component = entry.get("component")
