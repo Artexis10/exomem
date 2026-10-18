@@ -1,11 +1,15 @@
 """Edit-back of store collection views (OpenSpec move-structured-collections-to-sqlite §6, §16 A1, A2).
 
-The writer-level cases drive ``edit_back.EditBack`` with explicit monotonic times, as the
-store thread does without a file watcher; the service cases drive the installed service.
+The writer-level cases drive ``edit_back.EditBack`` with explicit monotonic times;
+the service cases drive the installed service, with and without watcher notifications.
 """
 
 import hashlib
 import json
+import os
+import sqlite3
+import threading
+import time
 
 import pytest
 from test_collection_store_migration import env as env
@@ -29,10 +33,11 @@ def views_released(monkeypatch):
 
 
 def passes(store, *times):
-    """One edit-back runner, run once at each monotonic time."""
+    """Drain the bounded turns due at each supplied monotonic time."""
     runner = edit_back.EditBack()
+    runner.hints(store, (), True)
     for now in times:
-        runner.run(store, now=now)
+        until(lambda now=now: runner.run(store, now=now) > 0)
     return runner
 
 
@@ -68,9 +73,502 @@ def test_a_settled_valid_edit_is_one_view_edit_and_a_replay_commits_nothing(stor
     # The same bytes again, as after a crash before their render was installed: nothing new.
     rendered = path.read_bytes()
     path.write_bytes(edited)
-    runner.run(store, now=SETTLED + 60)
-    runner.run(store, now=2 * SETTLED + 60)
+    until(lambda: runner.run(store, now=SETTLED + 60) > 0)
+    until(lambda: runner.run(store, now=2 * SETTLED + 60) > 0)
     assert len(txns(store, "view_edit")) == 1 and holds(store) == [] and path.read_bytes() == rendered
+
+
+def test_an_item_save_without_its_stamp_is_held_without_changing_the_record(store):
+    """Removing generated metadata must not authorize an edit against an unknown base."""
+    from exomem import vault
+
+    _, path = appended(store, count=1)
+    frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
+    frontmatter.pop("exomem_view")
+    frontmatter["title"] = "Edited without a base"
+    edited = ("---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n" + body).encode()
+    path.write_bytes(edited)
+
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+
+    [(_, code, raw)] = holds(store)
+    assert (code, raw) == ("VIEW_INVALID", edited)
+    assert store.connection.execute("SELECT row_version,values_json FROM items").fetchone() == (
+        1, '{"count":1,"title":"One"}')
+    assert txns(store, "view_edit") == []
+
+
+def test_an_offline_cross_directory_move_keeps_the_filename_and_payload_version(store):
+    """An offline rename must be found before the missing old view is recreated."""
+    receipt, old = appended(store)
+    raw = old.read_bytes()
+    destination = old.parent / "Renamed" / "Manual.md"
+    destination.parent.mkdir()
+    old.rename(destination)
+    passes(store, 0.0, SETTLED)
+    path, version, payload = store.connection.execute("SELECT view_path,row_version,payload_hash FROM items").fetchone()
+    assert path == destination.relative_to(store.root).as_posix() and version == 1
+    assert receipt["after_item_hash"] == store._version({"collection_id": CID, "item_key": KEY,
+                                                       "row_version": version, "payload_hash": payload})
+    assert destination.read_bytes() == raw and not old.exists() and holds(store) == []
+    assert [(operation, actor) for operation, actor, _ in txns(store, "view_move")] == [("view_move", "owner:view-edit")]
+
+
+def test_a_move_event_remains_verifiable_after_its_formatting_correction_is_discarded(store):
+    """Discarded file formatting must not remove an input needed to verify immutable move history."""
+    from exomem import records
+
+    _, source = appended(store)
+    destination = source.with_name("Manual.md")
+    source.rename(destination)
+    edited = destination.read_bytes().replace(b"title: One", b"title: 'One'")
+    destination.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    assert store.connection.execute("SELECT view_path FROM items").fetchone() == (
+        destination.relative_to(store.root).as_posix(),)
+    assert any(raw == edited for _, _, raw in holds(store))
+    for reference, _, _ in holds(store):
+        store.discard_held(CID, held=reference, why="discard formatting correction")
+    assert holds(store) == []
+
+    cursor = store.connection.execute(
+        "SELECT t.*,m.manifest_text,c.manifest_path FROM txns t "
+        "JOIN collection_manifests m ON m.collection_id=t.collection_id "
+        "AND m.manifest_version=t.manifest_version_after "
+        "JOIN collections c ON c.collection_id=t.collection_id WHERE t.operation='view_move'")
+    [row] = cursor.fetchall()
+    txn = dict(zip((column[0] for column in cursor.description), row, strict=True))
+    receipt = json.loads(txn["receipt_json"])
+    version = store.connection.execute(
+        "SELECT version_before FROM audit_effects WHERE txn_id=?", (txn["txn_id"],)).fetchone()[0]
+    manifest = collections.parse_manifest_bytes(
+        store.root, txn["manifest_path"], txn["manifest_text"].encode())
+    # The v1 event envelope uses only immutable transaction, manifest, receipt and effect facts.
+    event = {name: txn[name] for name in (
+        "transition_id", "collection_id", "operation", "generation_before", "generation_after",
+        "manifest_version_before", "manifest_version_after", "prev_event_hash", "committed_at", "why", "request_hash")}
+    event.update(manifest_hash=manifest.manifest_version.hash,
+                 effects={"old_path": receipt["affected_paths"][0], "path": receipt["affected_paths"][1],
+                          "generation": txn["generation_before"], "version": version})
+    assert hashlib.sha256(b"exomem-collection-event:v1\0" + records._canonical_json(event)).hexdigest() == txn["event_hash"]
+
+
+def test_a_file_move_hint_completes_the_census_when_each_turn_visits_one_path(store):
+    """An exact file hint must finish at window size one instead of preventing move discovery forever."""
+    _, source = appended(store)
+    canonical = source.read_bytes()
+    destination = source.with_name("Manual.md")
+    source.rename(destination)
+    runner = edit_back.EditBack()
+    runner.hints(store, [(source.relative_to(store.root).as_posix(), destination.relative_to(store.root).as_posix(), False)])
+    for now in (0.0, SETTLED):
+        for _ in range(200):
+            if runner.run(store, now=now, limit=1) > 0:
+                break
+        else:
+            pytest.fail("the file-move census did not finish its bounded turns")
+    assert runner.last_status["status"] == "current"
+    assert store.connection.execute("SELECT view_path,row_version FROM items").fetchone() == (
+        destination.relative_to(store.root).as_posix(), 1)
+    assert len(txns(store, "view_move")) == 1 and holds(store) == []
+    assert destination.read_bytes() == canonical and not source.exists()
+
+
+def test_cyclic_moves_at_one_payload_version_do_not_replay_the_first_move(store):
+    """A→B→A→B at the same item version is three moves, each with a fresh container generation."""
+    _, first = appended(store)
+    second = first.with_name("Manual.md")
+    runner = passes(store, 0.0)
+    for now, source, destination in ((60.0, first, second), (120.0, second, first), (180.0, first, second)):
+        source.rename(destination)
+        until(lambda now=now: runner.run(store, now=now) > 0)
+        until(lambda now=now: runner.run(store, now=now + SETTLED) > 0)
+        assert not source.exists() and destination.exists()
+    assert len(txns(store, "view_move")) == 3
+    assert store.connection.execute("SELECT row_version FROM items").fetchone() == (1,)
+    assert len({request for _, _, request in txns(store, "view_move")}) == 3
+
+
+def test_duplicate_current_stamp_destinations_are_held_instead_of_chosen_by_order(store):
+    """Two detached copies of the current item cannot become a unique move through window eviction."""
+    _, old = appended(store)
+    store.reconcile_views()
+    raw = old.read_bytes()
+    one, two = old.with_name("CopyA.md"), old.with_name("CopyB.md")
+    old.unlink()
+    one.write_bytes(raw)
+    two.write_bytes(raw)
+    runner = edit_back.EditBack()
+    runner.hints(store, (), True)
+    for now in (0.0, SETTLED, 2 * SETTLED):
+        until(lambda now=now: runner.run(store, now=now, limit=1) > 0)
+    assert txns(store, "view_move") == []
+    assert one.read_bytes() == two.read_bytes() == old.read_bytes() == raw
+    assert len([code for _, code, _ in holds(store) if code == edit_back.CONFLICT]) == 2
+
+
+def test_a_copied_stamp_cannot_release_different_detached_bytes_after_path_adoption(store, monkeypatch):
+    """A recycled persisted inode and copied stamp must not release unrelated bytes after path adoption."""
+    _, old = appended(store)
+    canonical = old.read_bytes()
+    detached = canonical.replace(b"title: One", b"title: Detached")
+    destination = old.with_name("Manual.md")
+    old.unlink()
+    destination.write_bytes(detached)
+    # A stale persisted identity can match an unrelated replacement after inode reuse.
+    stat = destination.stat()
+    store.connection.execute("UPDATE projection_state SET stat_identity=? WHERE kind='item'",
+                             (f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}",))
+    store.connection.commit()
+    from test_governance_egress import _external
+
+    from exomem import commands, held_fs
+    from exomem.collection_store import governance, views
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance import raw_protection
+    from exomem.governance.principal import owner_principal, request_scope
+
+    original = views.PublicationBatch._install
+    with monkeypatch.context() as blocked:
+        def interrupted(batch, publication):
+            raise held_fs.HeldFsError("IO_ERROR", "injected installation interruption")
+
+        blocked.setattr(views.PublicationBatch, "_install", interrupted)
+        passes(store, 0.0, SETTLED, 2 * SETTLED, 3 * SETTLED)
+        assert destination.read_bytes() == detached and txns(store, "view_edit") == []
+        newer = detached.replace(b"title: Detached", b"title: Second save")
+        destination.write_bytes(newer)
+        passes(store, 60.0, 60.0 + SETTLED, 60.0 + 2 * SETTLED, 60.0 + 3 * SETTLED)
+        assert destination.read_bytes() == newer and txns(store, "view_edit") == []
+    assert views.PublicationBatch._install is original
+    store.reconcile_views()
+    assert destination.read_bytes() == canonical and not old.exists()
+    assert store.connection.execute("SELECT row_version FROM items").fetchone() == (1,)
+    assert set(store.connection.execute("SELECT held_bytes,quarantined FROM held_candidates")) == {(detached, 1), (newer, 1)}
+    assert len(txns(store, "view_move")) == 1 and txns(store, "view_edit") == []
+    held_paths = store.connection.execute("SELECT view_path,held_bytes FROM held_candidates").fetchall()
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        for held_path, raw in held_paths:
+            assert raw.decode() in commands.op_get(store.root, path=held_path)["body"]
+    for who, unrestricted in ((_external(), True), (owner_principal(), False)):
+        with monkeypatch.context() as access:
+            access.setattr(raw_protection, "has_unrestricted_access", lambda root, principal, value=unrestricted: value)
+            with request_scope(who), store.read_snapshot():
+                target = next(subject for subject in governance.subjects(store.connection, CID, "test")
+                              if isinstance(subject.row_id, int))
+                assert store._operation.decision(target).level == 6
+            for held_path, _ in held_paths:
+                with preview_store(store.root, store.handle), request_scope(who), pytest.raises(ValueError, match="NOT_FOUND"):
+                    commands.op_get(store.root, path=held_path)
+
+
+def test_discard_and_restart_do_not_release_an_unconfirmed_adopted_path(store, monkeypatch):
+    """Discard cannot erase unresolved adoption; canonical confirmation must allow later ordinary saves again."""
+    from exomem import held_fs
+    from exomem.collection_store import connection, views
+    from exomem.collection_store.writer import CollectionWriter
+
+    _, old = appended(store)
+    canonical = old.read_bytes()
+    raw = canonical.replace(b"title: One", b"title: Detached")
+    destination = old.with_name("Manual.md")
+    old.rename(destination)
+    destination.write_bytes(raw)
+    with monkeypatch.context() as blocked:
+        def interrupted(batch, publication):
+            raise held_fs.HeldFsError("IO_ERROR", "injected installation interruption")
+
+        blocked.setattr(views.PublicationBatch, "_install", interrupted)
+        passes(store, 0.0, SETTLED, 2 * SETTLED)
+        [(reference, _, _)] = holds(store)
+        store.discard_held(CID, held=reference, why="discard this observation")
+        assert holds(store) == [] and destination.read_bytes() == raw
+        database, root = store.handle.path, store.root
+        store.handle.close()
+        with connection.open_writer(database, lease_check=lambda: True) as handle:
+            resumed = CollectionWriter(root, handle)
+            newer = raw.replace(b"title: Detached", b"title: After restart")
+            destination.write_bytes(newer)
+            passes(resumed, 0.0, SETTLED, 2 * SETTLED)
+            assert txns(resumed, "view_edit") == [] and destination.read_bytes() == newer
+            assert resumed.connection.execute("SELECT held_bytes,quarantined FROM held_candidates").fetchall() == [(newer, 1)]
+    with connection.open_writer(database, lease_check=lambda: True) as handle:
+        resumed = CollectionWriter(root, handle)
+        resumed.reconcile_views()
+        resumed.reconcile_views()  # This transaction confirms canonical bytes, rather than trusting _install's return.
+        assert destination.read_bytes() == canonical
+        with monkeypatch.context() as blocked:
+            blocked.setattr(views.PublicationBatch, "_install", interrupted)
+            container_hash, item_hash = resumed.current_guards(CID, KEY)
+            resumed.update_record(CID, item_key=KEY, changes={"count": 2}, why="ordinary pending write",
+                expected_container_hash=container_hash, expected_item_version=item_hash)
+            current = resumed.connection.execute("SELECT values_json FROM items").fetchone()[0]
+        resumed.reconcile_views()
+        destination.write_bytes(destination.read_bytes().replace(b"title: One", b"title: Ordinary edit"))
+        passes(resumed, 0.0, SETTLED)
+        assert len(txns(resumed, "view_edit")) == 1
+        assert json.loads(current) == {"count": 2, "title": "One"}
+        assert json.loads(resumed.connection.execute("SELECT values_json FROM items").fetchone()[0]) == {
+            "count": 2, "title": "Ordinary edit"}
+
+
+def test_an_unbound_resume_adopts_its_observed_filename_and_refuses_a_later_edit(store):
+    """Explicit owner adoption keeps a manual filename; a stale adoption preserves both observations."""
+    create(store)
+    source = store.root / "Knowledge Base/Records/Work/Items/Manual.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    original = b"---\ntitle: Detached\ncount: 1\n---\nAuthored text\n"
+    source.write_bytes(original)
+    passes(store, 0.0, SETTLED)
+    [(held, code, raw)] = holds(store)
+    assert (code, raw) == (edit_back.UNBOUND, original)
+    changed = original.replace(b"count: 1", b"count: 2")
+    source.write_bytes(changed)
+    with pytest.raises(collections.CollectionError, match="VIEW_INPUT_CHANGED"):
+        store.append_record(CID, held=held, why="adopt")
+    assert {raw for _, _, raw in holds(store)} == {original, changed}
+    assert store.connection.execute("SELECT count(*) FROM items").fetchone() == (0,)
+    newer = next(reference for reference, _, raw in holds(store) if raw == changed)
+    receipt = store.append_record(CID, held=newer, why="adopt current file")
+    assert receipt["affected_paths"] == [source.relative_to(store.root).as_posix()]
+    assert store.connection.execute("SELECT row_version,values_json FROM items").fetchone() == (
+        1, json.dumps({"count": 2, "title": "Detached"}, separators=(",", ":")))
+    assert len(txns(store, "append")) == 1 and [(code, raw) for _, code, raw in holds(store)] == [(edit_back.UNBOUND, original)]
+
+
+def test_an_interrupted_census_cannot_confirm_absence_or_recreate_an_old_path(store, monkeypatch):
+    """A directory read failure after seeing a candidate leaves its old path absent and reports incomplete work."""
+    from exomem import held_fs
+
+    _, old = appended(store)
+    store.reconcile_views()
+    destination = old.with_name("Manual.md")
+    old.rename(destination)
+    with held_fs.acquire(store.root).require() as fs:
+        backend = type(fs)
+    original = backend.iter_names
+
+    def interrupted(fs, parent):
+        yield from original(fs, parent)
+        raise held_fs.HeldFsError("IO_ERROR", "injected directory interruption")
+
+    monkeypatch.setattr(backend, "iter_names", interrupted)
+    runner = passes(store, 0.0, SETTLED, 2 * SETTLED)
+    store.reconcile_views(missing_ready=store.handle.census(store.root).missing_ready)
+    assert destination.exists() and not old.exists() and txns(store, "view_move") == []
+    assert runner.last_status["status"] == "incomplete" and runner.last_status["failures"] > 0
+
+
+def test_an_oversized_candidate_keeps_all_bytes_and_prevents_an_absence_claim(store):
+    """The existing parser byte bound must not truncate a correction or make a partial sweep look complete."""
+    from exomem import record_formats
+
+    _, old = appended(store)
+    store.reconcile_views()
+    destination = old.with_name("Manual.md")
+    old.rename(destination)
+    oversized = old.with_name("Oversized.md")
+    raw = b"x" * (record_formats._MAX_ITEM_BYTES + 1)
+    oversized.write_bytes(raw)
+    runner = passes(store, 0.0, SETTLED)
+    store.reconcile_views(missing_ready=store.handle.census(store.root).missing_ready)
+    assert oversized.read_bytes() == raw and destination.exists() and not old.exists()
+    assert holds(store) == [] and runner.last_status["status"] == "incomplete"
+
+
+def test_a_duplicate_arriving_after_the_sweep_preserves_both_files_and_is_corrected_next_pass(store, monkeypatch):
+    """A completed sweep is observational: an unseen late copy cannot make publication destroy either file."""
+    from exomem.collection_store.writer import CollectionWriter
+
+    _, old = appended(store)
+    canonical = old.read_bytes()
+    chosen, late = old.with_name("Manual.md"), old.with_name("Late.md")
+    old.rename(chosen)
+    original = CollectionWriter.reconcile_detached_candidate
+
+    def arriving(writer, facts, **kwargs):
+        if not late.exists():
+            late.write_bytes(canonical)
+        return original(writer, facts, **kwargs)
+
+    monkeypatch.setattr(CollectionWriter, "reconcile_detached_candidate", arriving)
+    runner = passes(store, 0.0, SETTLED)
+    assert chosen.read_bytes() == late.read_bytes() == canonical and not old.exists()
+    until(lambda: runner.run(store, now=60.0) > 0)
+    until(lambda: runner.run(store, now=60.0 + SETTLED) > 0)
+    assert chosen.read_bytes() == late.read_bytes() == canonical and len(txns(store, "view_move")) == 1
+    assert [(code, raw) for _, code, raw in holds(store)] == [(edit_back.CONFLICT, canonical)]
+
+
+def test_a_directory_rename_with_a_pending_install_and_changed_cleanup_input_preserves_all_bytes(store, monkeypatch):
+    """A pending installation must preserve its moved edit, unseen aside and a stage changed during cleanup."""
+    from exomem import held_fs
+    from exomem.collection_store import views
+
+    receipt, old = appended(store)
+    nested = old.parent / "Nested" / "Manual.md"
+    nested.parent.mkdir()
+    old.rename(nested)
+    passes(store, 0.0, SETTLED)
+    store.reconcile_views()
+    passes(store, 0.0)
+    original = views.PublicationBatch._install
+
+    def blocked(batch, publication):
+        raise held_fs.HeldFsError("IO_ERROR", "injected installation interruption")
+
+    monkeypatch.setattr(views.PublicationBatch, "_install", blocked)
+    update = store.update_record(CID, item_key=KEY, changes={"count": 2}, why="update during edit",
+        expected_container_hash=store.current_guards(CID)[0], expected_item_version=receipt["after_item_hash"])
+    monkeypatch.setattr(views.PublicationBatch, "_install", original)
+    descriptor = json.loads(store.connection.execute("SELECT install_json FROM projection_state WHERE kind='item'").fetchone()[0])
+    stage = nested.parent / (views.STAGE_PREFIX + descriptor["token"])
+    edited = stage.read_bytes().replace(b"title: One", b"title: Owner")
+    nested.write_bytes(edited)
+    displaced = b"Unseen displaced input\n"
+    (nested.parent / (views.ASIDE_PREFIX + descriptor["token"] + "-0")).write_bytes(displaced)
+    renamed = nested.parent.with_name("Renamed")
+    nested.parent.rename(renamed)
+    destination = renamed / nested.name
+    changed_stage = renamed / stage.name
+    unseen = b"Stage changed after move preparation\n"
+    publish = views.PublicationBatch.publish
+
+    def changed_during_cleanup(batch):
+        if any(leaf == stage.name for _projection, _parent, leaf, _digest in batch.cleanup):
+            changed_stage.write_bytes(unseen)
+        return publish(batch)
+
+    monkeypatch.setattr(views.PublicationBatch, "publish", changed_during_cleanup)
+    runner = passes(store, 0.0, SETTLED)
+    assert runner.last_status["status"] == "current"
+    assert not nested.exists() and not nested.parent.exists() and destination.exists()
+    assert store.connection.execute("SELECT row_version,values_json FROM items").fetchone() == (
+        2, json.dumps({"count": 2, "title": "One"}, separators=(",", ":")))
+    assert {(code, raw) for _, code, raw in holds(store)} == {
+        (edit_back.CONFLICT, displaced), (edit_back.CONFLICT, edited)}
+    assert store.connection.execute("SELECT DISTINCT quarantined FROM held_candidates").fetchall() == [(1,)]
+    assert len(txns(store, "view_move")) == 2 and txns(store, "view_edit") == []
+    assert update["after_item_hash"] == store.current_guards(CID, KEY)[1] and destination.read_bytes() != edited
+    monkeypatch.setattr(views.PublicationBatch, "publish", publish)
+    for _ in range(2):
+        result = store.reconcile_views()
+        assert "projection_pending" in result["warnings"] and changed_stage.read_bytes() == unseen
+    assert not nested.parent.exists() and list(renamed.glob(".exomem-collection-*")) == [changed_stage]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX redundant stage alias crash seam")
+def test_a_refused_move_commit_keeps_unknown_stage_aliases_until_the_hold_is_durable(store, monkeypatch):
+    """A refused COMMIT must not retire journal bytes before their quarantine commits."""
+    from exomem import held_fs
+    from exomem.collection_store import views
+
+    _, old = appended(store)
+    source = old.parent / "Nested" / "Manual.md"
+    source.parent.mkdir()
+    old.rename(source)
+    passes(store, 0.0, SETTLED)
+    store.reconcile_views()
+    with monkeypatch.context() as blocked:
+        def interrupted(batch, publication):
+            raise held_fs.HeldFsError("IO_ERROR", "injected installation interruption")
+
+        blocked.setattr(views.PublicationBatch, "_install", interrupted)
+        store.update_record(CID, item_key=KEY, changes={"count": 2}, why="agent",
+                            expected_container_hash=store.current_guards(CID)[0],
+                            expected_item_version=store.current_guards(CID, KEY)[1])
+    descriptor = json.loads(store.connection.execute("SELECT install_json FROM projection_state WHERE kind='item'").fetchone()[0])
+    stage = source.parent / (views.STAGE_PREFIX + descriptor["token"])
+    unknown = stage.read_bytes().replace(b"title: One", b"title: Unknown")
+    source.unlink()
+    os.link(stage, source)
+    source.write_bytes(unknown)
+    renamed = source.parent.with_name("Renamed")
+    source.parent.rename(renamed)
+    destination, alias = renamed / source.name, renamed / stage.name
+    moving = [False]
+
+    def refuse_commit(action, name, column, *_):
+        if action == sqlite3.SQLITE_UPDATE and name == "items" and column == "view_path":
+            moving[0] = True
+        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_TRANSACTION and name == "COMMIT" and moving[0] else sqlite3.SQLITE_OK
+
+    store.connection.set_authorizer(refuse_commit)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            passes(store, 60.0, 60.0 + SETTLED)
+    finally:
+        store.connection.set_authorizer(None)
+    assert alias.read_bytes() == destination.read_bytes() == unknown
+    assert store.connection.execute("SELECT 1 FROM held_candidates WHERE held_bytes=?", (unknown,)).fetchone() is None
+    from exomem.collection_store.writer import CollectionWriter
+
+    advance = CollectionWriter._advance
+    newer = unknown.replace(b"title: Unknown", b"title: Newer")
+    with monkeypatch.context() as writing:
+        def edit_before_precommit(writer, txn):
+            if txn["operation"] == "view_move":
+                destination.write_bytes(newer)
+            return advance(writer, txn)
+
+        writing.setattr(CollectionWriter, "_advance", edit_before_precommit)
+        runner = passes(store, 120.0, 120.0 + SETTLED)
+    assert runner.last_status["status"] == "incomplete" and alias.read_bytes() == destination.read_bytes() == newer
+    assert store.connection.execute("SELECT 1 FROM held_candidates WHERE held_bytes=?", (newer,)).fetchone() is None
+    passes(store, 180.0, 180.0 + SETTLED)
+    assert not alias.exists() and destination.read_bytes() != unknown
+    assert store.connection.execute("SELECT held_bytes,quarantined FROM held_candidates").fetchall() == [(newer, 1)]
+
+
+def test_a_move_out_of_the_source_keeps_destination_bytes_and_holds_the_governed_copy(store):
+    """A reported moved-out item keeps ordinary destination custody while its canonical path is restored."""
+    _, old = appended(store)
+    store.reconcile_views()
+    original = old.read_bytes()
+    destination = store.root / "Knowledge Base/Manual.md"
+    old.rename(destination)
+    runner = edit_back.EditBack()
+    runner.hints(store, [(old.relative_to(store.root).as_posix(), destination.relative_to(store.root).as_posix(), False)])
+    for now in (0.0, SETTLED, 2 * SETTLED):
+        until(lambda now=now: runner.run(store, now=now) > 0)
+    assert destination.read_bytes() == old.read_bytes() == original
+    assert txns(store, "view_move") == []
+    assert store.connection.execute("SELECT held_bytes,quarantined FROM held_candidates WHERE held_bytes<>?", (b"",)).fetchall() == [(original, 0)]
+    assert [code for _, code, raw in holds(store) if raw] == [edit_back.MOVED]
+
+
+def test_a_large_summary_census_reads_actual_files_without_generating_or_visiting_row_paths(store, monkeypatch):
+    """A summary's canonical row count must not determine its census or filesystem work."""
+    from test_collection_store_summary import _seed, summary_text
+
+    from exomem import held_fs
+    from exomem.collection_store import summary
+
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.RECORDS_SUMMARY_V1})
+    store.create_collection(manifest_path(), summary_text(), why="create", scaffold=False)
+    _seed(store, CID, 100_001)
+    store.reconcile_views()
+    before = list(store.root.rglob("*.md"))
+    with held_fs.acquire(store.root).require() as fs:
+        backend = type(fs)
+    reads, directories = [], []
+    original_read, original_names = backend.read, backend.iter_names
+
+    def read(fs, file, **kwargs):
+        reads.append(file.version().size)
+        return original_read(fs, file, **kwargs)
+
+    def names(fs, parent):
+        directories.append(parent)
+        yield from original_names(fs, parent)
+
+    monkeypatch.setattr(backend, "read", read)
+    monkeypatch.setattr(backend, "iter_names", names)
+    runner = passes(store, 0.0, SETTLED)
+    assert runner.last_status["status"] == "current" and directories == []
+    assert len(reads) <= summary.MAX_PAGES + 1 and max(reads) <= summary.MAX_PAGE_BYTES
+    assert list(store.root.rglob("*.md")) == before
+    assert store.connection.execute("SELECT count(*) FROM items WHERE view_path IS NOT NULL").fetchone() == (0,)
 
 
 def test_an_invalid_save_is_held_once_and_stays_in_place(store):
@@ -204,13 +702,15 @@ def test_a_typing_storm_leaves_no_hold(store):
     now = 0.0
     for keystroke in range(12):  # 18 s of autosaves, each followed by a half-second pause
         path.write_bytes(rendered.replace(b"count: 1", f"count: 1{keystroke}x".encode()))
-        runner.run(store, now=now)
-        runner.run(store, now=now + 0.5)
+        runner.notify(store, [path.relative_to(store.root).as_posix()])
+        until(lambda now=now: runner.run(store, now=now) > 0)
+        until(lambda now=now: runner.run(store, now=now + 0.5) > 0)
         now += 1.5
     assert holds(store) == []
     path.write_bytes(rendered.replace(b"count: 1", b"count: 12"))
-    runner.run(store, now=now)
-    runner.run(store, now=now + 2.0)
+    runner.notify(store, [path.relative_to(store.root).as_posix()])
+    until(lambda now=now: runner.run(store, now=now) > 0)
+    until(lambda now=now: runner.run(store, now=now + 2.0) > 0)
     assert holds(store) == [] and len(txns(store, "view_edit")) == 1
     assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0])["count"] == 12
 
@@ -306,6 +806,125 @@ def published_view(root, title, **values):
 def counted(root, title):
     rows = owner(root, "record_memory", action="query", collection=CID)["rows"]
     return next(row.get("count") for row in rows if row["title"] == title)
+
+
+def test_a_watcher_notification_never_opens_an_unserved_store(tmp_path, monkeypatch):
+    """Defect: an ordinary vault event starts a store thread or opens a SQLite database."""
+    from exomem.collection_store import connection, runtime
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a watcher notification opened a store")
+
+    monkeypatch.setattr(runtime, "_server", unexpected)
+    monkeypatch.setattr(connection, "open_reader", unexpected)
+    root = tmp_path / "ordinary"
+    runtime.notify_view_change(root, "notes/page.md")
+    assert root.resolve() not in runtime._SERVERS and not root.exists()
+
+
+def test_view_notification_overflow_keeps_bounded_move_hints_and_requests_a_census(service):
+    """Defect: a sync burst grows retained event metadata or loses its overflow recovery signal."""
+    from exomem.collection_store import runtime
+
+    server = runtime._server(service.root)
+
+    def burst():
+        runtime.notify_view_change(service.root, "old", destination="new", directory=True)
+        for index in range(runtime._VIEW_CHANGE_CAPACITY + 2):
+            runtime.notify_view_change(service.root, f"unknown/{index}.md")
+        hints, census = server.take_view_hints()
+        assert len(hints) == runtime._VIEW_CHANGE_CAPACITY and census
+        assert ("old", "new", True) in hints
+        assert server.take_view_hints() == ((), False)
+
+    server.call(burst, wake_maintenance=False)
+
+
+def test_directory_dirtiness_lost_in_an_overflow_still_finds_a_moved_item_before_the_periodic_pass(served, monkeypatch):
+    """A directory hint that overflows the watcher mailbox must still discover the moved file through enumeration."""
+    from exomem import file_watcher
+    from exomem.collection_store import runtime
+
+    root = served.root
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    server = runtime._server(root)
+    until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    _, old = published_view(root, "Renamed")
+    destination = old.parent / "Nested" / "Manual.md"
+    destination.parent.mkdir()
+
+    def burst():
+        for index in range(runtime._VIEW_CHANGE_CAPACITY):
+            runtime.notify_view_change(root, f"unrelated/{index}.md")
+        old.rename(destination)
+        file_watcher.FileWatcher(root)._notify_view_change(old.parent, directory=True)
+        assert server._view_census_needed
+
+    server.call(burst, wake_maintenance=False)
+    until(lambda: store_rows(root, "SELECT view_path FROM items") == [(destination.relative_to(root).as_posix(),)], seconds=8)
+    assert not old.exists() and destination.exists()
+    assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_move'") == [("view_move",)]
+
+
+def test_a_watcher_save_burst_with_restored_stat_applies_before_the_full_pass(served, monkeypatch):
+    """Defect: a view created after the initial scan waits 60 s, or suppression hides changed bytes."""
+    from exomem import file_watcher
+    from exomem.collection_store import runtime
+
+    root = served.root
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    server = runtime._server(root)
+    until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    _, path = published_view(root, "Watched", count=1)
+    original, info = path.read_bytes(), path.stat()
+    watcher = file_watcher.FileWatcher(root)
+    # The index watcher can suppress a matching stat signature; edit-back must still see the save.
+    file_watcher.register_self_write(root, [path])
+    for count in (b"x", b"3", b"2"):
+        path.write_bytes(original.replace(b"count: 1", b"count: " + count))
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert file_watcher._is_self_write_event(root, path, deleted=False)
+        watcher._record(path, deleted=False)
+        time.sleep(0.05)
+    until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=6)
+    assert counted(root, "Watched") == 2
+    assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
+    assert store_rows(root, "SELECT code FROM held_candidates WHERE kind='view-correction'") == []
+    assert server._edit_back._next_full > time.monotonic() + 40
+
+
+def test_continuously_queued_requests_do_not_starve_a_notified_view_edit(served, monkeypatch):
+    """Defect: a busy service always takes the next request and never applies a settled saved view."""
+    from exomem import file_watcher
+    from exomem.collection_store import runtime
+
+    root = served.root
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 60.0)
+    server = runtime._server(root)
+    until(lambda: server._edit_back is not None and server._edit_back._next_full > time.monotonic() + 50)
+    _, path = published_view(root, "Busy", count=1)
+    pumping = threading.Event()
+    pumping.set()
+    original_serve = server._serve
+
+    def keep_requests_queued(request):
+        original_serve(request)
+        if pumping.is_set():
+            with server._condition:
+                server._requests.append(runtime._Call(lambda: None, wake_maintenance=False))
+                server._condition.notify_all()
+            time.sleep(0.005)
+
+    monkeypatch.setattr(server, "_serve", keep_requests_queued)
+    try:
+        server.call(lambda: None, wake_maintenance=False)
+        path.write_bytes(path.read_bytes().replace(b"count: 1", b"count: 2"))
+        file_watcher.FileWatcher(root)._record(path, deleted=False)
+        until(lambda: store_rows(root, "SELECT row_version FROM items") == [(2,)], seconds=6)
+        assert pumping.is_set()
+        assert store_rows(root, "SELECT operation FROM txns WHERE operation='view_edit'") == [("view_edit",)]
+    finally:
+        pumping.clear()
 
 
 def test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held(served):
@@ -443,10 +1062,10 @@ def test_the_stores_own_render_is_left_alone_and_then_skipped_by_its_stat(store,
         platform = type(fs)
     reads = []
     read = platform.read
-    monkeypatch.setattr(platform, "read", lambda fs, file: reads.append(file) or read(fs, file))
+    monkeypatch.setattr(platform, "read", lambda fs, file, **kwargs: reads.append(file) or read(fs, file, **kwargs))
     runner = passes(store, 0.0)
     assert len(reads) == 2  # the first pass reads the manifest and item views
-    runner.run(store, now=60.0)
+    until(lambda: runner.run(store, now=60.0) > 0)
     assert len(reads) == 2  # the next full pass only stats them
     assert txns(store) == before and holds(store) == [] and path.read_bytes() == rendered
 
@@ -590,6 +1209,242 @@ def test_a_view_correction_held_under_an_earlier_id_shape_can_be_discarded(store
 # Log views: one view of every row, edited block by block (design §6, §16 A2).
 
 
+def test_a_mixed_log_save_commits_prose_and_valid_rows_and_preserves_other_blocks(store):
+    """A partial row commit must not authorize publication over unapplied prose or invalid blocks."""
+    from test_collection_store_writer import OTHER, log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Two", "details": []}, item_key=OTHER, why="capture")
+    receipt = store.append_record(CID, item={"title": "Extra", "details": [{"field": "reps", "value": "3"}]},
+                                  item_key="33333333-3333-4333-8333-333333333333", why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    edited = b"Authored prose.\n" + path.read_bytes().replace(b"### One", b"### First").replace(b"### Two", b"### Second")
+    edited = edited.replace(b"- reps | 3", b"- reps | 3\nUnparsed prose inside a block.")
+    template = b"### Template\n- reps | 8\n\n"
+    path.write_bytes(edited + template)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 1 and len(txns(store, "view_edit")) == 2
+    assert path.read_bytes().startswith(b"Authored prose.\n") and b"### First" in path.read_bytes()
+    assert sorted(code for _, code, _ in holds(store)) == ["VIEW_INVALID", "VIEW_UNBOUND"]
+    assert next(raw for _, code, raw in holds(store) if code == "VIEW_UNBOUND") == template
+    assert b"Unparsed prose inside a block." in next(raw for _, code, raw in holds(store) if code == "VIEW_INVALID")
+    assert store.connection.execute("SELECT profile_operation FROM txns WHERE operation='view_frame_edit'").fetchone() == (None,)
+    assert store.connection.execute("SELECT COUNT(*) FROM item_versions").fetchone() == (5,)
+
+
+def test_a_stop_between_log_component_commits_leaves_the_complete_buffer_for_replay(store):
+    """A committed frame and first row must not displace a second row edit after interruption."""
+    from test_collection_store_writer import OTHER, log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    receipt = store.append_record(CID, item={"title": "Two", "details": []}, item_key=OTHER, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    raw = b"New prose.\n" + path.read_bytes().replace(b"### One", b"### First").replace(b"### Two", b"### Second")
+    path.write_bytes(raw)
+    cursor = store.connection.execute("SELECT * FROM projection_state WHERE kind='log'")
+    projection = dict(zip([column[0] for column in cursor.description], cursor.fetchone(), strict=True))
+    observation = edit_back.Observation(projection["path"], projection, hashlib.sha256(raw).hexdigest(), None, raw)
+    with store.read_snapshot():
+        found = edit_back.classify(store, projection, raw)
+    store.apply_view_frame(observation, found.frame)
+    store.apply_view_edit(observation, found.blocks[0])
+    store.reconcile_views(paths={observation.path: observation})
+    assert path.read_bytes() == raw  # a restart sees every unapplied component
+    passes(store, 0.0, SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 1 and len(txns(store, "view_edit")) == 2
+    assert holds(store) == [] and b"### First" in path.read_bytes() and b"### Second" in path.read_bytes()
+
+
+def test_a_stale_frame_cannot_replace_new_prose_even_when_row_stamps_are_current(store):
+    """Row versions alone cannot detect two competing edits of surrounding prose."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    path.write_bytes(b"First prose.\n" + stale)
+    passes(store, 0.0, SETTLED)
+    edited = b"Stale prose.\n" + stale
+    path.write_bytes(edited)
+    passes(store, 60.0, 60.0 + HELD)
+    assert len(txns(store, "view_frame_edit")) == 1
+    assert [(code, raw) for _, code, raw in holds(store)] == [("VIEW_INVALID", edited)]
+    assert path.read_bytes().startswith(b"First prose.\n")
+
+
+def test_a_row_commit_does_not_stale_an_unchanged_frame_base(store):
+    """Saving old unchanged row blocks with new prose must keep a newer row commit."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    for title in ("Agent first", "Agent second", "Agent"):
+        receipt = store.update_record(CID, item_key=KEY, changes={"title": title}, why="agent",
+                                      expected_container_hash=receipt["after_container_hash"],
+                                      expected_item_version=receipt["after_item_hash"])
+        store.reconcile_views()
+    path.write_bytes(b"New prose.\n" + stale)
+    passes(store, 0.0, SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 1 and txns(store, "view_edit") == [] and holds(store) == []
+    assert path.read_bytes().startswith(b"New prose.\n") and b"### Agent" in path.read_bytes()
+
+
+def test_a_frame_returning_to_its_base_accepts_an_unapplied_edit_but_replays_an_applied_save(store):
+    """Frame content CAS survives A→B→A while an earlier committed save remains one transition."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    base = path.read_bytes()
+    applied = b"First prose.\n" + base
+    path.write_bytes(applied)
+    passes(store, 0.0, SETTLED)
+    path.write_bytes(path.read_bytes().removeprefix(b"First prose.\n"))
+    passes(store, 60.0, 60.0 + SETTLED)
+    path.write_bytes(b"Unapplied prose.\n" + base)
+    passes(store, 120.0, 120.0 + SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 3 and path.read_bytes().startswith(b"Unapplied prose.\n")
+    path.write_bytes(applied)
+    passes(store, 180.0, 180.0 + SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 3 and path.read_bytes().startswith(b"Unapplied prose.\n")
+    assert holds(store) == [] and txns(store, "view_edit") == []
+
+
+def test_an_empty_eof_log_keeps_authored_prose_and_a_template_around_its_invisible_stamp(store, tmp_path):
+    """An invisible marker must not add a newline or turn below-heading template insertion into a whole hold."""
+    from test_collection_store_views import SESSION, X3_ID, imported_log
+
+    from exomem import record_formats
+    from exomem.collection_store import export, log_view
+
+    def empty_eof(data):
+        section = next(heading for heading in record_formats._headings_outside_fences(data) if heading.level == 2)
+        return data[:section.end].removesuffix(b"\n")
+
+    path = imported_log(store, tmp_path, empty_eof)
+    row, manifest, _ = store._collection(X3_ID)
+    # Materialize the imported empty projection through its ordinary pending-render seam.
+    with store._mutation(reconcile=True):
+        store._pending_log(manifest, row["generation"])
+    store.reconcile_views()
+    raw = path.read_bytes()
+    heading = record_formats._headings_outside_fences(raw)[-1]
+    assert not raw.endswith(b"\n") and b"<!-- exomem-frame " in raw[:heading.start]
+    # Prose typed between the invisible stamp and heading remains authored prefix text.
+    path.write_bytes(raw[:heading.start] + b"New prose.\n" + raw[heading.start:])
+    passes(store, 0.0, SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 1 and not path.read_bytes().endswith(b"\n")
+    # An actual owner-added terminal newline is a frame edit, even while the log is empty.
+    path.write_bytes(path.read_bytes() + b"\n")
+    passes(store, 60.0, 60.0 + SETTLED)
+    assert len(txns(store, "view_frame_edit")) == 2 and path.read_bytes().endswith(b"\n")
+    template = log_view.render_block(manifest, {"item_key": KEY, "values": SESSION}, "\n").encode()
+    template = b"".join(line for line in template.splitlines(keepends=True)
+                        if record_formats._MARKER.fullmatch(line.strip()) is None)
+    path.write_bytes(path.read_bytes() + template)
+    passes(store, 120.0, 120.0 + SETTLED)
+    [(reference, code, held)] = holds(store)
+    assert code == "VIEW_UNBOUND" and held == template and b"New prose.\n" in path.read_bytes()
+    receipt = store.append_record(X3_ID, held=reference, why="adopt template")
+    store.reconcile_views()
+    frame_count = len(txns(store, "view_frame_edit"))
+    path.write_bytes(path.read_bytes().replace(b"Deadlift | grey | 22", b"Deadlift | grey | 23"))
+    passes(store, 180.0, 180.0 + SETTLED)
+    assert len(txns(store, "view_frame_edit")) == frame_count and len(txns(store, "view_edit")) == 1
+    frame = store.connection.execute("SELECT log_frame_json FROM collections WHERE collection_id=?", (X3_ID,)).fetchone()[0]
+    [(_, exported)] = export._render_log(store.root, store.connection, manifest, X3_ID, frame)
+    assert b"New prose.\n" in exported and b"Deadlift | grey | 23" in exported
+    assert receipt["outcome"] == "committed" and holds(store) == []
+
+
+@pytest.mark.parametrize("problem", ["duplicate", "foreign", "future"])
+def test_a_bad_frame_stamp_prevents_every_component_of_a_mixed_save(store, problem):
+    """Position flexibility must not let duplicate or foreign frame proof accompany applied rows."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    raw = b"New prose.\n" + path.read_bytes().replace(b"### One", b"### Edited")
+    marker = next(line for line in raw.splitlines(keepends=True) if line.startswith(b"<!-- exomem-frame "))
+    if problem == "duplicate":
+        raw += marker
+    else:
+        stamp = json.loads(marker[len(b"<!-- exomem-frame "):-len(b" -->\n")])
+        if problem == "foreign":
+            stamp["s"] = "99999999-9999-4999-8999-999999999999"
+        else:
+            stamp["v"] = store.connection.execute("SELECT generation FROM collections").fetchone()[0] + 1
+        raw = raw.replace(marker, b"<!-- exomem-frame " + json.dumps(stamp).encode() + b" -->\n")
+    path.write_bytes(raw)
+    passes(store, 0.0, HELD)
+    assert txns(store, "view_frame_edit") == txns(store, "view_edit") == []
+    assert [(code, held) for _, code, held in holds(store)] == [(
+        "VIEW_FOREIGN" if problem == "foreign" else "VIEW_INVALID", raw)]
+
+
+def test_missing_historical_frame_context_is_not_reconstructed_from_the_current_manifest(store):
+    """Governance backfill can hold bytes but cannot invent proof that edited prose was rendered."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    descriptor = json.loads(store.connection.execute("SELECT install_json FROM projection_state WHERE kind='log'").fetchone()[0])
+    for context in [descriptor.get("render_context"), *descriptor.get("source_contexts", [])]:
+        if context:
+            context.pop("frame_hash", None)
+    store.connection.execute("UPDATE projection_state SET install_json=? WHERE kind='log'", (json.dumps(descriptor),))
+    store.connection.commit()
+    raw = b"Unproved prose.\n" + path.read_bytes()
+    path.write_bytes(raw)
+    passes(store, 0.0, HELD)
+    assert txns(store, "view_frame_edit") == []
+    assert [(code, held) for _, code, held in holds(store)] == [("VIEW_INVALID", raw)]
+
+
+def test_a_held_log_conflict_resumes_only_the_displayed_edit_and_a_template_appends_once(store):
+    """Log resume must parse a block, preserve newer hidden fields and discard inferred template identity."""
+    from test_collection_store_writer import log_manifest_text
+
+    text = log_manifest_text().replace("    title: {type: string, required: true}",
+                                       "    title: {type: string, required: true}\n    note: {type: string}")
+    store.create_collection(manifest_path(), text, why="create")
+    receipt = store.append_record(CID, item={"title": "One", "note": "old", "details": []}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    current = store.update_record(CID, item_key=KEY, changes={"note": "new"}, why="agent",
+                        expected_container_hash=receipt["after_container_hash"],
+                        expected_item_version=receipt["after_item_hash"])
+    store.reconcile_views()
+    path.write_bytes(stale.replace(b"### One", b"### Edited") + b"### Template\n- reps | 8\n\n")
+    passes(store, 0.0, SETTLED)
+    held = {code: reference for reference, code, _ in holds(store)}
+    store.update_record(CID, item_key=KEY, held=held["VIEW_CONFLICT"], why="resume",
+                        expected_container_hash=current["after_container_hash"],
+                        expected_item_version=current["after_item_hash"])
+    values = json.loads(store.connection.execute("SELECT values_json FROM items WHERE item_key=?", (KEY,)).fetchone()[0])
+    assert values == {"title": "Edited", "note": "new", "details": []}
+    first = store.append_record(CID, held=held["VIEW_UNBOUND"], why="adopt template", request_id="template-resume")
+    replay = store.append_record(CID, held=held["VIEW_UNBOUND"], why="adopt template", request_id="template-resume")
+    assert first["audit_correlation"] == replay["audit_correlation"]
+    assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+
+
 def test_an_edit_of_a_stale_log_block_is_held_as_a_conflict(store):
     """Defect: a log block saved from a buffer older than its row reverts the agent's newer row, or
     the owner's bytes for that block are lost when the log is rendered again."""
@@ -709,6 +1564,75 @@ def test_a_spacing_only_edit_of_a_log_block_is_rendered_again_without_a_hold(sto
     assert holds(store) == [] and txns(store) == before and path.read_bytes() == rendered
 
 
+def test_a_formatting_only_log_save_preserves_spaces_in_stored_values(store):
+    """A grammar-trimmed heading must not turn a formatting save into a correction."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    values = {"title": "  One  ", "details": [{"field": "reps", "value": " 10 "}]}
+    receipt = store.append_record(CID, item=values, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    edited = rendered.replace(b"###   One  \n", b"### One\n")
+    assert edited != rendered
+    path.write_bytes(edited)
+    before = txns(store)
+    passes(store, 0.0, SETTLED, HELD + SETTLED)
+    assert holds(store) == [] and txns(store) == before
+    assert json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0]) == values
+    assert path.read_bytes() == rendered
+
+
+def test_a_log_field_edit_preserves_spaces_in_an_untouched_field(store):
+    """Editing a child row must not trim an API-written heading in the same block."""
+    from test_collection_store_writer import log_manifest_text
+
+    store.create_collection(manifest_path(), log_manifest_text(), why="create")
+    receipt = store.append_record(CID, item={"title": "  One  ", "details": [{"field": "reps", "value": "10"}]},
+                                  item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    rendered = path.read_bytes()
+    edited = rendered.replace(b"- reps | 10\n", b"- reps | 11\n")
+    assert edited != rendered
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    version, raw = store.connection.execute("SELECT row_version,values_json FROM items").fetchone()
+    assert version == 2 and holds(store) == []
+    assert json.loads(raw) == {"title": "  One  ", "details": [{"field": "reps", "value": "11"}]}
+    assert len(txns(store, "view_edit")) == 1
+
+
+def test_a_stale_log_resume_preserves_untouched_padding_and_a_newer_hidden_field(store):
+    """A held child edit must not trim its old heading or undo a newer API-only field."""
+    from test_collection_store_writer import log_manifest_text
+
+    text = log_manifest_text().replace("    title: {type: string, required: true}",
+                                       "    title: {type: string, required: true}\n    note: {type: string}")
+    store.create_collection(manifest_path(), text, why="create")
+    receipt = store.append_record(CID, item={"title": "  One  ", "note": "old",
+                                  "details": [{"field": "reps", "value": "10"}]}, item_key=KEY, why="capture")
+    store.reconcile_views()
+    path = store.root / receipt["affected_paths"][0]
+    stale = path.read_bytes()
+    current = store.update_record(CID, item_key=KEY, changes={"note": "new"}, why="agent",
+                                  expected_container_hash=receipt["after_container_hash"],
+                                  expected_item_version=receipt["after_item_hash"])
+    store.reconcile_views()
+    edited = stale.replace(b"- reps | 10\n", b"- reps | 11\n")
+    assert edited != stale
+    path.write_bytes(edited)
+    passes(store, 0.0, SETTLED)
+    [(held, code, _)] = holds(store)
+    assert code == "VIEW_CONFLICT"
+    store.update_record(CID, item_key=KEY, held=held, why="resume",
+                        expected_container_hash=current["after_container_hash"],
+                        expected_item_version=current["after_item_hash"])
+    values = json.loads(store.connection.execute("SELECT values_json FROM items").fetchone()[0])
+    assert values == {"title": "  One  ", "note": "new", "details": [{"field": "reps", "value": "11"}]}
+
+
 def test_a_log_block_that_names_no_row_is_held_and_appends_nothing(store):
     """Defect: a block the owner typed into the log, which no record id binds to a row, is dropped
     by the next render, or becomes a row without a governed append."""
@@ -742,7 +1666,11 @@ def test_a_held_whole_log_view_is_withheld_from_a_caller_who_cannot_read_every_r
     store.reconcile_views()
     log = receipt["affected_paths"][0]
     path = store.root / log
-    path.write_bytes(b"A note above the log.\n" + path.read_bytes())  # an edit of the frame holds the whole view
+    from exomem.collection_store import log_view
+
+    _, manifest, _ = store._collection(CID)
+    unstamped, _ = log_view.split_frame_stamp(manifest, path.read_bytes())
+    path.write_bytes(b"A note above the log.\n" + unstamped)  # Missing frame proof holds the whole buffer.
     passes(store, 0.0, SETTLED, HELD + SETTLED)
     assert [code for _, code, _ in holds(store)] == ["VIEW_INVALID"] and held_issues(store) == ["VIEW_FRAME_CHANGED"]
     sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -815,7 +1743,7 @@ def test_a_served_log_view_is_exports_render_and_takes_one_edited_block_as_one_u
     from test_collection_store_views import SESSION, SESSION_HEADING
 
     from exomem import record_formats
-    from exomem.collection_store import connection, export
+    from exomem.collection_store import connection, export, log_view
 
     root = served_log.root
     owner(root, "record_memory", action="append", collection=X3, item=SESSION, why="a store-mode session")
@@ -828,7 +1756,8 @@ def test_a_served_log_view_is_exports_render_and_takes_one_edited_block_as_one_u
         manifest = collections.parse_manifest_bytes(root, X3, text.encode())
         [(_, exported)] = export._render_log(root, conn, manifest, manifest.collection_id, frame)
     # The export writes no stamps, because file mode has no store to name.
-    unstamped = b"".join(line for line in view.splitlines(keepends=True)
+    authored, _ = log_view.split_frame_stamp(manifest, view)
+    unstamped = b"".join(line for line in authored.splitlines(keepends=True)
                          if record_formats.read_log_block_stamp(line) is None)
     assert unstamped == exported and view.startswith(b"\xef\xbb\xbf") and SESSION_HEADING in view
     blocks = view.split(b"### ")

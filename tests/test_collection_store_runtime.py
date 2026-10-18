@@ -7,10 +7,11 @@ import time
 from contextlib import closing
 
 import pytest
-from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
+from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
+from exomem import held_fs
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection, replica, schema
+from exomem.collection_store import connection, replica, schema, views
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.runtime import CollectionStoreRuntime
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
@@ -93,6 +94,21 @@ def _create(runtime):
                              manifest_text=manifest_text(), why="capture", scaffold=False)
 
 
+def test_a_cached_handle_cannot_bypass_an_older_reader_ceiling_or_leak_a_borrower(runtime, monkeypatch):
+    """A previously cached writer must refuse schema 12 when its simulated reader supports only 11."""
+    _create(runtime)
+    cached = runtime._handle
+    assert cached is not None
+    with monkeypatch.context() as older:
+        older.setattr(schema, "SCHEMA_VERSION", 11)
+        with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+            with preview_store(runtime.root, runtime):
+                pytest.fail("an older cached handler entered the newer store")
+        assert runtime.manager._store_borrowers == {}
+    with preview_store(runtime.root, runtime) as writer:
+        assert writer.connection.execute("SELECT COUNT(*) FROM collections").fetchone() == (1,)
+
+
 def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     _create(runtime)
     manager, client = runtime.manager, runtime.manager.client
@@ -114,6 +130,107 @@ def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     manager.close()
     assert client.holder is None
     assert client.token == 1
+
+
+def _pending_item_views(runtime, monkeypatch):
+    _create(runtime)
+
+    def interrupted(batch, publication):
+        raise held_fs.HeldFsError("IO_REFUSED", "installation interrupted")
+
+    with runtime.manager.consistency_guard(runtime.root), preview_store(runtime.root, runtime) as writer:
+        writer.reconcile_views()
+        with monkeypatch.context() as blocked:
+            blocked.setattr(views.PublicationBatch, "_install", interrupted)
+            writer.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
+            writer.append_record(CID, item={"title": "Two"}, item_key=OTHER, why="capture")
+        paths = [row[0] for row in writer.connection.execute(
+            "SELECT path FROM projection_state WHERE state='pending' ORDER BY path")]
+    assert len(paths) == 2 and all(not (runtime.root / path).exists() for path in paths)
+    return paths
+
+
+def _resume_pending_views(runtime, paths, released):
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.governance.principal import library_scope
+
+    with connection.open_writer(runtime.path, lease_check=lambda: True) as handle, library_scope():
+        writer = CollectionWriter(runtime.root, handle)
+        writer.reconcile_views(pending_only=True)
+        writer.reconcile_views(pending_only=True)
+        assert writer.connection.execute("SELECT COUNT(*) FROM txns").fetchone() == (3,)
+        assert writer.connection.execute("SELECT COUNT(*) FROM projection_state WHERE state='pending'").fetchone() == (0,)
+    assert all((runtime.root / path).exists() for path in paths)
+    assert runtime.sample_head() == released
+
+
+def test_handoff_stops_before_the_next_view_when_an_install_uses_the_drain_share(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    installed = []
+    monotonic, offset = time.monotonic, [0.0]
+    install = views.PublicationBatch._install
+
+    def exhaust_share(batch, publication):
+        install(batch, publication)
+        installed.append(publication.path)
+        if len(installed) == 1:
+            offset[0] += 12
+
+    with monkeypatch.context() as drain:
+        drain.setattr(time, "monotonic", lambda: monotonic() + offset[0])
+        drain.setattr(views.PublicationBatch, "_install", exhaust_share)
+        runtime.manager.close(deadline=time.monotonic() + 20)
+    assert installed == paths[:1]
+    assert (runtime.root / paths[0]).exists() and not (runtime.root / paths[1]).exists()
+    released = runtime.manager.client.release_head
+    assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+        assert reader.execute("SELECT state FROM projection_state WHERE path=?", (paths[1],)).fetchone() == ("pending",)
+    _resume_pending_views(runtime, paths, released)
+
+
+def test_handoff_leaves_views_pending_when_batch_setup_uses_the_drain_share(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    monotonic, offset = time.monotonic, [0.0]
+    initialize = views.PublicationBatch.__init__
+
+    def exhaust_share(batch, *args, **kwargs):
+        initialize(batch, *args, **kwargs)
+        offset[0] += 12
+
+    with monkeypatch.context() as drain:
+        drain.setattr(time, "monotonic", lambda: monotonic() + offset[0])
+        drain.setattr(views.PublicationBatch, "__init__", exhaust_share)
+        runtime.manager.close(deadline=time.monotonic() + 20)
+    assert all(not (runtime.root / path).exists() for path in paths)
+    released = runtime.manager.client.release_head
+    assert runtime.manager.client.released.is_set() and released == runtime.sample_head()
+    with closing(connection.open_reader(replica.replica_path(runtime.root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (2,)
+        assert reader.execute("SELECT COUNT(*) FROM projection_state WHERE state='pending'").fetchone() == (2,)
+    _resume_pending_views(runtime, paths, released)
+
+
+def test_cancelled_reconcile_continuation_keeps_the_unfinished_path(runtime, monkeypatch):
+    paths = _pending_item_views(runtime, monkeypatch)
+    cancelled = threading.Event()
+    capture = views.PublicationBatch.capture_previous
+
+    def cancel_after_capture(batch, path):
+        previous = capture(batch, path)
+        cancelled.set()
+        return previous
+
+    with runtime.manager.consistency_guard(runtime.root), preview_store(runtime.root, runtime) as writer:
+        with monkeypatch.context() as recovery:
+            recovery.setattr(views.PublicationBatch, "capture_previous", cancel_after_capture)
+            result = writer.reconcile_views(after=paths[0], pending_only=True, stop=cancelled.is_set)
+        assert result["next_path"] == paths[0] and "projection_pending" in result["warnings"]
+        assert not (runtime.root / paths[1]).exists()
+        writer.reconcile_views(after=result["next_path"], pending_only=True)
+        assert (runtime.root / paths[1]).exists()
+        assert writer.connection.execute("SELECT COUNT(*) FROM txns").fetchone() == (3,)
 
 
 def test_shutdown_leaves_the_released_head_in_the_store_file_while_another_reader_is_open(runtime, tmp_path):

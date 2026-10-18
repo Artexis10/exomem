@@ -4,6 +4,12 @@ registry: sync-providers
 # must not keep its live database there. Each entry is one observable fact; `evidence`
 # names how custody looks for it and `value` is what it looks for.
 entries:
+  syncthing-conflict-copy:
+    label: Syncthing conflict copy
+    attributes: {evidence: conflict-copy-glob, value: '*.sync-conflict-*-*-*.*'}
+  obsidian-conflict-copy:
+    label: Obsidian conflict copy
+    attributes: {evidence: conflict-copy-glob, value: '* (Conflicted copy *).md'}
   syncthing-folder:
     label: Syncthing
     attributes: {evidence: root-entry, value: .stfolder}

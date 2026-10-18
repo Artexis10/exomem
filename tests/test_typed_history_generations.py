@@ -11,7 +11,7 @@ from test_collection_store_typed_storage import bulk, create, migrate, row_ids
 from test_collection_store_writer import CID
 from test_collection_store_writer import store as store
 
-from exomem.collection_store import connection, index_migrations, schema, tables, typed_storage
+from exomem.collection_store import connection, governance, index_migrations, schema, tables, typed_storage
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
@@ -19,6 +19,15 @@ from exomem.governance.principal import library_scope
 def previous_release(patch):
     """Write as the schema-10 release did, through the maintained writer."""
     patch.setattr(schema, "SCHEMA_VERSION", 10)
+    current_subjects = governance.iter_subjects
+
+    def historical_subjects(conn, cid, logical_vault_id, **options):
+        # These hold-free historical seeds have no schema-12 quarantine column.
+        assert conn.execute("SELECT 1 FROM held_candidates WHERE collection_id=? LIMIT 1", (cid,)).fetchone() is None
+        options["include_held"] = False
+        return current_subjects(conn, cid, logical_vault_id, **options)
+
+    patch.setattr(governance, "iter_subjects", historical_subjects)
     # The old writer has no native conversion diagnostics or schema-11 column.
     patch.setattr(typed_storage, "migration_diagnostic", lambda *_: None)
     trigger = typed_storage._identity_trigger
@@ -62,7 +71,7 @@ def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(histori
     monkeypatch.setenv("EXOMEM_COLLECTION_STORE_PREVIEW", "1")
     with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
         conn = handle.connection
-        assert schema.schema_version(conn) == 11
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         for name, rows in before.items():
             after = conn.execute(f"SELECT * FROM {name}").fetchall()
             assert [row[:6] for row in after] == rows if name == "version_identity" else after == rows

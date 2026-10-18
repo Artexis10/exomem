@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import state_paths, sync_providers
+from . import authority
 
 SYNC_ROOTS_ENV = "EXOMEM_COLLECTION_STORE_SYNC_ROOTS"
 
@@ -133,7 +134,7 @@ def verify(vault_root) -> Custody:
             if _overlap(root, vault) or _overlap(root, store_directory):
                 return Custody(False, f"configured sync root {root} overlaps the vault or live store")
         mounts = _windows_mounts()
-        for path in (vault, store_directory):
+        for path in (vault, _resolved(authority.marker_path(vault).parent), store_directory):
             found = _client_evidence(path, evidence) or _windows_sync_folder(path, mounts, evidence)
             if found is not None:
                 return Custody(False, found)
