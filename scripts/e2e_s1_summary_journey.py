@@ -53,6 +53,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import cell_memory_profile as memory_profile  # noqa: E402
 import e2e_product_loop as loop  # noqa: E402
 
 # --- the invented export and its independent reference -------------------------
@@ -615,11 +616,79 @@ def expect(condition: object, message: str, observed: object = None) -> None:
         raise RuntimeError(f"{message}{detail}")
 
 
+def process_starttime(pid: int) -> int:
+    """Read Linux's process identity without interpreting spaces or parentheses in its name."""
+    # Fields after the final comm delimiter start at 3; Linux fixes starttime at field 22.
+    fields = (Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()
+    return int(fields[19])
+
+
+def process_memory(pid: int) -> dict[str, Any]:
+    """Observe one process, including native allocations, with identity checks around the reads."""
+    try:
+        starttime = process_starttime(pid)
+        memory = memory_profile.read_smaps_rollup(pid)
+        peak = memory_profile.read_peak_rss(pid)
+        if starttime != process_starttime(pid) or memory is None or peak is None:
+            raise ValueError("process identity or memory observation unavailable")
+        return {"status": "observed", "pid": pid, "starttime_ticks": starttime,
+                "rss_bytes": memory["rss_bytes"], "peak_rss_bytes": peak,
+                "monotonic_ns": time.monotonic_ns()}
+    except (OSError, ValueError, IndexError, KeyError) as error:
+        return {"status": "unavailable", "reason": type(error).__name__}
+
+
+def record_process_observation(path: Path, launch: str) -> None:
+    """Publish launch metadata before the installed entry point; observation never controls startup."""
+    record = {**process_memory(os.getpid()), "launch_id": launch}
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+
+
+def memory_window(service, baseline, *, scope, progress) -> dict[str, Any]:
+    """Keep separate process windows and their raw observations; do not sum their peaks."""
+    final = service.memory_snapshot()
+    result = {"scope": scope, "baseline": baseline, "final": final, "progress": progress,
+              "method": "final process VmHWM minus baseline smaps_rollup Rss",
+              "limits": "earlier peaks can inflate; kernel accounting is approximate; children and swap excluded"}
+    if baseline["status"] != "observed" or final["status"] != "observed":
+        return {**result, "status": "unavailable"}
+    if (baseline["pid"], baseline["starttime_ticks"]) != (final["pid"], final["starttime_ticks"]):
+        return {**result, "status": "unavailable", "reason": "process_identity_changed"}
+    delta = final["peak_rss_bytes"] - baseline["rss_bytes"]
+    if delta < 0:
+        return {**result, "status": "unavailable", "reason": "peak_below_baseline"}
+    return {**result, "status": "observed", "additional_reported_mib": delta / memory_profile.MIB}
+
+
 class Session:
     """One MCP session on a running service."""
 
-    def __init__(self, client, timeout: float) -> None:
+    def __init__(self, client, timeout: float, *, process_observation=None) -> None:
         self.client, self.timeout = client, timeout
+        self.process_observation = process_observation
+
+    def memory_snapshot(self, *, startup=False) -> dict[str, Any]:
+        if self.process_observation is None:
+            return {"status": "unavailable", "reason": "worker_not_observed"}
+        path, launch = self.process_observation
+        try:
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            if recorded["launch_id"] != launch:
+                raise ValueError("observation belongs to another launch")
+            if recorded["status"] != "observed":
+                return recorded
+            current = process_memory(int(recorded["pid"]))
+            if current["status"] != "observed":
+                return current
+            if current["starttime_ticks"] != recorded["starttime_ticks"]:
+                raise ValueError("observation belongs to another process")
+            return recorded if startup else current
+        except (OSError, ValueError, IndexError, KeyError, TypeError) as error:
+            return {"status": "unavailable", "reason": type(error).__name__}
 
     async def call(self, tool: str, **arguments: Any) -> Any:
         result = await asyncio.wait_for(
@@ -754,13 +823,15 @@ class Journey:
             self.timings[name] = round(time.monotonic() - started, 1)
 
     @contextlib.asynccontextmanager
-    async def service(self, label: str) -> AsyncIterator[Session]:
+    async def service(self, label: str, *, measure_memory=False) -> AsyncIterator[Session]:
         """The installed stdio service on this vault, holding the writer lease while it runs."""
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
 
         log = self.work / f"service-{label}.log"
-        server = self.observed_server(label, "--transport", "stdio")
+        observation = ((self.observer_log_root / label / (secrets.token_hex(16) + ".json"), secrets.token_hex(16))
+                       if measure_memory else None)
+        server = self.observed_server(label, "--transport", "stdio", process_observation=observation)
         client = Client(
             StdioTransport(
                 command=server[0],
@@ -781,16 +852,18 @@ class Journey:
                 raise RuntimeError(
                     f"service '{label}' did not start ({error})\n--- {log.name} tail ---\n{tail}"
                 ) from error
-            yield Session(client, self.timeout)
+            yield Session(client, self.timeout, process_observation=observation)
 
-    def observed_server(self, label: str, *arguments: str) -> list[str]:
+    def observed_server(self, label: str, *arguments: str, process_observation=None) -> list[str]:
         """Launch the same installed module with temporary failure-only observation."""
         from _recipient_query_observer import LOG_NAME
 
         # Labels name the harness's observed process launches, not user categories.
         log_path = self.observer_log_root / label / LOG_NAME
+        observation = ([] if process_observation is None else
+                       ["--observe-process", str(process_observation[0]), process_observation[1]])
         return [str(self.python), str(Path(__file__).resolve()),
-                "--observe-query-timeouts", str(log_path), *arguments]
+                "--observe-query-timeouts", str(log_path), *observation, *arguments]
 
     @contextlib.asynccontextmanager
     async def recipient_service(self) -> AsyncIterator[tuple[str, Session]]:
@@ -1131,7 +1204,7 @@ def revised_manifest(recommended: dict[str, Any]) -> str:
 async def create_and_start_import(journey: Journey) -> tuple[str, int]:
     """Steps 2 and 3 up to the interruption; returns the job token and the rows imported at the stop."""
     expected = len(reference_rows(journey.rows))
-    async with journey.service("import") as service:
+    async with journey.service("import", measure_memory=True) as service:
         await file_collections_unchanged(journey, service, "when the store first serves")
         with journey.step("2. record_memory creates the NEW summary collection"):
             created = await service.mutate(
@@ -1181,6 +1254,7 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 why="declare the recommended daily rollups and the field-release lookup",
                 **guards,
             )
+            baseline = service.memory_snapshot()
             job = await service.import_job(WORKOUTS_ID, mode="start", **journey.import_request)
             expect(job["state"] == "running", "the import did not start running", job)
         with journey.step("3. stop the service mid-job"):
@@ -1198,6 +1272,9 @@ async def create_and_start_import(journey: Journey) -> tuple[str, int]:
                 "the import was not mid-job when the service stopped; enlarge the export",
                 at_stop,
             )
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="warm import start through the observed interrupted batch",
+                progress=at_stop["rows"]))
     return job["continuation"], imported
 
 
@@ -1209,7 +1286,8 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
         "rejected": len(journey.rows) - valid_lines,
         "duplicates": valid_lines - len(rows),
     }
-    async with journey.service("resume") as service:
+    async with journey.service("resume", measure_memory=True) as service:
+        baseline = service.memory_snapshot(startup=True)
         with journey.step("3. restart: the job resumes and completes with exact counts"):
             first = await service.import_job(WORKOUTS_ID, mode="status", continuation=continuation)
             expect(
@@ -1246,6 +1324,9 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
                 "the import did not reject the export's invalid rows",
                 done["rejections"],
             )
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="before installed entry point through resumed import completion",
+                progress=done["rows"]))
         with journey.step("4. query and compare with the independent reference"):
             await compare_queries(journey, service)
         with journey.step("7. file collections A and B unchanged"):
@@ -1775,8 +1856,15 @@ def main() -> int:
         from _recipient_query_observer import observe_query_timeouts
 
         log_path = Path(sys.argv[2])
-        sys.argv = ["exomem", *sys.argv[3:]]
+        observation_parser = argparse.ArgumentParser(add_help=False)
+        observation_parser.add_argument("--observe-process", nargs=2)
+        observed, arguments = observation_parser.parse_known_args(sys.argv[3:])
+        sys.argv = ["exomem", *arguments]
         with observe_query_timeouts(log_path):
+            if observed.observe_process:
+                path, launch = observed.observe_process
+                # runpy preserves this address space; PID/starttime cannot detect a future exec replacement.
+                record_process_observation(Path(path), launch)
             runpy.run_module("exomem", run_name="__main__", alter_sys=True)
         return 0
     parser = argparse.ArgumentParser(description=__doc__)

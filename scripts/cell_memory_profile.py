@@ -151,17 +151,18 @@ def parse_smaps_rollup(text: str) -> dict[str, int]:
     return out
 
 
-def read_smaps_rollup() -> dict[str, int] | None:
+def read_smaps_rollup(pid: int | str = "self") -> dict[str, int] | None:
     try:
-        return parse_smaps_rollup(Path("/proc/self/smaps_rollup").read_text())
+        return parse_smaps_rollup((Path("/proc") / str(pid) / "smaps_rollup").read_text())
     except OSError:
         return None
 
 
-def read_peak_rss() -> int | None:
+def read_peak_rss(pid: int | str = "self") -> int | None:
     """``VmHWM``: peak RSS since process start or the last reset, in bytes."""
     try:
-        match = re.search(r"^VmHWM:\s+(\d+)\s+kB", Path("/proc/self/status").read_text(), re.M)
+        # Linux proc fixes this counter's name, numeric format and KiB unit.
+        match = re.search(r"^VmHWM:\s+(\d+)\s+kB", (Path("/proc") / str(pid) / "status").read_text(), re.M)
     except OSError:
         return None
     return int(match.group(1)) * 1024 if match else None
