@@ -6,15 +6,10 @@ independent expected rows and daily results) over the parent change
 move-structured-collections-to-sqlite. It runs as one step of the product E2E
 (`scripts/e2e_product_loop.py`) on the wheel that run already built and installed.
 
-The journey checks the installed release capability before enrolment:
-
-* Disabled wheels prove that summary creation and offline enrolment refuse.
-  The isolated test installation then changes the one release-capability line.
-* Enabled wheels keep their installed bytes throughout the journey.
-
-Both paths prove that an unenrolled vault refuses MCP summary creation, then
-exercise owner enrolment and the released workflow. No environment variable,
-argument or vault state turns the release capability on.
+The journey requires a wheel that releases summary collections and keeps its
+installed capability bytes unchanged. It proves that an unenrolled vault
+refuses MCP summary creation, then exercises owner enrolment and the released
+workflow. It never changes an installed release capability.
 
 All data is invented and generated here from a fixed seed. The expected values
 come from `reference_daily` below, written from the raw rows with `datetime`
@@ -35,7 +30,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import difflib
 import hashlib
 import importlib.util
 import io
@@ -604,8 +598,6 @@ LEASE_TOKEN = "s1-journey-writer-token"
 OPERATOR_TOKEN = "s1-journey-operator-token"
 LEASE_TTL = 4.0
 RECIPIENT_ID = 20261007
-CAPABILITY_OFF = "RELEASED: frozenset[str] = frozenset()"
-CAPABILITY_ON = "RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1})"
 
 
 class Refused(RuntimeError):
@@ -919,33 +911,6 @@ def tree_digest(root: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
-def release_records_summary(capability_file: Path) -> None:
-    """Rewrite the one `RELEASED` line, as the S1.8 release would, and prove nothing else moved."""
-    before = capability_file.read_text(encoding="utf-8").splitlines(keepends=True)
-    hits = [index for index, line in enumerate(before) if line.rstrip("\r\n") == CAPABILITY_OFF]
-    expect(len(hits) == 1, f"{capability_file} must hold exactly one line '{CAPABILITY_OFF}'", hits)
-    after = list(before)
-    ending = before[hits[0]][len(CAPABILITY_OFF):]
-    after[hits[0]] = CAPABILITY_ON + ending
-    # Replace the file, never write through it: uv hard-links installed files to its wheel
-    # cache, and an in-place write would change the cached wheel for every later install.
-    staged = capability_file.with_name(capability_file.name + ".release")
-    staged.write_text("".join(after), encoding="utf-8")
-    shutil.copymode(capability_file, staged)
-    os.replace(staged, capability_file)
-    written = capability_file.read_text(encoding="utf-8").splitlines(keepends=True)
-    changed = [
-        line
-        for line in difflib.unified_diff(before, written, n=0)
-        if line[:1] in "+-" and not line.startswith(("+++", "---"))
-    ]
-    expect(
-        changed == [f"-{before[hits[0]]}", f"+{CAPABILITY_ON}{ending}"],
-        "the released-phase rewrite must change exactly the one RELEASED line",
-        changed,
-    )
-
-
 async def until(check: Callable, *, within: float, what: str, pause: float = 0.1) -> Any:
     """Poll an async check until it returns something truthy."""
     deadline = time.monotonic() + within
@@ -959,7 +924,6 @@ async def until(check: Callable, *, within: float, what: str, pause: float = 0.1
 
 # --- the journey ------------------------------------------------------------------
 
-UNAVAILABLE = "RECORDS_SUMMARY_UNAVAILABLE"
 ENROLMENT_REQUIRED = "COLLECTION_STORE_ENROLLMENT_REQUIRED"
 SERVICE_ACTIVE = "COLLECTION_STORE_SERVICE_ACTIVE"
 #: What the owner's offline enrolment leaves in the vault: the replica and the routing marker.
@@ -1101,54 +1065,18 @@ async def refuse_unenrolled(journey: Journey, service: Session) -> None:
         await file_collections_unchanged(journey, service, "while the vault is unenrolled")
 
 
-async def dark_phase(journey: Journey) -> None:
-    enabled = journey.initial_records_summary_enabled
-    async with journey.service("dark") as service:
+async def unenrolled_phase(journey: Journey) -> None:
+    async with journey.service("unenrolled") as service:
         with journey.step("A/B: file Records and Planning collections, created before the store"):
             await create_file_collections(journey, service)
             await file_collections_unchanged(journey, service, "right after creation")
         with journey.step("1. preserve the invented export and check its receipt"):
             await preserve_export(journey, service)
-        if enabled:
-            await refuse_unenrolled(journey, service)
-        else:
-            with journey.step("0. dark phase: create and import refuse"):
-                await service.refused(
-                    UNAVAILABLE,
-                    "record_memory",
-                    action="create",
-                    manifest_path=WORKOUTS_PATH,
-                    manifest_text=summary_manifest(WORKOUTS_ID, "Workout summaries"),
-                    why="a NEW summary collection, before the release",
-                )
-                # With no store in the vault, an import has no store collection to run into. It
-                # refuses as the file collection or the absent one, not RECORDS_SUMMARY_UNAVAILABLE,
-                # which an enrolled vault under a dark release answers (test_collection_store_service).
-                for target, code in (
-                    (journey.file_collections["records"], "IMPORT_UNAVAILABLE"),
-                    (WORKOUTS_ID, "COLLECTION_NOT_FOUND"),
-                ):
-                    await service.refused(
-                        code,
-                        "record_memory",
-                        action="import",
-                        collection=target,
-                        import_request={"mode": "preview", **journey.import_request},
-                    )
+        await refuse_unenrolled(journey, service)
     enrolment = journey.work / "enrolment.md"
     enrolment.write_text(summary_manifest(ENROLMENT_ID, "Enrolment"), encoding="utf-8")
-    if not enabled:
-        refused = journey.owner_cli(
-            "create", "--manifest-path", ENROLMENT_PATH, "--manifest-file", str(enrolment),
-            "--why", "enrol before the release",
-        )  # fmt: skip
-        expect(
-            refused.returncode == 1 and UNAVAILABLE in refused.stderr,
-            "the owner's offline create did not refuse in the dark phase",
-            {"returncode": refused.returncode, "stderr": refused.stderr[-800:]},
-        )
     leftovers = [name for name in STORE_FILES if (journey.vault / name).exists()]
-    expect(not leftovers, "the dark phase left store files in the vault", leftovers)
+    expect(not leftovers, "the unenrolled phase left store files in the vault", leftovers)
 
 
 def installed_capability_file(journey: Journey) -> Path:
@@ -1164,20 +1092,12 @@ def installed_capability_file(journey: Journey) -> Path:
         timeout=60,
     ).stdout.strip()
     path = Path(found)
-    # The rewrite is of the installed wheel only; never of a source checkout.
+    # Inspect the installed wheel's capability bytes, not a source checkout.
     expect("site-packages" in path.parts, "capability.py is not an installed-wheel file", found)
     return path
 
 
 async def released_phase_enrol(journey: Journey) -> None:
-    if not journey.initial_records_summary_enabled:
-        with journey.step("0. released phase: rewrite the RELEASED line in the test installation"):
-            release_records_summary(installed_capability_file(journey))
-        expect(loop._installed_records_summary_enabled(
-            journey.python, env=loop._clean_env(journey.home, journey.vault), cwd=journey.work,
-        ), "the installed release does not enable summary collections")
-        async with journey.service("unenrolled") as service:
-            await refuse_unenrolled(journey, service)
     with journey.step("2. owner enrols the vault: offline `exomem collections create`"):
         enrolment = journey.work / "enrolment.md"
         enrolled = journey.owner_cli_after_stop(
@@ -1808,6 +1728,7 @@ def print_log_tails(work: Path, chars: int = 1500, *, observer_log_root: Path | 
 def run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     journey = Journey(args)
+    expect(journey.initial_records_summary_enabled, "the installed release does not enable summary collections")
     capability_file = installed_capability_file(journey)
     capability_before = capability_file.read_bytes()
     journey.measurements["installed_capability"] = {
@@ -1823,7 +1744,7 @@ def run(args: argparse.Namespace) -> int:
         )
         coordinator, handle = start_coordinator(journey)
     try:
-        asyncio.run(dark_phase(journey))
+        asyncio.run(unenrolled_phase(journey))
         asyncio.run(released_phase_enrol(journey))
         continuation, imported = asyncio.run(create_and_start_import(journey))
         asyncio.run(resume_import(journey, continuation, imported))
@@ -1833,8 +1754,7 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(unsupported_launcher(journey))
         asyncio.run(narrowing_rollback(journey))
         capability_after = capability_file.read_bytes()
-        if journey.initial_records_summary_enabled:
-            expect(capability_after == capability_before, "the ON journey changed installed capability bytes")
+        expect(capability_after == capability_before, "the journey changed installed capability bytes")
         journey.measurements["installed_capability"]["final_sha256"] = hashlib.sha256(capability_after).hexdigest()
     except BaseException:
         print_log_tails(journey.work, observer_log_root=journey.observer_log_root)

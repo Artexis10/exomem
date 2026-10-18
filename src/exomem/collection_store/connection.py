@@ -242,6 +242,17 @@ class WriterConnection:
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
         self.derived: Any = None
+        self.view_census: Any = None
+
+    def census(self, root):
+        """This writer tenure's disposable view evidence; replacing the handle starts a fresh sweep."""
+        self.require_owner_thread()
+        if self.view_census is None:
+            from .census import Census
+
+            self.view_census = Census(self)
+            self.view_census.bind_root(root)
+        return self.view_census
 
     @property
     def release_cache(self):
@@ -363,6 +374,9 @@ class WriterConnection:
             if self.derived is not None:
                 self.derived.close()
                 self.derived = None
+            if self.view_census is not None:
+                self.view_census.close()
+                self.view_census = None
             self.core.close()
             self.core.engine.dispose()
             self._closed = True

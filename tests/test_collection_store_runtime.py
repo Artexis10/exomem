@@ -93,6 +93,21 @@ def _create(runtime):
                              manifest_text=manifest_text(), why="capture", scaffold=False)
 
 
+def test_a_cached_handle_cannot_bypass_an_older_reader_ceiling_or_leak_a_borrower(runtime, monkeypatch):
+    """A previously cached writer must refuse schema 12 when its simulated reader supports only 11."""
+    _create(runtime)
+    cached = runtime._handle
+    assert cached is not None
+    with monkeypatch.context() as older:
+        older.setattr(schema, "SCHEMA_VERSION", 11)
+        with pytest.raises(connection.CollectionStoreError, match="SCHEMA_NEWER"):
+            with preview_store(runtime.root, runtime):
+                pytest.fail("an older cached handler entered the newer store")
+        assert runtime.manager._store_borrowers == {}
+    with preview_store(runtime.root, runtime) as writer:
+        assert writer.connection.execute("SELECT COUNT(*) FROM collections").fetchone() == (1,)
+
+
 def test_runtime_handoff_drains_read_and_publishes_acknowledged_rows(runtime):
     _create(runtime)
     manager, client = runtime.manager, runtime.manager.client

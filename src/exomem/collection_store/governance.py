@@ -122,13 +122,17 @@ class CanonicalGrantBasis:
     type_version: int
     declaration_hash: str
     domain: str
+    quarantined: bool = False
 
     @property
     def fingerprint(self) -> str:
         from dataclasses import asdict
 
+        payload = asdict(self)
+        if not self.quarantined:
+            del payload["quarantined"]  # Existing non-quarantined grants retain their original fingerprints.
         return hashlib.sha256(
-            f"exomem.collection-grant.{self.domain}.v1\0".encode() + _json(asdict(self)).encode()
+            f"exomem.collection-grant.{self.domain}.v1\0".encode() + _json(payload).encode()
         ).hexdigest()
 
 
@@ -290,7 +294,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     summary = view_mode == "summary"
     audience = declared.default_audience
 
-    def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain):
+    def make(ref, row_id, policy_path, item_type, raw_metadata, row_version, payload, domain, quarantined=False):
         meta = _metadata(raw_metadata)
         subject = membership.MetadataSubject(
             policy_path, (ref,), tuple(meta["projects"]), tuple(meta["tags"]),
@@ -298,7 +302,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         )
         basis = CanonicalGrantBasis(logical_vault_id, store_identity[0], ref, row_version, payload,
                                     subject, audience, version, content_hash,
-                                    name, type_version, declaration_hash, domain)
+                                    name, type_version, declaration_hash, domain, bool(quarantined))
         return CanonicalSubject(cid, row_id, basis)
 
     if identity in (None, path) and row_key is None:
@@ -334,14 +338,14 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     if not include_held or row_key is not None:
         return
     with closing(conn.execute(
-        "SELECT held_id,view_path,governance_json,governance_hash FROM held_candidates "
+        "SELECT held_id,view_path,governance_json,governance_hash,quarantined FROM held_candidates "
         "WHERE collection_id=?" + held_filter + " ORDER BY held_id",
         (cid, *held_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
-            for held_id, path, raw_metadata, payload in batch:
+            for held_id, path, raw_metadata, payload, quarantined in batch:
                 yield make(f"exomem://collection-held/{cid}/{held_id}", held_id, path,
-                           "held-record", raw_metadata, 1, payload, "held")
+                           "held-record", raw_metadata, 1, payload, "held", quarantined)
 
 
 def held_item_key(candidate_json: str) -> str | None:
@@ -782,6 +786,9 @@ class OperationAuthorization:
         Without the item's decision, a hold would show a withheld item's values to an audience
         that every selector of the item withholds it from.
         """
+        if subject.basis.quarantined and not (raw_protection.is_owner(self.who)
+                                               and raw_protection.has_unrestricted_access(self.root, self.who)):
+            return Decision(0)
         decision = self._subject_decision(subject, session=session)
         if decision.level == 0 or subject.basis.domain != "held":
             return decision
@@ -1383,7 +1390,7 @@ class OperationAuthorization:
                     return Decision(0)
                 projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
                 # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-                if projection["kind"] not in {"manifest", "item", "held", "summary"}:
+                if projection["kind"] not in {"manifest", "item", "held", "summary", "log"}:
                     return Decision(0)
                 if projection["kind"] == "item" and not any(
                     subject.row_id == projection["row_id"] for subject in targets[1:]

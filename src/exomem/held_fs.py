@@ -199,7 +199,7 @@ class HeldFilesystem:
     ) -> HeldResult[None]:
         raise NotImplementedError
 
-    def read(self, file: HeldFile) -> HeldResult[bytes]:
+    def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         raise NotImplementedError
 
     def write(self, file: HeldFile, data: bytes | Chunks) -> HeldResult[None]:

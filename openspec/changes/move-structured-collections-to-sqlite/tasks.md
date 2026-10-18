@@ -3,7 +3,8 @@
 - [x] 0.1 `proposal.md`, `design.md`, spec deltas (`structured-collections`, `planning`, `records`, `human-owned-structured-files`, `governance-kernel`, `machine-local-state-placement`, `hosted-vault-portability`), `tasks.md`; including the one-mechanism addendum (`design.md` §14) and the #1457 cost-list answers (§15).
 - [x] 0.2 Storage-engine spike with invented data: `benchmarks/collections_sqlite_spike/`.
 - [x] 0.3 Orchestrator rulings R1–R10, the #1452 sequencing, and "two writers without the lease are unsupported" folded into `design.md` ("Rulings") and the deltas.
-- [ ] 0.4 When #1452's `add-records-bulk-upsert` is archived into the canonical `records` spec, add a `records` MODIFIED delta here for its bulk requirements: store mode drops `BULK_UPSERT_AUDIT_DEPTH`, raises the cap to 500, and makes a batch one transition (`design.md` §9 "Sequencing"). Re-run `openspec validate --all --strict`.
+- [x] 0.4 When #1452's `add-records-bulk-upsert` is archived into the canonical `records` spec, add a `records` MODIFIED delta here for its bulk requirements: store mode drops `BULK_UPSERT_AUDIT_DEPTH`, raises the cap to 500, and makes a batch one transition (`design.md` §9 "Sequencing"). Re-run `openspec validate --all --strict`.
+  The file contract was archived in #1793. The delta preserves its scenarios and states the existing store exceptions for caps, atomicity, receipts and `describe`. Store implementation and proof shipped in #1559, with typed batch support in #1763. `test_500_rows_share_one_transition_and_transaction_without_file_depth` proves the cap, one transition and per-row effects. Strict validation passes all 226 items; this closes the artifact task only.
 - [x] 0.5 Critic amendments 1–11 folded into `design.md` §16 (A1–A11), the sections it names and the deltas. Pinned version links and the compiler-lane rewrite moved out of this change (A11).
 - [x] 0.6 Owner rulings on N1–N4 applied: all confirmed as implemented, and N3's preflight names the exact release (`design.md` "Rulings").
 
@@ -149,6 +150,7 @@ October 4 private runtime/create foundation: independent review approves current
   - `maintain_memory(mode="collections-store-reconcile")` is preview-first and turns every item changed after the fork point into a held correction;
   - `describe` and the doctor probe state that writers without the lease are unsupported.
 - [ ] P1b.7 Cloud: preserve a consistent snapshot of the cell-state-root store in operator export and staged restore, excluding `-wal` / `-shm`; Cloud import runs the importer and proof in staging through the existing helpers.
+  - Configure and verify writer-lease coordination for Cloud cells before enabling store mode. Reuse the existing coordinator contract and validate its store capability, credentials and topology. Snapshot and restore wiring alone does not satisfy this dependency.
 - [ ] P1b.8 **Phase gate.**
   - The round-trip proof is green on the generated legacy vaults.
   - Backup under concurrent writes is integrity-checked at 10,000 items.
@@ -202,11 +204,15 @@ October 4 private runtime/create foundation: independent review approves current
   - a frame edit is held (`VIEW_FRAME_CHANGED`) until `view_frame_edit` exists;
   - a session the owner inserts from a template has no record id, so it is held `VIEW_UNBOUND` until an unbound block can be resumed as an append;
   Older debt: `get_page` answers a log view path as absent for every caller, because `governance.projection_decision` proves no log render; it fails closed.
+  Same-batch follow-through: authenticate the frame base through managed stamps and persisted render contexts; apply frame and row components without accepting the whole buffer early. Keep explicit block resume on ordinary leaves, and prove complete current renders for direct log reads. Preserve EOF newline state through the shared projector/export renderer. The phase gate remains unmet until the matrix and latency evidence pass.
   Residues:
   - a string value written through the API with leading or trailing spaces renders with them, and the adapter strips them, so an untouched block of that row reads as a change;
   - `runtime.RuntimeAdapter._drain_views` checks its deadline only between windows, so one window of `VIEW_BATCH_PATHS` paths can overrun its share.
   A block is compared with its row by values, not spacing (`log_view.stray_lines`): `tests/test_collection_store_edit_back.py::test_a_spacing_only_edit_of_a_log_block_is_rendered_again_without_a_hold` and `tests/test_collection_store_legacy_import.py::test_a_legacy_log_whose_child_rows_are_spaced_by_hand_imports`, both red on the line comparison they replace, and `::test_a_line_in_a_legacy_log_block_that_no_value_holds_refuses_the_import` (a line shaped like a child row, a comment, a row with four cells).
 - [ ] P2.6 `file_watcher` hook for paths `projection_state` owns: lease holder only, settle windows (2 s apply, 10 s hold), the same leaf functions as MCP, REST and CLI.
+  - Keep one bounded notification mailbox and grant due view work a bounded turn under request load. Perform ownership checks and all writes on the store thread.
+  - Page the projection-root census and retain move evidence in disposable TEMP state. Recheck absence and destination custody after a successful complete pass. Summary collections create no per-row filesystem work.
+  - Keep detached bytes quarantined until canonical provenance establishes release. Schema 12 carries that persisted authority floor and excludes incompatible readers.
 - [x] P2.7 Held view corrections in `inspect` (the Records `projection` summary and the Planning diagnostics codes with the exact Planning key set unchanged) and in the attention queue.
   Evidence: `tests/test_collection_store_edit_back.py::test_an_on_disk_item_edit_becomes_one_governed_view_edit_and_a_stale_save_is_held` (the Records summary, diagnostics and the `collection_view_corrections` attention category, then discard), `::test_a_planning_hierarchy_violation_is_held_not_applied` (the Planning diagnostics code with the key set unchanged) and `::test_attention_for_a_withheld_view_correction_equals_attention_without_it`, shown red when the category ignores the caller's release.
 - [ ] P2.8 **Phase gate.**

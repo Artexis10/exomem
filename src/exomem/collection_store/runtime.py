@@ -203,6 +203,7 @@ class _Scope:
             )
 
     def wrap(self, value):
+        from .census import Census
         from .governance import OperationAuthorization, ReleaseCache
         from .inspection import InspectionCache
         from .writer import CollectionWriter
@@ -214,6 +215,7 @@ class _Scope:
         if isinstance(value, (
             sqlite3.Connection, sqlite3.Cursor, connection.WriterConnection,
             CollectionWriter, OperationAuthorization, ReleaseCache, InspectionCache,
+            Census,
             AbstractContextManager, Iterator,
         )):
             return _Borrowed(value, self)
@@ -658,7 +660,10 @@ class CollectionStoreRuntime:
                     if handle.connection.execute(
                             "SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
                         return
-                    after = writer.reconcile_views(limit=VIEW_BATCH_PATHS, after=after, pending_only=True)["next_path"]
+                    after = writer.reconcile_views(
+                        limit=VIEW_BATCH_PATHS, after=after, pending_only=True,
+                        missing_ready=handle.census(self.root).missing_ready
+                        if capability.collection_views_enabled(self.root) else None)["next_path"]
                     passes += after is None
         except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
             logger.warning("pending collection views were not installed before the handoff", exc_info=True)
@@ -706,6 +711,8 @@ DERIVED_RETRY_SECONDS = 2.0
 BACKFILL_BATCH_ROWS = 128
 #: Paths per pending-view publication window: one collection's summary pages at their bounds.
 VIEW_BATCH_PATHS = 16
+# Bound watcher metadata independently of collection size; overflow requests a later census.
+_VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
 OPEN_RETRY_SECONDS = 30.0
 _SERVERS: dict[Path, StoreServer] = {}
@@ -771,6 +778,8 @@ def route(command, vault_root, arguments):
             root, authority.parse_marker(root, raw), selector) is None and not _creating(root, selector)):
         return None
     server = _server(root)
+    if server is None and not summary:
+        return None  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
         raise OpError(
             "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
@@ -962,6 +971,38 @@ def _server(root):
         return server
 
 
+def notify_view_change(root, path, *, destination=None, directory=False):
+    """Wake an existing store thread with a filesystem hint, without opening or calling it."""
+    watched_root = Path(root)
+    root = watched_root.resolve()
+
+    def relative(value):
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            return candidate.as_posix()
+        try:
+            return candidate.relative_to(watched_root).as_posix()
+        except ValueError:
+            try:
+                return candidate.relative_to(root).as_posix()
+            except ValueError:
+                return str(candidate)  # A move outside the vault retains its destination hint.
+
+    change = (relative(path), None if destination is None else relative(destination), directory)
+    with _SERVERS_LOCK:
+        server = _SERVERS.get(root)
+    if server is None:
+        return
+    with server._condition:
+        if server._closed:
+            return
+        if change in server._view_changes or len(server._view_changes) < _VIEW_CHANGE_CAPACITY:
+            server._view_changes[change] = False
+        else:
+            server._view_census_needed = True
+        server._condition.notify_all()
+
+
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
@@ -1007,6 +1048,11 @@ class StoreServer:
         self._views_after = None  # where the current pass over pending views continues
         self._views_passes = 0  # completed passes since the last maintenance wake
         self._edit_back = None  # this store's edit-back settle state, made at its first views tick
+        self._edit_handle = None
+        # False waits for exact-path lookup; True retains an unhandled hint for the census.
+        self._view_changes = {}
+        self._view_census_needed = False
+        self._view_retry_at = 0.0
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
@@ -1065,6 +1111,8 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
+                if self._view_work_due(now):
+                    self._ticks["views"] = min(self._ticks["views"], now)
                 due = min(self._ticks.values())
                 request = self._take(max(0.0, min(due, now + IMPORT_IDLE_SECONDS) - now))
                 if request is not None:
@@ -1073,6 +1121,9 @@ class StoreServer:
                         # The request may have started a job, revised a declaration or left views pending.
                         self._ticks = dict.fromkeys(self._ticks, 0.0)
                         self._views_after, self._views_passes = None, 0
+                    if self._view_work_due(time.monotonic()):
+                        # Saved views get one bounded turn even when requests never stop arriving.
+                        self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif time.monotonic() >= due:
                     # One tick per turn, so a waiting request is taken between any two.
                     name = min(self._ticks, key=self._ticks.get)
@@ -1090,6 +1141,26 @@ class StoreServer:
             request.taken = True
             self._condition.notify_all()
             return request
+
+    def _view_work_due(self, now):
+        if now < self._view_retry_at:
+            return False
+        with self._condition:
+            notified = any(not checked for checked in self._view_changes.values())
+        return notified or (self._ticks["views"] <= now and self._edit_back is not None
+                            and self._edit_back.wait(now) <= 0)
+
+    def take_view_hints(self):
+        """Transfer retained path/move/directory hints and the overflow flag to the store's census.
+
+        The caller takes responsibility for these hints. A watcher never invokes this or expands
+        directories. Both checked and unchecked hints share the one bounded mailbox until taken.
+        """
+        with self._condition:
+            hints, census = tuple(self._view_changes), self._view_census_needed
+            self._view_changes.clear()
+            self._view_census_needed = False
+        return hints, census
 
     def _open(self):
         from ..cli_ops import OpError
@@ -1364,27 +1435,58 @@ class StoreServer:
         view installed by one pass is confirmed current by the next, so two passes follow
         each maintenance wake; views still pending then, which cannot publish yet, wait for
         the next wake or the retry interval. Import status polling preserves these passes
-        and retry deadlines.
+        and retry deadlines. Watcher notifications force exact-path reads. Between requests,
+        every edit-back or census turn uses one bounded window.
         """
         from ..governance import principal
         from . import capability, edit_back
         from .preview import _mutate, preview_store
 
         if self.runtime is None or not capability.views_published(self.root):
+            self._view_retry_at = time.monotonic() + IMPORT_IDLE_SECONDS
             return IMPORT_IDLE_SECONDS
         views = capability.collection_views_enabled(self.root)
-        if views and self._edit_back is None:
+        self._view_retry_at = 0.0 if views else time.monotonic() + IMPORT_IDLE_SECONDS
+        if views and (self._edit_back is None or self._edit_handle is not self.runtime._handle):
             self._edit_back = edit_back.EditBack()
+        with self._condition:
+            changes = [change for change, checked in self._view_changes.items() if not checked][:VIEW_BATCH_PATHS]
+            for change in changes:
+                self._view_changes[change] = True
+            dirty = self._view_census_needed
+            self._view_census_needed = False
+        paths = {path for path, destination, directory in changes if destination is None and not directory}
         # Without edit-back, the publication pass alone sets the next tick, as before it existed.
         wait = self._edit_back.wait(time.monotonic()) if views else float("inf")
+        if views and (changes or dirty):
+            wait = 0.0
         if views and wait <= 0:
             try:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    owned = self._edit_back.notify(writer, paths)
+                    self._edit_back.hints(writer, [change for change in changes
+                                                  if change[0] not in owned or change[1] is not None or change[2]], dirty)
                     wait = self._edit_back.run(writer, now=time.monotonic(), mutate=lambda method, *args, **kwargs:
-                                               _mutate(self.root, method, *args, **kwargs))
+                                               _mutate(self.root, method, *args, **kwargs),
+                                               limit=VIEW_BATCH_PATHS)
+                    self._edit_handle = self.runtime._handle
+                with self._condition:
+                    for change in changes:
+                        if self._view_changes.get(change) is True:
+                            del self._view_changes[change]
             except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
                 logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
                 wait = IMPORT_RETRY_SECONDS
+                self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
+                with self._condition:
+                    self._view_census_needed |= dirty
+                    for change in changes:
+                        if change in self._view_changes:
+                            self._view_changes[change] = False
+        with self._condition:
+            if views and self._view_retry_at <= time.monotonic() \
+                    and any(not checked for checked in self._view_changes.values()):
+                wait = 0.0
         try:
             with closing(connection.open_reader(self.runtime.path)) as reader:
                 if reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None:
@@ -1392,7 +1494,8 @@ class StoreServer:
                     return min(wait, IMPORT_IDLE_SECONDS)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 result = _mutate(self.root, writer.reconcile_views, limit=VIEW_BATCH_PATHS,
-                                 after=self._views_after, pending_only=True)
+                                 after=self._views_after, pending_only=True,
+                                 missing_ready=writer.handle.census(self.root).missing_ready if views else None)
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
             logger.warning("pending collection views could not publish; retrying later", exc_info=True)
             self._views_after = None

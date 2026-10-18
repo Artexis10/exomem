@@ -28,6 +28,18 @@ def _overlay(root: Path, text: str) -> None:
     registry.invalidate(root)
 
 
+def test_conflict_copy_patterns_follow_provider_data_and_case_policy(tmp_path):
+    """A declared provider pattern must classify a copy without requiring a code vocabulary edit."""
+    root = tmp_path / "vault"
+    (root / "Knowledge Base/_Schema").mkdir(parents=True)
+    assert sync_providers.is_conflict_copy(root, "report.SYNC-CONFLICT-20261018-120000-device.md")
+    assert sync_providers.is_conflict_copy(root, "report (Conflicted copy device 202610181200).md")
+    assert not sync_providers.is_conflict_copy(root, "ordinary.md")
+    _overlay(root, "schema_version: 1\nentries:\n  local-copy:\n    label: Local copy\n"
+                   "    attributes: {evidence: conflict-copy-glob, value: '*.fork-copy.md'}\n")
+    assert sync_providers.is_conflict_copy(root, "report.FORK-COPY.md")
+
+
 def test_an_owner_added_sync_folder_withholds_store_custody(tmp_path, monkeypatch):
     """A provider the owner declares is ignored, so the live store lands in its sync root."""
     root = _vault(tmp_path, "Proton Drive", monkeypatch)

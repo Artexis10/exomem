@@ -154,7 +154,11 @@ Previews one Planning or Records collection's manifest-declared human filenames 
 
 ### curation
 
-The governed multi-step mode. The agent authors a closed typed plan from explicit context; Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal. Curation cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. `hydration_recheck` is a same-identity continuation ordinal (1 to 8); the eighth is closure-only and cannot bind another plan.
+The governed multi-step mode. The agent authors a closed typed plan from explicit context. Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
+
+Page steps cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. Typed `append-record` and `update-record` steps support Records collections that use `markdown-items`. Store collections require their serving service; if it is unavailable, a prepared run remains resumable. Planning steps remain unsupported.
+
+`hydration_recheck` is a same-identity continuation ordinal (1 to 8). The eighth is closure-only and cannot bind another plan.
 
 ### tag-variants
 
@@ -162,7 +166,9 @@ Lists tags that differ only by case, separator or plural, grouped with visible p
 
 ### collections-store
 
-Reports whether each file Records and Planning collection would move into the collection store cleanly. It runs only with `dry_run=true`, is owner-only, and writes nothing. For each collection it gives the rows, the legacy audit status, the round-trip proof result and any blocker; a blocker names its code and, for a failed proof, the check letter. Datasets are skipped, and every copy of a duplicated collection identity is blocked. The vault verdict is `migratable`, `blocked` or `nothing_to_migrate`. Moving a vault is a separate offline upgrade step.
+Reports whether each file Records and Planning collection would move into the collection store cleanly. It runs only with `dry_run=true`, is owner-only, and writes nothing. Each collection reports its rows, legacy audit status, round-trip proof and any blocker. A blocker names its code and, for a failed proof, the check letter. Datasets are skipped, and every copy of a duplicated collection identity is blocked.
+
+The report separates vault setup in `coordinator` and, when needed, a vault-level `blocker`. Without configured writer-lease coordination, a vault with collections to migrate stays `blocked` even when every collection passes. The vault verdict is `migratable`, `blocked` or `nothing_to_migrate`. Moving a vault is a separate offline upgrade step.
 
 ### collections-store-export
 

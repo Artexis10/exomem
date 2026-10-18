@@ -99,6 +99,29 @@ When a view file changes and its bytes differ from the last published or pending
 
 For a view stamped with the current row version, it SHALL, after the file has been quiet for a settle window, classify the edit deterministically without interpreting prose. A formatting-only edit SHALL be re-rendered without a transaction. A valid change to declared values or body, made against the item's current row version, SHALL be applied as an ordinary governed `update` (or Planning `update` or `triage`) through the same leaf functions, validation, governance precommit, audit transition and receipt as a tool call, with actor `owner:view-edit`, a reason naming the view, and a request identity derived from the view path, base row version and file hash so that a replay is a no-op; the view SHALL then be re-rendered. A valid manifest edit SHALL be applied as a governed `revise`. An edit that is ambiguous, schema-breaking, violates Planning lifecycle or hierarchy rules, changes a system property, conflicts with a newer row version, deletes a view, moves a view out of its collection's source root, adds an unbound file under a projection root, or is a file-sync conflict copy SHALL become a held view correction carrying the human's bytes and field-addressed diagnostics, and SHALL NEVER silently overwrite or discard either the store row or the human's edit. A move of a view within its collection's source root with an intact current stamp SHALL be a governed `view_move` transition that updates the item's view path, re-authorized for the new path, and SHALL NOT re-render the old path. A later valid edit of the same view SHALL resolve a held correction of bytes at that view path, which is an invalid edit kept in place or a deleted view. A held correction of displaced bytes, such as a stale-buffer save (`VIEW_CONFLICT`), SHALL be resolved only by resuming or discarding it. History pages SHALL be read-only: edits to them SHALL be ignored and re-rendered.
 
+The watcher SHALL enqueue bounded path and move hints without opening the store or waiting for its thread. The store thread SHALL check ownership and grant due work a bounded turn between requests. Overflow and directory events SHALL request a census. Census and settling metadata SHALL remain bounded in memory, with disposable disk-backed state for larger observations. A census SHALL examine materialized files, without per-row filesystem work for summary collections.
+
+A complete census SHALL establish only the candidates observed during that sweep, not an atomic filesystem snapshot. Partial or failed sweeps SHALL NOT authorize missing-path effects. Before adopting a move, the writer SHALL recheck the collection basis, old-path absence, destination custody, identity, stamp, bytes and authorization. Observed duplicates SHALL remain ambiguous. The move SHALL keep the payload version, advance the collection generation, and retire or rebind pending installations without recreating the old path. Replay identity SHALL include the observed generation. Publication SHALL preserve unseen bytes through its existing no-clobber rules.
+
+Orphan cleanup SHALL remove an unowned stage or aside only when its bytes match a committed render or a complete durable held copy. Unknown bytes SHALL remain untouched and cleanup SHALL report pending.
+
+#### Scenario: A refused move commit retains unknown aliases
+- **WHEN** a move captures unknown bytes from a stage alias and SQL COMMIT fails
+- **THEN** the stage alias and destination remain untouched
+- **AND** successful cleanup starts only after the hold commits and fresh held handles prove the same object, versions and digest
+
+#### Scenario: A second save cannot clear unresolved move provenance
+- **WHEN** an unknown moved view changes again before canonical installation is confirmed, including after hold discard or restart
+- **THEN** every differing observation and displaced input stays quarantined without applying an ordinary row edit
+- **AND** only fresh held proof of a committed canonical target clears its pending provenance in an existing confirmation transaction
+- **AND** preserved old descriptors retain their own quarantine state, while later ordinary edits follow normal rules after canonical confirmation
+
+A file moved outside its source root SHALL remain at the destination under ordinary destination permissions. Proven move evidence SHALL preserve a correction and restore the canonical view. Unknown correction bytes SHALL retain quarantine; no move hint or path adoption SHALL establish their release authority.
+
+#### Scenario: A stage changes after a move drops its token ownership
+- **WHEN** a move commits before cleanup, and the remaining stage changes before orphan recovery
+- **THEN** recovery preserves its unknown bytes and reports pending cleanup instead of deleting them by filename
+
 #### Scenario: A value edit in Obsidian becomes an audited update
 - **WHEN** a user changes one declared field in an item view and saves
 - **THEN** after the settle window the store holds the new value, one audit transition names the view edit, and the view is re-rendered
@@ -126,6 +149,26 @@ For a view stamped with the current row version, it SHALL, after the file has be
 #### Scenario: A moved view keeps its identity
 - **WHEN** a user renames an item view within its collection folder and the editor rewrites links to it
 - **THEN** a `view_move` transition records the new path and the old path is not re-rendered
+
+#### Scenario: An interrupted census does not mistake a rename for deletion
+- **WHEN** a view moves to a directory the census has not reached and the sweep is interrupted
+- **THEN** the incomplete sweep preserves the moved file and does not recreate its old path
+
+#### Scenario: Repeated moves remain separate transitions
+- **WHEN** an unchanged item moves from one path to another, back, and again to the second path
+- **THEN** each move records its own transition while the payload version remains unchanged
+
+#### Scenario: A later duplicate survives reconciliation
+- **WHEN** another file acquires a moved item's stamp after the census has examined that file
+- **THEN** publication preserves both files and a later census classifies the duplicate without claiming an atomic earlier snapshot
+
+#### Scenario: Summary row count does not multiply filesystem work
+- **WHEN** a summary collection gains canonical rows without gaining materialized pages
+- **THEN** its census examines only its materialized files and performs no per-row filesystem reads
+
+#### Scenario: Request load does not starve settled edits
+- **WHEN** foreground requests remain queued after a view's settle window expires
+- **THEN** the store thread gives due edit-back work bounded turns and applies the edit through the normal writer
 
 #### Scenario: Deleting a view does not delete the item
 - **WHEN** a user deletes an item view file
@@ -418,6 +461,14 @@ The substrate SHALL support three declared storage strategies. For `markdown-log
 
 Chronological-log child rows SHALL declare a bounded `container_field` in addition to their delimiter and fields; that container SHALL be a declared array-of-object item-schema field, so adapters do not impose domain field names. For the log layout, the store SHALL keep the view's frame, meaning the bytes outside the declared item section, its UTF-8 BOM, its newline style and its final-newline state, and SHALL re-emit them byte-identically. Markdown parsing of views and legacy files SHALL accept exactly one leading UTF-8 BOM for frontmatter parsing. A log-layout view SHALL stay within its rendering size cap, and a write that would exceed it SHALL refuse with a remediation to use the items layout.
 
+#### Scenario: EOF newline state survives the shared log renderer
+- **WHEN** an imported log with no suffix is rendered or exported after a row write
+- **THEN** the renderer keeps its final-newline state and inserts only the separator needed before a first block
+
+#### Scenario: A trailing section keeps its authored whitespace
+- **WHEN** a log with a trailing section is projected and exported
+- **THEN** both paths preserve the complete suffix and its whitespace
+
 #### Scenario: Log layout renders one readable history file
 - **WHEN** a log-layout collection is queried or safely mutated
 - **THEN** the store is canonical and its log view shows every item as a readable block in declared order, and no generated dataset is promoted implicitly
@@ -429,6 +480,64 @@ Chronological-log child rows SHALL declare a bounded `container_field` in additi
 #### Scenario: Dataset stays directly editable
 - **WHEN** a dataset-backed collection uses CSV, TSV, or JSON
 - **THEN** its rows remain readable and editable with ordinary tools, Exomem queries them from the file, and dataset append/update refuses rather than reserializing the file
+
+### Requirement: Log frame edits preserve row and source history
+
+A newly rendered store log view SHALL carry a managed frame stamp that binds the store, instance, rendered generation and full canonical frame hash. The stamp SHALL NOT become authored frame content or appear in reverse export. Existing persisted render contexts SHALL retain authentic frame bases. Current metadata SHALL NOT manufacture historical frame proof.
+
+The decoder SHALL accept one complete managed comment line outside code fences in the frame prefix or declared item section. It SHALL NOT use a marker from a later section. A fenced marker SHALL remain authored text. The renderer SHALL place the marker before an unterminated empty EOF heading and normally after the declared heading. Removing it SHALL restore authored bytes without normalizing a separator.
+
+Frame comparison SHALL use the canonical renderer's frame representation for the current row occupancy in the same snapshot. A required first-block separator alone SHALL NOT count as an authored frame edit. A real edit SHALL retain its captured proposal bytes and use the stored canonical frame hash as its authenticated base.
+
+A settled frame edit SHALL apply only against an authentic recorded base whose frame hash remains current. Unrelated row commits SHALL NOT invalidate an unchanged frame base. The internal writer SHALL record one content-free `view_frame_edit` transition by `owner:view-edit`, advance the collection generation, and queue the log view. It SHALL change no item version or item effect. A missing or stale frame base SHALL preserve the complete buffer as a held correction.
+
+The writer SHALL validate the whole log before applying components. Frame and row changes SHALL use their respective leaves and deterministic replay identities. A component commit SHALL NOT accept the whole buffer digest. Publication SHALL displace that buffer only after every component is canonical or durably held.
+
+#### Scenario: Unrelated rendered rows do not expire an unchanged frame base
+- **WHEN** an edited buffer outlives at least three separately rendered row generations and its canonical frame stays unchanged
+- **THEN** a persisted context for the same path, collection and log kind may authenticate its full frame hash at a later generation
+- **AND** both classification and mutation require integer generations ordered from the stamp through the context to the current collection
+- **AND** a different canonical frame rejects the edit, while an exact frame revert permits an unapplied edit without relaxing row or held-byte governance
+
+Explicit resume of a held log block SHALL parse exactly one block under the declared grammar and reject stray text. A stale-block update SHALL rebase against its recorded row version without reverting untouched newer fields. An unbound template block SHALL use ordinary append validation, caller overrides and key derivation. Log blocks SHALL NOT adopt item-file filenames.
+
+A direct log read SHALL require release of the manifest, every canonical row and complete fields. It SHALL prove exact current rendered bytes in the same snapshot and retain additional frame membership restrictions. An edited, stale or partly withheld log SHALL answer as absent.
+
+#### Scenario: A mixed log save preserves every component
+- **WHEN** a saved buffer changes its frame and several rows, including an invalid or unbound block
+- **THEN** valid components commit through their leaves and every remaining byte stays in the buffer or a durable correction
+
+#### Scenario: A crash between component commits is replayable
+- **WHEN** the writer stops after one component commits and before the remaining components finish
+- **THEN** retry preserves the original buffer, commits each remaining valid component once and adds no duplicate transition
+
+#### Scenario: A stale frame cannot replace a newer frame
+- **WHEN** a buffer retains unchanged row stamps but names an older frame base
+- **THEN** the current frame stays canonical and the complete stale buffer becomes a correction
+
+#### Scenario: A row commit does not stale the frame
+- **WHEN** a row commit advances the generation without changing the canonical frame hash
+- **THEN** an authentic frame edit from the earlier generation can apply without reverting that row
+
+#### Scenario: An old context cannot acquire invented frame proof
+- **WHEN** an edited frame names a context that retained no authenticated frame hash
+- **THEN** the writer preserves the buffer as a correction rather than deriving its base from current metadata
+
+#### Scenario: A held block resumes without reverting untouched fields
+- **WHEN** the owner resumes a stale block after another field changes through the API
+- **THEN** the ordinary update applies the block's changes and preserves the untouched newer field
+
+#### Scenario: A template block resumes through ordinary append
+- **WHEN** the owner resumes an unbound template block with inferred identity
+- **THEN** ordinary validation derives its key and appends once, while a refusal preserves the held bytes
+
+#### Scenario: An empty unterminated log accepts prose and its first template block
+- **WHEN** an owner edits prose before an empty EOF heading, then inserts a template below it
+- **THEN** the managed marker adds no authored newline, the frame applies, and the template remains separately resumable
+
+#### Scenario: A direct log read proves the complete current render
+- **WHEN** a caller requests a generated log path
+- **THEN** only the exact current render is readable after every row and complete fields are released; edited or withheld content stays absent
 
 ### Requirement: Imported legacy audit gaps can be explicitly rebaselined
 

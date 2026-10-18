@@ -94,6 +94,30 @@ def refused(work, code=capability.UNAVAILABLE):
     assert error.value.code == code, error.value
 
 
+def test_a_withheld_selection_without_a_service_is_indistinguishable_from_missing(service):
+    """Routing must not disclose marker ownership before collection visibility is checked."""
+    from test_collection_field_admission import GUEST
+    from test_governance_egress import write_rule, write_scope
+
+    root = service.root
+    service.stop()
+    write_scope(root, paths="Records/**")
+    write_rule(root, ceiling=0)
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    before = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")}
+    errors = []
+    with request_scope(GUEST):
+        for selector in (CID, "99999999-9999-4999-8999-999999999999"):
+            with pytest.raises((OpError, collections.CollectionError, CollectionStoreError)) as error:
+                writer_lease.invoke_command(command, root, action="append", collection=selector,
+                                            item={"title": "Proposal"}, why="capture")
+            errors.append((error.value.code, error.value.message if isinstance(error.value, OpError) else error.value.reason))
+    assert errors[0] == errors[1] and errors[0][0] == "COLLECTION_NOT_FOUND"
+    refused(lambda: call(root, "record_memory", action="append", collection=CID,
+                         item={"title": "Proposal"}, why="capture"), "COLLECTION_STORE_UNAVAILABLE")
+    assert {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")} == before
+
+
 @dataclass
 class Service:
     root: Path

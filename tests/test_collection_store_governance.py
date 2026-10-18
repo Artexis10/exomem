@@ -17,11 +17,91 @@ from exomem.governance.principal import RequestPrincipal, owner_principal, reque
 from exomem.record_memory import record_memory
 
 
+def test_quarantined_hold_requires_unrestricted_owner_despite_a_broad_grant(store, monkeypatch):
+    """Unproven detached bytes must not inherit an open manifest or a recipient's grant authority."""
+    from test_collection_store_edit_back import passes
+    from test_governance_egress import GRANT_ID, SCOPE_ID, _gov_dir
+
+    from exomem.collection_store import capability, governance
+    from exomem.governance import raw_protection
+
+    create(store)
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.COLLECTION_VIEWS_V1})
+    source = store.root / "Knowledge Base/Records/Work/Items/Detached.md"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"---\ntitle: Candidate\n---\nUnknown origin\n")
+    passes(store, 0.0, 2.0)
+    reference, quarantine = store.connection.execute("SELECT held_id,quarantined FROM held_candidates").fetchone()
+    assert quarantine == 1
+    write_scope(store.root, paths="Records/**")
+    grant = _gov_dir(store.root) / "grants" / "broad.yaml"
+    grant.parent.mkdir(parents=True)
+    grant.write_text(f'governance_version: 1\nid: {GRANT_ID}\nkind: standing\n'
+                     f'scope_ids: ["{SCOPE_ID}"]\naudience: {_external().audience_id}\nceiling: 6\n')
+    for who, unrestricted, visible in ((owner_principal(), True, True),
+                                        (owner_principal(), False, False), (_external(), True, False)):
+        monkeypatch.setattr(raw_protection, "has_unrestricted_access", lambda root, principal, value=unrestricted: value)
+        with request_scope(who), store.read_snapshot():
+            subject = next(subject for subject in governance.subjects(store.connection, CID, "test")
+                           if subject.row_id == reference)
+            assert (store._operation.decision(subject).level == 6) is visible
+        if not visible:
+            with request_scope(who), pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                store.append_record(CID, held=reference, why="resume")
+
+
 def withhold(store):
     write_scope(store.root, paths="Records/**")
     write_rule(store.root, ceiling=0)
     compiled = policy.load(store.root)
     assert not compiled.empty and not compiled.blocked
+
+
+@pytest.mark.parametrize("protection", ["row", "field"])
+def test_a_current_log_read_requires_every_row_and_complete_fields(store, protection):
+    """A raw log cannot release a hidden sibling or evade field release through its frame."""
+    from test_collection_store_writer import log_manifest_text
+
+    from exomem import commands
+    from exomem.collection_store import authority
+
+    text = log_manifest_text()
+    if protection == "field":
+        text = text.replace("    details:", "    place: {type: string, classification: location}\n    details:")
+    store.create_collection(manifest_path(), text, why="create")
+    store.append_record(CID, item={"title": "One", "details": []}, item_key=KEY, why="capture")
+    receipt = store.append_record(CID, item={"title": "Two", "details": []}, item_key=OTHER, why="capture")
+    store.reconcile_views()
+    path = receipt["affected_paths"][0]
+    sid = store.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
+    marker = authority.marker_path(store.root)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
+        "authority_epoch": 1, "collections": [authority.marker_entry(CID, manifest_path(), sid, "records", path,
+                                                                 "markdown-log")],
+        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1}}))
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert commands.op_get(store.root, path=path)["path"] == path
+        rendered = (store.root / path).read_bytes()
+        (store.root / path).write_bytes(b"Unsaved prose.\n" + rendered)
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(store.root, path=path)
+        (store.root / path).write_bytes(rendered)
+        store.update_record(CID, item_key=OTHER, changes={"title": "Changed"}, why="agent",
+                            expected_container_hash=receipt["after_container_hash"],
+                            expected_item_version=receipt["after_item_hash"])
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(store.root, path=path)
+        store.reconcile_views()
+        assert "Changed" in commands.op_get(store.root, path=path)["body"]
+    if protection == "row":
+        write_scope(store.root, paths="Unrelated/**")
+        scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{OTHER}]\n")
+        write_rule(store.root, ceiling=0)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_get(store.root, path=path)
 
 
 def test_withheld_append_refuses_without_changing_stored_data(store):

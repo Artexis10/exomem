@@ -55,6 +55,8 @@ INVALID = "VIEW_INVALID"
 FOREIGN = "VIEW_FOREIGN"
 DELETED = "VIEW_DELETED"
 UNBOUND = "VIEW_UNBOUND"
+MOVED = "VIEW_MOVED"
+CONFLICT_COPY = "VIEW_CONFLICT_COPY"
 
 #: PROVISIONAL (operator choice O2, not yet ruled): an invalid item or manifest view keeps the
 #: owner's bytes at the view path, held in place, and re-renders only when the hold is
@@ -65,6 +67,8 @@ KEEP_INVALID_IN_PLACE = True
 #: The view kinds edit-back reads; the others are generated read-only output.
 # nosemgrep: ep-word-membership, ep-word-set -- The projection_state.kind CHECK fixes these kinds.
 EDITABLE_KINDS = ("item", "manifest", "log")
+# The projection_state.kind CHECK fixes these files; summary pages are observed but never edited back.
+OBSERVED_KINDS = (*EDITABLE_KINDS, "summary")
 #: The kinds whose invalid edit stays at its view path (O2). A log view shows every row, so a hold
 #: kept there would keep every later row out of it; a log view's holds take its bytes aside instead.
 # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
@@ -77,9 +81,8 @@ _UNSTAMPED = {
               "that view and save it, then discard this correction.",
 }
 _FRAME_CHANGED = {
-    "code": "VIEW_FRAME_CHANGED", "reason": "the text outside the log's item section changed",
-    "remedy": "The store keeps the log's frame as it was imported or created and applies no edit to it yet. "
-              "Discard this correction to keep the stored frame.",
+    "code": "VIEW_FRAME_CHANGED", "reason": "the edited log frame has no authentic current frame base",
+    "remedy": "Copy the prose into the current log view, then discard this correction.",
 }
 _BLOCK_TEXT = {
     "code": "VIEW_BLOCK_TEXT", "reason": "a log block holds text that is none of its declared values",
@@ -126,6 +129,12 @@ def request_id(path: str, base: int | None, digest: str) -> str:
     return hashlib.sha256(f"exomem-view-edit:v1\0{path}\0{base}\0{digest}".encode()).hexdigest()
 
 
+def frame_request_id(path: str, stamp: dict, proposed: str) -> str:
+    """Replay one frame edit independently of row commits from the same buffer."""
+    return hashlib.sha256(b"exomem-view-frame:v1\0" + path.encode() + b"\0"
+                          + records._canonical_json(stamp) + b"\0" + proposed.encode()).hexdigest()
+
+
 def why(path: str) -> str:
     reason = f"edited view {path}"
     return reason if len(reason.encode()) <= records._MAX_WHY_BYTES else "edited a collection view"
@@ -148,6 +157,7 @@ class Classification:
     path: str | None = None
     raw: bytes | None = None
     blocks: tuple = ()
+    frame: Classification | None = None
 
 
 def _refused(error: collections.CollectionError) -> tuple:
@@ -324,7 +334,7 @@ def _parsed_view(manifest_text: str, stamp) -> tuple:
 def _classify_log(writer, projection, raw, refusals) -> Classification:
     """Classify a log view (design §6): its frame and stamps first, then block by block.
 
-    The whole view is held when it does not parse, its frame changed, a block carries another
+    The whole view is held when it does not parse, its frame lacks a current base, a block carries another
     store's stamp, or it shows stored rows and no block carries a stamp. Otherwise each block
     is classified by the A2 stamp rules against its own row, and each stored row with no block
     is a removed block.
@@ -334,8 +344,8 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
     generation, frame_json = conn.execute("SELECT generation,log_frame_json FROM collections WHERE collection_id=?",
                                           (manifest.collection_id,)).fetchone()
     try:
-        parsed = record_formats.MarkdownLogAdapter(writer.root, manifest).read_bytes(raw)
-        start, end = log_view.bounds(manifest, raw, parsed.records)
+        authored, frame_stamp = log_view.split_frame_stamp(manifest, raw)
+        parsed = record_formats.MarkdownLogAdapter(writer.root, manifest).read_bytes(authored)
     except collections.CollectionError as error:
         return Classification(INVALID, None, generation, generation, issues=_refused(error))
     except UnicodeError:
@@ -345,16 +355,31 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
         return Classification(INVALID, None, generation, generation, issues=tuple(
             {"code": diagnostic.code, "reason": diagnostic.reason} for diagnostic in parsed.diagnostics))
     frame = log_view.load(frame_json, manifest)
-    if raw[:start] != frame.text.encode() or raw[end:] != frame.suffix.encode():
-        return Classification(INVALID, None, generation, generation, issues=(_FRAME_CHANGED,))
-    blocks = [(record, raw[record.span.start:record.span.end]) for record in parsed.records]
+    proposed = log_view.capture(manifest, authored, parsed.records)
+    blocks = [(record, authored[record.span.start:record.span.end]) for record in parsed.records]
     stamps = [record_formats.read_log_block_stamp(block) for _, block in blocks]
     identity = views.store_identity(conn)
     lineage = {entry["instance_id"] for entry in
                json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
-    for stamp in stamps:
+    for stamp in [frame_stamp, *stamps]:
         if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
             return Classification(FOREIGN, stamp, stamp["v"])
+    if refusals.get(None):
+        return Classification(INVALID, None, generation, generation, issues=tuple(refusals[None]))
+    proposed_hash = log_view.frame_hash(proposed)
+    frame_found = Classification(SAME)
+    has_blocks = conn.execute("SELECT 1 FROM items WHERE collection_id=? LIMIT 1", (manifest.collection_id,)).fetchone() is not None
+    # Compare the renderer's separator without changing the captured proposal for a real frame edit.
+    if proposed_hash != log_view.frame_hash(log_view.frame_for_render(frame, has_blocks=has_blocks)):
+        if frame_stamp is None:
+            return Classification(INVALID, None, generation, generation, issues=(_FRAME_CHANGED,))
+        replay = conn.execute("SELECT 1 FROM txns WHERE request_id=? AND collection_id=? AND operation='view_frame_edit'", (
+            frame_request_id(projection["path"], frame_stamp, proposed_hash), manifest.collection_id)).fetchone()
+        if not replay:
+            if not authentic_frame_base(writer, projection, frame_stamp) or frame_stamp["h"] != log_view.frame_hash(frame):
+                return Classification(INVALID, None, generation, generation, issues=(_FRAME_CHANGED,))
+            frame_found = Classification(None, frame_stamp, frame_stamp["v"], generation,
+                                         change={"frame_json": proposed.as_json(), "frame_hash": proposed_hash})
     stored = {row["item_key"]: row for row in log_view.rows(conn, manifest)}
     if all(stamp is None for stamp in stamps) and any(record.identity.key in stored for record, _ in blocks):
         # Only the exact imported bytes may be unstamped, and those are the published digest.
@@ -384,7 +409,20 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
             continue
         found.append(Classification(DELETED, None, row["row_version"], row["row_version"], path=row["view_path"],
                                     raw=b""))
-    return Classification(None, None, generation, generation, blocks=tuple(found))
+    return Classification(None, None, generation, generation, blocks=tuple(found), frame=frame_found)
+
+
+def authentic_frame_base(writer, projection, stamp) -> bool:
+    """Only persisted render contexts can authenticate a buffer's frame stamp."""
+    row = writer.connection.execute(
+        "SELECT p.install_json,c.generation FROM projection_state p JOIN collections c USING(collection_id) "
+        "WHERE p.path=? AND p.kind='log'", (projection["path"],)).fetchone()
+    descriptor = json.loads(row[0]) if row and row[0] else {}
+    return any(isinstance(context, dict) and context.get("path") == projection["path"]
+               and context.get("collection_id") == projection["collection_id"] and context.get("kind") == "log"
+               and type(context.get("row_version")) is int and 1 <= stamp["v"] <= context["row_version"] <= row[1]
+               and context.get("frame_hash") == stamp["h"]
+               for context in [descriptor.get("render_context"), *descriptor.get("source_contexts", [])])
 
 
 def _shown(manifest, key, values, name) -> bool:
@@ -468,6 +506,24 @@ def resumed_update(writer, held, manifest, before) -> dict:
     """
     from . import typed_storage
 
+    if manifest.storage.strategy == "markdown-log":
+        if held["code"] != CONFLICT:
+            raise records._held_not_found()
+        record = log_view.decode_block(writer.root, manifest, held["held_bytes"])
+        stamp = record_formats.read_log_block_stamp(held["held_bytes"])
+        identity = views.store_identity(writer.connection)
+        lineage = json.loads(writer.connection.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
+        version = writer.connection.execute("SELECT payload_hash FROM item_versions WHERE row_id=? AND row_version=?",
+                                            (before["row_id"], held["base_row_version"])).fetchone()
+        if (record.identity.inferred or record.identity.key != before["item_key"] or stamp is None
+                or stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}
+                or stamp["v"] != held["base_row_version"] or version is None or version[0][:12] != stamp["h"]):
+            raise records._held_not_found()
+        base = typed_storage.version_values(writer.connection, before["row_id"], stamp["v"])[0]
+        changes, deleted = _edit(manifest, before["item_key"], base,
+                                 collections.normalize_item_values(manifest.schema, record.values))
+        return {"action": "update", "item_key": before["item_key"], "changes": changes,
+                "delete_fields": deleted, "body": None}
     try:
         frontmatter, body, _ = vault.parse_frontmatter(held["held_bytes"].decode(), strict=True)
         base, base_body = typed_storage.version_values(writer.connection, before["row_id"], held["base_row_version"])
@@ -479,6 +535,15 @@ def resumed_update(writer, held, manifest, before) -> dict:
     changes, deleted = _changes(base, values)
     return {"action": "update", "item_key": key, "changes": changes, "delete_fields": deleted,
             "body": None if body == base_body else body}
+
+
+def resumed_append(writer, held, manifest) -> dict:
+    """Decode older held log templates lazily, through the same declared block grammar."""
+    if held["code"] != UNBOUND or held["candidate"].get("view") == "log":
+        raise records._held_not_found()
+    record = log_view.decode_block(writer.root, manifest, held["held_bytes"])
+    return {"action": "append", "item": collections.normalize_item_values(manifest.schema, record.values),
+            "item_key": None if record.identity.inferred else record.identity.key, "body": ""}
 
 
 @dataclass(frozen=True)
@@ -506,7 +571,13 @@ def _served(writer, cid) -> bool:
     if not authority.projection_eligible(writer, {"collection_id": cid}):
         return False
     try:
-        _, manifest, _ = writer._collection(cid)
+        row = writer.connection.execute(
+            "SELECT c.manifest_path,m.manifest_text FROM collections c JOIN collection_manifests m "
+            "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
+            (cid,)).fetchone()
+        if row is None:
+            return False
+        manifest = collections.parse_manifest_bytes(writer.root, row[0], row[1].encode())
     except (collections.CollectionError, connection.CollectionStoreError):
         return False
     return capability.summary_route_open(writer.root, manifest)
@@ -516,21 +587,27 @@ def _stat(version) -> str:
     return f"{version.identity.device}:{version.identity.inode}:{version.size}:{version.mtime_ns}"
 
 
-def observe(writer, paths=None) -> list[Observation]:
+def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) -> list[Observation]:
     """Read the item, manifest and log views a pass checks, outside the write transaction.
 
     A view whose stat identity matches the one recorded with its current bytes costs one
     stat. ``paths`` limits the pass to the views still settling. A collection behind a
-    closed route fence is not read at all.
+    closed route fence is not read at all. ``force`` bypasses the stat shortcut for explicit
+    notifications and views still settling, whose edited bytes can share the published stat.
     """
+    from .runtime import VIEW_BATCH_PATHS
+
+    limit = VIEW_BATCH_PATHS if limit is None else limit
     with writer.read_snapshot():
         if paths is None:
             cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','log') ORDER BY path")
+                "SELECT * FROM projection_state WHERE kind IN (SELECT value FROM json_each(?)) "
+                "AND path>? ORDER BY path LIMIT ?", (json.dumps(OBSERVED_KINDS), after, limit))
         else:
             cursor = writer.connection.execute(
-                "SELECT * FROM projection_state WHERE kind IN ('item','manifest','log') AND path IN "
-                "(SELECT value FROM json_each(?)) ORDER BY path", (json.dumps(sorted(paths)),))
+                "SELECT * FROM projection_state WHERE kind IN (SELECT value FROM json_each(?)) AND path IN "
+                "(SELECT value FROM json_each(?)) ORDER BY path LIMIT ?",
+                (json.dumps(OBSERVED_KINDS), json.dumps(sorted(paths)), limit))
         names = [column[0] for column in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         admitted = {cid: _served(writer, cid) for cid in {row["collection_id"] for row in rows}}
@@ -545,6 +622,8 @@ def observe(writer, paths=None) -> list[Observation]:
             try:
                 if relative not in parents:
                     opened = fs.parent(relative)
+                    if not opened.ok and opened.error.code != "MISSING":
+                        raise opened.error
                     parents[relative] = stack.enter_context(opened.require()) if opened.ok else None
                 parent = parents[relative]
                 if parent is None:
@@ -553,17 +632,22 @@ def observe(writer, paths=None) -> list[Observation]:
                 opened = fs.file(parent, Path(row["path"]).name)
                 if not opened.ok:
                     if opened.error.code != "MISSING":
-                        continue
+                        raise opened.error
                     found.append(Observation(row["path"], row, None, None))
                     continue
                 with opened.require() as file:
                     before = file.version()
-                    if _stat(before) == row["stat_identity"] and row["state"] in ("current", "held"):
+                    if row["path"] not in force and _stat(before) == row["stat_identity"] \
+                            and row["state"] in ("current", "held"):
                         continue
-                    raw = fs.read(file).require()
+                    bound = collections._MAX_MANIFEST_BYTES if row["kind"] == "manifest" else (
+                        record_formats._MAX_LOG_BYTES if row["kind"] == "log" else record_formats._MAX_ITEM_BYTES)
+                    raw = fs.read(file, max_bytes=bound).require()
                     if file.version() != before:
-                        continue  # still being written; the next pass reads it again
-            except (held_fs.HeldFsError, OSError):
+                        raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
+            except (held_fs.HeldFsError, OSError) as error:
+                if errors is not None:
+                    errors(row["collection_id"], row["path"], getattr(error, "code", "IO_ERROR"))
                 continue
             found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw))
     return found
@@ -588,51 +672,122 @@ class EditBack:
     """
 
     def __init__(self):
-        self._seen: dict[str, _Seen] = {}
-        self._next_full = 0.0
+        self._identity = None
+        self._next_full = self._next_work = 0.0
+        self._census_turn = False
+        self.last_status = {"status": "pending", "source": "current handle view census"}
 
-    def run(self, writer, *, now: float, mutate: Callable | None = None) -> float:
-        """Run the pass that is due and return the seconds until the next one."""
+    def _state(self, writer):
+        identity = writer.handle._inspection_identity
+        if identity is not self._identity:
+            self._identity = identity
+            self._next_full = self._next_work = 0.0
+        return writer.handle.census(writer.root)
+
+    def hints(self, writer, changes, dirty=False):
+        self._state(writer).hints(changes, dirty)
+        if changes or dirty:
+            self._next_work = 0.0
+
+    def notify(self, writer, paths) -> set[str]:
+        """Queue exact editable paths in the handle's TEMP state, never from a copied stamp."""
+        state = self._state(writer)
+        if not paths:
+            return set()
+        with writer.read_snapshot():
+            # The projection_state.kind CHECK fixes OBSERVED_KINDS.
+            owned = {path for path, kind in writer.connection.execute(
+                "SELECT path,kind FROM projection_state WHERE path IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(paths)),)) if kind in OBSERVED_KINDS}
+        state.enqueue(owned)
+        if owned:
+            self._next_work = 0.0
+        return owned
+
+    def run(self, writer, *, now: float, mutate: Callable | None = None,
+            limit: int | None = None, full_pass: bool = True) -> float:
+        """Advance one bounded view window; periodic scans and direct notifications share turns."""
+        from .runtime import VIEW_BATCH_PATHS
+
+        limit = VIEW_BATCH_PATHS if limit is None else limit
         mutate = mutate or (lambda method, *args, **kwargs: method(*args, **kwargs))
-        full = now >= self._next_full
-        if not full and self.wait(now) > 0:
-            return self.wait(now)
-        observations = observe(writer, None if full else set(self._seen))
-        if full:
-            self._next_full = now + FULL_PASS_SECONDS
-            present = {observation.path for observation in observations}
-            # A view that matched its stat identity again is no longer changing.
-            for path in [path for path in self._seen if path not in present]:
-                del self._seen[path]
-        own, settled = [], []
+        state = self._state(writer)
+        due = [row[0] for row in state.due(now, limit)]
+        sweep = state.phase != "idle" or now >= state.next_full
+        # Alternate the two view workloads so continuous direct edits cannot starve the census.
+        census_turn = sweep and (not due or self._census_turn)
+        self._census_turn = not census_turn
+        if census_turn:
+            if state.phase == "observe":
+                paths = state.observation_paths(limit)
+                self._observations(writer, state, paths, now, mutate, limit)
+            else:
+                state.step(writer, now=now, limit=limit,
+                           candidate=lambda row, at: self._detached(writer, state, row, at, mutate))
+        elif due:
+            self._observations(writer, state, due, now, mutate, limit)
+        self._next_full = state.next_full
+        self._next_work = now + state.wait(now)
+        self.last_status = state.status()
+        return self.wait(now)
+
+    def _observations(self, writer, state, paths, now, mutate, limit):
+        if not paths:
+            return
+        force = {path for path in paths if state.seen(path) is not None or state.db.execute(
+            "SELECT pending FROM temp.settling WHERE path=?", (path,)).fetchone() == (1,)}
+        observations = observe(writer, paths, force=force, limit=limit, errors=state.fail)
+        present = {observation.path for observation in observations}
+        for path in paths:
+            if path not in present:
+                state.forget(path)
+        own = []
         for observation in observations:
             if observation.own:
-                self._seen.pop(observation.path, None)
+                state.forget(observation.path)
                 own.append(observation)
                 continue
-            seen = self._seen.get(observation.path)
+            if observation.digest is None and observation.projection["kind"] == "item" \
+                    and not state.missing_ready(observation.projection["collection_id"]):
+                state.forget(observation.path)
+                continue  # Only a completed successful census permits the deletion fallback.
+            seen = state.seen(observation.path)
             if seen is None or seen.digest != observation.digest:
-                self._seen[observation.path] = _Seen(observation.digest, now, seen.invalid_since if seen else None)
-            elif now >= seen.due():
-                settled.append((observation, seen))
-        if own:
-            mutate(writer.record_view_observations, own)
-        for observation, seen in settled:
+                state.remember(observation.path, _Seen(observation.digest, now, seen.invalid_since if seen else None))
+                continue
+            if now < seen.due():
+                continue
             try:
                 acted = self._act(writer, observation, seen, now, mutate)
             except (collections.CollectionError, connection.CollectionStoreError):
-                # One view the store cannot act on now must not starve the others; it is retried a pass later.
                 logger.warning("a collection view edit could not be applied; retrying later", exc_info=True)
                 seen.retry = now + FULL_PASS_SECONDS
-                continue
+                acted = False
             if acted:
-                self._seen.pop(observation.path, None)
-        return self.wait(now)
+                state.forget(observation.path)
+            else:
+                state.remember(observation.path, seen)
+        if own:
+            mutate(writer.record_view_observations, own)
 
-    def wait(self, now: float) -> float:
-        """Seconds until a pass is due: the next full pass, or a changed view that may have settled."""
-        deadlines = [self._next_full, *(seen.due() for seen in self._seen.values())]
-        return max(0.0, min(deadlines) - now)
+    def _detached(self, writer, state, row, now, mutate):
+        path, cid, key, stamp, digest, _stat_identity, version, old = row
+        try:
+            result = mutate(writer.reconcile_detached_candidate,
+                            {"path": path, "collection_id": cid, "item_key": key,
+                             "stamp": json.loads(stamp), "digest": digest,
+                             "version": json.loads(version), "old_path": old}, census=state)
+        except (collections.CollectionError, connection.CollectionStoreError, held_fs.HeldFsError,
+                vault.PathGuardError, OSError) as error:
+            state.fail(cid, path, getattr(error, "code", "IO_ERROR"))
+            return False
+        if result.get("moved"):
+            state.forget(result["old_path"])
+        return True
+
+    def wait(self, now: float, *, include_full: bool = True) -> float:
+        """Seconds until the next bounded view turn; all clocks are monotonic."""
+        return max(0.0, min(self._next_work, self._next_full) - now)
 
     def _act(self, writer, observation, seen, now, mutate) -> bool:
         """Act on one settled view; False keeps it settling, as an invalid view not yet held."""
@@ -642,10 +797,28 @@ class EditBack:
                 mutate(writer.reconcile_views, paths={observation.path: observation})
             return True
         with writer.read_snapshot():
-            found = classify(writer, projection, observation.raw)
+            pending = writer.connection.execute(
+                "SELECT state,pending_sha256,install_json FROM projection_state WHERE path=?", (observation.path,)).fetchone()
+            preserved = bool(pending and views.unresolved_target({"install_json": pending[2]})
+                             and pending[1] != observation.digest)
+            if preserved:
+                found = None
+            else:
+                found = classify(writer, projection, observation.raw)
+        if preserved:
+            mutate(writer.reconcile_views, paths={observation.path: observation})
+            return True
         if found.code is None and projection["kind"] == "log":
             # Each edited block is its own governed update; the pass then holds the other blocks.
             refused = []
+            if found.frame is not None and found.frame.code is None:
+                try:
+                    mutate(writer.apply_view_frame, observation, found.frame)
+                except collections.CollectionError as error:
+                    # A frame refusal holds the whole buffer, including all unapplied blocks.
+                    observation = Observation(observation.path, projection, observation.digest, observation.stat,
+                                              observation.raw, ((None, _refused(error)),))
+                    found = Classification(INVALID)
             for block in found.blocks:
                 if block.code is None:
                     try:
