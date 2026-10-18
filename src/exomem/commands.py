@@ -6485,7 +6485,10 @@ def op_activate_context(
     For task_refresh, put the task in conversation.focus. intent_resolution
     qualifies the human request separately. Origin labels cues, not human words.
     Returns bounded context, state, refs and provenance; abstains instead of guessing.
-    Choose a visible anchor for ambiguity. ask_memory recalls gaps; read_memory opens refs.
+    For a follow-up whose subject the conversation establishes, select its visible anchor.
+    Otherwise, supply optional conversation.focus naming current subjects, including attachment cues.
+    Focus is an agent cue; it cannot settle ambiguity in the human turn.
+    ask_memory recalls gaps; read_memory opens refs.
     Reads no attachments. Due items and refresh grant no write authority.
 
     Args:
@@ -6493,12 +6496,15 @@ def op_activate_context(
         max_chars: Prose ceiling, clamped to 500..8,000; overflow becomes pointers.
         purpose: Visibility purpose; never ranking.
         continuity: Prior token unchanged; drop on compaction or new session.
-        anchor: Chosen visible compiled ref; hidden and ineligible refs refuse alike.
+        anchor: Visible compiled ref chosen for a prior subject, ambiguity or correction.
+            Hidden and ineligible refs refuse alike.
         include_timings: Include stage timings.
         client: Lowercase client label; invalid labels ignored.
         session: Stable opaque conversation ID, at most 256 characters.
         workspace: Thread project key, at most 256 characters.
-        conversation: Focus, read refs, six relevant excerpts/2,400 chars; never full history.
+        conversation: Optional fields: focus (one line/240 chars), refs (12 already-read pages),
+            recent (six excerpts/2,400 chars total; user 600, assistant 300 each).
+            Never send full history.
         trigger: user_turn for initial recall; task_refresh keeps turn and uses focus.
         initiator: Descriptive caller label; grants no authority. Invalid labels ignored.
     """

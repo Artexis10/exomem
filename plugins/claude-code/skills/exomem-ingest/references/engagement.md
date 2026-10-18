@@ -242,12 +242,13 @@ as your `anchor` choice, and cannot settle an ambiguity between anchors the
 user's own words reached. Earlier turns and refs never reach an anchor by
 themselves: they strengthen one the turn or your `focus` already reached, or
 break a tie when exactly one competitor was named before
-(`generation.disambiguated_by`). A turn that points back ("is it still on
-track?") and uses no word the earlier turns lack is carried from the newest
-earlier user turn that named one subject. A turn that brings in a new word
-("does it snow much in oslo?") is read as a new topic and is not carried, even
-when it also says "it"; pass `focus` when such a turn still means the earlier
-subject.
+(`generation.disambiguated_by`). When the current turn resolves no subject,
+automatic carry requires a pointing turn without new local material.
+Its content must be licensed by subject titles or the shipped task vocabulary;
+words appearing earlier do not themselves license carry.
+The newest earlier user entry that resolves subjects supplies them; multiple
+subjects remain ambiguous. If this misses a grounded follow-up, use the
+explicit recovery in [recall](recall.md#context-activation-packets-activate_context).
 
 Activation reads no attachment itself and runs no media model: only the names
 you put into `focus` count. Conversation text is used for that one call and
