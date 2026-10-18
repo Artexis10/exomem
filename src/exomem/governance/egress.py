@@ -2179,7 +2179,12 @@ def resolve_visible_identifier(
 
     visible = _visible_candidates(
         vault_root,
-        memory_refs.paths_for_ids_read_only(vault_root, (memory_id,)).get(memory_id, ()),
+        memory_refs.paths_for_ids_read_only(
+            vault_root, (memory_id,),
+            admit_pending_paths=functools.partial(
+                pending_identity_candidates, vault_root, principal=principal, purpose=purpose,
+            ),
+        ).get(memory_id, ()),
         principal=principal,
         purpose=purpose,
     )
@@ -2237,6 +2242,104 @@ def _visible_candidates(
     )
 
 
+def pending_identity_candidates(
+    vault_root: Path,
+    paths: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+    minimum_level: int = LEVEL_NONE + 1,
+) -> tuple[str, ...]:
+    """Keep pending identities unless the caller can prove their pages hidden.
+
+    The footprint never reads page bodies. Unknown membership or a potentially
+    widening byte-bound approval still permits a duplicate and stays uncertain.
+    """
+    root = Path(vault_root)
+    tombstones = lifecycle.tombstoned_paths(root)
+    candidates = tuple(
+        path
+        for path in paths
+        if not reserved_paths.classify_logical(path).blocked
+        if not lifecycle.is_tombstoned_in(tombstones, path)
+    )
+    policy = policy_module.load(root)
+    who = principal if principal is not None else effective_principal()
+    candidates = tuple(
+        path
+        for path in candidates
+        if raw_protection.permits(root, path, who, resolve_bytes=False) is not False
+    )
+    if policy.blocked or not who.resolved or bound_writer(root) is not None:
+        # File membership cannot prove a canonical projection hidden.
+        return candidates
+    declared_purpose = _declared_purpose(root, who, purpose)
+    try:
+        boundary = connector_boundary.snapshot(root, policy)
+        denied_scopes = boundary.denied_scopes(who) if boundary is not None else frozenset()
+    except connector_boundary.BoundaryUnavailable:
+        denied_scopes = None
+    # Bridge targets need their current approved bytes, so remain uncertain.
+    possible_grants = {grant.path for grant in policy.release_grants}
+    if who.verified_authorization_session is not None:
+        connection = None
+
+        def unresolved(path):
+            possible_grants.add(path)
+            return None
+
+        try:
+            connection = store.open_authorization_session_connection(root)
+            # The authority validates session, purpose and policy before asking
+            # for reviewed paths. None activates no grant and reads no bytes.
+            authorization_session_authority.active_session_grants_for_projection_resolver(
+                connection,
+                context=who.verified_authorization_session,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                resolve=unresolved,
+                policy_fingerprint=policy.fingerprint,
+                now=int(time.time()),
+            )
+        except (
+            authorization_custody.AuthorizationCustodyUnavailable,
+            authorization_session_lifecycle.AuthorizationSessionUnavailable,
+            OSError,
+            sqlite3.Error,
+            store.UnsupportedGovernanceSchema,
+            ValueError,
+            TypeError,
+        ):
+            possible_grants.update(candidates)
+        finally:
+            if connection is not None:
+                connection.close()
+    retained: list[str] = []
+    for path in candidates:
+        try:
+            scope_ids = membership_module.evaluate_path_only(
+                root, path, policy, resolve_bytes=False
+            ).require_classified()
+        except membership_module.MembershipUnresolved:
+            retained.append(path)
+            continue
+        # Connector ceilings are independent of every possible widening grant.
+        if denied_scopes is not None and denied_scopes.intersection(scope_ids):
+            continue
+        if (
+            path in possible_grants
+            or decide(
+                scope_ids,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                policy=policy,
+            ).level
+            >= minimum_level
+        ):
+            retained.append(path)
+    return tuple(retained)
+
+
 def visible_memory_refs(
     vault_root: Path,
     values: Iterable[str],
@@ -2272,7 +2375,12 @@ def visible_memory_ref_paths(
     }
     if not wanted:
         return {}
-    found = memory_refs.paths_for_ids_read_only(Path(vault_root), wanted.values())
+    found = memory_refs.paths_for_ids_read_only(
+        Path(vault_root), wanted.values(),
+        admit_pending_paths=functools.partial(
+            pending_identity_candidates, Path(vault_root), principal=principal, purpose=purpose,
+        ),
+    )
     out: dict[str, str] = {}
     for value, memory_id in wanted.items():
         visible = _visible_candidates(

@@ -625,6 +625,19 @@ Append and targeted update for `markdown-log` and `markdown-items` collections S
 - **WHEN** a curation or episode Records step is prepared for a store collection whose storage is a log or a summary
 - **THEN** it refuses with `CURATION_RECORDS_STORAGE_UNSUPPORTED` and seals no plan
 
+#### Scenario: A committed file Records step stays verified after migration
+- **WHEN** an existing file-mode Records witness is migrated and its Markdown view is regenerated
+- **THEN** readback verifies the witness through the checkpoint's original source binding, imported event and unchanged canonical item version
+- **AND** it adds no transaction and requires no store-native request identity for the historical write
+
+#### Scenario: An old event cannot certify a manually changed imported item
+- **WHEN** a file item changes before migration while retaining the witnessed update's old audit marker
+- **THEN** its captured source hash differs from the witness, readback reports changed, and no write repeats
+
+#### Scenario: Missing original source evidence stays uncertain
+- **WHEN** an older import checkpoint cannot bind an existing file witness to its original item bytes
+- **THEN** readback stays uncertain and never reconstructs that byte hash from a normalized view or treats a run identity as a commit
+
 ### Requirement: Idempotent append and conflict-safe update
 The substrate SHALL make exact append retries idempotent where a stable item identity is available. When a caller omits the item identity and every field of the manifest's declared natural key is present in the validated values, the substrate SHALL derive the identity deterministically from the collection identity and the natural-key serialisation the read path already uses, and stamp it explicitly like any other item key; an explicit identity SHALL still win, and a payload that lacks a natural-key field SHALL receive a random identity as before. Reusing one identity with different content SHALL refuse as an identity conflict. An append whose derived or supplied identity differs from an existing item's while its serialised natural key equals that item's SHALL refuse as a natural-key conflict naming every such existing item; the store's natural-key uniqueness constraint SHALL enforce this. Targeted update SHALL change only the resolved item and SHALL never fall back from a missing identifier to fuzzy text matching. A mutation carrying a transport request identity SHALL record that identity and its terminal receipt in the same transaction as the write; a retry with the same identity SHALL return the recorded receipt without writing, and the same identity with a different request SHALL refuse. Both profiles SHALL inherit these rules through the shared mechanics.
 

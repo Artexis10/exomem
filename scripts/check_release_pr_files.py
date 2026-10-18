@@ -17,8 +17,10 @@ response.
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 #: release-please bumps its manifest in every release PR.
@@ -37,6 +39,30 @@ def _extra_files(config: dict) -> list[dict]:
         for entry in package.get("extra-files", []):
             extra.append({"path": entry, "type": "generic"} if isinstance(entry, str) else entry)
     return extra
+
+
+def _version_value(path: str, line: str) -> str | None:
+    """Parse the version assignment, never code beside a version marker."""
+    try:
+        if Path(path).suffix == ".py":
+            statements = ast.parse(line).body
+            if len(statements) != 1 or not isinstance(statement := statements[0], ast.Assign):
+                return None
+            if len(statement.targets) != 1 or not isinstance(target := statement.targets[0], ast.Name):
+                return None
+            # Python release metadata assigns only this public package attribute.
+            if target.id != "__version__" or not isinstance(statement.value, ast.Constant):
+                return None
+            value = statement.value.value
+        else:
+            # The configured non-Python generic files use TOML version assignments.
+            values = tomllib.loads(line)
+            if set(values) != {"version"}:
+                return None
+            value = values["version"]
+    except (SyntaxError, ValueError):
+        return None
+    return value if isinstance(value, str) else None
 
 
 def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
@@ -58,9 +84,22 @@ def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
         if patch is None:
             problems.append(f"{file['filename']}: GitHub returned no diff to verify")
             continue
-        changed = [line for line in patch.splitlines() if line[:1] in ("+", "-")]
+        lines = patch.splitlines()
+        changed = [line for line in lines if line[:1] in ("+", "-")]
         if any(_VERSION_MARKER not in line for line in changed):
             problems.append(f"{file['filename']}: changes a line other than its version")
+            continue
+        removed = [line[1:] for line in changed if line.startswith("-")]
+        added = [line[1:] for line in changed if line.startswith("+")]
+        if (
+            len(removed) != 1
+            or len(added) != 1
+            # Adjacent diff lines replace one assignment in place; a moved key changes its scope.
+            or lines.index("+" + added[0]) != lines.index("-" + removed[0]) + 1
+            or _version_value(file["filename"], removed[0]) is None
+            or _version_value(file["filename"], added[0]) is None
+        ):
+            problems.append(f"{file['filename']}: changes more than its version value")
     return problems
 
 

@@ -266,21 +266,25 @@ An overlay row is removed only after the matching persistent component proves
 the exact after generation. There is no removal-before-publication gap.
 
 At process start, managed recall hydrates the overlay from outstanding receipts
-before it declares readiness. Hydration is bounded. If the pending set exceeds
-the bound or any exact path cannot be proven, recall returns the existing typed
-warming/unavailable outcome while a background pass rebuilds the overlay. It
-never silently serves a stale last-published catalogue. Offline callers retain
-their existing source-walk fallback.
+before it declares strict readiness. Content hydration is bounded.
+Overflow or an unprovable page preserves the complete validated path footprint.
+Recall suppresses every pending identity, adds only proven content, and serves
+unaffected admitted results with incomplete coverage disclosed.
+Unknown custody still returns typed unavailability. Partial answers avoid shared
+result caches. Offline callers retain their existing source-walk fallback.
 
 The receipt store exposes this restart path through bounded typed operations,
-not private SQLite access: a snapshot returns every non-retired pending batch
-with its exact receipt, path generation/revision, state, and an opaque store
-generation; a fence operation proves that generation is still current; and an
+not private SQLite access: a snapshot returns every non-retired pending path
+with validated receipt lineage and an opaque store generation.
+Bounded hydration adds exact receipts and content; overflow needs no page bodies.
+A fence operation proves that generation is still current; and an
 exact CAS retirement operation clears only rows from that same batch,
 generation, and revision. Snapshot outcomes are closed as `complete`,
 `overflow`, or `unprovable`. Only a complete snapshot whose generation remains
-current can authorize managed recall readiness. Any concurrent pending-row
-mutation invalidates the fence and forces another bounded hydration attempt.
+current can authorize strict readiness. If body hydration loses its fence,
+one fresh path-only snapshot permits degraded recall without repeated body reads.
+Publication callbacks and the existing worker own retirement, including completed
+live custody after restart. Reader threads do not perform component retirement.
 
 **Alternative rejected — rely on watcher echo.** Watchers are optional, delayed,
 and deliberately suppress self-authored echoes. They remain a backstop, not the
@@ -453,8 +457,8 @@ Red-first failure injection covers every cut:
   must exceed 2.0 s;
 - restore inline advisory encode → the default public-write latency test must
   block on the injected slow encoder;
-- remove startup overlay hydration → the restart read must serve stale data or
-  warming, and the test requires warming until exact coverage is ready.
+- remove startup custody reconstruction → the restart read must not admit stale
+  pending content or treat unknown custody as empty.
 
 Mutation tests run in harness-owned scratch copies with imports proved to come
 from those copies. Real-scale benchmarks run only on a quiesced machine and only
@@ -515,7 +519,7 @@ fresh reviewer for recheck.
 | Exact after-state activation | Accept a hash/generation mismatch | `test_mixed_or_stale_state_never_activates_components` |
 | Supersession/completion CAS | Let an old revision clear the current row | `test_older_revision_cannot_clear_newer_custody` |
 | Pending stale-row shadow | Return persistent rows before applying tombstones | `test_pending_edit_delete_hides_stale_rows` |
-| Overflow/warming fail-closed | Serve the old catalogue after incomplete hydration | `test_unprovable_pending_overflow_returns_warming` |
+| Complete pending suppression | Admit a pending identity after incomplete hydration | `test_pending_overflow_serves_unaffected_catalogue_with_coverage_warning` |
 | Authority release | Keep mutation authority during a slow component | `test_slow_component_runs_after_authority_release` |
 | Shared deadline | Give each component a new duration | `test_components_share_one_absolute_post_commit_deadline` |
 | Failure truthfulness | Convert registration/proof failure to pending | `test_real_custody_failure_is_not_laundered_to_pending` |
@@ -538,14 +542,15 @@ not eligible for review.
   corpus size.
 - **[Risk] A pending overlay becomes a second search index.** → It is a bounded
   delta over unfinished receipts, never a corpus copy; persistent catalogues
-  remain primary, and overflow fails closed to warming.
+  remain primary. Overflow retains only validated path metadata and suppresses
+  every pending identity while unaffected results remain available.
 - **[Risk] Later writes race older workers.** → Every publication and completion
   is generation-bound and CAS-revisioned; stale work can run but cannot become
   current or clear newer custody.
 - **[Risk] A queue backlog makes recall warm indefinitely.** → Prompt drains,
-  periodic reconciliation, age/depth alarms, fair rotation, and live acceptance
-  prove convergence after a burst. Warming is preferable to stale answers when
-  the overlay cannot be complete.
+  bounded committed recovery, age/depth alarms, fair rotation, and live acceptance
+  prove convergence after a burst. Known paths remain suppressed while unaffected
+  recall continues. Only unknown custody requires whole-request unavailability.
 - **[Risk] Async advisories arrive after the writing conversation.** → The
   terminal carries an exact opaque result reference; results never appear in an
   unrelated conversation, attention, or due-state. Explicit `suggestions=true`
@@ -580,7 +585,7 @@ not eligible for review.
 3. Dual-record prepared batch receipts while retaining synchronous fanout.
    Prove rollback/crash cuts and that receipts retire without double work.
 4. Enable the pending-recall overlay and prove create/edit/delete/move
-   read-your-write and restart warming behavior.
+   read-your-write, restart reconstruction, and degraded coverage behavior.
 5. Switch derived fanout to receipt-owned background execution for a bounded
    command tranche, then the remaining governed mutations. Set
    `EXOMEM_FAST_DURABLE_ACK=1` only after dual-record and pending-read evidence is
@@ -602,13 +607,16 @@ A stranded batch is not rollback-able state: the kill switch stops new
 fast-acknowledged writes, but the pending overlay keeps reading durable custody,
 so a batch already held in `reconcile_required` stays until it is repaired.
 `doctor` reports it (`fast_ack_custody`, failing while any batch is stranded)
-and `maintain --reconcile` repairs it by converging its pages from current bytes
-and retiring it once both recall lanes hold them. Reconcile retires receipt
+and the bounded service worker repairs previously proven committed batches
+through the existing owners, with retry backoff. Unproven mixed state keeps its
+transactional reconciliation demand. Explicit `maintain --reconcile` remains
+available and retires a batch once both recall lanes hold current bytes.
+Recovery retires receipt
 custody only: a batch stranded by a shared page can still own a page exactly as
 its advisory result describes it, so a `ready` or `failed` result stays as
 published; a result that never ran fails as `advisory_unavailable` over an
-unchanged target and is superseded over a moved one. The runbook entry is
-therefore "set the flag to 0, then reconcile".
+unchanged target and is superseded over a moved one.
+Disabling fast acknowledgement alone does not repair existing custody.
 
 Rollback is mandatory on any stale post-write read, any acknowledged write with
 missing required custody, any cross-tenant/result authorization leak, two or

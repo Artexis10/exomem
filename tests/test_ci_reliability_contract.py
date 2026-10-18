@@ -18,6 +18,8 @@ from pytest_split.algorithms import Algorithms
 ROOT = Path(__file__).parents[1]
 
 FULL_CI_JOBS = {
+    "frozen-verifier",
+    "cloud-cellctl",
     "retrieval-quality",
     "retrieval-latency",
     "governance-projection-wire",
@@ -117,7 +119,8 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
     )
     assert junit_step["with"]["path"] == (
         f"test-results/junit-{tier}-"
-        "${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml"
+        "${{ matrix.python-version }}-shard-${{ matrix.shard }}"
+        f"{'*' if tier == 'core' else ''}.xml"
     )
     assert junit_step["with"]["if-no-files-found"] == "warn"
 
@@ -325,7 +328,22 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     the workflow's installed algorithm on those same ordered collections.
     """
     full_items = _collect_items("full lean suite", None, [])
-    core_items = _collect_items("core tier", "core", [])
+    workflow = _workflow()
+    core_job = workflow["jobs"]["core-tests"]
+    # Job-level environment values select the timing modules; runtime defaults live on the steps.
+    serial_modules = list(core_job["env"].values())
+    for variable in core_job["env"]:
+        assert f'--ignore="${variable}"' in _run_step(core_job)["run"]
+    serial_step = next(
+        step for step in core_job["steps"]
+        if all(f'"${variable}"' in step.get("run", "") for variable in core_job["env"])
+    )
+    assert serial_step["if"] == "matrix.shard == 1 && steps.scope.outputs.docs_only != 'true'"
+    assert "--splits" not in serial_step["run"]
+    assert "-serial.xml" in serial_step["run"]
+    core_items = _collect_items("pooled core tier", "core", [f"--ignore={module}" for module in serial_modules])
+    serial_items = _collect_items("serial core checks", "core", serial_modules)
+    serial = {item.nodeid for item in serial_items}
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
     full, core, harness, latency = (
@@ -333,6 +351,8 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
         for items in (full_items, core_items, harness_items, latency_items)
     )
 
+    assert not core & serial, "the serial checks also run in the worker pool"
+    core |= serial
     assert core | harness | latency == full, (
         f"tier union misses {len(full - (core | harness | latency))} node(s) and "
         f"adds {len((core | harness | latency) - full)} node(s)"
@@ -344,7 +364,6 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     # Use the installed algorithms on current ordered items, including their
     # missing-duration fallback; stale duration entries do not belong to a tier.
     durations = json.loads((ROOT / ".test_durations.json").read_text(encoding="utf-8"))
-    workflow = _workflow()
     for job_id, items in (("core-tests", core_items), ("harness-tests", harness_items)):
         job = workflow["jobs"][job_id]
         command = _run_step(job)["run"]

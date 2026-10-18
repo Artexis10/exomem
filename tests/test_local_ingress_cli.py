@@ -433,8 +433,9 @@ def test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_
     """A commit failure that deletes the bytes makes the owner send them all again for a full
     disk or a lease handoff, which nothing about the bytes caused."""
     import errno
+    import threading
 
-    from exomem import preserve
+    from exomem import preserve, upload_sessions
 
     app = _service_app(tmp_path, monkeypatch)
     real, calls = preserve.preserve_stream, []
@@ -446,16 +447,83 @@ def test_attach_keeps_an_upload_whose_commit_found_the_disk_full_and_commits_it_
         return real(*args, **kwargs)
 
     monkeypatch.setattr(preserve, "preserve_stream", full_disk_once)
+    commit = upload_sessions._commit
+    retry_started, retry_visible, release = threading.Event(), threading.Event(), threading.Event()
+    workers = []
+
+    def delayed_retry(*args):
+        workers.append(threading.current_thread())
+        if calls:
+            retry_started.set()
+            assert release.wait(30)
+        return commit(*args)
+
+    monkeypatch.setattr(upload_sessions, "_commit", delayed_retry)
+
+    class ResumeTransport(_ServiceTransport):
+        def handle_request(self, request):
+            response = super().handle_request(request)
+            if request.method == "GET" and response.json()["state"] == upload_sessions.COMMITTING:
+                retry_visible.set()
+                release.set()
+            return response
+
     source = tmp_path / "samples.json"
     source.write_bytes(b'{"heart_rate": [61, 62, 63]}' * 20)
     argv = [str(source), "--scope", "Device", "--category", "Uploads", "--resumable",
             "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
 
-    assert _attach_main(argv, transport=_ServiceTransport(app)) == 1
-    assert "run the same command again" in capsys.readouterr().err
-    resumed = _ServiceTransport(app)
-    assert _attach_main(argv, transport=resumed) == 0
+    try:
+        assert _attach_main(argv, transport=_ServiceTransport(app)) == 1
+        assert "run the same command again" in capsys.readouterr().err
+        resumed = ResumeTransport(app)
+        assert _attach_main(argv, transport=resumed) == 0
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(30)
+            assert not worker.is_alive()
 
+    assert retry_started.is_set() and retry_visible.is_set()
     receipt = json.loads(capsys.readouterr().out)
     assert resumed.parts == []
     assert (vault / receipt["path"]).read_bytes() == source.read_bytes()
+
+
+def test_attach_reports_a_persistent_commit_failure_without_losing_the_held_bytes(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Status polling must expose a failed attempt instead of retrying forever."""
+    import errno
+    import threading
+
+    from exomem import preserve, upload_sessions
+    from exomem.state_paths import state_store_root, vault_state_dir
+
+    app = _service_app(tmp_path, monkeypatch)
+
+    def full_disk(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(preserve, "preserve_stream", full_disk)
+    source = tmp_path / "samples.json"
+    source.write_bytes(b'{"samples": [1, 2, 3]}')
+
+    code = _attach_main(
+        [str(source), "--scope", "Device", "--category", "Uploads", "--resumable",
+         "--token-file", str(_token_file(tmp_path)), "--port", "8764"],
+        transport=_ServiceTransport(app),
+    )
+
+    assert code == 1
+    assert "run the same command again" in capsys.readouterr().err
+    assert len(list((state_store_root() / "attach-sessions").glob("*.json"))) == 1
+    store = vault_state_dir(vault) / upload_sessions.STORE_DIRNAME
+    [record_path] = store.glob("*.json")
+    session_id = json.loads(record_path.read_text())["id"]
+    for worker in threading.enumerate():
+        if worker.name == f"upload-session-commit-{session_id[:8]}":
+            worker.join(30)
+            assert not worker.is_alive()
+    [part] = store.glob("*.part")
+    assert part.read_bytes() == source.read_bytes()

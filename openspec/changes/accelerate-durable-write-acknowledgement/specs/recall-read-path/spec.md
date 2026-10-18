@@ -8,9 +8,12 @@ recall SHALL merge a bounded exact pending-delta projection with the last
 published lexical catalogue, exclude stale catalogue rows for every changed or
 deleted pending path, and deduplicate by current canonical identity. The pending
 projection SHALL survive process restart from durable receipt state before
-managed recall is declared ready. If complete pending coverage cannot be proven
-within its bound, managed recall MUST return a typed warming or unavailable
-outcome rather than stale or silently incomplete results. Vector and graph lanes
+managed recall is declared ready. Content hydration SHALL remain bounded.
+When complete path custody remains trustworthy but content cannot be hydrated,
+recall SHALL suppress every pending identity and serve unaffected admitted results
+with incomplete coverage disclosed. Unknown custody SHALL return a typed unavailable
+outcome. Exact reference operations SHALL NOT claim unproven identity uniqueness.
+Vector and graph lanes
 MAY omit the new generation while their receipts are pending, but the default
 recall response SHALL disclose that projection state.
 
@@ -39,7 +42,12 @@ recall response SHALL disclose that projection state.
 
 #### Scenario: Restart cannot reconstruct a complete pending projection
 
-- **WHEN** managed recall starts with pending receipts but cannot prove or hydrate their complete current delta
-- **THEN** recall reports warming or unavailable
-- **AND** it does not serve the last catalogue as if no pending mutation existed
+- **WHEN** managed recall starts with trustworthy pending paths but cannot hydrate their complete current delta
+- **THEN** recall suppresses every pending identity and serves unaffected results with incomplete coverage disclosed
+- **AND** it neither returns stale pending content nor caches the partial answer
+
+#### Scenario: Restart cannot prove pending custody
+
+- **WHEN** managed recall cannot establish a trustworthy complete footprint from its authoritative pending store
+- **THEN** recall reports unavailable rather than treating unknown custody as empty
 

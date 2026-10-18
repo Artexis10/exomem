@@ -360,11 +360,33 @@ def _envelope(captured, context, transition, generation, previous, *, original=N
                     "count": proof.reachable_count,
                     "ordered_event_digest": proof.ordered_event_digest,
                 },
+                "original_items": _original_items(captured),
                 # These claimed passes cannot commit until the independent checks succeed.
                 "verification_summary": dict.fromkeys("abcdef", "passed"),
             }
         )
     return envelope
+
+
+def _original_items(captured):
+    """Bind each imported item file to its exact source bytes and structural audit marker.
+
+    The checkpoint keeps this proof after ordinary view publication replaces the source hash.
+    A missing marker remains missing; this evidence does not repair historical gaps.
+    """
+    # File-mode curation receipts support item files only; a shared log needs no per-row binding.
+    if captured.manifest.storage.strategy != "markdown-items":
+        return {}
+    sources = dict(captured.snapshot.source_bytes)
+    return {
+        record.identity.key: {
+            "source_sha256": record.source.hash,
+            "transition_id": records._structural_audit_marker(
+                captured.manifest, sources[record.source.path], record
+            ),
+        }
+        for record in captured.snapshot.records
+    }
 
 
 def _event_hash(envelope):
