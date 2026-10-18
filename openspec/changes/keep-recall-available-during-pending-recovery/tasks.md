@@ -15,6 +15,7 @@
 
 - [ ] 3.1 Preserve blocked mappings through reference projection; verify stale references cannot return and unresolved identity stays explicit.
 - [ ] 3.2 Reuse coverage warnings and current release checks; verify restricted callers reveal no hidden pending paths or counts.
+- [ ] 3.3 Separate redaction ownership from current mappings; verify optional citation and pointer omission, honest coverage, hidden twins, moves, budgets, and strict authority.
 
 ## 4. Service-owned recovery
 

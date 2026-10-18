@@ -158,6 +158,19 @@ def staged_replica(session, check, heads):
             pass
 
 
+def replica_adoptability(metadata, raw_marker, *, intent_only=False):
+    """Pure replica refusals shared by takeover and offline archive validation."""
+    if not intent_only and schema.META_REPLICA_DIVERGENCE in metadata:
+        return DIVERGED, "the vault replica records unresolved divergence"
+    intent = None if metadata.get(authority.PENDING_CREATE) is None else json.loads(metadata[authority.PENDING_CREATE])
+    if intent is not None and intent.get("kind") == authority.EXPORT:
+        # Only the owner's export may finish the collections' departure from this store.
+        return EXPORTING, "the vault replica carries an unfinished export; finish it with `exomem collections export`"
+    if intent is not None and intent["target_marker"].encode() != raw_marker:
+        return SYNC_PENDING, "the vault replica carries an unfinished create"
+    return None
+
+
 def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token):
     """Return ``admit``, ``stage``, ``adopt``, ``continue`` or the unresolved code, with its reason."""
     sid = marker["store_id"]
@@ -198,13 +211,9 @@ def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token
     if any(staged.collections.get(entry["collection_id"]) != entry["manifest_path"]
            for entry in marker["collections"]):
         return "COLLECTION_STORE_SYNC_PENDING", "the vault replica predates the authority marker"
-    intent = None if meta.get(authority.PENDING_CREATE) is None else json.loads(meta[authority.PENDING_CREATE])
-    if intent is not None and intent.get("kind") == authority.EXPORT:
-        # Adopting would drop the intent with the other bookkeeping and serve a store whose
-        # collections are leaving it; only the owner's export finishes it.
-        return EXPORTING, "the vault replica carries an unfinished export; finish it with `exomem collections export`"
-    if intent is not None and intent["target_marker"].encode() != raw_marker:
-        return "COLLECTION_STORE_SYNC_PENDING", "the vault replica carries an unfinished create"
+    refusal = replica_adoptability(meta, raw_marker, intent_only=True)
+    if refusal is not None:
+        return refusal
     head = (sequence, meta.get(schema.META_STORE_HEAD_HASH))
     if local is not None and recorded_head == head == (local.commit_seq, local.head_hash):
         return "continue", "this host's store already carries the recorded replica head"

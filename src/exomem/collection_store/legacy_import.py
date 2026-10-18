@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from contextlib import closing, contextmanager
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from .. import held_fs, planning, record_formats, records, vault
 from .. import structured_collections as collections
 from . import authority, chain, governance, log_view, summary, tokens, types
 from .connection import CollectionStoreError
+from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
 
 _WHY = "capture legacy state into unpublished staging"
@@ -31,31 +32,6 @@ def _json(value) -> str:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-@contextmanager
-def checked_sql(conn, check):
-    interrupted = None
-
-    def progress():
-        nonlocal interrupted
-        try:
-            check()
-        except BaseException as error:  # noqa: BLE001 - SQLite otherwise discards the caller's interruption
-            interrupted = error
-            return 1
-        return 0
-
-    conn.set_progress_handler(progress, 1000)
-    try:
-        check()
-        yield
-    except sqlite3.DatabaseError as error:
-        if interrupted is not None:
-            raise interrupted from error
-        raise
-    finally:
-        conn.set_progress_handler(None, 0)
 
 
 class LegacyProofError(CollectionStoreError):

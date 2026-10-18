@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.126.1](https://github.com/Artexis10/exomem/compare/v0.126.0...v0.126.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* parse recall canary results through the MCP client ([#1851](https://github.com/Artexis10/exomem/issues/1851)) ([ad0046e](https://github.com/Artexis10/exomem/commit/ad0046e37bb858966b80cf674996f06ab88832b5))
+* **recall:** keep file approvals below the policy ceiling ([#1842](https://github.com/Artexis10/exomem/issues/1842)) ([20ba350](https://github.com/Artexis10/exomem/commit/20ba350059568c7cfe15fb5333ec077e45c64c61))
+* **recall:** share cold corpus builds through admission ([#1847](https://github.com/Artexis10/exomem/issues/1847)) ([dd0afc8](https://github.com/Artexis10/exomem/commit/dd0afc863ed7198ea96242db9a6f8746bcae8598))
+
+
+### Performance
+
+* **egress:** reuse resolution work within each terminal pass ([#1848](https://github.com/Artexis10/exomem/issues/1848)) ([a127f67](https://github.com/Artexis10/exomem/commit/a127f6773dddfb76428c9ad51ee730a027e864bb))
+* reuse collection reads and proved migration imports ([#1844](https://github.com/Artexis10/exomem/issues/1844)) ([7f6c6c8](https://github.com/Artexis10/exomem/commit/7f6c6c83999b521b6eb95ad35e036ad115267374))
+* reuse due projections and preserve partial recall checks ([#1846](https://github.com/Artexis10/exomem/issues/1846)) ([6122277](https://github.com/Artexis10/exomem/commit/61222773c7ee7c4ecf51a95551c279ef8611209a))
+
 ## [0.126.0](https://github.com/Artexis10/exomem/compare/v0.125.0...v0.126.0) (2026-10-18)
 
 

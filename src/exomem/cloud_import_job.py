@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -246,8 +247,14 @@ def run_import(
 def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> None:
     from .vault import _is_vault
 
+    # Operator tar exports have one fixed vault/ wrapper; mixed archive roots are ambiguous.
+    if not _is_vault(staging) and (staging / "vault").exists():
+        if staging.is_symlink() or sorted(path.name for path in staging.iterdir()) != ["vault"]:
+            raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "mixed_vault_roots")
+        staging = staging / "vault"
     if not _is_vault(staging):
         raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "vault")
+    _prove_restore_collections(staging)
     prior = vault_root.parent / f".restore-prior-{request.import_id}"
     _ensure_private_directory(prior)
     marker = prior / "request.json"
@@ -282,6 +289,27 @@ def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> No
             return result
         if hashes(staging) != hashes(vault_root):
             raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_committed")
+
+
+def _prove_restore_collections(staging: Path) -> None:
+    """Prove collection bytes in private staging before moving destination vault or state."""
+    from . import structured_collections as collections
+    from . import vault_portability
+    from .collection_store import chain, connection, preflight
+
+    try:
+        with vault_portability.checked_collection_replica(staging):
+            pass
+        rows, manifests, _store_ids = preflight.candidates(staging)
+        if manifests:
+            with tempfile.TemporaryDirectory(prefix="exomem-cloud-restore-proof-") as private:
+                with connection.staging_store(Path(private) / "staging.sqlite") as store:
+                    rows.extend(preflight.prove_into(staging, manifests, store, Path(private), preflight.import_context()))
+        if any(row["status"] == "blocked" for row in rows):
+            raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "collection_proof")
+    except (connection.CollectionStoreError, chain.StoreChainError, sqlite3.Error,
+            collections.CollectionError, vault_portability.PortabilityError, ValueError, OSError):
+        raise ArchiveRefused("ARCHIVE_MEMBER_REFUSED", "collection_proof") from None
 
 
 def discard(vault_root: Path, import_id: str, *, keep_adoption: bool = False) -> None:

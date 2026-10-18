@@ -45,10 +45,18 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal, overload
 from urllib.parse import unquote
 
-from .. import activation_result, call_spans, find_corpus, memory_refs, reserved_paths, state_paths, vault
+from .. import (
+    activation_result,
+    call_spans,
+    find_corpus,
+    memory_refs,
+    reserved_paths,
+    state_paths,
+    vault,
+)
 from ..collection_store.preview import bound_writer, canonical_read, projection_decision
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
@@ -2359,28 +2367,52 @@ def visible_memory_refs(
     )
 
 
+@overload
+def visible_memory_ref_paths(
+    vault_root: Path, values: Iterable[str], *,
+    principal: RequestPrincipal | None = None, purpose: str | None = None,
+    _optional: Literal[False] = False,
+) -> dict[str, str]: ...
+
+
+@overload
+def visible_memory_ref_paths(
+    vault_root: Path, values: Iterable[str], *,
+    principal: RequestPrincipal | None = None, purpose: str | None = None,
+    _optional: bool,
+) -> dict[str, str] | None: ...
+
+
 def visible_memory_ref_paths(
     vault_root: Path,
     values: Iterable[str],
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-) -> dict[str, str]:
+    _optional: bool = False,
+) -> dict[str, str] | None:
     """`visible_memory_refs` with the one visible page each ref names, from the
-    same single scan: `{ref: vault-relative path}`."""
+    same single scan: `{ref: vault-relative path}`.
+
+    Optional packet origins may receive None for incomplete caller-visible
+    identity coverage. Every exact caller retains strict resolution by default.
+    """
     wanted = {
         value: memory_id
         for value in dict.fromkeys(str(item or "").strip() for item in values)
         if (memory_id := memory_refs.parse_memory_ref(value)) is not None
     }
-    if not wanted:
+    if not wanted and not _optional:
         return {}
     found = memory_refs.paths_for_ids_read_only(
         Path(vault_root), wanted.values(),
         admit_pending_paths=functools.partial(
             pending_identity_candidates, Path(vault_root), principal=principal, purpose=purpose,
         ),
+        _optional=_optional,
     )
+    if found is None:
+        return None
     out: dict[str, str] = {}
     for value, memory_id in wanted.items():
         visible = _visible_candidates(
@@ -3622,9 +3654,11 @@ def guard_working_set(
         item["anchor"] for item in guarded.get("pointers") or ()
         if isinstance(item, Mapping) and memory_refs.parse_memory_ref(item.get("anchor"))
     }
-    hidden_pointer_origins = pointer_origins - visible_memory_refs(
-        vault_root, pointer_origins, principal=who, purpose=purpose
+    origin_paths = visible_memory_ref_paths(
+        vault_root, pointer_origins, principal=who, purpose=purpose,
+        _optional=not bool(guarded.get("abstained")),
     )
+    hidden_pointer_origins = pointer_origins - (origin_paths or {}).keys()
     for section in ("pointers", "ambiguity", "current_state", "missing"):
         values = guarded.get(section)
         if isinstance(values, list):
@@ -3639,6 +3673,14 @@ def guard_working_set(
                 _note_removal(section, len(values), len(kept))
                 _charge_back_removed(guarded, section, values, kept)
             guarded[section] = kept
+
+    if origin_paths is None and not guarded.get("abstained"):
+        # This protocol reason reports batch coverage, never pointer membership.
+        # Check empty origin batches too so hidden pointers cannot toggle it.
+        marker = {"role": "pointers", "reason": "identity_incomplete"}
+        missing = guarded.setdefault("missing", [])
+        if marker not in missing:
+            missing.append(marker)
 
     # Appended AFTER the `missing` filter runs, never before: `missing[]` entries
     # are compared as reference fields, so a bare word matches a withheld page's
@@ -6612,7 +6654,7 @@ class _ArtifactReferenceGate:
         token = token.split("#", 1)[0].strip().strip("\"'").rstrip(".,;:!?")
         return token, wikilink
 
-    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...]:
+    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
         if lifecycle.is_tombstoned(self.vault_root, token):
@@ -6622,11 +6664,16 @@ class _ArtifactReferenceGate:
             memory_id = memory_refs.parse_memory_ref(token)
             if memory_id is None:
                 return ()
-            # Preserve raw uniqueness before gating; visibility-filtered lookup
-            # would leave a hidden-only reference unresolved and unredacted.
-            paths = memory_refs.paths_for_ids_read_only(
+            # Redaction keeps raw hidden-owner evidence after pending withdrawal.
+            # Potentially visible uncertainty omits the token, not admitted material.
+            paths = memory_refs.paths_for_optional_references_read_only(
                 self.vault_root, (memory_id,),
+                admit_pending_paths=lambda paths: pending_identity_candidates(
+                    self.vault_root, paths, principal=self.who, purpose=self.purpose,
+                ),
             ).get(memory_id, ())
+            if paths is None:
+                return None
             if len(paths) != 1:
                 return ()
             token = paths[0]
@@ -6718,7 +6765,9 @@ class _ArtifactReferenceGate:
                     # replacing it tells them the item exists.
                     return token
             candidates = self.resolve(token)
-            if candidates and not all(self._permits(rel) for rel in candidates):
+            if candidates is None or (
+                candidates and not all(self._permits(rel) for rel in candidates)
+            ):
                 return WITHHELD_REFERENCE
             return token
 
