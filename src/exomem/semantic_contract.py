@@ -1837,7 +1837,7 @@ def current_writer_resolver_entries(
             if entry is None or language_hash is None:
                 return decline("corpus_absent")
             if caption != checkpoint:
-                return decline("corpus_checkpoint_differs")
+                return decline("checkpoint_differs")
             census, context = entry
             entries = context.resolver_entries
 
