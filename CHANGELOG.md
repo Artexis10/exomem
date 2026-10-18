@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.127.3](https://github.com/Artexis10/exomem/compare/v0.127.2...v0.127.3) (2026-10-18)
+
+
+### Bug Fixes
+
+* **compiler:** serve linked material without promoting partial names ([#1867](https://github.com/Artexis10/exomem/issues/1867)) ([66374d3](https://github.com/Artexis10/exomem/commit/66374d35fd4a02387e443724eb2014ebf3f7f7be))
+
 ## [0.127.2](https://github.com/Artexis10/exomem/compare/v0.127.1...v0.127.2) (2026-10-18)
 
 
