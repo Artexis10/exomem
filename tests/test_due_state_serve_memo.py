@@ -54,7 +54,10 @@ def _spy(
 ) -> list[dict]:
     calls: list[dict] = []
 
-    def fake(vault_root, *, today, now, principal=None, purpose=None, payload=None):
+    def fake(
+        vault_root, *, today, now, principal=None, purpose=None,
+        payload=None, review_payload=None,
+    ):
         calls.append({"today": today, "now": now, "purpose": purpose, "payload": payload})
         rows = [{"ref": f"exomem://memory/{len(calls)}", "kind": "open", "path": PAGE}]
         # As the real build does: record the verdict the plane gave at build time.
