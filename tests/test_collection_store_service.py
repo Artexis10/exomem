@@ -769,15 +769,15 @@ def test_lost_store_custody_keeps_file_writes_and_renewal_available(service, mon
         assert {path: path.read_bytes() for path in protected} == protected
         assert marker.read_bytes() == before_marker
         with request_scope(OWNER), restarted.manager.writer_authority_guard(vault_root=root):
-            prove = restarted.manager._collection_file_marker
+            refuse_paths = authority.refuse_view_paths
 
-            def removed_after_proof(*args, **kwargs):
-                current = prove(*args, **kwargs)
+            def removed_before_validation(*args, **kwargs):
+                # Withdraw after the file proof without changing the renewal thread's marker reader.
                 marker.unlink()
-                return current
+                return refuse_paths(*args, **kwargs)
 
             with monkeypatch.context() as gap:
-                gap.setattr(restarted.manager, "_collection_file_marker", removed_after_proof)
+                gap.setattr(authority, "refuse_view_paths", removed_before_validation)
                 refused(lambda: vault.batch_atomic_write([
                     vault.PlannedWrite(root / "Knowledge Base/unowned.md", "Unpublished.\n"),
                 ], vault_root=root, post_commit_fanout=False), "COLLECTION_STORE_MARKER_CONFLICT")
