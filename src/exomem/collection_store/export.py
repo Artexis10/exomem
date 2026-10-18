@@ -27,7 +27,7 @@ import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path, PurePosixPath
 
-from .. import record_formats, records, state_migration, vault, writer_lease
+from .. import held_fs, record_formats, records, state_migration, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import (
@@ -36,9 +36,11 @@ from . import (
     chain,
     connection,
     derived_rows,
+    history,
     legacy_import,
     log_view,
     owner,
+    ownership,
     preflight,
     schema,
     takeover,
@@ -189,7 +191,7 @@ def _view_edits(root, conn, manifest, cid, targets):
     for path, kind, published, pending in conn.execute(
             "SELECT path,kind,published_sha256,pending_sha256 FROM projection_state WHERE collection_id=?", (cid,)):
         # nosemgrep: ep-word-membership -- the schema's closed projection kinds; see _RENDERED.
-        if kind not in _RENDERED:
+        if kind != "history" and kind not in _RENDERED:
             raise collections.CollectionError(UNREPRESENTABLE, f"a {kind} view has no file form")
         known.add(path)
         data = _read(root, path)
@@ -202,6 +204,13 @@ def _view_edits(root, conn, manifest, cid, targets):
     directories = [records._held_directory(manifest)]
     if manifest.storage.strategy == "markdown-items":
         directories.append(manifest.storage.source)
+    history_main = history.main_path(manifest)
+    history_directory = str(PurePosixPath(history.page_path(manifest, 1)).parent)
+    directories.append(history_directory)
+    if os.path.lexists(Path(root) / history_main) and history_main not in known:
+        edited.append(history_main)
+    if os.path.lexists(Path(root) / history_directory) and not (Path(root) / history_directory).is_dir():
+        edited.append(history_directory)
     edited += [path for directory in directories for path in _disk_files(root, directory) if path not in known]
     return sorted(edited)
 
@@ -244,6 +253,12 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
                 if path not in held and sha is not None}
             targets = {manifest_path: rendered["manifest"], **dict(rendered["sources"]), **dict(rendered["held"]),
                        **dict.fromkeys(resolved)}
+        # File mode cannot reconstruct history's per-effect release decisions; retire only registered exact bytes.
+        retired = {path: None if (data := _read(root, path)) is None else _sha(data)
+                   for (path,) in conn.execute("SELECT path FROM projection_state WHERE collection_id=? AND kind='history'",
+                                              (cid,))}
+        resolved.update(retired)
+        targets.update(dict.fromkeys(retired))
         blocker = _unexportable(manifest, imported, rendered)
         if blocker is None and views:
             allowed = dict(targets)
@@ -258,20 +273,24 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
         blocker = _blocker(OVER_BOUND if code == _LOG_BOUND else UNREPRESENTABLE, f"{code}: {error}")
     if blocker is not None:
         return {**row, "status": "blocked", "blocker": blocker}, None
-    if rendered is None:
+    if rendered is None and not resolved:
         return {**row, "status": "unwritten"}, None
     basis = sorted((path, None if (data := _read(root, path)) is None else _sha(data),
                     None if target is None else _sha(target)) for path, target in targets.items())
     imported_text = conn.execute("SELECT manifest_text FROM collection_manifests WHERE collection_id=? "
                                  "AND manifest_version=1", (cid,)).fetchone()[0]
     work = {"manifest_path": manifest_path, "manifest_text": text, "targets": targets, "resolved": resolved,
+            "checkpoint": rendered is not None,
             "basis": basis,
             # The checkpoint continues the legacy chain from the head the store imported, or from
             # the checkpoint an abandoned export left: another parent would fork that chain.
             "parent_id": parents.get(cid) or collections.parse_manifest_bytes(
                 Path(root), manifest_path, imported_text.encode("utf-8")).audit_head or "baseline",
             "gap_code": _HISTORY_CODE.format(store_id=store_id, first=first, last=last), "collection_head": head}
-    return {**row, "status": "written", "files": sum(1 for _, before, after in basis if before != after)}, work
+    if rendered is None:
+        return {**row, "status": "unwritten"}, work
+    return {**row, "status": "written",
+            "files": sum(1 for _, before, after in basis if before != after)}, work
 
 
 def _parents(conn):
@@ -285,9 +304,14 @@ def plan(root, conn, *, plan_id=None, views=True):
     head = chain.verify_store_chain(conn)
     store_id = conn.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     raw = authority.read_marker(root)
-    marker = authority.parse_marker(root, raw)
-    if marker["store_id"] != store_id:
-        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the marker routes to another store")
+    marker, _ = ownership.declarations(root, conn)
+    if marker is None:
+        raise CollectionStoreError(BLOCKED, "the store has no canonical collections")
+    authority.require_projection_ownership(conn, marker, root=root)
+    if raw is not None:
+        hint = authority.parse_marker(root, raw)
+        for entry in hint["collections"]:
+            authority.require_selected(conn, hint, entry, root=root)
     rows, work, parents = [], {}, _parents(conn)
     for entry in sorted(marker["collections"], key=lambda item: item["manifest_path"]):
         row, planned = _plan_collection(root, conn, entry, store_id, plan_id, parents, views=views)
@@ -295,7 +319,7 @@ def plan(root, conn, *, plan_id=None, views=True):
         if planned is not None:
             work[entry["collection_id"]] = planned
     verdict = "blocked" if any(row["status"] == "blocked" for row in rows) else "exportable"
-    basis = {"store_id": store_id, "head": list(head), "marker_sha256": _sha(raw),
+    basis = {"store_id": store_id, "head": list(head), "marker_sha256": None if raw is None else _sha(raw),
              "collections": [[row["collection_id"], row["status"], work.get(row["collection_id"], {}).get("basis")]
                              for row in rows]}
     sealed = {"mode": "collections-store-export", "verdict": verdict, "store_id": store_id,
@@ -345,7 +369,7 @@ def preview(vault_root) -> dict:
         return _report("preview", "export_pending", plan_id=intent["plan_id"], exported_at=intent["exported_at"],
                        collections=[{"collection_id": entry["collection_id"], "path": entry["manifest_path"]}
                                     for entry in intent["collections"]])
-    if authority.read_marker(root) is None:
+    if ownership.current(root).marker is None:
         return _report("preview", "nothing_to_export", **(
             {"local_store": "this host keeps a store the vault no longer routes to; retire it with "
                             "`exomem collections export --retire-local`"}
@@ -409,12 +433,23 @@ def _begin(session, manager, fence_client, *, plan_id, why):
         raw = authority.read_marker(session.root)
         with closing(connection.open_reader(session.path)) as reader:
             sealed, _ = plan(session.root, reader)
+            marker = ownership.current(session.root, conn=reader).marker
         if sealed["verdict"] != "exportable":
             raise _refused(sealed)
         if sealed["plan_id"] != plan_id:
             raise _stale()
-        marker = authority.parse_marker(session.root, raw)
         _require_retire_route(fence_client)
+        if marker is None:
+            raise CollectionStoreError(BLOCKED, "the store has no admitted collections")
+        hint = None if raw is None else authority.parse_marker(session.root, raw)
+        if hint is None or authority.intent_collection_ids(hint) != authority.intent_collection_ids(marker):
+            if hint is not None:
+                marker = {**marker, "authority_epoch": hint["authority_epoch"],
+                          "collection_store_fence": hint["collection_store_fence"]}
+            repaired = json.dumps(marker, sort_keys=True, separators=(",", ":")).encode()
+            # Repair only the validated compatibility preimage; canonical data and the plan stay unchanged.
+            admission._replace_marker(session, token, raw, repaired)
+            raw = repaired
         intent = {"version": 2, "kind": authority.EXPORT, "request_id": "export:" + uuid.uuid4().hex,
                   "plan_id": plan_id, "expected_marker": raw.decode("utf-8"), "why": why,
                   "exported_at": dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ"),
@@ -500,12 +535,13 @@ def _write_collection(session, token, intent, cid, work, store_id, head, deferre
         for path, sha in work["resolved"].items():
             _remove(session, path, sha)
         _renew(session, token)
-        records.export_checkpoint(
-            root, work["manifest_path"], manifest_text=work["manifest_text"],
-            transition_id=_transition(intent["plan_id"], cid), parent_id=work["parent_id"],
-            gap_code=work["gap_code"], why=intent["why"], deferred=deferred,
-            payload_hash=records.export_checkpoint_payload_hash(
-                store_id=store_id, collection_head=work["collection_head"], store_head=head))
+        if work["checkpoint"]:
+            records.export_checkpoint(
+                root, work["manifest_path"], manifest_text=work["manifest_text"],
+                transition_id=_transition(intent["plan_id"], cid), parent_id=work["parent_id"],
+                gap_code=work["gap_code"], why=intent["why"], deferred=deferred,
+                payload_hash=records.export_checkpoint_payload_hash(
+                    store_id=store_id, collection_head=work["collection_head"], store_head=head))
 
 
 def _require_reads_as_served(root, conn, intent, work):
@@ -533,7 +569,7 @@ def _require_reads_as_served(root, conn, intent, work):
                 for key, record in found.items()):
             raise CollectionStoreError(UNVERIFIED, f"{entry['manifest_path']} does not read as the store served it")
         audit = records.inspect_audit_gap(root, manifest)
-        if cid in work:
+        if cid in work and work[cid]["checkpoint"]:
             (legacy,) = conn.execute("SELECT legacy_audit_status FROM collections WHERE collection_id=?",
                                      (cid,)).fetchone()
             # nosemgrep: ep-word-membership -- the inspector's closed audit statuses.
@@ -543,7 +579,7 @@ def _require_reads_as_served(root, conn, intent, work):
                 raise CollectionStoreError(UNVERIFIED, f"{entry['manifest_path']} reads audit {audit['status']} "
                                            "without the export's checkpoint")
         verified.append({"collection_id": cid, "path": entry["manifest_path"],
-                         "status": "written" if cid in work else "unwritten", "audit": audit["status"]})
+                         "status": "written" if cid in work and work[cid]["checkpoint"] else "unwritten", "audit": audit["status"]})
     return verified
 
 
@@ -626,6 +662,9 @@ def _write_and_verify(session, token, intent, store_id, deferred):
         for cid, planned in work.items():
             _renew(session, token)
             _write_collection(session, token, intent, cid, planned, store_id, head, deferred)
+        if any(_read(session.root, path) is not None for planned in work.values()
+               for path, target in planned["targets"].items() if target is None):
+            raise CollectionStoreError(UNVERIFIED, "an export retirement target is still present")
         _renew(session, token)
         return _require_reads_as_served(session.root, reader, intent, work)
 
@@ -647,7 +686,7 @@ def _record_verified(session, runtime, token, intent):
             json.dumps(intent, sort_keys=True, separators=(",", ":")), authority.PENDING_CREATE))
 
 
-def _require_retired_head(fence_client, path, store_id, generation):
+def _require_retired_head(fence_client, reader, store_id, generation):
     """Refuse to go forward from a retired fence unless the coordinator retired this store at its own head.
 
     Before the retire, another host may have adopted the replica and written rows that this
@@ -658,13 +697,67 @@ def _require_retired_head(fence_client, path, store_id, generation):
     if (retired.store_id, retired.generation) != (store_id, generation):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the coordinator retired another store fence")
     head = retired.collection_store_head
-    with closing(connection.open_reader(path)) as reader:
-        (instance,) = reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_INSTANCE_ID,)).fetchone()
-        if head is not None and not admission.holds_head(reader, head, store_id, instance):
-            raise CollectionStoreError(takeover.SYNC_PENDING, (
-                "the head the coordinator recorded when it retired this store's fence is not in this store, so "
-                "another host wrote rows that the files would lose; keep the services stopped and keep both stores, "
-                "the marker and the fence as they are"))
+    (instance,) = reader.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_INSTANCE_ID,)).fetchone()
+    if head is not None and not admission.holds_head(reader, head, store_id, instance):
+        raise CollectionStoreError(takeover.SYNC_PENDING, (
+            "the head the coordinator recorded when it retired this store's fence is not in this store, so "
+            "another host wrote rows that the files would lose; keep the services stopped and keep both stores, "
+            "the marker and the fence as they are"))
+    return retired
+
+
+def completed_retirement_binding(root, fence_client, store_id=None):
+    """Prove completed file authority from the paired export and retired head.
+
+    A false acceptance can expose stale views; an unresolved proof delays relevant
+    reads and local cleanup. Marker names alone never establish retirement.
+    """
+    from ..vault_portability import PortabilityError, _checked_collection_replica_structure
+
+    try:
+        if authority.read_marker(root) is not None:
+            return None
+        fence = fence_client.collection_store_fence()
+        if fence.enrolled:
+            return None
+        if store_id is None:
+            store_id = fence_client.retired_collection_store_fence().store_id
+            if store_id is None:
+                return None
+        directory = authority.marker_path(root).parent
+        for path in sorted(directory.glob(MARKER_LEAF + EXPORTED + "*")):
+            with held_fs.acquire(root).require() as fs, \
+                    fs.parent(directory.relative_to(root).as_posix()).require() as parent, \
+                    fs.file(parent, path.name).require() as file:
+                raw = fs.read(file).require()
+            marker = authority.parse_marker(root, raw)
+            generation = marker["collection_store_fence"]["generation"]
+            if marker["store_id"] != store_id or generation != fence.generation:
+                continue
+            at = path.name[len(MARKER_LEAF + EXPORTED):]
+            source = directory / (connection.STORE_FILENAME + EXPORTED + at)
+            with _checked_collection_replica_structure(root, source_path=source) as verified:
+                reader = verified.connection
+                intent = authority.pending_create(reader)
+                canonical, _ = ownership.declarations(root, reader, generation=generation)
+                if (intent is None or intent["kind"] != authority.EXPORT or intent["exported_at"] != at
+                        or intent["expected_marker"].encode() != raw or canonical["store_id"] != store_id
+                        or authority.intent_collection_ids(intent) != {entry["collection_id"] for entry in canonical["collections"]}
+                        or {entry["collection_id"] for entry in marker["collections"]}
+                        != authority.intent_collection_ids(intent)):
+                    raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "export retirement evidence differs")
+                for entry in marker["collections"]:
+                    authority.require_selected(reader, marker, entry, root=root)
+                for item in intent["collections"]:
+                    entry = authority.selected_entry(root, canonical, item["collection_id"])
+                    if (entry["manifest_path"], entry["source_path"]) != (item["manifest_path"], item["source_path"]):
+                        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "export collection binding differs")
+                retired = _require_retired_head(fence_client, reader, store_id, generation)
+                return at, (raw, verified.source_sha256, fence, retired)
+        return None
+    except (PortabilityError, held_fs.HeldFsError, OSError, sqlite3.Error, chain.StoreChainError,
+            collections.CollectionError):
+        raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "completed export evidence is unavailable") from None
 
 
 def apply(session, manager, fence_client, *, plan_id, why) -> dict:
@@ -686,7 +779,7 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     with manager.consistency_guard(root, operation="collection_store_export"):
         intent, begun = _local_intent(root), None
         if intent is None:
-            if authority.read_marker(root) is None:
+            if ownership.current(root).marker is None:
                 return preview(root) | {"step": "apply"}
             intent, begun = _begin(session, manager, fence_client, plan_id=plan_id, why=why)
         elif intent["plan_id"] != plan_id:
@@ -726,7 +819,8 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
         elif routed:
             # No enrolled fence admits a runtime and the marker cannot enrol again, so the store
             # is frozen: going forward from it loses nothing once its retired head is its own.
-            _require_retired_head(fence_client, session.path, store_id, generation)
+            with closing(connection.open_reader(session.path)) as reader:
+                _require_retired_head(fence_client, reader, store_id, generation)
             if not intent.get("verified"):
                 # A retire made by hand does not prove that this export wrote the files.
                 runtime = session.runtime()
@@ -799,7 +893,7 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                 with closing(connection.open_reader(session.path)) as reader:
                     _, work = plan(root, reader, plan_id=plan_id, views=False)
                     parents = _parents(reader)
-                views, removed = [], []
+                views, removed, missing_history = [], [], []
                 for cid, planned in work.items():
                     transition = _transition(plan_id, cid)
                     manifest = collections.parse_manifest_bytes(
@@ -808,12 +902,14 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                     for path, target in planned["targets"].items():
                         data = _read(root, path)
                         if target is None and data is None:
-                            removed.append((path,))
+                            kind = writer.connection.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
+                            (missing_history if kind == ("history",) else removed).append((path,))
                         elif data is not None and (data == target or path == planned["manifest_path"]
                                                    and data == checkpointed):
                             views.append((_sha(data), path))
-                    history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
-                    if history.parsed and any(event["transition_id"] == transition for event in history.events):
+                    audit_history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
+                    if planned["checkpoint"] and audit_history.parsed and any(
+                            event["transition_id"] == transition for event in audit_history.events):
                         # The log holds this checkpoint, so the legacy chain ends there. A checkpoint cut
                         # between its manifest and log flips is not in the chain, whatever the manifest
                         # names: the next export rewrites the manifest and checkpoints its parent again.
@@ -824,6 +920,7 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                         raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "the export intent changed")
                     conn.executemany("UPDATE projection_state SET published_sha256=? WHERE path=?", views)
                     conn.executemany("DELETE FROM projection_state WHERE path=? AND kind='held'", removed)
+                    conn.executemany("UPDATE projection_state SET state='pending' WHERE path=? AND kind='history'", missing_history)
                     conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (
                         schema.META_EXPORT_PARENTS, json.dumps(parents, sort_keys=True, separators=(",", ":"))))
                     conn.execute("DELETE FROM store_meta WHERE key=?", (authority.PENDING_CREATE,))
@@ -855,11 +952,9 @@ def retire_local(session, manager, fence_client) -> dict:
         if authority.read_marker(root) is not None:
             raise CollectionStoreError(takeover.SYNC_PENDING, "this vault still routes collections to its store; "
                                        "wait until the exported vault reaches this host")
-        exported = {}
-        for path in authority.marker_path(root).parent.glob(MARKER_LEAF + EXPORTED + "*"):
-            exported[authority.parse_marker(root, path.read_bytes())["store_id"]] = path.name[len(
-                MARKER_LEAF + EXPORTED):]
         if not session.path.exists():
+            if completed_retirement_binding(root, fence_client) is None:
+                raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "no completed export remains")
             # No store is left to tombstone, but the descriptors still keep an older release out.
             with manager.writer_authority_guard(vault_root=root):
                 token = manager._fencing_token
@@ -871,13 +966,13 @@ def retire_local(session, manager, fence_client) -> dict:
             intent = authority.pending_create(reader)
         if intent is not None and intent["kind"] == authority.EXPORT:
             raise admission.export_pending()
-        fence = fence_client.collection_store_fence()
-        if store_id not in exported or fence.enrolled and fence.store_id == store_id:
+        completed = completed_retirement_binding(root, fence_client, store_id)
+        if completed is None:
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "no finished export retired this host's "
                                        "store, so it stays; export the vault first")
         with manager.writer_authority_guard(vault_root=root):
             token = manager._fencing_token
             state_migration.retire_collection_store_compatibility(root, authority_check=lambda: session.require(token))
             session.require(token)
-            _tombstone_store(session, exported[store_id])
-    return _report("retire-local", "retired", status="retired", store_id=store_id, exported_at=exported[store_id])
+            _tombstone_store(session, completed[0])
+    return _report("retire-local", "retired", status="retired", store_id=store_id, exported_at=completed[0])

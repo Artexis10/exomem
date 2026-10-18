@@ -23,7 +23,8 @@ def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect():
     assert result["phase_acceptance"] is False
     assert result["command_path"]["lease"] == "vault-scoped"
     assert result["command_path"]["inspect"] == "full public"
-    assert result["command_path"]["projection"] == "synchronous item-view protocol"
+    assert result["command_path"]["projection"] == "deferred item-view publication"
+    assert result["command_path"]["acknowledgement"] == "durable SQLite commit"
     # Elapsed and CPU values must cover the same actual public calls, rather
     # than subtracting unrelated percentile distributions to invent a wait budget.
     assert result["timing_clocks"]["elapsed"] == "perf_counter"
@@ -41,6 +42,7 @@ def test_store_diagnostic_uses_scoped_lease_and_full_public_inspect():
     inspection = result["final_inspect"]
     assert inspection["contract"]["collection_id"] == "6a7b8c9d-1111-4222-8333-444455556666"
     assert inspection["coverage"]["committed"] == 9
+    assert inspection["projection"]["pending_views"] > 0
     # Counts alone can survive filtering of an unresolved caller: require the
     # public contract and every source version in this small, authorised fixture.
     versions = inspection["source_versions"]
@@ -119,6 +121,7 @@ def test_phase_probes_prove_release_refusal_and_bulk_storage():
     assert probes["refusal_state_unchanged"] is True
     assert probes["bulk_500"]["stored_count_delta"] == 500
     assert probes["bulk_500"]["elapsed_ms"] > 0
+    assert result["final_inspect"]["projection"]["pending_views"] > 0
     assert result["phase_acceptance"] is False
     assert result["run_metadata"]["sqlite_version"]
     assert result["run_metadata"]["script_sha256"]

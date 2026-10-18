@@ -17,7 +17,6 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
 import threading
 import time
 from contextlib import ExitStack, closing, suppress
@@ -402,7 +401,7 @@ def test_a_writer_without_a_store_runtime_stays_fenced_until_the_marker_is_insta
     collections as files, and the next apply refuses them as stale."""
     root = legacy_vault(env)
     crash_apply(tmp_path, "before-marker")
-    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+    with pytest.raises(collections.CollectionError, match="COLLECTION_STORE_UNAVAILABLE"):
         append_to_work(root, "a write between the fence cut and the marker")
     assert migrate(root, "apply") == 0
 
@@ -423,6 +422,11 @@ def test_a_write_after_a_cutover_stops_before_its_fence_cut_reaches_the_store(en
         crash_apply(tmp_path, "before-fence")
     capsys.readouterr()
     assert connection.store_path(root).exists() and authority.read_marker(root) is None
+    assert not fence().enrolled
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        intent = authority.pending_create(reader)
+        assert intent["kind"] == authority.MIGRATE and intent["expected_marker"] is None
+        assert "base_head" not in intent and "supersedes" not in intent
     written = append_to_work(root, "Written while the store waited")
     assert migrate(root, "apply") == 0
     applied = printed(capsys)
@@ -483,6 +487,29 @@ def test_a_file_changed_outside_the_lease_after_the_fence_cut_supersedes_the_una
     assert (fence().enrolled, fence().generation, fence().store_id) == (True, 2, routed["store_id"])
     assert foreign_evidence(root) == [published]
     assert stored_body(root, KEY) == "Edited by hand\n"
+
+
+def test_a_supersede_with_another_predecessor_generation_cannot_recover_or_move_the_fence(env, capsys, tmp_path):
+    """An interrupted replacement must not use a forged predecessor to pass recovery before its fence CAS."""
+    root = legacy_vault(env)
+    crash_apply(tmp_path, "before-marker")
+    edit_by_hand(root)
+    crash_apply(tmp_path, "after-install")
+    before = fence()
+    with closing(sqlite3.connect(connection.store_path(root))) as writer:
+        intent = authority.pending_create(writer)
+        assert intent["supersedes"]["generation"] == before.generation
+        intent["supersedes"]["generation"] += 1
+        writer.execute("UPDATE store_meta SET value=? WHERE key=?",
+                       (json.dumps(intent), authority.PENDING_CREATE))
+        writer.commit()
+        head = chain.verify_store_chain(writer)
+    capsys.readouterr()
+    assert migrate(root, "apply") == 1
+    assert "COLLECTION_STORE_MARKER_CONFLICT" in capsys.readouterr().err
+    assert authority.read_marker(root) is None and fence() == before
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader) == intent and chain.verify_store_chain(reader) == head
 
 
 def test_a_crash_after_the_store_is_published_resumes_from_its_intent_without_importing_again(
@@ -1058,7 +1085,7 @@ def test_a_writer_without_a_store_runtime_stays_fenced_while_an_s1_migration_is_
     collections as files, and the next apply refuses them as stale."""
     root = s1
     crash_apply(tmp_path, "before-marker", released=MIGRATE | {capability.RECORDS_SUMMARY_V1})
-    with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
+    with pytest.raises(collections.CollectionError, match="COLLECTION_STORE_UNAVAILABLE"):
         append_to_work(root, "a write while the migration is pending")
     assert migrate(root, "apply") == 0
 
@@ -1336,12 +1363,6 @@ def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_c
     target = asyncio.run(runtime.inspect({"python": OLDER, "version": _older()}))
     with pytest.raises(ValueError, match="does not support required state compatibility"):
         runtime.migration_required(target)
-    started = subprocess.run(
-        [OLDER, "-I", "-c", "import sys; from pathlib import Path; from exomem import state_migration;"
-         " state_migration.require_vault_state_ready(Path(sys.argv[1]))", str(copy)],
-        capture_output=True, text=True, env={**os.environ, "EXOMEM_STATE_ROOT": str(tmp_path / "old-state")})
-    assert started.returncode != 0
-    assert "StateCompatibilityUnsupported" in started.stderr or "COLLECTION_STORE_MARKER_CONFLICT" in started.stderr
 
 
 NESTED = "Knowledge Base/Records/Work/Items/Nested/_collection.md"

@@ -175,6 +175,10 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
             code="NOT_FOUND",
             reason=f"file does not exist: {missing_path}",
         )
+    from .collection_store import ownership
+
+    if ownership.relevant(resolution.relative) or ownership.relevant(resolution.resolved_relative):
+        ownership.current(vault_root)
     try:
         # The resolver may have followed a stable in-vault alias. Read the
         # exact resolved target it classified, not the caller spelling that

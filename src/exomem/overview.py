@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import access, reserved_paths
+from .collection_store.ownership import reader
 from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
 from .kbdir import kb_dirname
 
@@ -156,6 +157,7 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
     return scan, rel
 
 
+@reader
 def overview(
     root: Path | str,
     path: str = "",

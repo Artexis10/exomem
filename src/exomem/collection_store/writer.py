@@ -186,6 +186,12 @@ class CollectionWriter:
                         self._resolve_in_place(self._view_edit["path"], self._view_edit["base"])
                 except _RecoveryOnly:
                     recovery_only = True
+                if not reconcile:
+                    # Exact item and manifest intents are durable; the projector installs them after save.
+                    # The projection_state.kind CHECK fixes the ordinary kinds that defer publication.
+                    batch.publications = {path: publication for path, publication in batch.publications.items()
+                                          if publication.projection is None
+                                          or publication.projection["kind"] not in ("item", "manifest")}
                 batch.stage_all()
                 for manifest in tuple(batch.precommits.values()):
                     self._precommit(manifest)
@@ -358,21 +364,17 @@ class CollectionWriter:
             yield self._operation.field_plan(manifest).manifest
 
     def discover_collections(self, *, authorize_path=None, max_candidates=512, max_raw_candidates=512):
-        from . import authority
+        from . import ownership
+        from .preview import production_bound
 
         with self.read_snapshot():
-            marker = authority.routing_marker(self)
-            entries = ([(entry["collection_id"], entry["manifest_path"]) for entry in marker["collections"]]
-                       if marker is not None else self.connection.execute(
-                           "SELECT collection_id,manifest_path FROM collections ORDER BY manifest_path"
-                       ).fetchall())
+            proof = ownership.current(self.root, conn=self.connection, private=not production_bound(self.root))
+            entries = [(entry["collection_id"], entry["manifest_path"]) for entry in proof.entries
+                       if entry["collection_id"] in proof.admitted]
             manifests = []
             for cid, path in sorted(entries, key=lambda entry: entry[1]):
                 if authorize_path is not None and not authorize_path(path):
                     continue
-                if marker is not None:
-                    authority.require_selected(self.connection, marker, authority.selected_entry(self.root, marker, cid),
-                                               root=self.root)
                 head = self._operation.summary_manifest(cid)
                 if head is None:
                     head = (None, self._operation.decision(self._operation.catalog(cid)[0]))
@@ -418,6 +420,33 @@ class CollectionWriter:
                 return bool(found) and self._operation.decision(found[0]).level >= 6
             return any(subject.basis.identity == identity and self._operation.decision(subject).level >= 6
                        for subject in self._operation.catalog(manifest.collection_id)[1:])
+
+    def admitted_item_metadata(self, cid, key, path):
+        """Admit one complete current item from canonical metadata, without reading its payload."""
+        from .preview import selected_writer
+
+        selected = selected_writer(self.root, cid)
+        if selected is None or selected.handle._inspection_identity is not self.handle._inspection_identity:
+            return None
+        with self.read_snapshot():
+            self._operation.require_complete_fields(cid)
+            row = self.connection.execute(
+                "SELECT view_path FROM items WHERE collection_id=? AND item_key=?", (cid, key)
+            ).fetchone()
+            if row is None or row[0] != path:
+                return None
+            manifest_path = self.connection.execute(
+                "SELECT manifest_path FROM collections WHERE collection_id=?", (cid,)
+            ).fetchone()[0]
+            manifest = next(governance.iter_subjects(
+                self.connection, cid, self._operation.logical_vault_id,
+                identity=manifest_path, include_held=False), None)
+            item = next(governance.iter_subjects(
+                self.connection, cid, self._operation.logical_vault_id, row_key=key, include_held=False), None)
+            if manifest is None or item is None or any(
+                    self._operation.decision(subject).level < 6 for subject in (manifest, item)):
+                return None
+            return item
 
     def _projection_path_exists(self, path):
         """Canonical existence for delta pruning, without authorizing disclosure."""
@@ -467,6 +496,9 @@ class CollectionWriter:
         from .. import due_state, record_governance
 
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
+        from . import history
+
+        history.verify(self.connection, manifest.collection_id, proofs=self.handle.release_cache.history)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
         field_plan = self._operation.field_plan(manifest)
         if not field_plan.owner and (field_plan.whole_fields != set(manifest.schema.fields)):
@@ -550,14 +582,24 @@ class CollectionWriter:
             )
             committed = len(allowed_rows)
         held_paths = {subject.basis.subject.path for subject in catalog if subject.row_id in held_ids}
-        pending = sum(
-            kind == "manifest" or row_id in allowed_rows or (kind in ("log", "summary") and complete)
-            or (kind == "held" and path in held_paths)
-            for path, row_id, kind in self.connection.execute(
-                "SELECT path,row_id,kind FROM projection_state WHERE collection_id=? AND state='pending'",
-                (manifest.collection_id,),
-            )
-        )
+        pending = 0
+        pending_history = {}
+        for path, row_id, kind, published in self.connection.execute(
+            "SELECT path,row_id,kind,published_sha256 FROM projection_state WHERE collection_id=? AND state='pending'",
+            (manifest.collection_id,),
+        ):
+            if kind == "history":
+                # A hidden-only write may queue a page without changing any released output.
+                if self._operation.projection_decision(path).level >= 6:
+                    pending_history[path] = published
+            else:
+                pending += (kind == "manifest" or row_id in allowed_rows or (kind in ("log", "summary") and complete)
+                            or (kind == "held" and path in held_paths))
+        if pending_history:
+            from . import history
+
+            context = history.PageContext(self.connection, self.root, manifest, cache=self.handle.release_cache)
+            pending += sum(digest != pending_history[path] for path, digest in context.digests(pending_history))
         held = self.connection.execute(
             "SELECT held_id, updated_at, candidate_json, diagnostics_json, kind, code "
             f"FROM held_candidates WHERE collection_id = ? AND held_id IN ({','.join('?' for _ in held_ids)}) ORDER BY held_id",
@@ -626,32 +668,9 @@ class CollectionWriter:
         return payload, selection
 
     def _inspection_audit(self, row, *, complete):
-        from .. import record_governance
+        from . import history
 
-        incomplete = {"status": "history_incomplete", "gaps": []}
-        if not complete:
-            return incomplete
-        if row["legacy_audit_status"] is None:
-            return {"status": "ok" if row["audit_head"] else "baseline", "gaps": []}
-        # Historical/deleted paths also gate imported gap topology and rationale.
-        captured = self.connection.execute(
-            "SELECT json_extract(receipt_json,'$.bounded_inspection'),"
-            "json_extract(receipt_json,'$.bounded_inspection_paths') FROM txns "
-            "WHERE collection_id=? AND txn_id=?",
-            (row["collection_id"], row["created_txn"]),
-        ).fetchone()
-        try:
-            paths = json.loads(captured[1]) if captured and captured[1] is not None else None
-            if not isinstance(paths, list) or any(
-                type(path) is not str or not self._operation.allows_history_path(path) for path in paths
-            ):
-                return incomplete
-            audit = record_governance._inspection_audit(
-                json.loads(captured[0]) if captured and captured[0] is not None else None
-            )
-        except (TypeError, ValueError):
-            return incomplete
-        return audit if audit["status"] == row["legacy_audit_status"] else incomplete
+        return history.audit(self, row, complete=complete)
 
     def _inspection_record(self, manifest, subject):
         cursor = self.connection.execute(
@@ -854,6 +873,9 @@ class CollectionWriter:
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
         valid = mutation_terminal.valid_collection_receipt(receipt)
+        warnable = mutation_terminal.valid_collection_receipt({
+            **receipt, "warnings": [*receipt.get("warnings", []), "projection_pending"],
+        })
         if txn["operation"] == "view_frame_edit":
             # This private leaf has no item effect and cannot truthfully return a Records update receipt.
             valid = (set(receipt) == {"operation", "collection_id", "transition_id", "commit_seq",
@@ -882,11 +904,20 @@ class CollectionWriter:
                 and all(row.get("transition_id") == txn["transition_id"]
                         for row in receipt["rows"] if row["outcome"] in {"inserted", "updated"})
             )
+            warnable = valid  # The bulk receipt's existing envelope supports publication warnings.
         if not valid:
             raise RuntimeError("writer constructed an invalid collection receipt")
         data = {**txn, "receipt_json": _json(receipt)}
+        from . import history
+
+        through = history.verify(self.connection, txn["collection_id"],
+                                 proofs=self.handle.release_cache.history, pending=data)
+        self._execute("UPDATE collections SET verified_through_txn=? WHERE collection_id=?",
+                      (through, txn["collection_id"]))
+        manifest = self._collection_manifest(self._collection_row(txn["collection_id"]))[0]
+        self._pending_basis(history.main_path(manifest), txn["collection_id"], "history", 0)
         self._execute(tables.INSERT_TXN, data)
-        if self._publication.deferred_create is None and txn["operation"] not in mutation_terminal.CONTROL_OPERATIONS:
+        if self._publication.deferred_create is None and warnable:
             self._publication.bind(receipt)
 
     def _advance(self, txn: Mapping[str, Any]) -> str:
@@ -906,7 +937,7 @@ class CollectionWriter:
         descriptor = None
         digest = hashlib.sha256(text.encode()).hexdigest()
         # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-        if kind in {"manifest", "item", "held", "summary", "log"}:
+        if kind in {"manifest", "item", "held", "summary", "log", "history"}:
             descriptor = self._publication.prepare({
                 "path": path, "collection_id": cid, "kind": kind, "row_id": row_id,
                 "pending_row_version": version, "pending_sha256": digest,
@@ -919,7 +950,8 @@ class CollectionWriter:
 
     def _render_view(self, projection, manifest):
         """Render indexed canonical rows using a context prepared before the filesystem phase."""
-        return views.render_view(self.connection, self._publication.identity, projection, manifest)
+        return views.render_view(self.connection, self._publication.identity, projection, manifest, root=self.root,
+                                 cache=self.handle.release_cache)
 
     def _register_view_input(self, projection, raw, token, slot, *, source=None):
         """Classify bytes found at a view path (``slot`` "offline") or displaced by an install.
@@ -929,6 +961,10 @@ class CollectionWriter:
         Without the edit-back release, a valid or formatting-only edit waits in place, as
         before edit-back existed.
         """
+        if projection["kind"] == "history":
+            # History is generated read-only output; edited bytes carry no canonical meaning.
+            self._publication.accept(projection["path"], hashlib.sha256(raw).hexdigest())
+            return True
         if views.unresolved_target(projection, source):
             _, manifest, _ = self._collection(projection["collection_id"])
             _, text = self._render_view(projection, manifest)
@@ -1059,12 +1095,15 @@ class CollectionWriter:
         whole log view names every row it shows (``governance.held_targets``).
         """
         contexts = (source or {}).get("source_contexts", [])
-        pairs = {tuple(pair) for name in ("previous_published", "previous_pending")
-                 if (pair := (source or {}).get(name)) is not None}
+        pairs = views.source_pairs(source or {})
         metadata = set()
         covered = set()
         try:
             for context in contexts:
+                if not isinstance(context, dict):
+                    metadata.clear()
+                    covered.clear()
+                    break
                 pair = (context.get("row_version"), context.get("sha256"))
                 if pair not in pairs or any(context.get(name) != projection.get(name)
                                            for name in ("path", "collection_id", "kind", "row_id")):
@@ -1074,8 +1113,14 @@ class CollectionWriter:
         except (KeyError, TypeError, ValueError):
             metadata.clear()
         if not pairs or covered != pairs or len(metadata) != 1:
-            self._publication.pending = True
-            return False
+            # Ambiguous historical authority preserves bytes under the existing owner-only quarantine floor.
+            canonical = self.connection.execute(
+                "SELECT m.governance_json FROM collection_manifests m JOIN collections c "
+                "ON c.collection_id=m.collection_id AND c.manifest_version=m.manifest_version WHERE c.collection_id=?",
+                (projection["collection_id"],),
+            ).fetchone()[0]
+            return self._store_view_correction(projection, code, raw, reference, diagnostics, base,
+                                               canonical, candidate=candidate, quarantined=True)
         metadata = metadata.pop()
         return self._store_view_correction(projection, code, raw, reference, diagnostics, base,
                                            metadata, candidate=candidate)
@@ -1218,7 +1263,7 @@ class CollectionWriter:
             if (row["generation"] != observed[0] or not _renders_rows(manifest)
                     or (not outside and not path.startswith(manifest.storage.source + "/"))):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep basis changed")
-            if not self._publication.eligible({"collection_id": cid}):
+            if not self._publication.eligible({"collection_id": cid, "path": manifest.path}):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "collection route is closed")
             item = self._item(cid, facts["item_key"]) if facts["item_key"] is not None else None
             self._require_detached_path(manifest, path, item)
@@ -1286,14 +1331,20 @@ class CollectionWriter:
                 self._execute("UPDATE projection_state SET path=?,install_json=NULL,stat_identity=NULL WHERE path=?",
                               (path, projection["path"]))
                 moved = self._publication.previous(path)
+                moved["source_pairs"], moved["source_contexts"] = [], []
                 self._publication.captured[path] = moved
                 self._publication.recovered_inputs[path] = []
                 if exact:
                     # This context describes a canonical render, never the observed detached bytes.
-                    descriptor = {"token": uuid.uuid4().hex, "render_context": self._publication._render_context(moved, manifest)}
-                    self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (_json(descriptor), path))
+                    context = self._publication._render_context(moved)
+                    moved["source_pairs"] = [[context["row_version"], context["sha256"]]]
+                    moved["source_contexts"] = [context]
+                    descriptor = {"token": uuid.uuid4().hex, "source_pairs": moved["source_pairs"],
+                                  "source_contexts": [context], "render_context": context}
+                    moved["install_json"] = _json(descriptor)
+                    self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (moved["install_json"], path))
                 else:
-                    descriptor = {"token": uuid.uuid4().hex, "unresolved_target_provenance": True}
+                    descriptor = {"token": uuid.uuid4().hex, "source_pairs": [], "unresolved_target_provenance": True}
                     moved["install_json"] = _json(descriptor)
                     self._execute("UPDATE projection_state SET install_json=? WHERE path=?", (moved["install_json"], path))
                     self._publication.accept(path, facts["digest"])
@@ -1308,6 +1359,7 @@ class CollectionWriter:
                     before_container_hash=self._container(row), after_container_hash=after,
                     affected_paths=[projection["path"], path], payload_hash=None,
                     outcome="committed", audit_correlation=txn["transition_id"])
+                self._history_reselection(cid)
                 self.handle.release_cache.touch(cid, f"exomem://{types.type_for_manifest(manifest).item_type}/{cid}/{item['item_key']}")
                 self._precommit(manifest)
                 self._insert_txn(txn, receipt)
@@ -1337,8 +1389,7 @@ class CollectionWriter:
         parent = batch._parent(previous["path"])
         preserved = []
         for displaced in [descriptor, *descriptor.get("preserved", [])]:
-            expected = {pair[1] for name in ("previous_published", "previous_pending")
-                        if (pair := displaced.get(name)) is not None} | set(displaced.get("accepted", ()))
+            expected = {pair[1] for pair in views.source_pairs(displaced)} | set(displaced.get("accepted", ()))
             found = False
             for slot in range(2):
                 leaf = views.ASIDE_PREFIX + displaced["token"] + f"-{slot}"
@@ -1364,11 +1415,20 @@ class CollectionWriter:
                 raw = batch._fs().read(file).require()
                 link_count = file.identity.link_count
             digest = hashlib.sha256(raw).hexdigest()
-            if digest == previous["pending_sha256"]:
+            ready = descriptor.get("install_ready") or (views.source_pair(previous, "pending")
+                                                        if "source_pairs" not in descriptor else None)
+            if ready is not None and digest == ready[1]:
                 if link_count == 2:
                     batch.pair_cleanup[previous["path"]] = (parent, stage_leaf, digest)
                 else:
                     batch.cleanup.append((previous, parent, stage_leaf, digest))
+            else:
+                source = {"source_pairs": [ready] if ready is not None else [],
+                          "source_contexts": [descriptor.get("render_context", {})]}
+                if not self._register_view_input(previous, raw, descriptor["token"], 2, source=source):
+                    raise connection.CollectionStoreError(
+                        "COLLECTION_STORE_PROJECTION_PENDING", "staged view edit awaits governed preservation")
+                batch.cleanup.append((previous, parent, stage_leaf, digest))
         elif result.error.code != "MISSING":
             raise result.error
         return preserved
@@ -1403,11 +1463,11 @@ class CollectionWriter:
                 return result
             if paths is not None:
                 cursor = self.connection.execute(
-                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') "
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log','history') "
                     f"AND path IN ({','.join('?' for _ in paths)}) ORDER BY path LIMIT ?", (*paths, limit + 1))
             else:
                 cursor = self.connection.execute(
-                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log') AND path>? "
+                    "SELECT * FROM projection_state WHERE kind IN ('item','manifest','held','summary','log','history') AND path>? "
                     "AND (? OR state='pending') ORDER BY path LIMIT ?",
                     (after or "", not pending_only, limit + 1),
                 )
@@ -1416,6 +1476,7 @@ class CollectionWriter:
             if more:
                 rows = rows[:limit]
             visited_parents = set()
+            history_pages = {}
             consumed = after or ""
             for projection in rows:
                 if batch.stopped():
@@ -1425,6 +1486,30 @@ class CollectionWriter:
                 if not batch.eligible(projection):
                     continue
                 _, manifest, _ = self._collection(projection["collection_id"])
+                if projection["kind"] == "history":
+                    from . import history
+
+                    if manifest.collection_id not in history_pages:
+                        context = history.PageContext(self.connection, self.root, manifest,
+                                                      cache=self.handle.release_cache)
+                        discovered = history.queue_pages(self, manifest, stopped=batch.stopped, limit=limit)
+                        requested = {row["path"] for row in rows
+                                     if row["kind"] == "history" and row["collection_id"] == manifest.collection_id}
+                        if not discovered:
+                            self._execute("UPDATE projection_state SET state='pending' WHERE path=?",
+                                          (history.main_path(manifest),))
+                        if batch.stopped():
+                            result["next_path"] = preceding
+                            break
+                        rendered = context.render_many(requested)
+                        history_pages[manifest.collection_id] = context, rendered, discovered
+                        batch.history_contexts[(manifest.collection_id, manifest.manifest_version.hash)] = context
+                    history_context, rendered, discovered = history_pages[manifest.collection_id]
+                    history_version, history_text = rendered[projection["path"]]
+                    history_digest = hashlib.sha256(history_text.encode()).hexdigest()
+                    keep_history_pending = not discovered and projection["path"] == history.main_path(manifest)
+                else:
+                    keep_history_pending = False
                 batch.precommits[manifest.collection_id] = manifest
                 result["examined"] += 1
                 try:
@@ -1477,8 +1562,15 @@ class CollectionWriter:
                     observed = None if paths is None else paths[projection["path"]]
                     if observed is not None and digest != observed.digest:
                         continue  # changed again since it settled; the next pass looks again
-                    if digest is not None and digest == projection["pending_sha256"]:
-                        if not preserved:
+                    if projection["kind"] == "history" and not history_context.exists(projection["path"]):
+                        if raw is None and not preserved:
+                            self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
+                        else:
+                            batch.retire(projection)
+                        continue
+                    current_render = projection["kind"] != "history" or digest == history_digest
+                    if digest is not None and digest == projection["pending_sha256"] and current_render:
+                        if not preserved and not keep_history_pending:
                             if not batch.confirm_target(projection):
                                 batch.pending = True
                                 continue
@@ -1488,15 +1580,19 @@ class CollectionWriter:
                                 "state='current' WHERE path=?", (projection["path"],)
                             )
                         continue
-                    if digest is not None and digest == projection["published_sha256"] and projection["state"] != "pending":
+                    if (digest is not None and digest == projection["published_sha256"]
+                            and (projection["state"] != "pending" or projection["kind"] == "history")
+                            and current_render):
+                        if projection["kind"] == "history" and projection["state"] == "pending" and not keep_history_pending:
+                            self._execute("UPDATE projection_state SET state='current',pending_row_version=NULL,"
+                                          "pending_sha256=NULL WHERE path=?", (projection["path"],))
                         if projection["state"] == "held":
                             # The owner restored the published view, which resolves its in-place hold.
                             self._resolve_in_place(projection["path"], edit_back.current_version(self.connection, projection))
                             self._execute("UPDATE projection_state SET state='current' WHERE path=?", (projection["path"],))
                         continue
                     source = {
-                        "previous_published": views.source_pair(projection, "published"),
-                        "previous_pending": views.source_pair(projection, "pending"),
+                        "source_pairs": projection["source_pairs"],
                         "source_contexts": projection["source_contexts"],
                     }
                     own = {projection["published_sha256"], projection["pending_sha256"],
@@ -1537,14 +1633,35 @@ class CollectionWriter:
                         else:
                             batch.retire(projection)
                         continue
-                    version, text = self._render_view(projection, manifest)
+                    version, text = ((history_version, history_text) if projection["kind"] == "history"
+                                     else self._render_view(projection, manifest))
                     self._pending(projection["path"], projection["collection_id"], projection["kind"], version, text, projection["row_id"], manifest=manifest)
                 except (held_fs.HeldFsError, OSError, connection.CollectionStoreError):
                     batch.pending = True
                 self._precommit(manifest)
             else:
-                result["next_path"] = consumed if more else None
+                sweep = self.handle.release_cache.queued_history_sweep()
+                if sweep is not None:
+                    from . import history
+
+                    active_main = history.main_path(self._collection(sweep.key[0])[1])
+                    previous = next((row["path"] for row in reversed(rows) if row["path"] < active_main), after or "")
+                    result["next_path"] = min(consumed, previous)
+                else:
+                    result["next_path"] = consumed if more else None
         return result
+
+    def _history_reselection(self, cid, *, new_row=False):
+        changed = self.handle.release_cache.discard_history(cid, new_row=new_row)
+        if not new_row or changed:
+            self._execute("UPDATE projection_state SET state='pending' WHERE collection_id=? "
+                          "AND kind='history' AND state!='pending'", (cid,))
+
+    def invalidate_history_pages(self):
+        """Queue derived history after governance changes; the normal drain does all publication."""
+        with self._mutation(reconcile=True):
+            self._execute("UPDATE projection_state SET state='pending' WHERE kind='history' AND state!='pending'")
+            return self._operation.policy.fingerprint
 
     def apply_view_edit(self, observation, found):
         """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.
@@ -1838,6 +1955,7 @@ class CollectionWriter:
             text, views.stamp(self._publication.identity, version, manifest.manifest_version.hash)
         )
         self._pending(manifest.path, manifest.collection_id, "manifest", version, rendered, manifest=manifest)
+        self._history_reselection(manifest.collection_id)
         self.handle.release_cache.touch(manifest.collection_id)
 
     def create_collection(
@@ -2219,7 +2337,9 @@ class CollectionWriter:
         Nothing renders on the acknowledgement path. The receipt says so: until reconcile, the
         published view shows an older basis.
         """
-        self._publication.pending = True
+        if kind != "history":
+            # History is always asynchronous; its queue is reported by inspect, without changing closed receipts.
+            self._publication.pending = True
         self._confirm_installed(path)
         if kind == "log":
             previous = self._publication.previous(path)
@@ -2318,6 +2438,10 @@ class CollectionWriter:
         parameters = self._item_parameters(manifest, key, values, body, path, txn, before, manifest_metadata, encoding)
         version, payload, stored = parameters["row_version"], parameters["payload_hash"], parameters["values_json"]
         if before is None:
+            self._history_reselection(manifest.collection_id, new_row=True)
+        elif parameters["governance_json"] != before["governance_json"] or path != before["view_path"]:
+            self._history_reselection(manifest.collection_id)
+        if before is None:
             cursor = self._execute(tables.INSERT_ITEM, parameters)
             row_id = cursor.lastrowid
         else:
@@ -2359,6 +2483,7 @@ class CollectionWriter:
     def _write_new_items(self, manifest, plans, txn, *, scope=None):
         """Apply admitted new summary rows together inside the existing mutation transaction."""
         manifest_metadata, encoding, layout = self._item_write_context(manifest)
+        self._history_reselection(manifest.collection_id, new_row=True)
         parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
                       for key, values, body, path, _, _ in plans]
         self._execute(tables.INSERT_ITEM, parameters)
@@ -2976,6 +3101,55 @@ class CollectionWriter:
         return self._item_carriers(result, manifest, path=before["view_path"] or manifest.path,
                                    key=key, values=final, previous=old_values)
 
+    def rebaseline_collection(self, collection, *, expected_manifest_hash, expected_container_hash,
+                             acknowledged_gap_codes, why, request_id=None):
+        """Acknowledge only a positively established imported discontinuity."""
+        from . import history
+
+        records._validate_why(why)
+        with self._mutation():
+            row, manifest, _ = self._collection(collection)
+            records._expect_hash(expected_manifest_hash, manifest.manifest_version.hash, "manifest")
+            records._expect_hash(expected_container_hash, self._container(row), "container")
+            assessment = history.audit(self, row)
+            gaps = tuple(assessment["gaps"])
+            if (row["legacy_audit_status"] != "gap" or assessment["status"] != "gap" or not gaps
+                    or not records._acknowledgeable_gap_codes(gaps)):
+                raise collections.CollectionError("RECORD_AUDIT_GAP", "rebaseline requires an inspectable audit gap")
+            codes = records._validate_gap_codes(tuple(acknowledged_gap_codes))
+            if codes != gaps:
+                raise collections.CollectionError("STALE_RECORD", "gap acknowledgement is stale")
+            payload = records.lifecycle_request_hash(action="rebaseline", collection_id=manifest.collection_id,
+                before_manifest_hash=expected_manifest_hash, before_container_hash=expected_container_hash,
+                proposed_manifest_hash=None, acknowledged_gap_codes=codes, rationale=why)
+            identity, digest, replay = self._identity("rebaseline", collection, {
+                "expected_manifest_hash": expected_manifest_hash, "expected_container_hash": expected_container_hash,
+                "acknowledged_gap_codes": codes, "why": why}, request_id)
+            if replay is not None:
+                return replay
+            gap = records.lifecycle_gap_fingerprint(prior_head=row["audit_head"] or "baseline",
+                acknowledged_gap_codes=codes, before_manifest_hash=expected_manifest_hash,
+                before_container_hash=expected_container_hash)
+            versions = [(manifest.path, manifest.manifest_version.hash), *(
+                (path, tokens.item_version(manifest.collection_id, key, version, digest))
+                for key, version, digest, path in self.connection.execute(
+                    "SELECT item_key,row_version,payload_hash,view_path FROM items WHERE collection_id=? ORDER BY item_key",
+                    (manifest.collection_id,)))]
+            checkpoint = records.lifecycle_checkpoint_fingerprint(tuple(versions))
+            facts = {"acknowledged_gap_codes": list(codes), "gap_fingerprint": gap,
+                     "checkpoint_snapshot_hash": checkpoint}
+            txn = self._txn(row, manifest, "rebaseline", why, identity, digest, effects=facts)
+            after = self._advance(txn)
+            self._execute("UPDATE collections SET audit_reader_version=2 WHERE collection_id=?", (manifest.collection_id,))
+            receipt = records._lifecycle_result(operation="rebaseline", manifest=manifest,
+                before_manifest_hash=expected_manifest_hash, after_manifest_hash=expected_manifest_hash,
+                before_container_hash=expected_container_hash, after_container_hash=after, payload_hash=payload,
+                audit_correlation=txn["transition_id"], continuity=False, acknowledged_gap_codes=codes,
+                gap_fingerprint=gap, checkpoint_snapshot_hash=checkpoint, affected_paths=(manifest.path,))
+            self._precommit(manifest)
+            self._insert_txn(txn, receipt)
+        return receipt
+
     def revise_collection(
         self,
         collection,
@@ -3149,6 +3323,5 @@ class CollectionWriter:
                 "outcome": "discarded",
                 "audit_correlation": None,
             }
-            self._publication.bind(receipt)
         writer_lease.mark_active_mutation_committed()
         return receipt

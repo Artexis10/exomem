@@ -38,12 +38,12 @@ from test_collection_store_migration import (
     wait_out_the_lease,
 )
 from test_collection_store_s1_gate import coordinator
-from test_collection_store_service import DAILY, Service, call
+from test_collection_store_service import DAILY, Service, _until, call
 
 from exomem import __main__ as cli
 from exomem import record_formats, records, state_migration, state_paths, writer_lease
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority, chain, connection, export
+from exomem.collection_store import authority, capability, chain, connection, export, replica
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
 
@@ -96,14 +96,138 @@ def preview_id(root, capsys):
     return previewed["plan_id"]
 
 
-def test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_served(env, capsys):  # noqa: F811
+@pytest.fixture
+def published_views(env, monkeypatch):  # noqa: F811 - imported fixture
+    """Exercise real view publication through its existing release capability."""
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED | {capability.RECORDS_SUMMARY_V1})
+    return env
+
+
+@pytest.mark.parametrize("hint", ["absent", "subset"])
+def test_export_uses_every_canonical_collection_when_the_compatibility_hint_is_incomplete(env, capsys, hint):  # noqa: F811
+    root = env
+    legacy_vault(root)
+    assert migrate(root, "apply") == 0
+    capsys.readouterr()
+    raw = authority.read_marker(root)
+    if hint == "absent":
+        authority.marker_path(root).unlink()
+    else:
+        marker = json.loads(raw)
+        marker["collections"] = marker["collections"][:1]
+        authority.marker_path(root).write_text(json.dumps(marker))
+    plan_id = preview_id(root, capsys)
+    assert run_export(root, "--plan-id", plan_id, "--why", "return to files") == 0
+    report = printed(capsys)
+    assert report["verdict"] == "exported"
+    assert {row["collection_id"] for row in report["collections"]} == set(MIGRATED)
+    assert authority.read_marker(root) is None
+    assert not fence().enrolled
+
+
+def test_a_cut_after_export_hint_repair_preserves_canonical_data_and_records_no_intent(env, capsys, monkeypatch):  # noqa: F811
+    root = env
+    legacy_vault(root)
+    assert migrate(root, "apply") == 0
+    capsys.readouterr()
+    authority.marker_path(root).unlink()
+    plan_id = preview_id(root, capsys)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        before = [list(reader.execute("SELECT * FROM " + table)) for table in ("collections", "items")]
+    replace_hint = export.admission._replace_marker
+
+    def interrupted(*args):
+        replace_hint(*args)
+        raise RuntimeError("interrupted after hint repair")
+
+    monkeypatch.setattr(export.admission, "_replace_marker", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted after hint repair"):
+        run_export(root, "--plan-id", plan_id, "--why", "return to files")
+    assert {entry["collection_id"] for entry in json.loads(authority.read_marker(root))["collections"]} == set(MIGRATED)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader) is None
+        assert [list(reader.execute("SELECT * FROM " + table)) for table in ("collections", "items")] == before
+    assert fence().enrolled
+
+
+@pytest.mark.parametrize("finish", ["resume", "abandon"])
+def test_interrupted_history_retirement_keeps_its_bindings_until_export_or_regeneration(published_views, capsys, monkeypatch, finish):
+    root = published_views
+    migrated_and_written(root, capsys)
+    plan_id = preview_id(root, capsys)
+    removed = []
+    remove = export._remove
+
+    def interrupted(session, path, sha):
+        remove(session, path, sha)
+        if path.endswith("/_history.md") and not removed:
+            removed.append(path)
+            raise RuntimeError("interrupted after history retirement")
+
+    with monkeypatch.context() as crash:
+        crash.setattr(export, "_remove", interrupted)
+        with pytest.raises(RuntimeError, match="interrupted after history retirement"):
+            run_export(root, "--plan-id", plan_id, "--why", "return to files")
+    assert len(removed) == 1 and not (root / removed[0]).exists()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert authority.pending_create(reader)["kind"] == authority.EXPORT
+        binding = reader.execute("SELECT published_sha256,pending_sha256 FROM projection_state WHERE path=?",
+                                 (removed[0],)).fetchone()
+        assert binding is not None and any(binding)
+    if finish == "resume":
+        assert run_export(root, "--plan-id", plan_id, "--why", "return to files") == 0
+        assert printed(capsys)["status"] == "exported"
+        assert not list(root.rglob("_history.md"))
+    else:
+        assert run_export(root, "--abandon", "--plan-id", plan_id, "--why", "keep canonical history") == 0
+        assert printed(capsys)["status"] == "abandoned"
+        assert not (root / removed[0]).exists()
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            assert reader.execute("SELECT state FROM projection_state WHERE path=?", (removed[0],)).fetchone() == ("pending",)
+            live_head = chain.verify_store_chain(reader)
+        with closing(connection.open_reader(replica.replica_path(root))) as reader:
+            assert chain.verify_store_chain(reader) == live_head
+            assert reader.execute("SELECT state FROM projection_state WHERE path=?", (removed[0],)).fetchone() == ("pending",)
+        lease = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env()).status()
+        assert lease.holder is None
+        assert (lease.collection_store_head.commit_seq, lease.collection_store_head.head_hash) == live_head
+        service = start_service(root)
+        try:
+            _until(lambda: (root / removed[0]).is_file())
+        finally:
+            service.stop()
+
+
+def test_unknown_and_edited_history_bytes_block_export_without_changing_them(published_views, capsys):
+    root = published_views
+    migrated_and_written(root, capsys)
+    page = root / WORK.replace("_collection.md", "_history.md")
+    unknown = page.parent / "_history" / "unregistered.md"
+    unknown.parent.mkdir(parents=True, exist_ok=True)
+    unknown.write_text("Authored history note.\n")
+    assert run_export(root, "--dry-run", operator=False) == 1
+    assert export.VIEW_EDITED in capsys.readouterr().out
+    assert unknown.read_text() == "Authored history note.\n"
+    unknown.unlink()
+    edited = page.read_bytes() + b"\nAn authored correction.\n"
+    page.write_bytes(edited)
+    assert run_export(root, "--dry-run", operator=False) == 1
+    assert export.VIEW_EDITED in capsys.readouterr().out
+    assert page.read_bytes() == edited and fence().enrolled
+
+
+def test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_served(published_views, capsys):
     """An export that loses or changes a row the store served, rewrites a collection the store
     never wrote, leaves a written collection without its acknowledged checkpoint, or leaves
     anything that routes, fences or adopts the store: the marker, the fence, the descriptors,
     the replica or the live store under its adoptable name."""
-    root = env
+    root = published_views
     before, served = migrated_and_written(root, capsys)
     store_id = authority.parse_marker(root, authority.read_marker(root))["store_id"]
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        history_paths = [row[0] for row in reader.execute("SELECT path FROM projection_state WHERE kind='history'")]
+        transitions = list(reader.execute("SELECT transition_id FROM txns ORDER BY txn_id"))
+    assert history_paths and any((root / path).is_file() for path in history_paths)
     plan_id = preview_id(root, capsys)
 
     assert run_export(root, "--plan-id", plan_id, "--why", "roll back to files") == 0
@@ -119,6 +243,9 @@ def test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_s
         f"collections.sqlite.exported-{at}", f"mode.json.exported-{at}"]
     assert not connection.store_path(root).exists()
     assert (state_paths.vault_state_dir(root) / f"collections.sqlite.exported-{at}").is_file()
+    assert not any(os.path.lexists(root / path) for path in history_paths)
+    with closing(connection.open_reader(state_paths.vault_state_dir(root) / f"collections.sqlite.exported-{at}")) as reader:
+        assert list(reader.execute("SELECT transition_id FROM txns ORDER BY txn_id")) == transitions
     assert (fence().enrolled, fence().generation) == (False, 1)
     assert not {"collections-store-v1", state_migration.COLLECTION_MARKER_COMPATIBILITY_ID} & set(
         state_migration.recorded_descriptor_ids(root))
@@ -127,6 +254,14 @@ def test_export_returns_a_migrated_vault_to_files_file_mode_reads_as_the_store_s
         name: digest for name, digest in before.items() if name.startswith(unwritten)}
     # Without a marker, the dispatcher reads every collection from its files.
     assert {cid: rows(root, path) for cid, path in MIGRATED.items()} == served
+    from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
+
+    from exomem.governance.principal import request_scope
+
+    write_scope(root, paths="Records/**")
+    write_rule(root, ceiling=6)
+    with request_scope(_external()), pytest.raises(ValueError, match="NOT_FOUND"):
+        _through_dispatcher(root, "get", path=WORK.replace("_collection.md", "_history.md"))
     audit = {cid: call(root, "plan_memory" if path == PLANNING else "record_memory", action="inspect",
                        collection=path)["audit"]["status"] for cid, path in MIGRATED.items()}
     assert audit == {CID: "acknowledged_gap", X3_ID: "acknowledged_gap", LEDGER_ID: "ok",
@@ -229,8 +364,15 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
             there.setenv(name, value)
         start_service(other).stop()  # it adopts the replica: this host now keeps a store of its own
         assert connection.store_path(other).exists()
-    # Sync carries the other host's last replica back, so the exporting host continues its tenure.
+    # Receiving the newer tenure does not yet admit the exporting host's older local SQL.
     shutil.copy2(other / COLLECTIONS / "collections.sqlite", root / COLLECTIONS / "collections.sqlite")
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        local_before = list(reader.execute("SELECT key,value FROM store_meta ORDER BY key"))
+    assert run_export(root, "--dry-run", operator=False) == 1
+    assert "COLLECTION_STORE_UNAVAILABLE" in capsys.readouterr().err
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert list(reader.execute("SELECT key,value FROM store_meta ORDER BY key")) == local_before
+    start_service(root).stop()
     assert run_export(root, "--plan-id", preview_id(root, capsys), "--why", "roll back to files") == 0
     at = printed(capsys)["exported_at"]
     for name, value in host.items():
@@ -239,6 +381,17 @@ def test_a_host_with_a_stale_store_serves_files_and_retire_local_waits_for_the_e
     assert "still routes" in capsys.readouterr().err and connection.store_path(other).exists()
     shutil.rmtree(other)
     shutil.copytree(root, other)  # the exported vault reaches the other host
+    paired = other / COLLECTIONS / (connection.STORE_FILENAME + export.EXPORTED + at)
+    saved = paired.with_name(paired.name + ".saved")
+    paired.rename(saved)
+    try:
+        with pytest.raises(OpError, match="COLLECTION_STORE_UNAVAILABLE"):
+            call(other, "record_memory", action="query", collection=WORK)
+        assert run_export(other, "--retire-local", operator=False) == 1
+        assert "completed export evidence is unavailable" in capsys.readouterr().err
+        assert connection.store_path(other).exists()
+    finally:
+        saved.rename(paired)
     service = file_service(other)
     try:
         assert {row["title"] for row in call(other, "record_memory", action="query", collection=WORK)["rows"]} == {
@@ -597,9 +750,10 @@ def test_a_host_that_lost_its_store_after_the_fence_retire_finishes_with_renames
     root = env
     _, served = migrated_and_written(root, capsys)
     crash_export(tmp_path, "after-fence-retire", preview_id(root, capsys))
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        at = authority.pending_create(reader)["exported_at"]
     for path in state_paths.vault_state_dir(root).glob("collections*.sqlite*"):
         path.unlink()
-    at = "20261016T120000Z"
     (root / COLLECTIONS / "mode.json").rename(root / COLLECTIONS / f"mode.json.exported-{at}")
     (root / COLLECTIONS / "collections.sqlite").rename(root / COLLECTIONS / f"collections.sqlite.exported-{at}")
 

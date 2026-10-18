@@ -797,6 +797,7 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
     grant authored against the connector's identity matches here too; stdio
     still resolves to the owner.
     """
+    from .collection_store import ownership
     from .governance import egress as egress_module
     from .governance import principal as principal_module
 
@@ -806,8 +807,13 @@ def _gated_adoption_egress(vault_root: Path, command_name: str, payload: Any) ->
         # residual payload in one pass gives repeated prompt/resource
         # references one verdict and one receipt outcome.
         with egress_module.disclosure_boundary(vault_root, command_name) as collector:
-            result = egress_module.postfilter(command_name, payload, vault_root)
-            egress_module.emit_boundary_receipt(collector)
+            try:
+                result = egress_module.postfilter(command_name, payload, vault_root)
+            finally:
+                try:
+                    ownership.finish_read(vault_root)
+                finally:
+                    egress_module.emit_boundary_receipt(collector)
             return result
 
 
@@ -843,6 +849,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
     resource provides discovery instead; each read reflects current runs.
     """
     from . import adoption_run as adoption_run_module
+    from .collection_store import ownership
     from .governance import connector_boundary, egress, principal
 
     def content_unavailable():
@@ -861,6 +868,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
             "structured proposals. Takes no arguments — the server infers the run."
         ),
     )
+    @ownership.reader(vault_root=vault_root)
     def continue_adoption() -> str:
         if unavailable := content_unavailable():
             import json
@@ -891,6 +899,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         description="Open Adoption Studio runs (newest first), read on demand.",
         mime_type="application/json",
     )
+    @ownership.reader(vault_root=vault_root)
     def adoption_runs() -> dict:
         from .adoption_run import AdoptionRunStore
 
@@ -909,6 +918,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
         description="One durable Adoption Studio run document, read by its stable id.",
         mime_type="application/json",
     )
+    @ownership.reader(vault_root=vault_root)
     def adoption_run_resource(run_id: str) -> dict:
         if unavailable := content_unavailable():
             return unavailable

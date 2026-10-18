@@ -2275,6 +2275,34 @@ def _committed_operation_witness(
     )
 
 
+def _records_item_visible(
+    vault_root: Path, binding: Mapping[str, Any], path: str
+) -> bool | None:
+    """Canonical visibility of a sealed Records item; None only for a file-backed leaf."""
+    from . import structured_collections as collections
+    from .collection_store import ownership
+    from .collection_store.preview import selected_writer
+
+    if not isinstance(binding, Mapping):
+        return False
+    if binding.get("kind") not in RECORDS_STEP_KINDS:
+        return None
+    prepared = binding.get("prepared")
+    if not isinstance(prepared, Mapping):
+        return False
+    cid, key = prepared.get("collection_id"), prepared.get("item_key")
+    if not isinstance(cid, str) or not isinstance(key, str) or prepared.get("destination") != path:
+        return False
+    writer = selected_writer(vault_root, cid)
+    if writer is None:
+        proof = ownership.current(vault_root)
+        return False if proof.selected(vault_root, cid) is not None or proof.owner(vault_root, path) is not None else None
+    try:
+        return writer.admitted_item_metadata(cid, key, path) is not None
+    except collections.CollectionError:
+        return False
+
+
 def _verify_records_receipt(
     vault_root: Path,
     binding: Mapping[str, Any],

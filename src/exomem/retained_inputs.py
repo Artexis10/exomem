@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import lifecycle_statuses, memory_refs, reserved_paths, semantic_unit_read, semantic_units
+from .collection_store.ownership import reader
 from .get_page import GetError, GetResult, get_page, prepare_page_read
 from .governance import authorization_custody, authorization_session_lifecycle, egress, store
 from .governance.principal import RequestPrincipal, effective_principal
@@ -188,6 +189,7 @@ def _release_snapshot(
     )
 
 
+@reader
 def resolve_retained_input(
     vault_root: Path,
     reference: object,
@@ -200,6 +202,7 @@ def resolve_retained_input(
     return _release_snapshot(vault_root, snapshot, disclosure=disclosure)
 
 
+@reader
 def exact_text_visible(vault_root: Path, value: str) -> bool:
     """Check an exact selected representation without recording unreturned targets."""
     principal = _principal()
@@ -213,6 +216,7 @@ def exact_text_visible(vault_root: Path, value: str) -> bool:
     return redacted == value and scrubbed == value
 
 
+@reader
 def recheck_retained_inputs(
     vault_root: Path,
     selections: tuple[tuple[RetainedInput, str], ...],

@@ -56,3 +56,36 @@ Cloud restore SHALL validate the replica's integrity, supported schema, chain, m
 #### Scenario: A canonical replacement carries an obsolete target
 - **WHEN** the replacement snapshot's pending-create target differs from the current authority marker
 - **THEN** preparation refuses before replacing the previous replica
+
+### Requirement: Readable collection exports use portable ZIP bundles
+
+User-facing vault exports SHALL use ZIP with ZIP64 support. Compressible content SHALL use standard DEFLATE; already compressed content MAY remain stored. This format SHALL support ordinary extraction on Windows, macOS and Linux. The separate encrypted operator recovery procedure SHALL NOT determine the user-facing archive format.
+
+A complete readable export SHALL include each collection's descriptor, declared schema and all current rows from the same consistent snapshot. JSON SHALL preserve typed values, authored row bodies, nulls, nested values, stable identities, row versions and provenance. CSV SHALL provide the complete tabular view alongside JSON. The canonical SQLite snapshot SHALL retain the audit and restore state. Readable files SHALL NOT replace that snapshot or change collection ownership.
+
+Generation SHALL stream rows in bounded batches through the existing archive owner. Row count SHALL NOT require whole-collection buffering or per-row Markdown. Existing archive integrity, authorization, portable paths and resource limits SHALL apply. Incomplete generation SHALL NOT report a complete artifact. This follow-up SHALL NOT gate the confirmed collection-store GA scope.
+
+#### Scenario: A summary collection exports every current row
+
+- **GIVEN** a collection has 100,000 rows and publishes only a bounded Markdown overview
+- **WHEN** its complete readable export succeeds
+- **THEN** JSON and CSV cover every current row from the declared snapshot, beyond ordinary query pagination
+- **AND** the descriptor and schema explain the collection without requiring generated item notes
+
+#### Scenario: Nested values retain their types
+
+- **WHEN** exported rows contain nulls, empty strings, numbers, lists or objects
+- **THEN** JSON preserves their types and distinctions with the declared schema
+- **AND** CSV provides a tabular view while JSON remains the typed representation
+
+#### Scenario: A large collection stays within the export budget
+
+- **WHEN** row data exceeds ordinary query pagination and archive size requires ZIP64
+- **THEN** generation streams bounded batches within the configured resource budget
+- **AND** the completed ZIP retains verified manifest entries and portable member paths
+
+#### Scenario: Generation stops before all rows are written
+
+- **WHEN** generation fails after writing only part of a collection
+- **THEN** the operation reports failure without publishing that archive as complete
+- **AND** existing canonical data remains unchanged

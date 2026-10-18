@@ -465,7 +465,7 @@ def open_writer(
         try:
             raw = conn.connection.driver_connection
             found = schema.schema_version(raw, ceiling=schema.SCHEMA_VERSION)
-            guarded = schema_guard is not None and 0 < found < schema.SCHEMA_VERSION
+            guarded = schema_guard is not None and found < schema.SCHEMA_VERSION
             if guarded:
                 schema_guard(schema.SCHEMA_VERSION)
                 _require_lease(check)

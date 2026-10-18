@@ -194,23 +194,25 @@ def adopt_local_preview(vault_root, *, recorded=UNKNOWN) -> dict:
 
 def adopt_replica_preview(vault_root, *, recorded=UNKNOWN) -> dict:
     """Preview a fresh host's copy without creating live state or opening the shared replica."""
+    from ..vault_portability import checked_collection_replica
     from . import authority
 
     root = Path(vault_root).resolve()
     raw = authority.read_marker(root)
-    marker = authority.parse_marker(root, raw)
-    with tempfile.TemporaryDirectory(prefix="exomem-adopt-preview-") as scratch, \
-            _evidence(replica.replica_path(root), Path(scratch)) as (digest, conn, meta):
-        if meta is None:
+    if raw is not None:
+        authority.parse_marker(root, raw)
+    with checked_collection_replica(root) as verified:
+        if verified is None:
             raise CollectionStoreError("COLLECTION_STORE_SYNC_PENDING", "the vault replica is incomplete or invalid")
-        for entry in marker["collections"]:
-            authority.require_selected(conn, marker, entry, root=root)
+        meta = dict(verified.connection.execute("SELECT key,value FROM store_meta"))
+        digest = verified.source_sha256
         head = _head(meta)
     recorded_view = recorded if recorded in (UNKNOWN, None) else {
         "store_id": recorded.store_id, "instance_id": recorded.instance_id,
         "commit_seq": recorded.commit_seq, "head_hash": recorded.head_hash}
-    return _sealed({"state": "replica", "store_id": marker["store_id"],
-                    "marker_sha256": hashlib.sha256(raw).hexdigest(), "replica": {"sha256": digest, **head},
+    return _sealed({"state": "replica", "store_id": meta[schema.META_STORE_ID],
+                    "marker_sha256": hashlib.sha256(raw if raw is not None else b"").hexdigest(),
+                    "replica": {"sha256": digest, **head},
                     "recorded_head": recorded_view})
 
 

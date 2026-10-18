@@ -198,6 +198,17 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
     with manager.consistency_guard(session.root, operation="collection_store_create"):
         if session.production:
             capability.require_records_summary(session.root)
+            if session.path.exists():
+                from . import ownership
+
+                reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+                with closing(reader):
+                    existing = {row[0] for row in reader.execute("SELECT collection_id FROM collections")}
+                    intent = authority.pending_create(reader)
+                    proof = ownership.resolve(session.root, conn=reader, manager=manager)
+                    # First admission cannot expose unrelated preview rows; their owner must recover that private state.
+                    if existing and not proof.admitted and (intent is None or existing != authority.intent_collection_ids(intent)):
+                        raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "unadmitted private collections require explicit recovery")
         if session.path.exists():
             session.runtime()
         with manager.writer_authority_guard(vault_root=session.root):
@@ -213,7 +224,9 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                         result = _replay_create(writer, request_id, replay)
                         if authority.pending_create(writer.connection) is None:
                             runtime = manager._collection_store
-                            marker = authority.parse_marker(session.root, authority.read_marker(session.root))
+                            from . import ownership
+
+                            marker = ownership.current(session.root, conn=writer.connection).marker
                             _verify_acquisition(writer, runtime, fence_client.collection_store_fence(), marker)
                 if replay is not None and authority.pending_create(writer.connection) is None:
                     # Only an already-admitted token can skip durable epoch publication.
@@ -242,15 +255,22 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
 
 
 def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client):
+    from . import ownership
+
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
     expected = authority.read_marker(writer.root)
     old = None if expected is None else authority.parse_marker(writer.root, expected)
+    proof = ownership.current(writer.root, conn=writer.connection)
     manifest = collections.parse_manifest_bytes(writer.root, manifest_path, manifest_text.encode())
     # Only a first enrolment reads the coordinator's fence, the basis of its cut.
     fence = fence_client.collection_store_fence() if old is None else None
-    target = target_marker(writer.root, old, sid, [authority.marker_entry(
+    existing = list(proof.entries)
+    if old is not None and proof.marker is not None:
+        old = {**proof.marker, "authority_epoch": old["authority_epoch"]}
+    entry = authority.marker_entry(
         manifest.collection_id, manifest.path, sid, manifest.semantic_profile, manifest.storage.source,
-        manifest.storage.strategy)], fence=fence)
+        manifest.storage.strategy)
+    target = target_marker(writer.root, old, sid, [entry] if old is not None else [*existing, entry], fence=fence)
     authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
@@ -271,7 +291,7 @@ def target_marker(root, old, sid, entries, *, fence, supersede=False):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "open the existing store before creating another collection")
     if old is None:
         # An enrolled fence makes no cut, so its basis stays the first generation as before.
-        generation = fence.generation + 1 if supersede or not fence.enrolled else 1
+        generation = fence.generation + 1 if supersede or not fence.enrolled else fence.generation
     target = {"version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
               "authority_epoch": 1 if old is None else old["authority_epoch"] + 1,
               "collections": ([] if old is None else old["collections"]) + list(entries),
@@ -297,7 +317,7 @@ def _replay_create(writer, request_id, receipt):
         if intent["kind"] != authority.CREATE or intent["request_id"] != request_id:
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "another create is pending")
         return _recover_create(writer)
-    if not authority.collection_admitted(writer, row[1]) or authority.read_marker(writer.root) is None:
+    if not authority.collection_admitted(writer, row[1]):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "creation is no longer admitted")
     return {"status": "marker_admitted", "collection_id": row[1], "txn_id": row[0],
             "receipt": dict(receipt), "head": {"commit_seq": head[0], "head_hash": head[1]}}
@@ -350,45 +370,62 @@ def _resolve(session, *, force=False):
         return previous.status()
     if not session.verify_custody():
         return _custody_lost(session, token).status()
-    raw, marker, fence = _routed_store(session)
-    with manager.writer_authority_guard(vault_root=session.root):
-        token = manager._fencing_token
-        if runtime.reporting_ready(token):
-            return {"status": "admitted"}
-        facts, diverged, signature = _takeover_facts(session, runtime, token, raw, marker, fence)
-        action, reason = ((takeover.DIVERGED, "this store records unresolved divergence") if diverged
-                          else takeover.decide(staged=None, **facts))
-        recorded, local = facts["recorded"], facts["local"]
+    with ExitStack() as stack:
+        routed = _routed_store(session, stack)
+        if isinstance(routed, takeover.Pending):
+            with manager._report_lock:
+                token = manager._fencing_token
+                if token is not None and runtime._admitted_token == token:
+                    return {"status": "admitted"}
+                routed.token = token
+                if previous is not None and previous.code == routed.code:
+                    routed.since = previous.since
+                runtime._takeover = routed
+            return routed.status()
+        raw, marker, fence, staged = routed
+        with manager.writer_authority_guard(vault_root=session.root):
+            token = manager._fencing_token
+            if runtime.reporting_ready(token):
+                return {"status": "admitted"}
+            facts, diverged, signature = _takeover_facts(session, runtime, token, raw, marker, fence)
+            action, reason = ((takeover.DIVERGED, "this store records unresolved divergence") if diverged
+                              else takeover.decide(staged=None, **facts))
+            recorded, local = facts["recorded"], facts["local"]
 
-        def check():
-            manager._renew_collection_store(token, due_only=True)
-            session.require(token)
+            def check():
+                manager._renew_collection_store(token, due_only=True)
+                session.require(token)
 
-        with ExitStack() as stack:
-            staged = None
             if action == "stage":
                 heads = [None if recorded is None else (recorded.commit_seq, recorded.head_hash),
                          None if local is None else (local.commit_seq, local.head_hash)]
-                staged = stack.enter_context(takeover.staged_replica(session, check, heads))
+                if staged is None:
+                    staged = stack.enter_context(takeover.staged_replica(session, check, heads))
+                else:
+                    with connection.checked_sql(staged.reader, check):
+                        staged.relation = {head: chain.head_relation(staged.reader, *head) for head in heads if head is not None}
                 action, reason = ((takeover.SYNC_PENDING, "the vault replica has not arrived")
                                   if staged is None else takeover.decide(staged=staged, **facts))
+            if staged is not None:
+                # The same held leaf survives, but install/restamp must not retain a SQLite reader.
+                staged.close_reader()
             # nosemgrep: ep-word-membership -- takeover.decide returns these action tokens.
             if action in {"admit", "adopt", "continue"} or (
                     action == takeover.DIVERGED and local is not None and not diverged):
                 with manager.consistency_guard(session.root, operation="collection_store_takeover"):
                     action, reason = _settle(session, runtime, token, facts, staged, action, reason, check)
-        if action == "admitted":
-            return {"status": "admitted"}
-        state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
-                                 None if local is None else local.commit_seq, signature)
-        if previous is not None and (previous.code, previous.recorded) == (state.code, state.recorded):
-            state.since = previous.since
-        with manager._report_lock:
-            # A racing resolve may have admitted this token meanwhile; never shadow it.
-            if runtime._admitted_token == token:
+            if action == "admitted":
                 return {"status": "admitted"}
-            runtime._takeover = state
-        return state.status()
+            state = takeover.Pending(token, action, reason, None if recorded is None else recorded.commit_seq,
+                                     None if local is None else local.commit_seq, signature)
+            if previous is not None and (previous.code, previous.recorded) == (state.code, state.recorded):
+                state.since = previous.since
+            with manager._report_lock:
+                # A racing resolve may have admitted this token meanwhile; never shadow it.
+                if runtime._admitted_token == token:
+                    return {"status": "admitted"}
+                runtime._takeover = state
+            return state.status()
 
 
 def _owner_operation(session, manager, fence_client, why):
@@ -398,7 +435,11 @@ def _owner_operation(session, manager, fence_client, why):
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
     runtime = session.runtime(retire=False)
-    return runtime, _routed_store(session)[2]
+    with ExitStack() as stack:
+        routed = _routed_store(session, stack)
+        if isinstance(routed, takeover.Pending):
+            raise routed.error()
+        return runtime, routed[2]
 
 
 def _stale_preview():
@@ -789,8 +830,9 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
             "an export applies only offline: stop the service, then run `exomem collections export --plan-id ID "
             "--why REASON` with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
     step = export.abandon if abandon else export.apply
+    # Abandon queues view recovery, so its closing owner must not publish those views.
     return _offline_owner(root, "export", lambda session, manager, fence_client: step(
-        session, manager, fence_client, plan_id=plan_id, why=why))
+        session, manager, fence_client, plan_id=plan_id, why=why), drain_views=not abandon)
 
 
 def require_summary_manifest(root, manifest_path, manifest_text):
@@ -915,7 +957,7 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work, *, operator=True):
+def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
     """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
@@ -933,15 +975,16 @@ def _offline_owner(root, operation, work, *, operator=True):
     config = replace(config, replica_id=config.replica_id + writer_lease.OFFLINE_OWNER_SUFFIX)
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
+        close_options = {} if drain_views else {"drain_views": False}
         try:
             result = work(session, manager, fence_client)
         except BaseException:
             # The refusal is the answer; an unadmitted token keeps its lease until it expires.
             with suppress(Exception):
-                manager.close()
+                manager.close(**close_options)
             raise
         try:
-            manager.close()
+            manager.close(**close_options)
         except OpError as error:
             if operation == "migrate" and result.get("status") != "marker_admitted":
                 # A migrate that admitted nothing has no head to hand off; the report must not hide.
@@ -997,15 +1040,27 @@ def _migrate_schema(session, token):
     return None
 
 
-def _routed_store(session):
+def _routed_store(session, stack):
     """The marker this takeover serves, with the coordinator's store fence bound to it.
 
     A copied vault meeting a fresh coordinator cuts the fence over from its marker,
-    which revokes any earlier token, so this precedes the lease acquisition. It reads
-    only the store's head, which a store an earlier release wrote keeps unmigrated.
+    which revokes any earlier token, so this precedes the lease acquisition. Its
+    structural declarations do not establish public file authority or store admission.
     """
-    if session.path.exists():
-        with closing(connection.open_head_reader(session.path)) as reader:
+    from . import ownership
+
+    def pending(code, reason):
+        # Only known candidate/transition evidence becomes Pending; caller and native I/O failures still raise.
+        return takeover.Pending(session.manager._fencing_token, code, reason, None, None,
+                                takeover.replica_signature(session.root))
+
+    _, enrolled = ownership.enrollment(session.root)
+    local = session.path.exists()
+    marker = staged = None
+    if local:
+        reader, _ = connection._open_read_only(session.path, connection.BUSY_TIMEOUT_MS)
+        with closing(reader):
+            reader.execute("BEGIN")
             intent = authority.pending_create(reader)
             if intent is not None:
                 from .runtime import served
@@ -1015,19 +1070,56 @@ def _routed_store(session):
                     # The serving store thread resumes it, so the same request succeeds later.
                     raise connection.busy("a collection create is still publishing; retry shortly")
                 if intent["kind"] == authority.MIGRATE:
-                    raise migration_pending()
+                    return pending(takeover.SYNC_PENDING, migration_pending().reason)
                 if intent["kind"] == authority.EXPORT:
-                    raise export_pending()
+                    return pending(takeover.EXPORTING, export_pending().reason)
                 # A marker that changed under the create never resolves by retrying.
                 raise CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED",
                                            "create recovery owns this store; resume that create")
+            if enrolled:
+                # Recovery needs namespace facts before takeover can satisfy a public reader's head floor.
+                current_fence = session.fence_client.collection_store_fence()
+                marker, _ = ownership.declarations(session.root, reader, generation=max(1, current_fence.generation))
     raw = authority.read_marker(session.root)
-    if raw is None:
-        raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no collection here routes to a store")
-    marker = authority.parse_marker(session.root, raw)
+    if enrolled and local:
+        if marker is None:
+            raise CollectionStoreError("COLLECTION_STORE_UNAVAILABLE", "no admitted collection store remains")
+    else:
+        def check():
+            if not session.check():
+                raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "producer directory custody was lost")
+            token = session.manager._fencing_token
+            if token is not None:
+                session.manager._renew_collection_store(token, due_only=True)
+                session.require(token)
+
+        staged = stack.enter_context(takeover.staged_replica(session, check))
+        if staged is None or not staged.metadata:
+            return pending(takeover.SYNC_PENDING, "the vault replica is missing, incomplete or invalid")
+        marker = staged.canonical
+        current_fence = session.fence_client.collection_store_fence()
+        if current_fence.enrolled and current_fence.store_id != marker["store_id"]:
+            return pending(takeover.DIVERGED, "the replica differs from the coordinator store")
+        if raw is not None:
+            hint = authority.parse_marker(session.root, raw)
+            if hint["store_id"] != marker["store_id"]:
+                return pending(takeover.DIVERGED, "the replica differs from the backup identity")
+            try:
+                authority.require_marker(staged.reader, hint, root=session.root)
+            except CollectionStoreError as error:
+                if error.code != "COLLECTION_STORE_MARKER_CONFLICT":
+                    raise
+                return pending(takeover.SYNC_PENDING, error.reason)
+            marker = {**marker, "authority_epoch": hint["authority_epoch"],
+                      "collection_store_fence": hint["collection_store_fence"]}
+        elif not current_fence.enrolled:
+            return pending(takeover.SYNC_PENDING, "restore lacks a matching store fence")
+        refusal = takeover.replica_adoptability(staged.metadata, raw)
+        if refusal is not None:
+            return pending(*refusal)
     fence = _store_fence(session.fence_client, session.fence_client.collection_store_fence(), marker,
                          initial=marker["collection_store_fence"]["generation"] == 1)
-    return raw, marker, fence
+    return raw, marker, fence, staged
 
 
 def _takeover_facts(session, runtime, token, raw, marker, fence):
@@ -1271,12 +1363,14 @@ def _acquired(runtime, fence, code):
     return acquired
 
 
-def holds_head(conn, recorded, store_id, instance_id):
-    """Whether ``recorded``, a head the coordinator recorded, is this store's: its store, instance and chain."""
+def holds_head(conn, recorded, store_id, instance_id, *, lineage=None):
+    """Require this store's instance and chain; a validated lineage also accepts its recorded ancestors."""
     found = conn.execute(
         "SELECT store_head_hash FROM txns WHERE commit_seq=?", (recorded.commit_seq,),
     ).fetchone() if recorded.commit_seq else (None,)
-    return recorded.store_id == store_id and recorded.instance_id == instance_id and found == (recorded.head_hash,)
+    belongs = recorded.instance_id == instance_id or (lineage is not None and any(
+        entry["instance_id"] == recorded.instance_id for entry in lineage))
+    return recorded.store_id == store_id and belongs and found == (recorded.head_hash,)
 
 
 def _verify_acquisition(writer, runtime, fence, target):
@@ -1324,6 +1418,12 @@ def _install_marker(session, token, fence_client, target, intent, current, write
 
 
 def _upgrade_marker(session, writer, token):
+    from . import ownership
+
+    proof = ownership.current(session.root, conn=writer.connection, private=not session.production)
+    if proof.marker is not None:
+        # Admission validates all canonical projection containment, including collections absent from the hint.
+        authority.require_projection_ownership(writer.connection, proof.marker, root=session.root)
     raw = authority.read_marker(session.root)
     if raw is None:
         return
@@ -1392,23 +1492,33 @@ class _CreateAdmission:
         authority.require_new_file_ownership(root, old, self.entry)
 
     def record(self, manifest, txn):
+        from . import ownership
+
         writer = self.writer
         writer._publication.deferred_create = manifest.collection_id
         self.txn_id = txn["txn_id"]
         target = authority.parse_marker(writer.root, self.target)
         sid = writer._publication.identity["store_id"]
-        entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
-                                       manifest.storage.source if target["version"] == 2 else None, manifest.storage.strategy)
         old = None if self.expected is None else authority.parse_marker(writer.root, self.expected)
-        if (target["store_id"] != sid or target["collections"] !=
-                ([] if old is None else old["collections"]) + [entry]
+        canonical, _ = ownership.declarations(writer.root, writer.connection)
+        self.entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
+                                            manifest.storage.source, manifest.storage.strategy)
+        wire_entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
+                                            manifest.storage.source if target["version"] == 2 else None,
+                                            manifest.storage.strategy)
+        existing = set() if canonical is None else authority.intent_collection_ids(canonical)
+        if (target["store_id"] != sid or
+                authority.intent_collection_ids(target) != existing | {manifest.collection_id}
+                or authority.selected_entry(writer.root, target, manifest.collection_id) != wire_entry
                 or target["authority_epoch"] != (1 if old is None else old["authority_epoch"] + 1)
                 or (old is not None and (old["store_id"] != sid or
                     old["collection_store_fence"] != target["collection_store_fence"]))
                 or authority.read_marker(writer.root) != self.expected):
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "create marker basis differs")
-        self.entry = authority.marker_entry(manifest.collection_id, manifest.path, sid, manifest.semantic_profile,
-                                            manifest.storage.source, manifest.storage.strategy)
+        for target_entry in target["collections"]:
+            # The writer records admission immediately before inserting the new collection.
+            if target_entry["collection_id"] != manifest.collection_id:
+                authority.require_selected(writer.connection, target, target_entry, root=writer.root)
         writer._recheck_guard(self)
         intent = {"version": 1, "request_id": txn["request_id"], "request_hash": txn["request_hash"],
                   "collection_id": manifest.collection_id, "manifest_path": manifest.path,
@@ -1442,28 +1552,11 @@ def _recover_create(writer):
         for entry in intent["collections"]:
             writer._operation.require_collection(entry["collection_id"], complete=True)
         head = chain.verify_store_chain(writer.connection)
+        receipt = authority.require_intent_binding(writer.connection, intent)
         if intent["kind"] == authority.MIGRATE:
-            for entry in intent["collections"]:
-                if writer.connection.execute(
-                    "SELECT 1 FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
-                    "WHERE t.txn_id=? AND t.operation='legacy_import' AND t.legacy_event_json IS NULL "
-                    "AND c.collection_id=? AND c.manifest_path=? AND c.source_path=? AND c.created_txn=t.txn_id",
-                    (entry["txn_id"], entry["collection_id"], entry["manifest_path"], entry["source_path"]),
-                ).fetchone() is None:
-                    raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT",
-                                               "migration intent lacks its committed import checkpoint")
             return {"status": authority.marker_status(writer, intent), "kind": authority.MIGRATE,
                     "collection_ids": sorted(authority.intent_collection_ids(intent)),
                     "head": {"commit_seq": head[0], "head_hash": head[1]}}
-        row = writer.connection.execute(
-            "SELECT t.receipt_json FROM txns t JOIN collections c ON c.collection_id=t.collection_id "
-            "WHERE t.txn_id=? AND t.operation='create' AND t.request_id=? AND t.request_hash=? "
-            "AND c.collection_id=? AND c.manifest_path=? AND c.source_path=? AND c.created_txn=t.txn_id",
-            (intent["txn_id"], intent["request_id"], intent["request_hash"], intent["collection_id"],
-             intent["manifest_path"], intent["source_path"]),
-        ).fetchone()
-        if row is None:
-            raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "create intent lacks its committed transaction")
         return {"status": authority.marker_status(writer, intent), "collection_id": intent["collection_id"],
-                "txn_id": intent["txn_id"], "receipt": json.loads(row[0]),
+                "txn_id": intent["txn_id"], "receipt": receipt,
                 "head": {"commit_seq": head[0], "head_hash": head[1]}}
