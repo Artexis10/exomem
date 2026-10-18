@@ -312,13 +312,13 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
                 # fsynced on every governed write, so its size is a per-write cost.
                 # Indentation cost ~2.5x for a machine-read file nobody diffs;
                 # `sort_keys` stays for determinism.
-                handle.write(
-                    json.dumps(
-                        payload,
-                        sort_keys=True,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
+                # Stream the payload to avoid allocating another full-size string.
+                json.dump(
+                    payload,
+                    handle,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
                 )
                 handle.write("\n")
                 handle.flush()
