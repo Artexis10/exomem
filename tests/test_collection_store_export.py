@@ -750,9 +750,10 @@ def test_a_host_that_lost_its_store_after_the_fence_retire_finishes_with_renames
     root = env
     _, served = migrated_and_written(root, capsys)
     crash_export(tmp_path, "after-fence-retire", preview_id(root, capsys))
+    with closing(connection.open_head_reader(connection.store_path(root))) as reader:
+        at = authority.pending_create(reader)["exported_at"]
     for path in state_paths.vault_state_dir(root).glob("collections*.sqlite*"):
         path.unlink()
-    at = "20261016T120000Z"
     (root / COLLECTIONS / "mode.json").rename(root / COLLECTIONS / f"mode.json.exported-{at}")
     (root / COLLECTIONS / "collections.sqlite").rename(root / COLLECTIONS / f"collections.sqlite.exported-{at}")
 

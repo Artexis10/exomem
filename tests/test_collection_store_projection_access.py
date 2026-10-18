@@ -2,6 +2,7 @@
 
 import pytest
 from test_collection_store_governance import inspection_token, redeem, session
+from test_collection_store_service import service as service
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
@@ -391,56 +392,34 @@ def test_owner_walk_treats_an_unbound_projection_directory_as_absent(store):
         }
 
 
-def test_owner_walk_on_an_empty_policy_decides_only_marker_owned_paths(tmp_path, monkeypatch):
-    import json
-
+def test_owner_walk_on_an_empty_policy_decides_only_canonical_owned_paths(service, monkeypatch):
     from exomem import find_corpus
-    from exomem.collection_store import authority
 
-    root = tmp_path / "vault"
+    root = service.root
     ordinary = "Knowledge Base/Notes/plain.md"
     owned = "Knowledge Base/Records/Work/Items/item.md"
     for path in (ordinary, owned):
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text("---\ntype: insight\nstatus: active\n---\n\nBody.\n")
-    sid = "11111111-1111-4111-8111-111111111111"
-    marker = authority.marker_path(root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid,
-                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }))
     # A walk over ordinary files keeps the empty-policy answer and parses nothing;
     # parsing each page cost the owner's carry rarity seconds per activation.
     monkeypatch.setattr(find_corpus, "parse_page", lambda *a, **kw: pytest.fail("parsed an ordinary page"))
     with request_scope(owner_principal()):
         keep = egress.release_walk_filter(root)
         assert keep(ordinary)
-        # A marker-owned path still needs the store, which no service serves here.
+        # Unregistered bytes inside a canonical namespace cannot become ordinary files.
         assert not keep(owned)
 
 
-def test_a_restricted_walk_on_an_empty_policy_agrees_with_the_read_door_outside_the_marker(
-    tmp_path, monkeypatch
+def test_a_restricted_walk_agrees_with_the_read_door_outside_canonical_ownership(
+    service, monkeypatch
 ):
-    """A caller under RAW protection walks an ordinary page exactly as a direct read serves it.
-
-    A collection-store marker made such a caller's walk decide every path in full:
-    it withheld a bridge-shaped page outside the marker that the read door serves,
-    and it parsed each page to do so.
-    """
-    import json
-
+    """An empty policy keeps ordinary bridges readable beside a canonical collection without parsing each page."""
     from test_governance_bridges import BRIDGE_PATH, SOURCE_PATH, _bridge_source_text, _bridge_text
 
     from exomem import commands, find_corpus
-    from exomem.collection_store import authority
 
-    root = tmp_path / "vault"
+    root = service.root
     owned = "Knowledge Base/Records/Work/Items/item.md"
     for path, text in (
         (SOURCE_PATH, _bridge_source_text()),
@@ -449,22 +428,11 @@ def test_a_restricted_walk_on_an_empty_policy_agrees_with_the_read_door_outside_
     ):
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(text)
-    sid = "11111111-1111-4111-8111-111111111111"
-    marker = authority.marker_path(root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({
-        "version": 2, "mode": "store", "default_authority": "file", "store_id": sid,
-        "authority_epoch": 1,
-        "collections": [{"collection_id": CID, "manifest_path": "Knowledge Base/Records/Work/_collection.md",
-                         "authority": "store", "store_id": sid,
-                         "source_path": "Knowledge Base/Records/Work/Items", "layout": "markdown-items"}],
-        "collection_store_fence": {"capability": "collections-store-v1", "generation": 1},
-    }))
     with request_scope(_external()):
         assert commands.op_get(root, path=BRIDGE_PATH).get("body")
         with monkeypatch.context() as walk:
             walk.setattr(find_corpus, "parse_page", lambda *a, **kw: pytest.fail("parsed an ordinary page"))
             keep = egress.release_walk_filter(root)
             assert keep(BRIDGE_PATH)
-        # A marker-owned path still needs the store, which no service serves here.
+        # Unregistered bytes inside a canonical namespace cannot become ordinary files.
         assert not keep(owned)

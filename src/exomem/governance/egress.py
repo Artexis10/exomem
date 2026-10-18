@@ -6945,10 +6945,8 @@ def release_walk_filter(
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
-        # The empty policy missed its shortcut only because a collection-store marker
-        # exists. Ordinary files keep the empty-policy answer, as `annotate_page` reads
-        # them, and only marker-owned paths take the per-path decision. The marker is
-        # read once for the walk, never per path.
+        # Disjoint files keep the empty-policy answer. Collection paths join the
+        # enclosing consumer's canonical ownership proof before their per-path decision.
         if unrestricted_content_access(vault_root, who):
             return lambda rel_path: keep(rel_path) if owned(rel_path) else True
         return lambda rel_path: (
