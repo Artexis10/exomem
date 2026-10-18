@@ -97,7 +97,7 @@
             }
           },
           "type": "object",
-          "description": "Optional fields: focus (one line/240 chars), refs (12 already-read pages),\nrecent (six excerpts/2,400 chars total; user 600, assistant 300 each).\nNever send full history."
+          "description": "Optional fields: focus (one line/240 chars), refs (12 already-read pages),\nrecent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history."
         },
         "trigger": {
           "default": "user_turn",
