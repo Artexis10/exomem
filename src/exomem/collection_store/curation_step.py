@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import structured_collections as collections
 from .. import writer_lease
-from . import authority, preview
+from . import authority, ownership, preview
 
 
 def _stale(reason):
@@ -275,8 +275,8 @@ def verify_imported(writer, prepared, postimage, *, kind):
         return False
 
 
-def needs_store(root, marker, command, arguments):
-    """Whether a curation or episode command runs a Records step on a collection the marker routes to the store.
+def needs_store(root, command, arguments):
+    """Whether a curation or episode command has a Records step in a canonically owned collection.
 
     A step on a store collection runs only on the store thread, so the whole command runs there;
     every other curation keeps its current path. The collections come from the sealed plans the
@@ -310,7 +310,11 @@ def needs_store(root, marker, command, arguments):
             return False
     for run in runs:
         selectors.update(curation.records_collections(root, run))
+    if not selectors:
+        return False
     try:
-        return any(authority.selected_entry(root, marker, selector) is not None for selector in selectors)
+        marker = ownership.current(root).marker
+        return marker is not None and any(
+            authority.selected_entry(root, marker, selector) is not None for selector in selectors)
     except (collections.CollectionError, ValueError):
         return False
