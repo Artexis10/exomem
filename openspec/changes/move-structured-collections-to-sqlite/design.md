@@ -232,6 +232,12 @@ There are three layers, and the first two already exist:
 
 View edits use a deterministic identity, `sha256(view_path, base_row_version, sha256(file bytes))`, so a watcher replay after a crash is a no-op (§6).
 
+**Historical curation receipts.** A file-mode Records step committed before migration keeps its existing witness. New import checkpoints bind each imported item file to its exact captured source SHA-256 and structural audit marker in `original_items`. This mapping lives in the existing immutable checkpoint envelope and its event hash; it adds no table or schema migration. A missing or mismatched marker remains evidence of the original state, without repairing a gap.
+
+Verification authorizes the current collection before reading this proof. It joins the checkpoint, imported event and unchanged canonical item version to the sealed destination and witness hash. Append also matches the sealed payload; update also matches every sealed preimage guard. A later edit and revert cannot pass because the imported version changed. Regenerated Markdown formatting does not affect this proof.
+
+Historical verification never recovers a missing witness, supplies a request identity or decides whether to repeat a write. Native transactions, including file-sealed steps committed after migration, retain their existing request-row proof. Older checkpoints without the source binding remain uncertain unless existing evidence proves the postcondition; normalized rows cannot reconstruct original byte hashes.
+
 ### 5. Markdown projection
 
 Every canonical object has a rendered view at today's path:

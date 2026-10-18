@@ -190,7 +190,8 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
    does not manage, so land a fix
    through its own pull request, never by a push to the release branch. Full
    CI (retrieval quality/latency, governance wire characterization, semantic
-   write latency, graph convergence, docker) runs on the nightly schedule and
+   write latency, graph convergence, docker, the frozen verifier and source K3s
+   integration) runs on the nightly schedule and
    on explicit dispatch, never per push to the release branch
    (each release-PR push used to re-trigger a 46-job full run; 61% of a
    measured day's runner-minutes went to those stampedes while ordinary PRs
@@ -208,6 +209,10 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
    missing full run blocks the release-PR merge. The full run cancels the
    unfinished push run at the same revision itself, because it runs every job
    that the push run runs.
+
+   Cloud image builds and smoke checks still run on the release pull request.
+   The version checker parses Python and TOML assignments, so a version marker
+   cannot hide another runtime or dependency change.
 5. Merge the Release Please PR.
 6. Release Please tags `vX.Y.Z` and creates the GitHub Release.
 7. The release workflow's `plan` job finds the release artifacts that are missing

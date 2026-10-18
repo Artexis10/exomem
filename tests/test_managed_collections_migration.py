@@ -709,26 +709,37 @@ def test_a_failure_after_publication_that_a_rerun_clears_finishes_in_the_same_ha
 
 
 def test_a_migrator_the_supervisor_stopped_before_it_published_completes_in_files_with_its_output(
-        service, tmp_path, monkeypatch, capsys):
+        service, tmp_path, capsys):
     """A migrator stopped before it published anything that fails the upgrade into recovery, is
     recorded as an unrecognized outcome, or whose last output never reaches the service journal
     because the supervisor closed its output before the migrator stopped."""
     root = service
     operator_file(tmp_path)
-    monkeypatch.setattr(service_manager, "MIGRATION_SECONDS", 4.0)
-    monkeypatch.setattr(service_manager, "MIGRATION_FINISH_SECONDS", 1.0)
+    handler_ready = tmp_path / "handler-ready"
     hung = candidate(tmp_path, MIGRATE, name="-hung", fault=(
-        "import signal, time\n"
+        "import pathlib, signal, time\n"
         "from exomem.collection_store import migration\n"
         "def stopped(number, frame):\n"
         "    print('the migrator stopped mid-step', flush=True)\n"
         "    raise SystemExit(1)\n"
         "def settle_handoff(vault_root, *, deadline):\n"
         "    signal.signal(signal.SIGTERM, stopped)\n"
+        f"    pathlib.Path({str(handler_ready)!r}).touch()\n"
         "    time.sleep(60)\n"
         "migration.settle_handoff = settle_handoff\n"))
+
+    class ReadyMigrator(Handoff):
+        async def _spawn(self, command, **options):
+            await super()._spawn(command, **options)
+            # Expire only after handler setup; this case proves stop-time output,
+            # while the budget cases cover the supervisor's elapsed-time limit.
+            while not handler_ready.exists():
+                assert self.child.returncode is None, "the migrator exited before handler setup"
+                await asyncio.sleep(0.01)
+            raise TimeoutError("simulated timeout after handler setup")
+
     capsys.readouterr()
-    result = upgrade(tmp_path, Handoff(tmp_path, root), hung)
+    result = upgrade(tmp_path, ReadyMigrator(tmp_path, root), hung)
     assert result["ok"], result
     assert result["handoff"]["migration"]["collections"] == {
         "state": "ran", "outcome": "abandoned", "code": "timed_out"}
