@@ -52,6 +52,8 @@ jobs:
         env: &core-test-env
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          # Pytest workers own CPU parallelism; avoid a native math pool per interpreter.
+          OPENBLAS_NUM_THREADS: &native-math-threads "1"
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
@@ -261,6 +263,7 @@ jobs:
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          OPENBLAS_NUM_THREADS: *native-math-threads
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
