@@ -44,9 +44,9 @@ class _Publisher:
     """Coalesced replica publication and the `_Collections/` watch for one admitted store.
 
     Publication copies a pinned snapshot outside the vault-wide mutation boundary, so
-    writes, file-collection writes included, proceed during the copy. Only its two
-    brief steps hold the boundary, each taken at an idle instant: recording the intent,
-    and verifying and swapping the copy; a write arriving during one waits for it. The watch
+    writes, file-collection writes included, proceed during the copy and verification.
+    Brief steps hold the boundary at idle instants and compare held-file witnesses
+    before each effect; a write arriving during one waits for it. The watch
     hashes the replica against the digest this instance last published when its stat
     signature changes. A foreign rewrite that keeps inode, size and mtime is found by
     the next publication's check-then-swap, which records the divergence and preserves
@@ -606,9 +606,9 @@ class CollectionStoreRuntime:
                                       schema_guard=lambda version: self._record_schema(token, version, progress=True))
 
     def publish(self, token, *, deadline):
-        """Coalesced publication (A9): copy outside the vault-wide boundary, swap under it.
+        """Coalesced publication (A9): verify outside exclusion and revalidate before effects.
 
-        Each boundary step is brief and taken at an idle instant. The swap step first
+        Each boundary step is brief and taken at an idle instant. Each resumed step first
         renews the lease with the coordinator, so a host that lost it while copying
         abandons the swap. Returns the published head (possibly older than the live
         one), or None when the store was busy before anything was recorded.
