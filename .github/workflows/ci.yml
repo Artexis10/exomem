@@ -177,6 +177,7 @@ jobs:
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
         # Refreshing the baseline stays a reviewed change through scripts/refresh_test_durations.py.
+        # Preserve thread stacks before a worker timeout can discard them.
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           --splits=12
@@ -189,6 +190,7 @@ jobs:
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path="$EXOMEM_DURATIONS_PATH"
+          -o faulthandler_timeout=150
           --session-timeout=1400
           --durations=50
           --durations-min=1
